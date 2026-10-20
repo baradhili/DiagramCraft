@@ -1,0 +1,12 @@
+[package]
+name = "dc"
+description = "DiagramCraft CLI — inspect and render Visio VSDX diagrams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vsdx = { path = "../vsdx" }
+dc-core = { path = "../dc-core" }
+anyhow.workspace = true
+clap.workspace = true

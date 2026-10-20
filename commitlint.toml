@@ -1,0 +1,45 @@
+# Conventional Commits linting for this repository.
+#
+# Enforced by cargo-commitlint (a Rust implementation of commitlint) via the
+# commit-msg hook in .commitlint/hooks/ — see AGENTS.md for setup. Bypass a
+# single commit with COMMITLINT_SKIP=1. Merge, revert, and squash commits are
+# skipped by the tool's built-in default ignores.
+
+[rules.type-enum]
+level = 2
+applicable = "always"
+value = ["feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert"]
+
+[rules.type-empty]
+level = 2
+applicable = "never"
+
+[rules.type-case]
+level = 2
+applicable = "always"
+value = ["lower-case"]
+
+# Scopes stay free-form (e.g. feat(v0.1), fix(vsdx)) but must be lower-case.
+[rules.scope-case]
+level = 2
+applicable = "always"
+value = ["lower-case"]
+
+[rules.subject-empty]
+level = 2
+applicable = "never"
+
+[rules.subject-case]
+level = 2
+applicable = "always"
+value = ["lower-case", "sentence-case"]
+
+[rules.subject-full-stop]
+level = 2
+applicable = "never"
+value = "."
+
+[rules.header-max-length]
+level = 2
+applicable = "always"
+value = 100

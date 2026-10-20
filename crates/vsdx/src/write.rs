@@ -1,0 +1,1024 @@
+//! Write path: serialize a [`Document`] back to VSDX XML parts and an OPC
+//! zip package.
+//!
+//! Round-trip contract (v0.2):
+//! - modeled parts (`document.xml`, pages/masters indexes, page and master
+//!   parts) are re-serialized from the model, which preserves element
+//!   order, every attribute, and raw markup (`<Text>`, `<Icon>`, unknown
+//!   document children);
+//! - every other part of the source package is copied byte-for-byte
+//!   (content types and relationships included — the part set is
+//!   unchanged);
+//! - documents built in code (`package: None`) get a complete generated
+//!   package: content types, rels, and standard part names.
+
+use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::Path;
+
+use anyhow::{Context, Result};
+
+use crate::model::{Attrs, Cell, Document, IndexChild, Master, Page, RawEl, Section, Shape, ShapeFlow, Sheet};
+use crate::opc::unescape;
+
+const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+const NS_MAIN: &str = "http://schemas.microsoft.com/office/visio/2012/main";
+const NS_REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const VISIO_REL: &str = "http://schemas.microsoft.com/visio/2010/relationships";
+
+const CT_RELS: &str = "application/vnd.openxmlformats-package.relationships+xml";
+const CT_XML: &str = "application/xml";
+
+// ---------------------------------------------------------------------------
+// XML primitives
+// ---------------------------------------------------------------------------
+
+fn esc_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+fn esc_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn push_open(out: &mut String, name: &str, attrs: &[(String, String)], self_close: bool) {
+    out.push('<');
+    out.push_str(name);
+    for (k, v) in attrs {
+        out.push(' ');
+        out.push_str(k);
+        out.push_str("=\"");
+        out.push_str(&esc_attr(v));
+        out.push('"');
+    }
+    out.push_str(if self_close { "/>" } else { ">" });
+}
+
+fn push_close(out: &mut String, name: &str) {
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+fn push_raw_el(out: &mut String, raw: &RawEl) {
+    if raw.inner.is_empty() {
+        push_open(out, &raw.name, &raw.attrs, true);
+    } else {
+        push_open(out, &raw.name, &raw.attrs, false);
+        out.push_str(&raw.inner);
+        push_close(out, &raw.name);
+    }
+}
+
+fn push_cell(out: &mut String, name: &str, cell: &Cell) {
+    let attrs = if cell.attrs.is_empty() {
+        let mut a: Attrs = vec![("N".into(), name.to_string())];
+        if let Some(v) = &cell.v {
+            a.push(("V".into(), v.clone()));
+        }
+        if let Some(u) = &cell.u {
+            a.push(("U".into(), u.clone()));
+        }
+        if let Some(f) = &cell.f {
+            a.push(("F".into(), f.clone()));
+        }
+        a
+    } else {
+        cell.attrs.clone()
+    };
+    match &cell.raw_inner {
+        Some(raw) if !raw.is_empty() => {
+            push_open(out, "Cell", &attrs, false);
+            out.push_str(raw);
+            push_close(out, "Cell");
+        }
+        _ => push_open(out, "Cell", &attrs, true),
+    }
+}
+
+fn synth_attrs(pairs: &[(&str, Option<String>)]) -> Attrs {
+    pairs
+        .iter()
+        .filter_map(|(k, v)| v.clone().map(|v| (k.to_string(), v)))
+        .collect()
+}
+
+/// The cells and sections of a sheet body (opening/closing tags belong to
+/// the caller — `PageSheet`, `StyleSheet`, …).
+fn push_sheet_body(out: &mut String, sheet: &Sheet) {
+    for child in &sheet.children {
+        match child {
+            crate::model::SheetChild::Cell(n, c) => push_cell(out, n, c),
+            crate::model::SheetChild::Section(sec) => push_section(out, sec),
+            crate::model::SheetChild::Raw(raw) => push_raw_el(out, raw),
+        }
+    }
+}
+
+fn push_section(out: &mut String, sec: &Section) {
+    let attrs = if sec.attrs.is_empty() {
+        let mut a: Attrs = vec![("N".into(), sec.name.clone())];
+        if sec.ix != 0 {
+            a.push(("IX".into(), sec.ix.to_string()));
+        }
+        a
+    } else {
+        sec.attrs.clone()
+    };
+    let empty = sec.rows.is_empty() && sec.cells.is_empty();
+    push_open(out, "Section", &attrs, empty);
+    if empty {
+        return;
+    }
+    for (n, c) in &sec.cells {
+        push_cell(out, n, c);
+    }
+    for row in &sec.rows {
+        let rattrs = if row.attrs.is_empty() {
+            synth_attrs(&[
+                ("T", row.t.clone()),
+                ("IX", if row.ix != 0 { Some(row.ix.to_string()) } else { None }),
+                ("N", row.n.clone()),
+            ])
+        } else {
+            row.attrs.clone()
+        };
+        if row.cells.is_empty() {
+            push_open(out, "Row", &rattrs, true);
+        } else {
+            push_open(out, "Row", &rattrs, false);
+            for (n, c) in &row.cells {
+                push_cell(out, n, c);
+            }
+            push_close(out, "Row");
+        }
+    }
+    push_close(out, "Section");
+}
+
+fn push_shape(out: &mut String, s: &Shape) {
+    let attrs = if s.attrs.is_empty() {
+        synth_attrs(&[
+            ("ID", Some(s.id.to_string())),
+            ("Type", s.type_.clone()),
+            ("Master", s.master.map(|v| v.to_string())),
+            ("MasterShape", s.master_shape.map(|v| v.to_string())),
+            ("LineStyle", s.line_style.map(|v| v.to_string())),
+            ("FillStyle", s.fill_style.map(|v| v.to_string())),
+            ("TextStyle", s.text_style.map(|v| v.to_string())),
+            ("NameU", s.name_u.clone()),
+        ])
+    } else {
+        s.attrs.clone()
+    };
+    push_open(out, "Shape", &attrs, false);
+    push_sheet_body(out, &s.sheet);
+    let push_text = |out: &mut String| {
+        if let Some(raw) = &s.sheet.text_raw {
+            out.push_str("<Text>");
+            out.push_str(raw);
+            push_close(out, "Text");
+        }
+    };
+    let push_raws = |out: &mut String| {
+        for raw in &s.raw_children {
+            push_raw_el(out, raw);
+        }
+    };
+    let push_subs = |out: &mut String| {
+        if !s.sub_shapes.is_empty() {
+            out.push_str("<Shapes>");
+            for sub in &s.sub_shapes {
+                push_shape(out, sub);
+            }
+            push_close(out, "Shapes");
+        }
+    };
+    if s.flow.is_empty() {
+        // Constructed shape: schema order Text → raws → sub-shapes.
+        push_text(out);
+        push_raws(out);
+        push_subs(out);
+    } else {
+        for step in &s.flow {
+            match step {
+                ShapeFlow::Text => push_text(out),
+                ShapeFlow::Raw(i) => {
+                    if let Some(raw) = s.raw_children.get(*i) {
+                        push_raw_el(out, raw);
+                    }
+                }
+                ShapeFlow::Shapes => push_subs(out),
+            }
+        }
+    }
+    push_close(out, "Shape");
+}
+
+fn push_shapes(out: &mut String, shapes: &[Shape]) {
+    out.push_str("<Shapes>");
+    for s in shapes {
+        push_shape(out, s);
+    }
+    push_close(out, "Shapes");
+}
+
+fn push_index_children(out: &mut String, children: &[IndexChild]) {
+    for c in children {
+        match c {
+            IndexChild::Sheet { tag, sheet } => {
+                push_open(out, tag, &sheet.attrs, false);
+                push_sheet_body(out, sheet);
+                push_close(out, tag);
+            }
+            IndexChild::Rel(a) => push_open(out, "Rel", a, true),
+            IndexChild::Raw(r) => push_raw_el(out, r),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Part serializers
+// ---------------------------------------------------------------------------
+
+fn decl() -> &'static str {
+    "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\n"
+}
+
+/// Standard VSDX namespaces, injected into roots of constructed documents
+/// whose attribute lists predate parsing (parsed roots keep their own).
+fn with_xmlns(attrs: &Attrs) -> Cow<'_, Attrs> {
+    if attrs.iter().any(|(k, _)| k == "xmlns") {
+        return Cow::Borrowed(attrs);
+    }
+    let mut v = vec![
+        ("xmlns".to_string(), NS_MAIN.to_string()),
+        ("xmlns:r".to_string(), NS_REL.to_string()),
+    ];
+    v.extend(attrs.iter().cloned());
+    Cow::Owned(v)
+}
+
+/// Serialize the main document part (`document.xml`).
+pub fn document_xml(doc: &Document) -> String {
+    let mut out = String::from(decl());
+    push_open(&mut out, "VisioDocument", &with_xmlns(&doc.root_attrs), false);
+    for item in &doc.items {
+        match item {
+            crate::model::DocItem::StyleSheets => {
+                out.push_str("<StyleSheets>");
+                for ss in &doc.stylesheets {
+                    push_open(&mut out, "StyleSheet", &ss.attrs, false);
+                    push_sheet_body(&mut out, &ss.sheet);
+                    push_close(&mut out, "StyleSheet");
+                }
+                push_close(&mut out, "StyleSheets");
+            }
+            crate::model::DocItem::Colors => {
+                out.push_str("<Colors>");
+                for (ix, rgb) in &doc.colors {
+                    push_open(
+                        &mut out,
+                        "ColorEntry",
+                        &[
+                            ("IX".into(), ix.to_string()),
+                            ("RGB".into(), rgb.clone()),
+                        ],
+                        true,
+                    );
+                }
+                push_close(&mut out, "Colors");
+            }
+            crate::model::DocItem::DocumentSheet => {
+                push_open(&mut out, "DocumentSheet", &doc.sheet.attrs, false);
+                push_sheet_body(&mut out, &doc.sheet);
+                push_close(&mut out, "DocumentSheet");
+            }
+            crate::model::DocItem::Raw(r) => push_raw_el(&mut out, r),
+        }
+    }
+    push_close(&mut out, "VisioDocument");
+    out
+}
+
+/// Serialize the pages index part (`pages.xml`).
+pub fn pages_index_xml(doc: &Document) -> String {
+    let mut out = String::from(decl());
+    push_open(&mut out, "Pages", &with_xmlns(&doc.pages_attrs), false);
+    for page in &doc.pages {
+        let attrs = if page.attrs.is_empty() {
+            synth_attrs(&[
+                ("ID", Some(page.id.to_string())),
+                ("NameU", Some(page.name.clone())),
+            ])
+        } else {
+            page.attrs.clone()
+        };
+        push_open(&mut out, "Page", &attrs, false);
+        push_index_children(&mut out, &page.children);
+        push_close(&mut out, "Page");
+    }
+    push_close(&mut out, "Pages");
+    out
+}
+
+/// Serialize one page's contents part.
+pub fn page_xml(page: &Page) -> String {
+    let mut out = String::from(decl());
+    push_open(&mut out, "PageContents", &with_xmlns(&page.contents_attrs), false);
+    if !page.shapes.is_empty() {
+        push_shapes(&mut out, &page.shapes);
+    }
+    for raw in &page.contents_raw {
+        push_raw_el(&mut out, raw);
+    }
+    push_close(&mut out, "PageContents");
+    out
+}
+
+/// Serialize the masters index part (`masters.xml`).
+pub fn masters_index_xml(doc: &Document) -> String {
+    let mut out = String::from(decl());
+    push_open(&mut out, "Masters", &with_xmlns(&doc.masters_attrs), false);
+    for m in &doc.masters {
+        let attrs = if m.attrs.is_empty() {
+            synth_attrs(&[
+                ("ID", Some(m.id.to_string())),
+                ("NameU", m.name_u.clone()),
+            ])
+        } else {
+            m.attrs.clone()
+        };
+        push_open(&mut out, "Master", &attrs, false);
+        push_index_children(&mut out, &m.children);
+        push_close(&mut out, "Master");
+    }
+    push_close(&mut out, "Masters");
+    out
+}
+
+/// Serialize one master's contents part.
+pub fn master_xml(m: &Master) -> String {
+    let mut out = String::from(decl());
+    push_open(&mut out, "MasterContents", &with_xmlns(&m.contents_attrs), false);
+    if !m.shapes.is_empty() {
+        push_shapes(&mut out, &m.shapes);
+    }
+    for raw in &m.contents_raw {
+        push_raw_el(&mut out, raw);
+    }
+    let sheet = &m.contents_sheet;
+    if !sheet.attrs.is_empty() || !sheet.children.is_empty() {
+        push_open(&mut out, "MasterSheet", &sheet.attrs, false);
+        push_sheet_body(&mut out, sheet);
+        push_close(&mut out, "MasterSheet");
+    }
+    push_close(&mut out, "MasterContents");
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Package assembly
+// ---------------------------------------------------------------------------
+
+/// The part names this document models (and therefore re-serializes).
+/// Pages/masters without a part (stencil pages) are absent.
+pub fn modeled_parts(doc: &Document) -> Vec<String> {
+    let mut v = vec![doc.doc_part.clone(), doc.pages_part.clone()];
+    for p in &doc.pages {
+        if !p.part.is_empty() {
+            v.push(p.part.clone());
+        }
+    }
+    if let Some(mp) = &doc.masters_part {
+        v.push(mp.clone());
+    }
+    for m in &doc.masters {
+        if !m.part.is_empty() {
+            v.push(m.part.clone());
+        }
+    }
+    v
+}
+
+/// Build the full part map for writing.
+///
+/// With a retained source package, unmodeled parts are copied verbatim and
+/// modeled parts re-serialized. Without one, a complete package (content
+/// types + rels + parts) is generated from the model.
+pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
+    let mut parts: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    if let Some(pkg) = &doc.package {
+        for name in pkg.part_names() {
+            let bytes = pkg.part(name).map(<[u8]>::to_vec).unwrap_or_default();
+            parts.insert(name.to_string(), bytes);
+        }
+        parts.insert(doc.doc_part.clone(), document_xml(doc).into_bytes());
+        parts.insert(doc.pages_part.clone(), pages_index_xml(doc).into_bytes());
+        for p in &doc.pages {
+            if !p.part.is_empty() && pkg.part(&p.part).is_some() {
+                parts.insert(p.part.clone(), page_xml(p).into_bytes());
+            }
+        }
+        if let Some(mp) = &doc.masters_part {
+            parts.insert(mp.clone(), masters_index_xml(doc).into_bytes());
+        }
+        for m in &doc.masters {
+            if !m.part.is_empty() && pkg.part(&m.part).is_some() {
+                parts.insert(m.part.clone(), master_xml(m).into_bytes());
+            }
+        }
+        // Editing (M4) may have added or removed pages relative to the
+        // source package: materialize new page parts, drop removed ones,
+        // and keep the pages-index rels and [Content_Types].xml in sync.
+        // Pure round-trips (no page-set change) leave all three untouched.
+        reconcile_page_parts(&mut parts, doc, pkg);
+        return parts;
+    }
+
+    // Fresh document: standard part layout.
+    let doc_part = if doc.doc_part.is_empty() {
+        "visio/document.xml".to_string()
+    } else {
+        doc.doc_part.clone()
+    };
+    let pages_part = if doc.pages_part.is_empty() {
+        "visio/pages/pages.xml".to_string()
+    } else {
+        doc.pages_part.clone()
+    };
+    parts.insert(doc_part.clone(), document_xml(doc).into_bytes());
+    parts.insert(pages_part.clone(), pages_index_xml(doc).into_bytes());
+
+    // Assign part names to pages/masters that lack one (1-based, in order).
+    let mut page_parts: Vec<(String, String)> = Vec::new(); // (part, rId)
+    for (i, p) in doc.pages.iter().enumerate() {
+        let part = if p.part.is_empty() {
+            format!("visio/pages/page{}.xml", i + 1)
+        } else {
+            p.part.clone()
+        };
+        let rid = p
+            .children
+            .iter()
+            .find_map(|c| match c {
+                IndexChild::Rel(a) => a
+                    .iter()
+                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| format!("rId{}", i + 1));
+        parts.insert(part.clone(), page_xml(p).into_bytes());
+        page_parts.push((part, rid));
+    }
+
+    let mut master_parts: Vec<(String, String)> = Vec::new();
+    let masters_part_default = "visio/masters/masters.xml".to_string();
+    if !doc.masters.is_empty() {
+        let masters_part = doc
+            .masters_part
+            .clone()
+            .unwrap_or_else(|| masters_part_default.clone());
+        parts.insert(masters_part.clone(), masters_index_xml(doc).into_bytes());
+        for (i, m) in doc.masters.iter().enumerate() {
+            let part = if m.part.is_empty() {
+                format!("visio/masters/master{}.xml", m.id)
+            } else {
+                m.part.clone()
+            };
+            let rid = m
+                .children
+                .iter()
+                .find_map(|c| match c {
+                    IndexChild::Rel(a) => a
+                        .iter()
+                        .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+                        .map(|(_, v)| v.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| format!("rId{}", i + 1));
+            parts.insert(part.clone(), master_xml(m).into_bytes());
+            master_parts.push((part, rid));
+        }
+        generate_rels(
+            &mut parts,
+            &doc_part,
+            vec![
+                ("pages", pages_part.clone()),
+                ("masters", masters_part.clone()),
+            ],
+        );
+        generate_index_rels(&mut parts, &masters_part, &master_parts, "master");
+    } else {
+        generate_rels(&mut parts, &doc_part, vec![("pages", pages_part.clone())]);
+    }
+
+    generate_index_rels(&mut parts, &pages_part, &page_parts, "page");
+
+    parts.insert(
+        "[Content_Types].xml".to_string(),
+        content_types_xml(&parts, &doc_part, &pages_part, doc).into_bytes(),
+    );
+    parts
+}
+
+fn rel_type(kind: &str) -> String {
+    format!("{VISIO_REL}/{kind}")
+}
+
+/// `_rels/.rels` plus the document part's rels.
+fn generate_rels(parts: &mut BTreeMap<String, Vec<u8>>, doc_part: &str, targets: Vec<(&str, String)>) {
+    let mut root_rels = String::from(decl());
+    root_rels.push_str(&format!("<Relationships xmlns=\"{REL_NS}\">"));
+    root_rels.push_str(&format!(
+        "<Relationship Id=\"rId1\" Type=\"{}\" Target=\"{}\"/>",
+        rel_type("document"),
+        relative_target("", doc_part)
+    ));
+    root_rels.push_str("</Relationships>");
+    parts.insert("_rels/.rels".to_string(), root_rels.into_bytes());
+
+    let mut doc_rels = String::from(decl());
+    doc_rels.push_str(&format!("<Relationships xmlns=\"{REL_NS}\">"));
+    for (i, (kind, target)) in targets.iter().enumerate() {
+        doc_rels.push_str(&format!(
+            "<Relationship Id=\"rId{}\" Type=\"{}\" Target=\"{}\"/>",
+            i + 1,
+            rel_type(kind),
+            relative_target(&dir_of(doc_part), target)
+        ));
+    }
+    doc_rels.push_str("</Relationships>");
+    parts.insert(rels_part_of(doc_part), doc_rels.into_bytes());
+}
+
+/// Rels of a pages/masters index part: one `<Relationship>` per (part, rId)
+/// declared by the index entries' `<Rel>` children (falling back to
+/// sequential rIds).
+fn generate_index_rels(
+    parts: &mut BTreeMap<String, Vec<u8>>,
+    index_part: &str,
+    entries: &[(String, String)],
+    kind: &str,
+) {
+    let mut rels = String::from(decl());
+    rels.push_str(&format!("<Relationships xmlns=\"{REL_NS}\">"));
+    for (target, rid) in entries {
+        rels.push_str(&format!(
+            "<Relationship Id=\"{rid}\" Type=\"{}\" Target=\"{}\"/>",
+            rel_type(kind),
+            relative_target(&dir_of(index_part), target)
+        ));
+    }
+    rels.push_str("</Relationships>");
+    parts.insert(rels_part_of(index_part), rels.into_bytes());
+}
+
+fn content_types_xml(
+    parts: &BTreeMap<String, Vec<u8>>,
+    doc_part: &str,
+    pages_part: &str,
+    doc: &Document,
+) -> String {
+    let masters_part = doc.masters_part.clone();
+    let mut page_set = std::collections::HashSet::new();
+    page_set.insert(pages_part.to_string());
+    for p in &doc.pages {
+        if !p.part.is_empty() {
+            page_set.insert(p.part.clone());
+        }
+    }
+    let mut out = String::from(decl());
+    out.push_str("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
+    if parts.keys().any(|n| n.ends_with(".rels")) {
+        out.push_str(&format!("<Default Extension=\"rels\" ContentType=\"{CT_RELS}\"/>"));
+    }
+    out.push_str(&format!("<Default Extension=\"xml\" ContentType=\"{CT_XML}\"/>"));
+    fn override_part(part: &str, ct: &str, out: &mut String) {
+        out.push_str(&format!(
+            "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
+            part, ct
+        ));
+    }
+    override_part(doc_part, "application/vnd.ms-visio.drawing.main+xml", &mut out);
+    for part in &page_set {
+        override_part(part, "application/vnd.ms-visio.pages+xml", &mut out);
+    }
+    if let Some(mp) = &masters_part {
+        override_part(mp, "application/vnd.ms-visio.masters+xml", &mut out);
+    }
+    for m in &doc.masters {
+        if !m.part.is_empty() {
+            override_part(&m.part, "application/vnd.ms-visio.master+xml", &mut out);
+        }
+    }
+    out.push_str("</Types>");
+    out
+}
+
+fn dir_of(part: &str) -> String {
+    match part.rfind('/') {
+        Some(i) => part[..i].to_string(),
+        None => String::new(),
+    }
+}
+
+fn rels_part_of(part: &str) -> String {
+    let dir = dir_of(part);
+    let file = &part[dir.len() + if dir.is_empty() { 0 } else { 1 }..];
+    if dir.is_empty() {
+        format!("_rels/{file}.rels")
+    } else {
+        format!("{dir}/_rels/{file}.rels")
+    }
+}
+
+/// Relative path from a part's directory to another part (rels Target form).
+fn relative_target(base_dir: &str, target: &str) -> String {
+    let base: Vec<&str> = if base_dir.is_empty() {
+        Vec::new()
+    } else {
+        base_dir.split('/').collect()
+    };
+    let tgt: Vec<&str> = target.split('/').collect();
+    let mut i = 0usize;
+    while i < base.len() && i + 1 < tgt.len() && base[i] == tgt[i] {
+        i += 1;
+    }
+    let ups = base.len() - i;
+    format!("{}{}", "../".repeat(ups), tgt[i..].join("/"))
+}
+
+/// Write the document to `path` as an OPC zip package.
+pub fn save(doc: &Document, path: &Path) -> Result<()> {
+    let parts = build_parts(doc);
+    let file = std::fs::File::create(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    write_parts(&parts, file)
+}
+
+/// Serialize into any seekable writer (used by the atomic save path:
+/// the writer is craft-atomic's staged file).
+pub fn save_with<W: std::io::Write + std::io::Seek>(doc: &Document, w: W) -> Result<()> {
+    let parts = build_parts(doc);
+    write_parts(&parts, w)
+}
+
+fn write_parts<W: std::io::Write + std::io::Seek>(
+    parts: &std::collections::BTreeMap<String, Vec<u8>>,
+    w: W,
+) -> Result<()> {
+    let mut w = zip::ZipWriter::new(w);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, data) in parts {
+        w.start_file(name.as_str(), opts)
+            .with_context(|| format!("starting zip entry {name}"))?;
+        w.write_all(data).with_context(|| format!("writing {name}"))?;
+    }
+    w.finish().context("finishing zip")?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Page-set reconciliation (editing support, M4)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct RelEntry {
+    id: String,
+    type_: String,
+    target: String,
+}
+
+/// Parse a `.rels` part into its `<Relationship>` entries.
+fn parse_rels(bytes: &[u8]) -> Vec<RelEntry> {
+    use quick_xml::events::Event;
+    let text = String::from_utf8_lossy(bytes);
+    let mut r = quick_xml::Reader::from_str(&text);
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if e.name().as_ref() == b"Relationship" =>
+            {
+                let mut id = String::new();
+                let mut type_ = String::new();
+                let mut target = String::new();
+                for a in e.attributes().flatten() {
+                    match a.key.as_ref() {
+                        b"Id" => id = String::from_utf8_lossy(&a.value).into_owned(),
+                        b"Type" => type_ = String::from_utf8_lossy(&a.value).into_owned(),
+                        b"Target" => target = String::from_utf8_lossy(&a.value).into_owned(),
+                        _ => {}
+                    }
+                }
+                out.push(RelEntry { id, type_, target });
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Resolve a rels `Target` (relative to the part owning the rels) to a
+/// package part name.
+fn resolve_target(index_dir: &str, target: &str) -> String {
+    let mut stack: Vec<&str> = if index_dir.is_empty() {
+        Vec::new()
+    } else {
+        index_dir.split('/').collect()
+    };
+    for seg in target.split('/') {
+        match seg {
+            "." | "" => {}
+            ".." => {
+                stack.pop();
+            }
+            s => stack.push(s),
+        }
+    }
+    stack.join("/")
+}
+
+fn build_rels(entries: &[RelEntry]) -> Vec<u8> {
+    let mut out = String::from(decl());
+    out.push_str(&format!("<Relationships xmlns=\"{REL_NS}\">"));
+    for e in entries {
+        out.push_str(&format!(
+            "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
+            &esc_attr(&e.id),
+            &esc_attr(&e.type_),
+            &esc_attr(&e.target)
+        ));
+    }
+    out.push_str("</Relationships>");
+    out.into_bytes()
+}
+
+/// Parse `[Content_Types].xml` into (defaults, overrides).
+fn parse_content_types(bytes: &[u8]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    use quick_xml::events::Event;
+    let text = String::from_utf8_lossy(bytes);
+    let mut r = quick_xml::Reader::from_str(&text);
+    let mut defaults = Vec::new();
+    let mut overrides = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
+                b"Default" => {
+                    let mut ext = String::new();
+                    let mut ct = String::new();
+                    for a in e.attributes().flatten() {
+                        match a.key.as_ref() {
+                            b"Extension" => ext = String::from_utf8_lossy(&a.value).into_owned(),
+                            b"ContentType" => ct = String::from_utf8_lossy(&a.value).into_owned(),
+                            _ => {}
+                        }
+                    }
+                    defaults.push((ext, ct));
+                }
+                b"Override" => {
+                    let mut part = String::new();
+                    let mut ct = String::new();
+                    for a in e.attributes().flatten() {
+                        match a.key.as_ref() {
+                            b"PartName" => part = String::from_utf8_lossy(&a.value).into_owned(),
+                            b"ContentType" => ct = String::from_utf8_lossy(&a.value).into_owned(),
+                            _ => {}
+                        }
+                    }
+                    overrides.push((part, ct));
+                }
+                _ => {}
+            },
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    (defaults, overrides)
+}
+
+fn build_content_types(
+    defaults: &[(String, String)],
+    overrides: &[(String, String)],
+) -> Vec<u8> {
+    let mut out = String::from(decl());
+    out.push_str("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
+    for (ext, ct) in defaults {
+        out.push_str(&format!(
+            "<Default Extension=\"{}\" ContentType=\"{}\"/>",
+            &esc_attr(ext),
+            &esc_attr(ct)
+        ));
+    }
+    for (part, ct) in overrides {
+        out.push_str(&format!(
+            "<Override PartName=\"{}\" ContentType=\"{}\"/>",
+            &esc_attr(part),
+            &esc_attr(ct)
+        ));
+    }
+    out.push_str("</Types>");
+    out.into_bytes()
+}
+
+const CT_PAGE: &str = "application/vnd.ms-visio.pages+xml";
+
+/// Synchronize `parts` with the model's page set: new pages get their
+/// part, a pages-index relationship, and a content-types override;
+/// removed pages lose all three. No page-set change → nothing rewritten.
+fn reconcile_page_parts(
+    parts: &mut BTreeMap<String, Vec<u8>>,
+    doc: &Document,
+    pkg: &crate::opc::Package,
+) {
+    let index_dir = dir_of(&doc.pages_part);
+    let rels_part = rels_part_of(&doc.pages_part);
+
+    let src_entries = match pkg.part(&rels_part) {
+        Some(bytes) => parse_rels(bytes),
+        None => Vec::new(),
+    };
+    let src_targets: Vec<String> = src_entries
+        .iter()
+        .map(|e| resolve_target(&index_dir, &e.target))
+        .collect();
+
+    let model_pages: Vec<&Page> = doc.pages.iter().filter(|p| !p.part.is_empty()).collect();
+    let model_parts: Vec<String> = model_pages.iter().map(|p| p.part.clone()).collect();
+
+    let added: Vec<&Page> = model_pages
+        .iter()
+        .copied()
+        .filter(|p| !src_targets.contains(&p.part))
+        .collect();
+    let removed: Vec<String> = src_targets
+        .iter()
+        .filter(|t| !model_parts.contains(*t))
+        .cloned()
+        .collect();
+
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+
+    // Parts: add new, drop removed.
+    for page in &added {
+        parts.insert(page.part.clone(), page_xml(page).into_bytes());
+    }
+    for part in &removed {
+        parts.remove(part.as_str());
+    }
+
+    // Pages-index rels: drop removed targets, append new pages' rIds
+    // (from each page's `<Rel r:id>` child, else a fresh sequential ID).
+    let mut entries: Vec<RelEntry> = src_entries
+        .iter()
+        .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))
+        .cloned()
+        .collect();
+    let mut next_rid = 1 + entries
+        .iter()
+        .filter_map(|e| e.id.strip_prefix("rId").and_then(|n| n.parse::<usize>().ok()))
+        .max()
+        .unwrap_or(0);
+    for page in &added {
+        let rid = page
+            .children
+            .iter()
+            .find_map(|c| match c {
+                IndexChild::Rel(a) => a
+                    .iter()
+                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let id = format!("rId{next_rid}");
+                next_rid += 1;
+                id
+            });
+        let target = relative_target(&index_dir, &page.part);
+        entries.push(RelEntry {
+            id: rid,
+            type_: rel_type("page"),
+            target,
+        });
+    }
+    parts.insert(rels_part, build_rels(&entries));
+
+    // Content types: drop overrides of removed parts, add for new pages.
+    if let Some(ct_bytes) = parts.get("[Content_Types].xml").cloned() {
+        let (mut defaults, mut overrides) = parse_content_types(&ct_bytes);
+        overrides.retain(|(part, _)| {
+            let name = part.trim_start_matches('/');
+            !removed.iter().any(|r| r == name)
+        });
+        for page in &added {
+            let name = format!("/{}", page.part);
+            if !overrides.iter().any(|(p, _)| *p == name) {
+                overrides.push((name, CT_PAGE.to_string()));
+            }
+        }
+        let built = build_content_types(&defaults, &overrides);
+        defaults.clear();
+        parts.insert("[Content_Types].xml".to_string(), built);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical form (round-trip verification)
+// ---------------------------------------------------------------------------
+
+/// Deterministic canonical form of an XML part for equality checks:
+/// - XML declaration, comments, PIs, whitespace-only text dropped;
+/// - attributes sorted by name, values unescaped then uniformly re-escaped;
+/// - empty elements normalized to the expanded `<n></n>` form;
+/// - CDATA and escaped text normalized to the same escaped form.
+pub fn canonical_form(bytes: &[u8]) -> String {
+    use quick_xml::events::Event;
+
+    let owned = String::from_utf8_lossy(bytes).into_owned();
+    let s = owned.trim_start_matches('\u{feff}');
+    let mut r = quick_xml::Reader::from_str(s);
+    let mut out = String::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match r.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => canon_tag(&mut out, &e, false),
+            Ok(Event::Empty(e)) => canon_tag(&mut out, &e, true),
+            Ok(Event::End(e)) => {
+                out.push_str("</");
+                out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+                out.push('>');
+            }
+            Ok(Event::Text(t)) => {
+                let txt = unescape(t.as_ref());
+                if !txt.trim().is_empty() {
+                    out.push_str(&esc_text(&txt));
+                }
+            }
+            Ok(Event::GeneralRef(r)) => {
+                let mut ent = String::from("&");
+                ent.push_str(&String::from_utf8_lossy(r.as_ref()));
+                ent.push(';');
+                let txt = unescape(ent.as_bytes());
+                if !txt.trim().is_empty() {
+                    out.push_str(&esc_text(&txt));
+                }
+            }
+            Ok(Event::CData(t)) => {
+                let txt = String::from_utf8_lossy(t.as_ref());
+                if !txt.trim().is_empty() {
+                    out.push_str(&esc_text(&txt));
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    out
+}
+
+fn canon_tag(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: bool) {
+    out.push('<');
+    out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+    let mut attrs: Vec<(String, String)> = e
+        .attributes()
+        .flatten()
+        .map(|a| {
+            (
+                String::from_utf8_lossy(a.key.as_ref()).into_owned(),
+                unescape(&a.value),
+            )
+        })
+        .collect();
+    attrs.sort();
+    for (k, v) in attrs {
+        out.push(' ');
+        out.push_str(&k);
+        out.push_str("=\"");
+        out.push_str(&esc_attr(&v));
+        out.push('"');
+    }
+    out.push('>');
+    if empty {
+        out.push_str("</");
+        out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+        out.push('>');
+    }
+}

@@ -1,0 +1,20 @@
+#!/bin/sh
+# commit-msg hook — lint the commit message with cargo-commitlint (the Rust
+# implementation of commitlint). Rules live in commitlint.toml at the repo
+# root; merge/revert/squash commits are skipped by its built-in ignores.
+#
+# One-time setup per clone:
+#   cargo install cargo-commitlint --version 2.1.0 --locked
+#   git config core.hooksPath .githooks
+#
+# Bypass a single commit with: COMMITLINT_SKIP=1 git commit ...
+
+[ -n "$COMMITLINT_SKIP" ] && exit 0
+
+if ! command -v cargo-commitlint >/dev/null 2>&1; then
+    echo "warning: cargo-commitlint not found; commit not linted." >&2
+    echo "         cargo install cargo-commitlint --version 2.1.0 --locked" >&2
+    exit 0
+fi
+
+exec cargo-commitlint check --edit "$1" --quiet

@@ -1,0 +1,22 @@
+[package]
+name = "dc-ui"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+craft-ui = { path = "../../third_party/craft-ui" }
+anyhow.workspace = true
+dc = { version = "0.1.0", path = "../dc" }
+dc-core = { version = "0.1.0", path = "../dc-core" }
+eframe = "0.37.0"
+egui = "0.37"
+resvg = "0.48.1"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
+vsdx = { version = "0.1.0", path = "../vsdx" }
+
+[dev-dependencies]
+image = "0.25"
+egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }

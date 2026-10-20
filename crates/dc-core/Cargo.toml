@@ -1,0 +1,16 @@
+[package]
+name = "dc-core"
+description = "DiagramCraft application core — editing command layer with undo/redo over the vsdx model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+craft-atomic = { git = "https://github.com/storytold/craft-libs" }
+vsdx = { path = "../vsdx" }
+anyhow.workspace = true
+quick-xml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }

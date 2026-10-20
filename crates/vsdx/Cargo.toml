@@ -1,0 +1,15 @@
+[package]
+name = "vsdx"
+description = "Reader/writer library for the Visio VSDX (OPC/XML) diagram format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+zip.workspace = true
+quick-xml.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
