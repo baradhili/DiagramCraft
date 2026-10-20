@@ -68,23 +68,6 @@ cargo run -p dc -- edit path/to/file.vsdx -o out.vsdx \
 cargo run -p dc-ui -- path/to/file.vsdx
 ```
 
-## Roadmap
-
-| Milestone | Scope | Status |
-|-----------|-------|--------|
-| M1 — Read VSDX | OPC packages, typed document model, master/stylesheet inheritance | **Done** |
-| M2 — Render | SVG backend: geometry, themes, gradients, images, wrapped text, connectors | **Done** (fidelity ladder continues against reference drawings) |
-| M3 — Write | Lossless round-trip with canonical-XML verification | **Done** |
-| M4 — Editing core | `dc-core` command layer, undo/redo, scoped addressing, crash-safe saves | **Done** |
-| M5 — Native GUI | Visio-2016-style shell: ribbon, stencils with drag-to-page, context menus, ShapeSheet inspector, resize/marquee/multi-select, kittest-tested | **Done** |
-| M6 — Ecosystem | Data linking (CSV/SQLite → shape data), validation rules, auto-layout, export filters (SVG/PNG/PDF), legacy `.vsd` reader | Planned |
-| M7 — VBA / `.vsdm` | Macro execution for macro-enabled drawings | Planned |
-| M8 — Visio add-in hosting | Running real Visio add-ins (GraphVizio first), spike-gated | Planned |
-| M9 — Plugins & imports | Plugin system; d2 / DOT / Mermaid diagram-language imports | Nice-to-have |
-
-Ongoing render-fidelity work is tracked in the private working plan
-against reference drawings exported by Visio 2016 at printer resolution.
-
 ## GUI tests
 
 Headless via egui_kittest (snapshots in `crates/dc-ui/tests/snapshots/`,
@@ -125,17 +108,7 @@ Bypass a single commit with `COMMITLINT_SKIP=1`.
 
 ## Roadmap
 
-### Current Milestone (M5)
-
-- Native canvas abstraction over the model (SVG→texture is the v0.4 bridge; a direct painter path is the destination), resize/rotate handles, multi-select, marquee.
-
-- Ribbon depth: contextual tabs, more commands wired (fonts/fills, alignment), backstage File view.
-
-- Snap/glue indicators, connector routing UX, template (`.vstx`) flow.
-
-- Thumbnail fallback for pathological masters (e.g. EMBELL's 10-inch frames render at sub-pixel stroke): prefer the shipped preview parts stencils carry when present.
-
-### M6 — Ecosystem
+### M6 — Ecosystem - current
 
 - Data linking (`data` crate): CSV/SQLite recordsets → shape data (URS category "Data Linking"; spec'd in VeeTrace).
 
