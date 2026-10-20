@@ -998,3 +998,40 @@ impl crate::Command for RemoveConnect {
 // ---------------------------------------------------------------------------
 
 pub use crate::layers::{AddLayer, RemoveLayer, RenameLayer};
+
+// ---------------------------------------------------------------------------
+// Composite command
+// ---------------------------------------------------------------------------
+
+/// A named group of commands applied as one undo step (Visio's macro
+/// analog): a multi-shape move, a resize (four cell edits), a marquee
+/// delete.
+pub struct Macro {
+    pub label: String,
+    pub cmds: Vec<Box<dyn crate::Command>>,
+}
+
+impl Macro {
+    pub fn new(label: impl Into<String>, cmds: Vec<Box<dyn crate::Command>>) -> Macro {
+        Macro { label: label.into(), cmds }
+    }
+}
+
+impl crate::Command for Macro {
+    fn label(&self) -> String {
+        self.label.clone()
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        for c in &mut self.cmds {
+            c.apply(doc)?;
+        }
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        // Reverse order: later commands may depend on earlier state.
+        for c in self.cmds.iter_mut().rev() {
+            c.undo(doc)?;
+        }
+        Ok(())
+    }
+}

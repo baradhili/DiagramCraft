@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dc_core::commands::{AddPage, AddShape, DuplicateShape, RemoveShape, ReorderShape};
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
-use dc_core::{SetCell, SetText, Editor};
+use dc_core::{Macro, SetCell, SetRowCell, SetText, Editor};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
@@ -27,7 +27,9 @@ pub struct App {
     view: View,
     page_idx: usize,
     tab: Tab,
-    sel: Option<(i64, i64)>, // (page id, shape id)
+    sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
+    /// Multi-selection (marquee / shift-click); includes the primary.
+    sel_set: Vec<(i64, i64)>,
     drag: Option<DragState>,
     stencil: Stencil,
     tex: TextureCache,
@@ -59,6 +61,15 @@ pub struct App {
     clipboard: Option<Shape>,
     /// Inline text editor target: (shape id, draft text).
     text_edit: Option<(i64, String)>,
+    /// Fill/Line color palette target (opened from the ribbon).
+    color_pick: Option<ColorTarget>,
+}
+
+/// Which cell a ribbon palette click targets.
+#[derive(Clone, Copy, PartialEq)]
+enum ColorTarget {
+    Fill,
+    Line,
 }
 
 enum PendingDialog {
@@ -91,6 +102,7 @@ enum BackPage {
 struct DragState {
     shape: i64,
     grab_off: (f64, f64), // pin − pointer, inches (y-up)
+    start_pin: (f64, f64),
     last_pin: (f64, f64),
     moved: bool,
 }
@@ -112,6 +124,7 @@ impl App {
             page_idx: 0,
             tab: Tab::Home,
             sel: None,
+            sel_set: Vec::new(),
             drag: None,
             stencil: Stencil::default(),
             tex: TextureCache::default(),
@@ -128,6 +141,7 @@ impl App {
             ctx_menu: None,
             clipboard: None,
             text_edit: None,
+            color_pick: None,
         };
         if let Some(p) = path {
             app.load(p);
@@ -367,6 +381,11 @@ impl App {
 
     /// AABB in page coords (inches, y-up): (x, y, w, h); rotation ignored.
     fn shape_rect(&self, doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
+        Self::shape_rect_static(doc, page_id, s)
+    }
+
+    /// Borrow-free bbox (page inches, y-up) for marquee gating.
+    fn shape_rect_static(doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
         let chain = shape_chain(doc, page_id, s.id).ok()?;
         let get = |n: &str| doc.resolve_cell(s, &chain, n).and_then(|c| c.numeric());
         let (pin_x, pin_y) = (get("PinX")?, get("PinY")?);
@@ -392,6 +411,25 @@ impl App {
     }
 
     /// Selection frame in canvas rect space (inches, y-down origin).
+    fn sel_extra_page_rects(&self) -> Vec<Rect> {
+        let Some(ed) = self.ed.as_ref() else { return Vec::new() };
+        let Some((page_id, primary)) = self.sel else { return Vec::new() };
+        let page_h = self.page_geom().h_in;
+        self.sel_set
+            .iter()
+            .filter(|(p, s)| *p == page_id && *s != primary)
+            .filter_map(|(_, sid)| {
+                let page = ed.doc.pages.get(self.page_idx)?;
+                let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
+                let (x, y, w, h) = Self::shape_rect_static(&ed.doc, page_id, sh)?;
+                Some(Rect::from_min_size(
+                    Pos2::new(x as f32, (page_h - y - h) as f32),
+                    Vec2::new(w as f32, h as f32),
+                ))
+            })
+            .collect()
+    }
+
     fn sel_page_rect(&self) -> Option<Rect> {
         let ed = self.ed()?;
         let (page_id, shape_id) = self.sel?;
@@ -505,9 +543,102 @@ impl App {
     }
 
     fn delete_selection(&mut self) {
-        let Some((page_id, shape_id)) = self.sel else { return };
-        self.apply(RemoveShape::new(page_id, shape_id));
+        let Some((page_id, _)) = self.sel else { return };
+        if self.sel_set.len() > 1 {
+            // One undo step for a multi-delete.
+            let cmds: Vec<Box<dyn dc_core::Command>> = self
+                .sel_set
+                .iter()
+                .filter(|(p, _)| *p == page_id)
+                .map(|(_, s)| Box::new(RemoveShape::new(page_id, *s)) as Box<dyn dc_core::Command>)
+                .collect();
+            let n = cmds.len();
+            self.apply(Macro::new(format!("delete {n} shapes"), cmds));
+        } else {
+            let shape_id = self.sel.unwrap().1;
+            self.apply(RemoveShape::new(page_id, shape_id));
+        }
         self.sel = None;
+        self.sel_set.clear();
+    }
+
+    /// Marquee selection: page-inch rect (y-down) → every top-level
+    /// shape whose bbox intersects joins the selection set.
+    fn apply_marquee(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
+        let Some(ed) = self.ed() else { return };
+        let Some(page_id) = self.page_id() else { return };
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        let page_h = page
+            .sheet()
+            .and_then(|s| s.cell("PageHeight"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(11.0);
+        let mut picked = Vec::new();
+        for shape in page.shapes.iter() {
+            if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
+                // shape rect is y-up; marquee is y-down.
+                let (my0, my1) = (page_h - y1, page_h - y0);
+                if sx <= x1 && sx + w >= x0 && sy <= my1 && sy + h >= my0 {
+                    picked.push((page_id, shape.id));
+                }
+            }
+        }
+        self.sel_set = picked;
+        self.sel = self.sel_set.last().copied();
+    }
+
+    /// Commit a corner-handle resize: the dragged corner moves by the
+    /// page-inch delta (y-down); the opposite corner stays anchored and
+    /// LocPin stays proportional (Visio's `Width*0.5` semantics).
+    fn apply_resize(&mut self, corner: canvas::Corner, dx: f64, dy: f64) {
+        let Some((page_id, shape_id)) = self.sel else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else { return };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else { return };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (Some(px), Some(py), Some(w), Some(h), Some(lx), Some(ly)) = (
+            get("PinX"),
+            get("PinY"),
+            get("Width"),
+            get("Height"),
+            get("LocPinX"),
+            get("LocPinY"),
+        ) else {
+            return;
+        };
+        // y-down delta → y-up geometry deltas per corner.
+        let (dw, dh) = match corner {
+            canvas::Corner::TopLeft => (-dx, -dy),
+            canvas::Corner::TopRight => (dx, -dy),
+            canvas::Corner::BottomLeft => (-dx, dy),
+            canvas::Corner::BottomRight => (dx, dy),
+        };
+        let nw = (w + dw).max(0.05);
+        let nh = (h + dh).max(0.05);
+        // Proportional LocPin keeps the anchor corner stationary: the
+        // world position of the opposite corner is Pin − Loc; scaling
+        // Loc by the same ratio keeps that corner fixed when Pin moves
+        // by Loc' − Loc.
+        let nlx = lx * nw / w;
+        let nly = ly * nh / h;
+        let npx = px - lx + nlx;
+        let npy = py - ly + nly;
+        let scope = Scope::Shape { page: page_id, shape: shape_id };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(SetCell::new(scope.clone(), "Width", cell(nw))),
+            Box::new(SetCell::new(scope.clone(), "Height", cell(nh))),
+            Box::new(SetCell::new(scope.clone(), "LocPinX", cell(nlx))),
+            Box::new(SetCell::new(scope.clone(), "LocPinY", cell(nly))),
+            Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))),
+            Box::new(SetCell::new(scope, "PinY", cell(npy))),
+        ];
+        self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
     }
 
     /// Track an in-progress shape drag; commit on release.
@@ -534,23 +665,85 @@ impl App {
         } else if let Some(d) = self.drag.take() {
             if d.moved {
                 if let Some(page_id) = self.page_id() {
-                    self.apply(MoveShape::new(page_id, d.shape, d.last_pin));
+                    // Moving a multi-selection moves every member by the
+                    // same delta, as one undo step.
+                    let others: Vec<i64> = self
+                        .sel_set
+                        .iter()
+                        .filter(|(p, s)| *p == page_id && *s != d.shape)
+                        .map(|(_, s)| *s)
+                        .collect();
+                    if others.is_empty() {
+                        self.apply(MoveShape::new(page_id, d.shape, d.last_pin));
+                    } else {
+                        let Some(ed) = self.ed() else { return };
+                        let dx = d.last_pin.0 - d.start_pin.0;
+                        let dy = d.last_pin.1 - d.start_pin.1;
+                        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+                            vec![Box::new(MoveShape::new(page_id, d.shape, d.last_pin))];
+                        for sid in others {
+                            let page = &ed.doc.pages[self.page_idx];
+                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid)
+                            else {
+                                continue;
+                            };
+                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+                            let get = |n: &str| {
+                                ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
+                            };
+                            if let (Some(px), Some(py)) = (get("PinX"), get("PinY")) {
+                                cmds.push(Box::new(MoveShape::new(
+                                    page_id,
+                                    sid,
+                                    (px + dx, py + dy),
+                                )));
+                            }
+                        }
+                        self.apply(Macro::new("move shapes", cmds));
+                    }
                     self.sel = Some((page_id, d.shape));
                 }
             }
         }
     }
 
-    fn on_canvas_click(&mut self, page_pos: (f64, f64)) {
+    fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool) {
         // Stencil placement takes priority.
         if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
+            let new_id = self
+                .ed
+                .as_ref()
+                .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
             self.apply(AddMasterInstance::new(page_id, master, page_pos));
             self.stencil.armed = None;
+            self.ctx_menu = None;
+            if let Some(nid) = new_id {
+                self.sel = Some((page_id, nid));
+                self.sel_set = vec![(page_id, nid)];
+            }
+            return;
+        }
+        if shift {
+            // Toggle membership in the multi-selection.
+            if let Some(hit) = self.shape_hit(page_pos) {
+                if let Some(p) = self.page_id() {
+                    let entry = (p, hit);
+                    if let Some(i) = self.sel_set.iter().position(|e| *e == entry) {
+                        self.sel_set.remove(i);
+                        self.sel = self.sel_set.last().copied();
+                    } else {
+                        self.sel_set.push(entry);
+                        self.sel = Some(entry);
+                    }
+                }
+            }
+            self.ctx_menu = None;
             return;
         }
         match self.shape_hit(page_pos) {
             Some(shape_id) => {
                 let page_id = self.page_id().expect("page");
+                self.sel_set = vec![(page_id, shape_id)];
                 // begin a drag: grab offset keeps the pin under the fingers
                 if let Some(ed) = self.ed() {
                     let page = &ed.doc.pages[self.page_idx];
@@ -567,6 +760,7 @@ impl App {
                             self.drag = Some(DragState {
                                 shape: shape_id,
                                 grab_off: (px - page_pos.0, py - page_pos.1),
+                                start_pin: (px, py),
                                 last_pin: (px, py),
                                 moved: false,
                             });
@@ -622,6 +816,17 @@ impl App {
             Action::Macros => {
                 self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into()
             }
+            Action::FillMenu | Action::LineMenu => {
+                self.color_pick = Some(if a == Action::FillMenu {
+                    ColorTarget::Fill
+                } else {
+                    ColorTarget::Line
+                });
+            }
+            Action::FontGrow => self.nudge_char_size(1.0),
+            Action::FontShrink => self.nudge_char_size(-1.0),
+            Action::RotateLeft => self.rotate_selection(90.0),
+            Action::RotateRight => self.rotate_selection(-90.0),
         }
     }
 
@@ -745,8 +950,8 @@ impl App {
                         vec![
                             RibbonButton::new(Icon::FontA, "Calibri", Action::Macros).combo().width(128.0).enabled(false).tip("Font family — planned"),
                             RibbonButton::new(Icon::FontA, "11", Action::Macros).combo().width(46.0).enabled(false).tip("Font size — planned"),
-                            RibbonButton::new(Icon::Grow, "", Action::Macros).enabled(false).tip("Increase font size — planned"),
-                            RibbonButton::new(Icon::Shrink, "", Action::Macros).enabled(false).tip("Decrease font size — planned"),
+                            RibbonButton::new(Icon::Grow, "", Action::FontGrow).tip("Increase font size"),
+                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink).tip("Decrease font size"),
                             RibbonButton::new(Icon::ClearAll, "", Action::Macros).enabled(false).tip("Clear all formatting — planned"),
                         ],
                         vec![
@@ -784,8 +989,8 @@ impl App {
                             .enabled(false)
                             .tip("Style gallery — planned")),
                         stack(vec![
-                            RibbonButton::new(Icon::Bucket, "Fill", Action::Macros).enabled(false).tip("Shape fill — planned"),
-                            RibbonButton::new(Icon::Pen, "Line", Action::Macros).enabled(false).tip("Line formatting — planned"),
+                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu).tip("Shape fill color"),
+                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu).tip("Line color"),
                             RibbonButton::new(Icon::Effects, "Effects", Action::Macros).enabled(false).tip("Shape effects — planned"),
                         ]),
                     ],
@@ -802,7 +1007,8 @@ impl App {
                         grid(vec![
                             vec![
                                 RibbonButton::new(Icon::Align, "Align", Action::Macros).enabled(false).tip("Alignment — planned"),
-                                RibbonButton::new(Icon::Rotate, "Rotate", Action::Macros).enabled(false).tip("Rotation — planned"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Right", Action::RotateRight).tip("Rotate selection 90° clockwise"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft).tip("Rotate selection 90° counter-clockwise"),
                             ],
                             vec![
                                 RibbonButton::new(Icon::Group, "Group", Action::Macros).enabled(false).tip("Grouping — planned"),
@@ -1298,6 +1504,7 @@ impl App {
         };
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
+        let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
         let drag_rect = self.drag_preview_rect();
         let dragging = self.drag.is_some();
         let armed = self.stencil.armed.is_some();
@@ -1317,21 +1524,45 @@ impl App {
             }
         };
         let mut mouse = self.mouse_page;
+        let armed = self.stencil.armed.is_some();
+        let App { view, ed, page_idx, .. } = self;
+        let ed = ed.as_ref();
+        let page = ed.map(|e| &e.doc.pages[(*page_idx).min(e.doc.pages.len().saturating_sub(1))]);
+        let hit = |pos: (f64, f64)| -> bool {
+            let Some(ed) = ed else { return false };
+            let Some(page) = page else { return false };
+            for shape in page.shapes.iter().rev() {
+                if let Some((x, y, w, h)) = Self::shape_rect_static(&ed.doc, page.id, shape) {
+                    if pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
         let out = canvas::show(
             ui,
-            &mut self.view,
+            view,
             &geom,
             Some(&tex),
             sel_rect,
+            &extra_rects,
             drag_rect,
             dragging,
             armed,
+            &hit,
             &mut mouse,
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
         if let Some(pos) = out.click_page_pos {
-            self.on_canvas_click(pos);
+            self.on_canvas_click(pos, out.shift_click);
+        }
+        if let Some((x0, y0, x1, y1)) = out.marquee_done {
+            self.apply_marquee(x0, y0, x1, y1);
+        }
+        if let Some((corner, (dx, dy))) = out.resize_done {
+            self.apply_resize(corner, dx, dy);
         }
         if let Some(pos) = out.right_click_page_pos {
             // Visio: right-click selects the shape under the cursor and
@@ -1395,6 +1626,84 @@ impl App {
             Some(out)
         }
         collect(self, shape_id).unwrap_or_default()
+    }
+
+    /// Bump the selected shapes' Character.Size by whole points.
+    fn nudge_char_size(&mut self, delta_pt: f64) {
+        let targets = self.sel_set.clone();
+        let Some(ed) = self.ed.as_ref() else { return };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let sheet = ed.doc.effective_sheet(sh, &chain);
+            let cur = sheet
+                .sections_named("Character")
+                .first()
+                .and_then(|sec| sec.rows.first())
+                .and_then(|r| r.cell("Size"))
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.13888);
+            let next = ((cur * 72.0 + delta_pt).max(4.0).min(200.0)) / 72.0;
+            cmds.push(Box::new(SetRowCell::new(
+                Scope::Shape { page: page_id, shape: sid },
+                "Character",
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                "Size",
+                vsdx::Cell::value(format!("{next:.6}")),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new("font size", cmds));
+        }
+    }
+
+    /// Rotate every selected shape ±90° (degrees, Visio CCW positive).
+    fn rotate_selection(&mut self, deg: f64) {
+        let targets = self.sel_set.clone();
+        let Some(ed) = self.ed.as_ref() else { return };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let cur = ed
+                .doc
+                .resolve_cell(sh, &chain, "Angle")
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0);
+            let next = cur + deg.to_radians();
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape { page: page_id, shape: sid },
+                "Angle",
+                vsdx::Cell::value(format!("{next:.8}")),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new("rotate shapes", cmds));
+        }
+    }
+
+    /// Apply a picked color to FillForegnd or LineColor on the selection.
+    fn apply_color(&mut self, target: ColorTarget, color: &str) {
+        let cell_name = match target {
+            ColorTarget::Fill => "FillForegnd",
+            ColorTarget::Line => "LineColor",
+        };
+        let targets = self.sel_set.clone();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape { page: page_id, shape: sid },
+                cell_name,
+                vsdx::Cell::value(color.to_owned()),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(format!("set {cell_name}"), cmds));
+        }
     }
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
@@ -1631,6 +1940,24 @@ impl App {
         self.sel
     }
     #[doc(hidden)]
+    pub fn debug_sel_set(&self) -> Vec<(i64, i64)> {
+        self.sel_set.clone()
+    }
+    /// Selection rect in SCREEN coords (for corner-handle tests).
+    #[doc(hidden)]
+    pub fn debug_sel_br_corner(&self) -> Option<egui::Pos2> {
+        let r = self.sel_page_rect()?;
+        let ppi = self.view.px_per_in();
+        Some(egui::pos2(
+            self.view.pan.x + r.right() as f32 * ppi,
+            self.view.pan.y + r.bottom() as f32 * ppi,
+        ))
+    }
+    #[doc(hidden)]
+    pub fn debug_sel_width(&self) -> f64 {
+        self.sel_page_rect().map(|r| r.width() as f64).unwrap_or(0.0)
+    }
+    #[doc(hidden)]
     pub fn debug_armed(&self) -> Option<i64> {
         self.stencil.armed
     }
@@ -1674,6 +2001,44 @@ impl App {
             // discarded
         } else {
             self.text_edit = Some((shape_id, draft));
+        }
+    }
+
+    /// The Visio theme palette shown by the ribbon Fill/Line buttons.
+    fn color_palette_window(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.color_pick else { return };
+        let mut open = true;
+        egui::Window::new(match target {
+            ColorTarget::Fill => "Fill Color",
+            ColorTarget::Line => "Line Color",
+        })
+        .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            let theme_colors = [
+                "#000000", "#FFFFFF", "#EEEEEE", "#969696",
+                "#4472C4", "#5B9BD5", "#70AD47", "#ED7D31",
+                "#FFC000", "#FF0000", "#7030A0", "#00B0F0",
+                "#FFF2CC", "#DEEAF6", "#E2EFDA", "#FCE4D6",
+            ];
+            egui::Grid::new("theme-palette").num_columns(8).spacing([6.0, 6.0]).show(ui, |ui| {
+                for (i, c) in theme_colors.iter().enumerate() {
+                    let color = egui::Color32::from_hex(c.trim_start_matches('#')).unwrap();
+                    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                    ui.painter().rect_filled(r, 2.0, color);
+                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Middle);
+                    if resp.clicked() {
+                        self.apply_color(target, c);
+                        self.color_pick = None;
+                    }
+                    if i % 8 == 7 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+        if !open {
+            self.color_pick = None;
         }
     }
 
@@ -1750,6 +2115,7 @@ impl App {
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.text_edit_window(&ctx);
+        self.color_palette_window(&ctx);
 
         if self.backstage {
             self.backstage_view(ui);

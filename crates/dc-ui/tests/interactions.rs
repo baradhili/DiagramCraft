@@ -118,3 +118,91 @@ fn right_click_menu_duplicate_creates_shape() {
     h.run();
     assert_eq!(h.state().debug_shape_count(), 1, "duplicate undoes");
 }
+
+#[test]
+fn marquee_selects_multiple_and_delete_removes_all() {
+    let mut h = harness_with_blank();
+    h.run();
+    // Place two shapes on the page via click-to-arm.
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-60.0f32, 60.0f32] {
+        let to = canvas.center() + egui::vec2(off, 0.0);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2);
+
+    // Marquee: drag on empty page from left of both shapes to right.
+    let c = canvas.center();
+    let a = egui::pos2(c.x - 120.0, c.y - 40.0);
+    let b = egui::pos2(c.x + 120.0, c.y + 40.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert!(
+        h.state().debug_sel_set().len() >= 2,
+        "marquee selected multiple shapes, got {:?}",
+        h.state().debug_sel_set()
+    );
+
+    // One Delete removes the whole selection (single undo step).
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0);
+}
+
+#[test]
+fn corner_drag_resizes_shape() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+
+    // Selection rect in screen coords comes from the app; approximate:
+    // the shape is ~1in at ~fit zoom centered where we dropped. Grab the
+    // bottom-right corner via the app's debug accessor.
+    let br = h.state().debug_sel_br_corner().expect("selection rect");
+    let before = h.state().debug_sel_width();
+    h.hover_at(br);
+    h.event(egui::Event::PointerButton {
+        pos: br,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(br + egui::vec2(40.0, 30.0));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: br + egui::vec2(40.0, 30.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let after = h.state().debug_sel_width();
+    assert!(
+        after > before + 0.15,
+        "corner drag grew the shape: {before} → {after}"
+    );
+}
