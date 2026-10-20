@@ -197,8 +197,12 @@ pub fn show(
         .find(|(_, c)| pos.distance(*c) <= grab)
         .map(|(k, _)| k)
     };
+    // Stable literal ids are intended for the drag-state memory keys.
+    #[allow(deprecated)]
     let mem_resize = egui::Id::new("dc-resize-corner");
+    #[allow(deprecated)]
     let mem_start = egui::Id::new("dc-drag-start");
+    #[allow(deprecated)]
     let mem_marquee = egui::Id::new("dc-marquee");
     let press_origin = ui.input(|i| i.pointer.press_origin());
     if resp.drag_started_by(egui::PointerButton::Primary) {

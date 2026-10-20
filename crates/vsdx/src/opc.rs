@@ -129,15 +129,15 @@ fn parse_content_types(xml: &str) -> Result<TypeMaps, OpcError> {
     loop {
         match r.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                if e.name().as_ref() == b"Default" || e.name().as_ref() == b"Override" {
+                if e.name().as_ref() == "Default" || e.name().as_ref() == "Override" {
                     let mut ext = None;
                     let mut ct: Option<String> = None;
                     let mut pn = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            b"Extension" => ext = Some(unescape(&a.value)),
-                            b"ContentType" => ct = Some(unescape(&a.value)),
-                            b"PartName" => pn = Some(unescape(&a.value)),
+                            "Extension" => ext = Some(a.value.to_string()),
+                            "ContentType" => ct = Some(a.value.to_string()),
+                            "PartName" => pn = Some(a.value.to_string()),
                             _ => {}
                         }
                     }
@@ -169,16 +169,16 @@ fn parse_relationships(xml: &str, base_dir: &str) -> Vec<(String, String, String
     loop {
         match r.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => {
-                let is_rel = e.name().as_ref() == b"Relationship";
+                let is_rel = e.name().as_ref() == "Relationship";
                 if is_rel {
                     let mut id = None;
                     let mut ty = None;
                     let mut target = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            b"Id" => id = Some(unescape(&a.value)),
-                            b"Type" => ty = Some(unescape(&a.value)),
-                            b"Target" => target = Some(unescape(&a.value)),
+                            "Id" => id = Some(a.value.to_string()),
+                            "Type" => ty = Some(a.value.to_string()),
+                            "Target" => target = Some(a.value.to_string()),
                             _ => {}
                         }
                     }

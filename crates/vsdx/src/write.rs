@@ -709,16 +709,16 @@ fn parse_rels(bytes: &[u8]) -> Vec<RelEntry> {
         buf.clear();
         match r.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if e.name().as_ref() == b"Relationship" =>
+                if e.name().as_ref() == "Relationship" =>
             {
                 let mut id = String::new();
                 let mut type_ = String::new();
                 let mut target = String::new();
                 for a in e.attributes().flatten() {
                     match a.key.as_ref() {
-                        b"Id" => id = String::from_utf8_lossy(&a.value).into_owned(),
-                        b"Type" => type_ = String::from_utf8_lossy(&a.value).into_owned(),
-                        b"Target" => target = String::from_utf8_lossy(&a.value).into_owned(),
+                        "Id" => id = a.value.to_string(),
+                        "Type" => type_ = a.value.to_string(),
+                        "Target" => target = a.value.to_string(),
                         _ => {}
                     }
                 }
@@ -778,25 +778,25 @@ fn parse_content_types(bytes: &[u8]) -> (Vec<(String, String)>, Vec<(String, Str
         buf.clear();
         match r.read_event_into(&mut buf) {
             Ok(Event::Start(e)) | Ok(Event::Empty(e)) => match e.name().as_ref() {
-                b"Default" => {
+                "Default" => {
                     let mut ext = String::new();
                     let mut ct = String::new();
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            b"Extension" => ext = String::from_utf8_lossy(&a.value).into_owned(),
-                            b"ContentType" => ct = String::from_utf8_lossy(&a.value).into_owned(),
+                            "Extension" => ext = a.value.to_string(),
+                            "ContentType" => ct = a.value.to_string(),
                             _ => {}
                         }
                     }
                     defaults.push((ext, ct));
                 }
-                b"Override" => {
+                "Override" => {
                     let mut part = String::new();
                     let mut ct = String::new();
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            b"PartName" => part = String::from_utf8_lossy(&a.value).into_owned(),
-                            b"ContentType" => ct = String::from_utf8_lossy(&a.value).into_owned(),
+                            "PartName" => part = a.value.to_string(),
+                            "ContentType" => ct = a.value.to_string(),
                             _ => {}
                         }
                     }
@@ -963,18 +963,18 @@ pub fn canonical_form(bytes: &[u8]) -> String {
             Ok(Event::Empty(e)) => canon_tag(&mut out, &e, true),
             Ok(Event::End(e)) => {
                 out.push_str("</");
-                out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+                out.push_str(e.name().as_ref());
                 out.push('>');
             }
             Ok(Event::Text(t)) => {
-                let txt = unescape(t.as_ref());
+                let txt = t.as_ref().to_string();
                 if !txt.trim().is_empty() {
                     out.push_str(&esc_text(&txt));
                 }
             }
             Ok(Event::GeneralRef(r)) => {
                 let mut ent = String::from("&");
-                ent.push_str(&String::from_utf8_lossy(r.as_ref()));
+                ent.push_str(r.as_ref());
                 ent.push(';');
                 let txt = unescape(ent.as_bytes());
                 if !txt.trim().is_empty() {
@@ -982,7 +982,7 @@ pub fn canonical_form(bytes: &[u8]) -> String {
                 }
             }
             Ok(Event::CData(t)) => {
-                let txt = String::from_utf8_lossy(t.as_ref());
+                let txt = t.as_ref().to_string();
                 if !txt.trim().is_empty() {
                     out.push_str(&esc_text(&txt));
                 }
@@ -996,14 +996,14 @@ pub fn canonical_form(bytes: &[u8]) -> String {
 
 fn canon_tag(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: bool) {
     out.push('<');
-    out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+    out.push_str(e.name().as_ref());
     let mut attrs: Vec<(String, String)> = e
         .attributes()
         .flatten()
         .map(|a| {
             (
-                String::from_utf8_lossy(a.key.as_ref()).into_owned(),
-                unescape(&a.value),
+                a.key.as_ref().to_string(),
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
             )
         })
         .collect();
@@ -1018,7 +1018,7 @@ fn canon_tag(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: boo
     out.push('>');
     if empty {
         out.push_str("</");
-        out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+        out.push_str(e.name().as_ref());
         out.push('>');
     }
 }

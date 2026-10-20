@@ -79,13 +79,6 @@ fn esc_attr(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn unesc(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&amp;", "&")
-}
-
 impl Connects {
     /// Parse the `<Connects>` element of a raw-children list, if present.
     pub fn from_raw(raws: &[RawEl]) -> Option<Connects> {
@@ -100,14 +93,14 @@ impl Connects {
         loop {
             buf.clear();
             match r.read_event_into(&mut buf) {
-                Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == b"Connect" => {
+                Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "Connect" => {
                     let mut pairs: Attrs = e
                         .attributes()
                         .flatten()
                         .map(|a| {
                             (
-                                String::from_utf8_lossy(a.key.as_ref()).into_owned(),
-                                unesc(&String::from_utf8_lossy(&a.value)),
+                                a.key.as_ref().to_string(),
+                                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
                             )
                         })
                         .collect();
