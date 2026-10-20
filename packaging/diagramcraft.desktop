@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DiagramCraft
+GenericName=Diagram Editor
+Comment=Draw flowcharts, layouts and diagrams from Visio files
+Exec=diagramcraft %F
+Icon=diagramcraft
+Terminal=false
+Categories=Graphics;VectorGraphics;Office;
+MimeType=application/vnd.ms-visio.drawing.main+xml;application/vnd.ms-visio.template.main+xml;application/vnd.ms-visio.stencil.main+xml;
+StartupWMClass=diagramcraft

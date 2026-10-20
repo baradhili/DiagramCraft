@@ -3,6 +3,34 @@ name = "dc-ui"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
+description = "DiagramCraft desktop application (Visio-compatible diagram editor)"
+
+# Distribution name for the GUI binary (packaging + desktop entry).
+[[bin]]
+name = "diagramcraft"
+path = "src/main.rs"
+
+[package.metadata.deb]
+name = "diagramcraft"
+maintainer = "DiagramCraft contributors"
+depends = "$auto"
+section = "graphics"
+priority = "optional"
+extended-description = """Native Linux diagram editor for Visio files: read, render, edit and
+write .vsdx/.vstx/.vssx packages losslessly, with a Visio-style ribbon
+GUI, stencils and ShapeSheet inspector."""
+assets = [
+    ["target/release/diagramcraft", "usr/bin/", "755"],
+    ["../../packaging/diagramcraft.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/diagramcraft.png", "usr/share/icons/hicolor/512x512/apps/diagramcraft.png", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "../../target/release/diagramcraft", dest = "/usr/bin/diagramcraft", mode = "755" },
+    { source = "../../packaging/diagramcraft.desktop", dest = "/usr/share/applications/diagramcraft.desktop", mode = "644" },
+    { source = "../../packaging/diagramcraft.png", dest = "/usr/share/icons/hicolor/512x512/apps/diagramcraft.png", mode = "644" },
+]
 
 [dependencies]
 craft-ui = { path = "../../third_party/craft-ui" }

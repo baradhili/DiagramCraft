@@ -6,7 +6,21 @@ them to SVG/PNG, edit them through an undoable command layer, and work in
 a native desktop GUI with the Visio shell (ribbon, stencils, ShapeSheet).
 
 Built clean-room: from recorded file-format and application-behavior
-observations. No Microsoft code, content, or assets.
+observations. No Microsoft code, content, or assets. 
+
+Using: [GitHub - morluto/rea: Reverse engineer anything with agents, from app behavior down to native binaries. · GitHub](https://github.com/morluto/rea) and zcode
+
+## Helping
+
+Right now it is pretty raw AI generated code and UI.. yes it suck and yes it does only a fraction of what it should do - but hey it does manage to mostly draw vsdx correctly!
+
+How can you help?
+
+1. Create issues - it gives me and my agent a way to track what could be fixed
+
+2. Create PR - awesome! - but please keep the PRs on a narrow feature (no 10000 line PRs please!) and make sure they are at least checked by CodeRabbit - or better Greptile
+
+3. Spread the word!
 
 ## Workspace
 
@@ -63,6 +77,21 @@ regenerate with `UPDATE_SNAPSHOTS=1`):
 cargo test -p dc-ui --test shell
 cargo test -p dc-ui --test interactions
 ```
+
+## Installers
+
+Release tags (`v*`) build installers through GitHub Actions
+(`.github/workflows/release.yml`): a Windows MSI (+ portable zip), a
+universal macOS dmg, and Linux deb / rpm / AppImage packages. Push a tag
+to cut a release:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+Packaging metadata lives in the `dc-ui` manifest (`[package.metadata.deb]`,
+`[package.metadata.generate-rpm]`), `crates/dc-ui/wix/` for the MSI, and
+`packaging/` for the desktop entry, icons, and macOS Info.plist.
 
 ## Commit conventions
 
