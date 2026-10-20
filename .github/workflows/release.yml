@@ -76,7 +76,7 @@ jobs:
       - name: Build installer
         shell: cmd
         run: |
-          "C:\Program Files (x86)\NSIS\makensis.exe" -DVERSION=${{ steps.ver.outputs.version }} packaging\installer.nsi
+          "C:\Program Files (x86)\NSIS\makensis.exe" -DVERSION=${{ steps.ver.outputs.version }} -DBINDIR="%GITHUB_WORKSPACE%\target\release" packaging\installer.nsi
       - name: Portable zip
         shell: bash
         run: |
