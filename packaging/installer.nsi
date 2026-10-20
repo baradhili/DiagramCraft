@@ -3,6 +3,8 @@
 ; from the repo root; expects target\release\diagramcraft.exe.
 
 !define APPNAME "DiagramCraft"
+; Binary directory passed in via -DBINDIR=... (NSIS resolves File
+; paths relative to this script, not the invocation directory).
 Name "${APPNAME}"
 OutFile "diagramcraft_${VERSION}_windows_x64_setup.exe"
 InstallDir "$PROGRAMFILES64\${APPNAME}"
@@ -19,7 +21,7 @@ UninstPage instfiles
 Section "${APPNAME} (required)"
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File "target\release\diagramcraft.exe"
+  File "${BINDIR}\diagramcraft.exe"
   WriteRegStr HKLM "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
     "DisplayName" "${APPNAME}"
