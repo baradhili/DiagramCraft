@@ -85,7 +85,8 @@ jobs:
       - name: Collect artifacts
         shell: bash
         run: |
-          cp diagramcraft_*_setup.exe dist/
+          # NSIS writes OutFile relative to the script directory.
+          cp packaging/diagramcraft_*_setup.exe dist/
           ls -la dist/
       - uses: actions/upload-artifact@v4
         with:
