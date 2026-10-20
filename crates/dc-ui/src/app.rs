@@ -1524,7 +1524,6 @@ impl App {
             }
         };
         let mut mouse = self.mouse_page;
-        let armed = self.stencil.armed.is_some();
         let App { view, ed, page_idx, .. } = self;
         let ed = ed.as_ref();
         let page = ed.map(|e| &e.doc.pages[(*page_idx).min(e.doc.pages.len().saturating_sub(1))]);
