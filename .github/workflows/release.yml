@@ -62,8 +62,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-wix
-        run: cargo install cargo-wix --locked
+      - name: Install NSIS
+        run: choco install nsis -y
       - name: Version
         id: ver
         shell: bash
@@ -71,18 +71,21 @@ jobs:
           VER="${GITHUB_REF_NAME#v}"
           case "$VER" in [0-9]*) ;; *) VER="0.1.0" ;; esac
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-      - name: Build MSI
-        run: cargo wix -p dc-ui
+      - name: Build binary
+        run: cargo build --release -p dc-ui --locked
+      - name: Build installer
+        shell: cmd
+        run: |
+          "C:\Program Files (x86)\NSIS\makensis.exe" -DVERSION=${{ steps.ver.outputs.version }} packaging\installer.nsi
       - name: Portable zip
         shell: bash
         run: |
-          cargo build --release -p dc-ui --locked
           mkdir -p dist
           7z a -tzip "dist/diagramcraft_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/diagramcraft.exe
       - name: Collect artifacts
         shell: bash
         run: |
-          cp target/wix/*.msi dist/ || true
+          cp diagramcraft_*_setup.exe dist/
           ls -la dist/
       - uses: actions/upload-artifact@v4
         with:

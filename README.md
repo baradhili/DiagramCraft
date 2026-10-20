@@ -81,7 +81,7 @@ cargo test -p dc-ui --test interactions
 ## Installers
 
 Release tags (`v*`) build installers through GitHub Actions
-(`.github/workflows/release.yml`): a Windows MSI (+ portable zip), a
+(`.github/workflows/release.yml`): a Windows NSIS installer (+ portable zip), a
 universal macOS dmg, and Linux deb / rpm / AppImage packages. Push a tag
 to cut a release:
 
@@ -90,7 +90,7 @@ git tag v0.2.0 && git push origin v0.2.0
 ```
 
 Packaging metadata lives in the `dc-ui` manifest (`[package.metadata.deb]`,
-`[package.metadata.generate-rpm]`), `crates/dc-ui/wix/` for the MSI, and
+`[package.metadata.generate-rpm]`), `packaging/installer.nsi` for the NSIS installer, and
 `packaging/` for the desktop entry, icons, and macOS Info.plist.
 
 ## Commit conventions
