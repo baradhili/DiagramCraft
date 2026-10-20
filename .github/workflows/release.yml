@@ -147,7 +147,18 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Prerelease?
+        id: pre
+        run: |
+          # vMAJOR.MINOR.PATCH.<letter> tags (v0.1.0.a, v0.1.0.b, …) are
+          # CI-iteration prereleases; plain semver tags publish full
+          # releases.
+          case "$GITHUB_REF_NAME" in
+            v*.*.*.*) echo "pre=true" >> "$GITHUB_OUTPUT" ;;
+            *)        echo "pre=false" >> "$GITHUB_OUTPUT" ;;
+          esac
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
           generate_release_notes: true
+          prerelease: ${{ steps.pre.outputs.pre }}
