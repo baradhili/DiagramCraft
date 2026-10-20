@@ -12,9 +12,23 @@ use std::collections::HashMap;
 
 /// Rasterize an SVG string to a `target_width`-pixel-wide RGBA image
 /// (height follows the viewBox aspect).
+///
+/// Fonts: the embedded Carlito set (metric-compatible with Calibri,
+/// OFL-1.1 — see assets/fonts/LICENSE-Carlito), NOT system fonts.
+/// System fonts made rasters machine-dependent and broke the snapshot
+/// tests on CI runners with different font sets.
 pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
     let mut opts = resvg::usvg::Options::default();
-    opts.fontdb_mut().load_system_fonts();
+    {
+        let db = opts.fontdb_mut();
+        for (name, bytes) in [
+            ("Carlito", include_bytes!("../assets/fonts/Carlito-Regular.ttf") as &[u8]),
+            ("Carlito", include_bytes!("../assets/fonts/Carlito-Bold.ttf")),
+        ] {
+            db.load_font_data(bytes.to_vec());
+            let _ = name;
+        }
+    }
     let tree = resvg::usvg::Tree::from_str(svg, &opts)
         .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
     let size = tree.size();
