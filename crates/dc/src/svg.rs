@@ -1578,20 +1578,23 @@ fn style_attr(
 
 /// Visio's built-in dash/dot line patterns (LinePattern 2–23) as SVG
 /// `stroke-dasharray` values in LineWeight multiples (patterns scale with
-/// the line weight — the ShapeSheet gallery's defining property). Ratios
-/// calibrated against the Utilisation gold render (issue #13): the LP 2/4/5
-/// diagram arrows measured dash 8w/gap 4w and 10w,2w,3w,2w(,3w,2w) at
-/// 583 px/in; the dotted/short-dash family (3/7/8) from the Key sample
-/// rows (dot ≈1w gap ≈2w; short dash ≈4w). Patterns outside this set
-/// stay solid until a corpus exercises them.
+/// the line weight — the ShapeSheet gallery's defining property). Numbers
+/// follow the ECMA-376 preset-dash primitives (`dash` 4,3 · `lgDash` 8,3 ·
+/// `dot` 1,3), composed per the Visio gallery semantics confirmed against
+/// labeled Visio 2016 reference crops (issue #13): 4 = dash-dot, 5 =
+/// dash-dot-dot, 7 = long dash + normal dash, 8 = long dash + two normal
+/// dashes. The crops' long dash measures ≈12w; the ECMA `lgDash` (8w) is
+/// used per owner decision — flip that constant if 7/8 read too short
+/// against the gold. Patterns outside this set stay solid until a corpus
+/// exercises them.
 fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 4.0],                   // dashed
-        3 => &[1.0, 2.0],                   // dotted
-        4 => &[10.0, 2.0, 3.0, 2.0],        // dash-dot
-        5 => &[10.0, 2.0, 3.0, 2.0, 3.0, 2.0], // dash-dot-dot
-        7 => &[4.0, 2.0],                   // short dash
-        8 => &[4.0, 2.0, 1.0, 2.0],         // short dash-dot
+        2 => &[8.0, 3.0],                      // dashed (lgDash)
+        3 => &[1.0, 3.0],                      // dotted (dot)
+        4 => &[4.0, 3.0, 1.0, 3.0],            // dash-dot (dashDot)
+        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0],  // dash-dot-dot (dashDotDot)
+        7 => &[8.0, 3.0, 4.0, 3.0],            // long dash + normal dash
+        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0],  // long + 2× normal dashes
         _ => return None,
     };
     Some(
@@ -1962,18 +1965,28 @@ mod tests {
 
     #[test]
     fn line_pattern_dasharrays_scale_with_weight() {
-        // Gold-calibrated ratios (issue #13), expressed in weight
-        // multiples: LP2 dashed 8/4, LP4 dash-dot 10,2,3,2 …
+        // ECMA-376 preset primitives (issue #13): dash 4,3 · lgDash 8,3 ·
+        // dot 1,3, composed per the Visio gallery semantics.
         let w = 0.01041666666666667; // 0.75 pt
+        assert_eq!(line_dasharray(2.0, w).as_deref(), Some("0.08333 0.03125"));
+        assert_eq!(line_dasharray(3.0, w).as_deref(), Some("0.01042 0.03125"));
         assert_eq!(
-            line_dasharray(2.0, w).as_deref(),
-            Some("0.08333 0.04167")
+            line_dasharray(4.0, w).as_deref(),
+            Some("0.04167 0.03125 0.01042 0.03125")
         );
         assert_eq!(
             line_dasharray(5.0, w).as_deref(),
-            Some("0.10417 0.02083 0.03125 0.02083 0.03125 0.02083")
+            Some("0.04167 0.03125 0.01042 0.03125 0.01042 0.03125")
         );
-        assert_eq!(line_dasharray(7.0, w).as_deref(), Some("0.04167 0.02083"));
+        // 7/8: long dash (lgDash) + normal dash(es).
+        assert_eq!(
+            line_dasharray(7.0, w).as_deref(),
+            Some("0.08333 0.03125 0.04167 0.03125")
+        );
+        assert_eq!(
+            line_dasharray(8.0, w).as_deref(),
+            Some("0.08333 0.03125 0.04167 0.03125 0.04167 0.03125")
+        );
         // Solid (1), hidden (0, handled elsewhere) and uncalibrated
         // patterns render solid — no dasharray attribute.
         assert!(line_dasharray(1.0, w).is_none());
