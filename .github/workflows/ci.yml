@@ -6,6 +6,11 @@ on:
 
 jobs:
   test:
+    # Skip the build/test matrix for PRs titled "chore …" (e.g. sync/dependency
+    # chores); pushes to main always run.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !startsWith(github.event.pull_request.title, 'chore')
     strategy:
       fail-fast: false
       matrix:
