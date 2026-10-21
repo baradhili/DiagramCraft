@@ -312,7 +312,7 @@ fn frame(ctx: &Context, layout: &Layout<u32>, events: Vec<Event>, focused: bool)
             |p| format!("Panel {p}"),
             |_| Permissions::default(),
             |ui, _| {
-                ids.push(ui.id());
+                ids.push(ui.scope_id());
                 ui.label("Actual panel content");
             },
         );
