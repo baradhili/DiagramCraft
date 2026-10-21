@@ -568,17 +568,12 @@ impl App {
         let Some(ed) = self.ed() else { return };
         let Some(page_id) = self.page_id() else { return };
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
-        let page_h = page
-            .sheet()
-            .and_then(|s| s.cell("PageHeight"))
-            .and_then(|c| c.numeric())
-            .unwrap_or(11.0);
         let mut picked = Vec::new();
         for shape in page.shapes.iter() {
             if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
-                // shape rect is y-up; marquee is y-down.
-                let (my0, my1) = (page_h - y1, page_h - y0);
-                if sx <= x1 && sx + w >= x0 && sy <= my1 && sy + h >= my0 {
+                // Both the shape rect and the marquee rect (from
+                // canvas::screen_to_page) are y-up page inches.
+                if sx <= x1 && sx + w >= x0 && sy <= y1 && sy + h >= y0 {
                     picked.push((page_id, shape.id));
                 }
             }

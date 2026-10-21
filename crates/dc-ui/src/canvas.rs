@@ -66,8 +66,8 @@ pub struct CanvasOut {
     pub resize_done: Option<(Corner, (f64, f64))>,
     /// A handle drag started this frame on this corner.
     pub resize_started: Option<Corner>,
-    /// Marquee (empty-area drag) finished: rect in page inches, y-down,
-    /// (x0, y0, x1, y1) possibly un-normalized.
+    /// Marquee (empty-area drag) finished: rect in page inches, y-up,
+    /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,

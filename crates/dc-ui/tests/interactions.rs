@@ -123,22 +123,50 @@ fn right_click_menu_duplicate_creates_shape() {
 fn marquee_selects_multiple_and_delete_removes_all() {
     let mut h = harness_with_blank();
     h.run();
-    // Place two shapes on the page via click-to-arm.
+    // Two shapes at DIFFERENT heights, so a mirrored (y-flipped)
+    // selection band would pick the wrong one.
     let cells = h.state().debug_master_cells();
     let from = cells[0].1.center();
     let canvas = h.state().debug_canvas_rect();
-    for off in [-60.0f32, 60.0f32] {
-        let to = canvas.center() + egui::vec2(off, 0.0);
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
         click_at(&mut h, from, egui::PointerButton::Primary);
         click_at(&mut h, to, egui::PointerButton::Primary);
     }
     h.run();
     assert_eq!(h.state().debug_shape_count(), 2);
 
-    // Marquee: drag on empty page from left of both shapes to right.
+    // Upper shape only: a band around the upper-left placement picks
+    // exactly one — this fails if the band is mirrored vertically.
     let c = canvas.center();
-    let a = egui::pos2(c.x - 120.0, c.y - 40.0);
-    let b = egui::pos2(c.x + 120.0, c.y + 40.0);
+    let a = c + egui::vec2(10.0, -80.0);
+    let b = c + egui::vec2(110.0, -20.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(
+        h.state().debug_sel_set().len(),
+        1,
+        "upper band selects exactly the upper shape (mirroring would pick the lower)"
+    );
+
+    // Full marquee over both.
+    let a = egui::pos2(c.x - 120.0, c.y - 90.0);
+    let b = egui::pos2(c.x + 120.0, c.y + 90.0);
     h.hover_at(a);
     h.event(egui::Event::PointerButton {
         pos: a,
