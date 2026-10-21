@@ -17,18 +17,28 @@ use std::collections::HashMap;
 /// OFL-1.1 — see assets/fonts/LICENSE-Carlito), NOT system fonts.
 /// System fonts made rasters machine-dependent and broke the snapshot
 /// tests on CI runners with different font sets.
+/// The font database, built once: Carlito Regular/Bold plus generic
+/// family mappings — usvg resolves unknown/no font-family through the
+/// generic defaults (Arial / Times New Roman), which don't exist in a
+/// Carlito-only database and would drop the text entirely.
+fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+        db.set_sans_serif_family("Carlito");
+        db.set_serif_family("Carlito");
+        db.set_monospace_family("Carlito");
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
 pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
     let mut opts = resvg::usvg::Options::default();
-    {
-        let db = opts.fontdb_mut();
-        for (name, bytes) in [
-            ("Carlito", include_bytes!("../assets/fonts/Carlito-Regular.ttf") as &[u8]),
-            ("Carlito", include_bytes!("../assets/fonts/Carlito-Bold.ttf")),
-        ] {
-            db.load_font_data(bytes.to_vec());
-            let _ = name;
-        }
-    }
+    opts.fontdb = font_db();
     let tree = resvg::usvg::Tree::from_str(svg, &opts)
         .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
     let size = tree.size();
