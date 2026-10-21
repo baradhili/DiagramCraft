@@ -232,7 +232,7 @@ impl crate::Command for SetRowCell {
         // the local sheet lacks the section or row, create it seeded with
         // the inherited cells (effective sheet) so untouched values keep
         // their master's appearance.
-        let inherited: Option<vsdx::model::Row> = (|| {
+        let inherited_sec: Option<vsdx::model::Section> = (|| {
             let Scope::Shape { page: page_id, shape: shape_id } = &self.scope else {
                 return None;
             };
@@ -240,27 +240,36 @@ impl crate::Command for SetRowCell {
             let sh = crate::scope::find_shape(&page.shapes, *shape_id)?;
             let chain = crate::scope::shape_chain(doc, *page_id, *shape_id).ok()?;
             let eff = doc.effective_sheet(sh, &chain);
-            let sec = eff
-                .sections_named(&self.section)
+            eff.sections_named(&self.section)
                 .into_iter()
-                .find(|s| s.ix == self.section_ix)?;
-            let row = match &self.row {
+                .find(|s| s.ix == self.section_ix)
+                .cloned()
+        })();
+        let inherited_row: Option<vsdx::model::Row> = inherited_sec.as_ref().and_then(|sec| {
+            match &self.row {
                 RowSel::Ix(ix) => sec.rows.iter().find(|r| r.ix == *ix),
                 RowSel::Named(n) => sec.rows.iter().find(|r| r.n.as_deref() == Some(n.as_str())),
-            }?;
-            Some(row.clone())
-        })();
+            }
+            .cloned()
+        });
 
         let s = sheet_mut(doc, &self.scope)?;
         let has_section = s.children.iter().any(|c| {
             matches!(c, vsdx::model::SheetChild::Section(sec) if sec.name == self.section && sec.ix == self.section_ix)
         });
         if !has_section {
-            s.children.push(vsdx::model::SheetChild::Section(vsdx::model::Section {
-                name: self.section.clone(),
-                ix: self.section_ix,
-                ..Default::default()
-            }));
+            // Seed with the FULL inherited section: an empty partial
+            // section would shadow the master's other rows (rich-text
+            // runs, multiple Character rows) once it exists locally.
+            let sec = match inherited_sec {
+                Some(sec) => sec,
+                None => vsdx::model::Section {
+                    name: self.section.clone(),
+                    ix: self.section_ix,
+                    ..Default::default()
+                },
+            };
+            s.children.push(vsdx::model::SheetChild::Section(sec));
             self.created_section = true;
         }
         {
@@ -281,7 +290,7 @@ impl crate::Command for SetRowCell {
                 RowSel::Named(n) => sec.rows.iter().any(|r| r.n.as_deref() == Some(n.as_str())),
             };
             if !has_row {
-                let mut row = inherited.unwrap_or_default();
+                let mut row = inherited_row.unwrap_or_default();
                 if let RowSel::Ix(ix) = &self.row {
                     row.ix = *ix;
                 }
@@ -306,7 +315,8 @@ impl crate::Command for SetRowCell {
             &self.name,
             self.old.clone(),
         )?;
-        if self.created_row {
+        if self.created_row && !self.created_section {
+            // We added a row to a pre-existing section: remove just it.
             if let Some(sec) = s.children.iter_mut().find_map(|c| match c {
                 vsdx::model::SheetChild::Section(sec)
                     if sec.name == self.section && sec.ix == self.section_ix =>
@@ -328,13 +338,12 @@ impl crate::Command for SetRowCell {
             self.created_row = false;
         }
         if self.created_section {
+            // We created the section (seeded wholesale from the inherited
+            // one); every row in it is ours, so undo removes it whole.
             if let Some(i) = s.children.iter().position(|c| {
                 matches!(c, vsdx::model::SheetChild::Section(sec) if sec.name == self.section && sec.ix == self.section_ix)
             }) {
-                if matches!(&s.children[i], vsdx::model::SheetChild::Section(sec) if sec.rows.is_empty() && sec.cells.is_empty())
-                {
-                    s.children.remove(i);
-                }
+                s.children.remove(i);
             }
             self.created_section = false;
         }
