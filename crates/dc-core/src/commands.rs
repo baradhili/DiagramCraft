@@ -191,6 +191,10 @@ pub struct SetRowCell {
     pub name: String,
     pub new: Cell,
     old: Option<Cell>,
+    /// Set when apply() created the local section and/or row (Visio
+    /// materializes inherited sections on first edit); undo removes them.
+    created_section: bool,
+    created_row: bool,
 }
 
 impl SetRowCell {
@@ -210,6 +214,8 @@ impl SetRowCell {
             name: name.into(),
             new,
             old: None,
+            created_section: false,
+            created_row: false,
         }
     }
 }
@@ -222,17 +228,120 @@ impl crate::Command for SetRowCell {
         )
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        // Visio materializes inherited sections/rows on first edit: when
+        // the local sheet lacks the section or row, create it seeded with
+        // the inherited cells (effective sheet) so untouched values keep
+        // their master's appearance.
+        let inherited: Option<vsdx::model::Row> = (|| {
+            let Scope::Shape { page: page_id, shape: shape_id } = &self.scope else {
+                return None;
+            };
+            let page = doc.pages.iter().find(|p| p.id == *page_id)?;
+            let sh = crate::scope::find_shape(&page.shapes, *shape_id)?;
+            let chain = crate::scope::shape_chain(doc, *page_id, *shape_id).ok()?;
+            let eff = doc.effective_sheet(sh, &chain);
+            let sec = eff
+                .sections_named(&self.section)
+                .into_iter()
+                .find(|s| s.ix == self.section_ix)?;
+            let row = match &self.row {
+                RowSel::Ix(ix) => sec.rows.iter().find(|r| r.ix == *ix),
+                RowSel::Named(n) => sec.rows.iter().find(|r| r.n.as_deref() == Some(n.as_str())),
+            }?;
+            Some(row.clone())
+        })();
+
         let s = sheet_mut(doc, &self.scope)?;
+        let has_section = s.children.iter().any(|c| {
+            matches!(c, vsdx::model::SheetChild::Section(sec) if sec.name == self.section && sec.ix == self.section_ix)
+        });
+        if !has_section {
+            s.children.push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+                name: self.section.clone(),
+                ix: self.section_ix,
+                ..Default::default()
+            }));
+            self.created_section = true;
+        }
+        {
+            let sec = s
+                .children
+                .iter_mut()
+                .find_map(|c| match c {
+                    vsdx::model::SheetChild::Section(sec)
+                        if sec.name == self.section && sec.ix == self.section_ix =>
+                    {
+                        Some(sec)
+                    }
+                    _ => None,
+                })
+                .expect("section just ensured");
+            let has_row = match &self.row {
+                RowSel::Ix(ix) => sec.rows.iter().any(|r| r.ix == *ix),
+                RowSel::Named(n) => sec.rows.iter().any(|r| r.n.as_deref() == Some(n.as_str())),
+            };
+            if !has_row {
+                let mut row = inherited.unwrap_or_default();
+                if let RowSel::Ix(ix) = &self.row {
+                    row.ix = *ix;
+                }
+                if let RowSel::Named(n) = &self.row {
+                    row.n = Some(n.clone());
+                }
+                sec.rows.push(row);
+                self.created_row = true;
+            }
+        }
         self.old = row_cell(s, &self.section, self.section_ix, &self.row, &self.name)?.cloned();
         set_row_cell(s, &self.section, self.section_ix, &self.row, &self.name, self.new.clone())?;
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
         let s = sheet_mut(doc, &self.scope)?;
-        restore_row_cell(s, &self.section, self.section_ix, &self.row, &self.name, self.old.clone())?;
+        restore_row_cell(
+            s,
+            &self.section,
+            self.section_ix,
+            &self.row,
+            &self.name,
+            self.old.clone(),
+        )?;
+        if self.created_row {
+            if let Some(sec) = s.children.iter_mut().find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            }) {
+                let ri = match &self.row {
+                    RowSel::Ix(ix) => sec.rows.iter().position(|r| r.ix == *ix),
+                    RowSel::Named(n) => {
+                        sec.rows.iter().position(|r| r.n.as_deref() == Some(n.as_str()))
+                    }
+                };
+                if let Some(i) = ri {
+                    sec.rows.remove(i);
+                }
+            }
+            self.created_row = false;
+        }
+        if self.created_section {
+            if let Some(i) = s.children.iter().position(|c| {
+                matches!(c, vsdx::model::SheetChild::Section(sec) if sec.name == self.section && sec.ix == self.section_ix)
+            }) {
+                if matches!(&s.children[i], vsdx::model::SheetChild::Section(sec) if sec.rows.is_empty() && sec.cells.is_empty())
+                {
+                    s.children.remove(i);
+                }
+            }
+            self.created_section = false;
+        }
         Ok(())
     }
 }
+
 
 /// Set a sheet's text (plain text; markup is escaped on store). Text
 /// belongs to shape sheets — page and master sub-shape scopes.

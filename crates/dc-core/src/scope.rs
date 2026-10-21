@@ -204,6 +204,18 @@ fn find_mut_recursive<'a>(shapes: &'a mut [Shape], id: i64) -> Option<&'a mut Sh
 }
 
 /// Find a shape by ID anywhere in a nested tree, mutably (public form).
+pub fn find_shape<'a>(shapes: &'a [Shape], id: i64) -> Option<&'a Shape> {
+    for s in shapes {
+        if s.id == id {
+            return Some(s);
+        }
+        if let Some(found) = find_shape(&s.sub_shapes, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 pub fn find_shape_mut<'a>(shapes: &'a mut Vec<Shape>, id: i64) -> Option<&'a mut Shape> {
     find_mut_recursive(shapes, id)
 }

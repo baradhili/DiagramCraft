@@ -794,3 +794,43 @@ fn reorder_shape_moves_zorder_and_restores() {
     ed.undo().unwrap();
     assert_eq!(order(&ed), ids.to_vec(), "both reorder steps undo");
 }
+
+#[test]
+fn set_row_cell_materializes_missing_character_section_with_undo() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let sid = dc_core::commands::next_shape_id(&ed.doc, page);
+    // A master-backed instance whose sheet carries NO local Character
+    // section (the common case for placed shapes).
+    let mut s = vsdx::model::Shape::default();
+    s.id = sid;
+    s.master = Some(7); // blank template master with Character rows
+    ed.apply(dc_core::AddShape { page, parent: None, shape: s }).unwrap();
+
+    ed.apply(dc_core::SetRowCell::new(
+        dc_core::Scope::Shape { page, shape: sid },
+        "Character",
+        0,
+        dc_core::commands::RowSel::Ix(0),
+        "Size",
+        vsdx::model::Cell::value("0.1666"),
+    ))
+    .unwrap();
+
+    // The local section/row now exist with the written value.
+    let sh = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, sid).unwrap();
+    let secs = sh.sheet.sections_named("Character");
+    let sec = secs
+        .first()
+        .expect("Character section materialized");
+    let size = sec.rows[0].cell("Size").and_then(|c| c.numeric()).unwrap();
+    assert!((size - 0.1666).abs() < 1e-9);
+
+    // Undo removes the materialized row/section again.
+    ed.undo().unwrap();
+    let sh = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, sid).unwrap();
+    assert!(
+        sh.sheet.sections_named("Character").is_empty(),
+        "materialized section removed on undo"
+    );
+}
