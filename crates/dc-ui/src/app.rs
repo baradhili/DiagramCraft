@@ -938,6 +938,7 @@ impl App {
     fn ribbon_content(&mut self, ui: &mut Ui) {
         let has_doc = self.ed.is_some();
         let sel_active = self.sel.is_some();
+        let has_sel = sel_active;
         let mut act: Option<Action> = None;
         let dispatch = |a: Action, act: &mut Option<Action>| {
             *act = Some(a);
@@ -970,8 +971,8 @@ impl App {
                         vec![
                             RibbonButton::new(Icon::FontA, "Calibri", Action::Macros).combo().width(128.0).enabled(false).tip("Font family — planned"),
                             RibbonButton::new(Icon::FontA, "11", Action::Macros).combo().width(46.0).enabled(false).tip("Font size — planned"),
-                            RibbonButton::new(Icon::Grow, "", Action::FontGrow).tip("Increase font size"),
-                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink).tip("Decrease font size"),
+                            RibbonButton::new(Icon::Grow, "", Action::FontGrow).enabled(has_sel).tip("Increase font size"),
+                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink).enabled(has_sel).tip("Decrease font size"),
                             RibbonButton::new(Icon::ClearAll, "", Action::Macros).enabled(false).tip("Clear all formatting — planned"),
                         ],
                         vec![
@@ -1009,8 +1010,8 @@ impl App {
                             .enabled(false)
                             .tip("Style gallery — planned")),
                         stack(vec![
-                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu).tip("Shape fill color"),
-                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu).tip("Line color"),
+                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu).enabled(has_sel).tip("Shape fill color"),
+                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu).enabled(has_sel).tip("Line color"),
                             RibbonButton::new(Icon::Effects, "Effects", Action::Macros).enabled(false).tip("Shape effects — planned"),
                         ]),
                     ],
@@ -1027,8 +1028,8 @@ impl App {
                         grid(vec![
                             vec![
                                 RibbonButton::new(Icon::Align, "Align", Action::Macros).enabled(false).tip("Alignment — planned"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Right", Action::RotateRight).tip("Rotate selection 90° clockwise"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft).tip("Rotate selection 90° counter-clockwise"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Right", Action::RotateRight).enabled(has_sel).tip("Rotate selection 90° clockwise"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft).enabled(has_sel).tip("Rotate selection 90° counter-clockwise"),
                             ],
                             vec![
                                 RibbonButton::new(Icon::Group, "Group", Action::Macros).enabled(false).tip("Grouping — planned"),
