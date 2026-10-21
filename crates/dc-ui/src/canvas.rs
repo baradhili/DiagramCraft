@@ -379,6 +379,7 @@ pub fn show(
 
     // Clicks / drops: report page position; the app hit-tests.
     if resp.clicked() {
+        out.shift_click = ui.input(|i| i.modifiers.shift);
         if let Some(mp) = resp.interact_pointer_pos() {
             let x_in = (mp.x - view.pan.x) as f64 / view.px_per_in() as f64;
             let y_up = page.h_in - (mp.y - view.pan.y) as f64 / view.px_per_in() as f64;
