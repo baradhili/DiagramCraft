@@ -1131,8 +1131,16 @@ impl crate::Command for Macro {
         self.label.clone()
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
-        for c in &mut self.cmds {
-            c.apply(doc)?;
+        // Transactional: a failing child rolls back the children that
+        // already ran (reverse order), so no partial changes stick
+        // outside the undo history.
+        for i in 0..self.cmds.len() {
+            if let Err(e) = self.cmds[i].apply(doc) {
+                for c in self.cmds[..i].iter_mut().rev() {
+                    let _ = c.undo(doc);
+                }
+                return Err(e);
+            }
         }
         Ok(())
     }

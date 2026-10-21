@@ -834,3 +834,51 @@ fn set_row_cell_materializes_missing_character_section_with_undo() {
         "materialized section removed on undo"
     );
 }
+
+/// A Macro whose child fails must leave the document untouched.
+#[derive(Debug)]
+struct Failing;
+
+impl dc_core::Command for Failing {
+    fn label(&self) -> String {
+        "always fails".into()
+    }
+    fn apply(&mut self, _doc: &mut Document) -> anyhow::Result<()> {
+        anyhow::bail!("boom")
+    }
+    fn undo(&mut self, _doc: &mut Document) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn macro_rolls_back_applied_children_on_failure() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let a = dc_core::commands::next_shape_id(&ed.doc, page);
+    let mut sa = vsdx::model::Shape::default();
+    sa.id = a;
+    ed.apply(dc_core::AddShape { page, parent: None, shape: sa }).unwrap();
+
+    let mut sb = vsdx::model::Shape::default();
+    sb.id = a + 1;
+    let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+        Box::new(dc_core::RemoveShape::new(page, a)),
+        Box::new(dc_core::AddShape { page, parent: None, shape: sb }),
+        Box::new(Failing),
+    ];
+    let undo_depth_before = ed.history.undo_labels().len();
+    let result = ed.apply(dc_core::Macro::new("doomed", cmds));
+    assert!(result.is_err(), "macro propagates the child error");
+
+    // The removal rolled back: the original shape is back, nothing
+    // half-applied remains, and no undo entry was pushed.
+    let shapes = &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes;
+    assert_eq!(shapes.len(), 1, "rolled back to the single original shape");
+    assert_eq!(shapes[0].id, a);
+    assert_eq!(
+        ed.history.undo_labels().len(),
+        undo_depth_before,
+        "failed macro left no undo entry"
+    );
+}
