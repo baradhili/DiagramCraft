@@ -618,16 +618,23 @@ impl App {
             canvas::Corner::BottomLeft => (-dx, dy),
             canvas::Corner::BottomRight => (dx, dy),
         };
+        let (w, h) = (w.max(1e-6), h.max(1e-6)); // ratio guards
         let nw = (w + dw).max(0.05);
         let nh = (h + dh).max(0.05);
-        // Proportional LocPin keeps the anchor corner stationary: the
-        // world position of the opposite corner is Pin − Loc; scaling
-        // Loc by the same ratio keeps that corner fixed when Pin moves
-        // by Loc' − Loc.
+        // Anchor the OPPOSITE corner: fractions (0|1) of its y-up bbox
+        // position, selected by the dragged (screen-oriented) corner.
+        // LocPin stays proportional (Visio's Width*0.5 semantics).
+        let (ax, ay) = match corner {
+            canvas::Corner::TopLeft => (1.0, 0.0), // anchor bottom-right
+            canvas::Corner::TopRight => (0.0, 0.0), // anchor bottom-left
+            canvas::Corner::BottomLeft => (1.0, 1.0), // anchor top-right
+            canvas::Corner::BottomRight => (0.0, 1.0), // anchor top-left
+        };
+        let anchor = (px + ax * w - lx, py + ay * h - ly);
         let nlx = lx * nw / w;
         let nly = ly * nh / h;
-        let npx = px - lx + nlx;
-        let npy = py - ly + nly;
+        let npx = anchor.0 - ax * nw + nlx;
+        let npy = anchor.1 - ay * nh + nly;
         let scope = Scope::Shape { page: page_id, shape: shape_id };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
         let cmds: Vec<Box<dyn dc_core::Command>> = vec![
@@ -1955,6 +1962,19 @@ impl App {
     #[doc(hidden)]
     pub fn debug_sel_width(&self) -> f64 {
         self.sel_page_rect().map(|r| r.width() as f64).unwrap_or(0.0)
+    }
+    #[doc(hidden)]
+    pub fn debug_sel_height(&self) -> f64 {
+        self.sel_page_rect().map(|r| r.height() as f64).unwrap_or(0.0)
+    }
+    #[doc(hidden)]
+    pub fn debug_sel_tl_corner(&self) -> Option<egui::Pos2> {
+        let r = self.sel_page_rect()?;
+        let ppi = self.view.px_per_in();
+        Some(egui::pos2(
+            self.view.pan.x + r.left() as f32 * ppi,
+            self.view.pan.y + r.top() as f32 * ppi,
+        ))
     }
     #[doc(hidden)]
     pub fn debug_armed(&self) -> Option<i64> {

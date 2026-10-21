@@ -183,7 +183,9 @@ fn corner_drag_resizes_shape() {
     // the shape is ~1in at ~fit zoom centered where we dropped. Grab the
     // bottom-right corner via the app's debug accessor.
     let br = h.state().debug_sel_br_corner().expect("selection rect");
+    let tl_before = h.state().debug_sel_tl_corner().expect("selection rect");
     let before = h.state().debug_sel_width();
+    let h_before = h.state().debug_sel_height();
     h.hover_at(br);
     h.event(egui::Event::PointerButton {
         pos: br,
@@ -201,8 +203,20 @@ fn corner_drag_resizes_shape() {
     });
     h.run();
     let after = h.state().debug_sel_width();
+    let h_after = h.state().debug_sel_height();
     assert!(
         after > before + 0.15,
         "corner drag grew the shape: {before} → {after}"
+    );
+    assert!(
+        h_after > h_before + 0.1,
+        "corner drag grew the shape height: {h_before} → {h_after}"
+    );
+    // Dragging the bottom-right screen corner must anchor the opposite
+    // (top-left) corner: it stays put within a pixel.
+    let tl_after = h.state().debug_sel_tl_corner().expect("selection rect");
+    assert!(
+        (tl_after.x - tl_before.x).abs() <= 1.0 && (tl_after.y - tl_before.y).abs() <= 1.0,
+        "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
     );
 }
