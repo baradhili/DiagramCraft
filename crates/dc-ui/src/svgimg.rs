@@ -12,9 +12,38 @@ use std::collections::HashMap;
 
 /// Rasterize an SVG string to a `target_width`-pixel-wide RGBA image
 /// (height follows the viewBox aspect).
+///
+/// Fonts: the embedded Carlito set (metric-compatible with Calibri,
+/// OFL-1.1 — see assets/fonts/LICENSE-Carlito) is the PRIMARY for
+/// every generic family (our text elements carry no font-family), so
+/// Latin rendering — everything the snapshot goldens contain — is
+/// machine-independent. System fonts are loaded ONLY as per-glyph
+/// fallback for scripts Carlito lacks (CJK, Arabic, …): better than
+/// invisible text, and it cannot displace Carlito for the families we
+/// resolve explicitly.
+/// The font database, built once: Carlito Regular/Bold plus generic
+/// family mappings — usvg resolves unknown/no font-family through the
+/// generic defaults (Arial / Times New Roman), which don't exist in a
+/// Carlito-only database and would drop the text entirely.
+fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
+        std::sync::OnceLock::new();
+    DB.get_or_init(|| {
+        let mut db = resvg::usvg::fontdb::Database::new();
+        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+        db.set_sans_serif_family("Carlito");
+        db.set_serif_family("Carlito");
+        db.set_monospace_family("Carlito");
+        db.load_system_fonts();
+        std::sync::Arc::new(db)
+    })
+    .clone()
+}
+
 pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
     let mut opts = resvg::usvg::Options::default();
-    opts.fontdb_mut().load_system_fonts();
+    opts.fontdb = font_db();
     let tree = resvg::usvg::Tree::from_str(svg, &opts)
         .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
     let size = tree.size();

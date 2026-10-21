@@ -126,7 +126,16 @@ fn run_shell(name: &str, app: App) {
         });
     harness.run();
     harness.run(); // second pass: textures and fit settle
-    harness.snapshot(name);
+    // Tolerances: anti-aliasing differs per GPU/driver (CI runners use
+    // software adapters), which kittest's own README calls out — accept
+    // small per-pixel deltas and a small budget of failed pixels while
+    // still catching real layout regressions.
+    harness.snapshot_options(
+        name,
+        &egui_kittest::SnapshotOptions::new()
+            .threshold(3.0)
+            .max_failed_pixels(10_000),
+    );
 }
 
 #[test]

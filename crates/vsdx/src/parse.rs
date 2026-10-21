@@ -155,14 +155,14 @@ fn find_main_part(pkg: &Package) -> Option<String> {
 
 enum Ev {
     /// Start tag with name + attributes.
-    Start(Vec<u8>, Attrs),
+    Start(String, Attrs),
     /// Self-closing tag with name + attributes.
-    Empty(Vec<u8>, Attrs),
+    Empty(String, Attrs),
     /// Character data (ignored by the structural parsers; raw text is
     /// captured by `read_raw_inner` instead).
     Text,
     /// End tag.
-    End(Vec<u8>),
+    End(String),
     Eof,
 }
 
@@ -171,15 +171,15 @@ fn next(r: &mut quick_xml::Reader<&[u8]>) -> Result<Ev> {
         let mut buf = Vec::new();
         match r.read_event_into(&mut buf) {
             Ok(quick_xml::events::Event::Start(e)) => {
-                return Ok(Ev::Start(e.name().as_ref().to_vec(), attrs_of(&e)))
+                return Ok(Ev::Start(e.name().as_ref().to_string(), attrs_of(&e)))
             }
             Ok(quick_xml::events::Event::Empty(e)) => {
-                return Ok(Ev::Empty(e.name().as_ref().to_vec(), attrs_of(&e)))
+                return Ok(Ev::Empty(e.name().as_ref().to_string(), attrs_of(&e)))
             }
             Ok(quick_xml::events::Event::Text(_))
             | Ok(quick_xml::events::Event::CData(_))
             | Ok(quick_xml::events::Event::GeneralRef(_)) => return Ok(Ev::Text),
-            Ok(quick_xml::events::Event::End(e)) => return Ok(Ev::End(e.name().as_ref().to_vec())),
+            Ok(quick_xml::events::Event::End(e)) => return Ok(Ev::End(e.name().as_ref().to_string())),
             Ok(quick_xml::events::Event::Eof) => return Ok(Ev::Eof),
             // Text/CData (handled by raw capture), Decl, comments, PIs,
             // doctypes: transparent.
@@ -194,8 +194,8 @@ fn attrs_of(e: &quick_xml::events::BytesStart<'_>) -> Attrs {
         .flatten()
         .map(|a| {
             (
-                String::from_utf8_lossy(a.key.as_ref()).into_owned(),
-                unescape(&a.value),
+                a.key.as_ref().to_string(),
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
             )
         })
         .collect()
@@ -260,20 +260,20 @@ fn read_raw_inner(r: &mut quick_xml::Reader<&[u8]>) -> Result<String> {
                 }
                 depth -= 1;
                 out.push_str("</");
-                out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+                out.push_str(&e.name().as_ref().to_string());
                 out.push('>');
             }
             Event::Empty(e) => push_reconstructed_open(&mut out, &e, true),
-            Event::Text(t) => out.push_str(&String::from_utf8_lossy(t.as_ref())),
+            Event::Text(t) => out.push_str(t.as_ref()),
             Event::GeneralRef(r) => {
                 // Entity reference (`&lt;`, `&#65;`, …): re-emit verbatim.
                 out.push('&');
-                out.push_str(&String::from_utf8_lossy(r.as_ref()));
+                out.push_str(r.as_ref());
                 out.push(';');
             }
             Event::CData(t) => {
                 out.push_str("<![CDATA[");
-                out.push_str(&String::from_utf8_lossy(t.as_ref()));
+                out.push_str(t.as_ref());
                 out.push_str("]]>");
             }
             // Comments/PIs/decls are canonical no-ops; drop them.
@@ -287,12 +287,12 @@ fn read_raw_inner(r: &mut quick_xml::Reader<&[u8]>) -> Result<String> {
 /// re-quoted with double quotes (safe: raw `"` bytes are escaped).
 fn push_reconstructed_open(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: bool) {
     out.push('<');
-    out.push_str(&String::from_utf8_lossy(e.name().as_ref()));
+    out.push_str(&e.name().as_ref().to_string());
     for a in e.attributes().flatten() {
         out.push(' ');
-        out.push_str(&String::from_utf8_lossy(a.key.as_ref()));
+        out.push_str(a.key.as_ref());
         out.push_str("=\"");
-        let v = String::from_utf8_lossy(&a.value);
+        let v = a.value.to_string();
         out.push_str(&v.replace('"', "&quot;"));
         out.push('"');
     }
@@ -306,15 +306,15 @@ fn plain_text_of(raw: &str) -> String {
     let mut buf = Vec::new();
     loop {
         match r.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Text(t)) => out.push_str(&unescape(t.as_ref())),
+            Ok(quick_xml::events::Event::Text(t)) => out.push_str(t.as_ref()),
             Ok(quick_xml::events::Event::GeneralRef(r)) => {
                 let mut ent = String::from("&");
-                ent.push_str(&String::from_utf8_lossy(r.as_ref()));
+                ent.push_str(r.as_ref());
                 ent.push(';');
                 out.push_str(&unescape(ent.as_bytes()));
             }
             Ok(quick_xml::events::Event::CData(t)) => {
-                out.push_str(&String::from_utf8_lossy(t.as_ref()))
+                out.push_str(t.as_ref())
             }
             Ok(quick_xml::events::Event::Eof) | Err(_) => break,
             _ => {}
@@ -337,7 +337,7 @@ fn parse_contents(xml: &str) -> Result<(Attrs, Sheet, Vec<Shape>, Vec<RawEl>)> {
     let mut shapes = Vec::new();
     let mut raw = Vec::new();
     // Locate the root element.
-    let (root_attrs, root_name): (Attrs, Vec<u8>) = loop {
+    let (root_attrs, root_name): (Attrs, String) = loop {
         match next(&mut r)? {
             Ev::Start(name, attrs) => break (attrs, name),
             Ev::Empty(_, attrs) => {
@@ -349,13 +349,13 @@ fn parse_contents(xml: &str) -> Result<(Attrs, Sheet, Vec<Shape>, Vec<RawEl>)> {
     };
     loop {
         match next(&mut r)? {
-            Ev::Start(name, a) => match name.as_slice() {
-                b"Shapes" => shapes = parse_shapes(&mut r)?,
-                b"PageSheet" | b"MasterSheet" => sheet = parse_sheet_body(&mut r, a)?,
+            Ev::Start(name, a) => match name.as_str() {
+                "Shapes" => shapes = parse_shapes(&mut r)?,
+                "PageSheet" | "MasterSheet" => sheet = parse_sheet_body(&mut r, a)?,
                 _ => {
                     // Unknown contents child (`<Connects>`, …): verbatim.
                     raw.push(RawEl {
-                        name: String::from_utf8_lossy(&name).into_owned(),
+                        name: name.clone(),
                         attrs: a,
                         inner: read_raw_inner(&mut r)?,
                     });
@@ -387,8 +387,8 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
         match next(&mut r)? {
             Ev::Start(name, attrs) => {
                 root_attrs = attrs;
-                if name.as_slice() != b"VisioDocument" {
-                    bail!("unexpected document root: {}", String::from_utf8_lossy(&name));
+                if name != "VisioDocument" {
+                    bail!("unexpected document root: {}", name.clone());
                 }
                 break;
             }
@@ -399,12 +399,12 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
     doc.root_attrs = root_attrs;
     loop {
         match next(&mut r)? {
-            Ev::Start(name, a) => match name.as_slice() {
-                b"StyleSheets" => {
+            Ev::Start(name, a) => match name.as_str() {
+                "StyleSheets" => {
                     doc.items.push(DocItem::StyleSheets);
                     loop {
                         match next(&mut r)? {
-                            Ev::Start(n2, a2) if n2.as_slice() == b"StyleSheet" => {
+                            Ev::Start(n2, a2) if n2 == "StyleSheet" => {
                                 let id = attr_i64(&a2, "ID").unwrap_or(0);
                                 let sheet = parse_sheet_body(&mut r, a2.clone())?;
                                 doc.stylesheets.push(StyleSheet {
@@ -414,7 +414,7 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                                     sheet,
                                 });
                             }
-                            Ev::Empty(n2, a2) if n2.as_slice() == b"StyleSheet" => {
+                            Ev::Empty(n2, a2) if n2 == "StyleSheet" => {
                                 let id = attr_i64(&a2, "ID").unwrap_or(0);
                                 doc.stylesheets.push(StyleSheet {
                                     id,
@@ -424,17 +424,17 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                                 });
                             }
                             Ev::Start(..) => skip_element(&mut r)?,
-                            Ev::End(n2) if n2.as_slice() == b"StyleSheets" => break,
+                            Ev::End(n2) if n2 == "StyleSheets" => break,
                             Ev::Eof => bail!("EOF inside StyleSheets"),
                             _ => {}
                         }
                     }
                 }
-                b"Colors" => {
+                "Colors" => {
                     doc.items.push(DocItem::Colors);
                     loop {
                         match next(&mut r)? {
-                            Ev::Start(n2, a2) if n2.as_slice() == b"ColorEntry" => {
+                            Ev::Start(n2, a2) if n2 == "ColorEntry" => {
                                 if let (Some(ix), Some(rgb)) = (
                                     attr_i64(&a2, "IX"),
                                     attr(&a2, "RGB").map(str::to_owned),
@@ -443,7 +443,7 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                                 }
                                 skip_element(&mut r)?;
                             }
-                            Ev::Empty(n2, a2) if n2.as_slice() == b"ColorEntry" => {
+                            Ev::Empty(n2, a2) if n2 == "ColorEntry" => {
                                 if let (Some(ix), Some(rgb)) = (
                                     attr_i64(&a2, "IX"),
                                     attr(&a2, "RGB").map(str::to_owned),
@@ -451,13 +451,13 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                                     doc.colors.push((ix, rgb));
                                 }
                             }
-                            Ev::End(n2) if n2.as_slice() == b"Colors" => break,
+                            Ev::End(n2) if n2 == "Colors" => break,
                             Ev::Eof => bail!("EOF inside Colors"),
                             _ => {}
                         }
                     }
                 }
-                b"DocumentSheet" => {
+                "DocumentSheet" => {
                     doc.items.push(DocItem::DocumentSheet);
                     doc.sheet = parse_sheet_body(&mut r, a)?;
                 }
@@ -465,7 +465,7 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                     // Unknown document child (`FaceNames`, `DocumentSettings`,
                     // …): keep verbatim, in place.
                     let raw = RawEl {
-                        name: String::from_utf8_lossy(&name).into_owned(),
+                        name: name.clone(),
                         attrs: a,
                         inner: read_raw_inner(&mut r)?,
                     };
@@ -474,12 +474,12 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
             },
             Ev::Empty(name, a) => {
                 doc.items.push(DocItem::Raw(RawEl {
-                    name: String::from_utf8_lossy(&name).into_owned(),
+                    name: name.clone(),
                     attrs: a,
                     inner: String::new(),
                 }));
             }
-            Ev::End(n) if n.as_slice() == b"VisioDocument" => break,
+            Ev::End(n) if n == "VisioDocument" => break,
             Ev::Eof => break,
             _ => {}
         }
@@ -500,9 +500,8 @@ struct IndexEntry {
 fn parse_index_entries(xml: &str, entry: &str) -> Result<(Attrs, Vec<IndexEntry>)> {
     let mut out = Vec::new();
     let mut r = quick_xml::Reader::from_str(xml);
-    let entry = entry.as_bytes();
     // Locate the root.
-    let (root_attrs, root_name): (Attrs, Vec<u8>) = loop {
+    let (root_attrs, root_name): (Attrs, String) = loop {
         match next(&mut r)? {
             Ev::Start(name, attrs) => break (attrs, name),
             Ev::Empty(_, attrs) => return Ok((attrs, Vec::new())),
@@ -512,21 +511,21 @@ fn parse_index_entries(xml: &str, entry: &str) -> Result<(Attrs, Vec<IndexEntry>
     };
     loop {
         match next(&mut r)? {
-            Ev::Start(name, a) if name.as_slice() == entry => {
+            Ev::Start(name, a) if name == entry => {
                 let mut e = IndexEntry {
                     attrs: a,
                     children: Vec::new(),
                 };
                 loop {
                     match next(&mut r)? {
-                        Ev::Start(n2, a2) if n2.as_slice() == b"PageSheet"
-                            || n2.as_slice() == b"MasterSheet" =>
+                        Ev::Start(n2, a2) if n2 == "PageSheet"
+                            || n2 == "MasterSheet" =>
                         {
-                            let tag = String::from_utf8_lossy(&n2).into_owned();
+                            let tag = n2.clone();
                             let sheet = parse_sheet_body(&mut r, a2)?;
                             e.children.push(IndexChild::Sheet { tag, sheet });
                         }
-                        Ev::Start(n2, a2) if n2.as_slice() == b"Rel" => {
+                        Ev::Start(n2, a2) if n2 == "Rel" => {
                             e.children.push(IndexChild::Rel(a2));
                             skip_element(&mut r)?;
                         }
@@ -534,30 +533,30 @@ fn parse_index_entries(xml: &str, entry: &str) -> Result<(Attrs, Vec<IndexEntry>
                             // <Icon> base64 stencil art and anything else:
                             // keep verbatim.
                             let raw = RawEl {
-                                name: String::from_utf8_lossy(&n2).into_owned(),
+                                name: n2.clone(),
                                 attrs: a2,
                                 inner: read_raw_inner(&mut r)?,
                             };
                             e.children.push(IndexChild::Raw(raw));
                         }
-                        Ev::Empty(n2, a2) if n2.as_slice() == b"Rel" => {
+                        Ev::Empty(n2, a2) if n2 == "Rel" => {
                             e.children.push(IndexChild::Rel(a2));
                         }
                         Ev::Empty(n2, a2) => {
                             e.children.push(IndexChild::Raw(RawEl {
-                                name: String::from_utf8_lossy(&n2).into_owned(),
+                                name: n2.clone(),
                                 attrs: a2,
                                 inner: String::new(),
                             }));
                         }
-                        Ev::End(n2) if n2.as_slice() == entry => break,
+                        Ev::End(n2) if n2 == entry => break,
                         Ev::Eof => bail!("EOF inside index entry"),
                         _ => {}
                     }
                 }
                 out.push(e);
             }
-            Ev::Empty(name, a) if name.as_slice() == entry => {
+            Ev::Empty(name, a) if name == entry => {
                 out.push(IndexEntry {
                     attrs: a,
                     children: Vec::new(),
@@ -577,7 +576,7 @@ fn parse_shapes(r: &mut quick_xml::Reader<&[u8]>) -> Result<Vec<Shape>> {
     loop {
         match next(r)? {
             Ev::Start(name, attrs) => {
-                if name.as_slice() == b"Shape" {
+                if name == "Shape" {
                     shapes.push(parse_shape(r, attrs)?);
                 } else {
                     skip_element(r)?;
@@ -585,11 +584,11 @@ fn parse_shapes(r: &mut quick_xml::Reader<&[u8]>) -> Result<Vec<Shape>> {
             }
             Ev::Empty(name, attrs) => {
                 // Deleted/childless shapes: `<Shape Del='1' …/>`.
-                if name.as_slice() == b"Shape" {
+                if name == "Shape" {
                     shapes.push(shape_from_attrs(attrs));
                 }
             }
-            Ev::End(name) if name.as_slice() == b"Shapes" => break,
+            Ev::End(name) if name == "Shapes" => break,
             Ev::Eof => break,
             _ => {}
         }
@@ -628,22 +627,22 @@ fn parse_shape(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Shape> 
     };
     loop {
         match next(r)? {
-            Ev::Start(name, a) => match name.as_slice() {
-                b"Cell" => {
+            Ev::Start(name, a) => match name.as_str() {
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         let cell = with_raw_inner(cell, r)?;
                         upsert_cell(&mut s.sheet.children, n, cell);
                     }
                 }
-                b"Section" => {
+                "Section" => {
                     let sec = parse_section(r, a)?;
                     upsert_section(&mut s.sheet.children, sec);
                 }
-                b"Shapes" => {
+                "Shapes" => {
                     s.sub_shapes = parse_shapes(r)?;
                     s.flow.push(ShapeFlow::Shapes);
                 }
-                b"Text" => {
+                "Text" => {
                     let raw = read_raw_inner(r)?;
                     let plain = plain_text_of(&raw);
                     s.sheet.text_raw = Some(raw);
@@ -655,7 +654,7 @@ fn parse_shape(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Shape> 
                 _ => {
                     // Unknown shape child (`ForeignData`, …): verbatim.
                     let raw = RawEl {
-                        name: String::from_utf8_lossy(&name).into_owned(),
+                        name: name.clone(),
                         attrs: a,
                         inner: read_raw_inner(r)?,
                     };
@@ -663,14 +662,14 @@ fn parse_shape(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Shape> 
                     s.flow.push(ShapeFlow::Raw(s.raw_children.len() - 1));
                 }
             },
-            Ev::Empty(name, a) => match name.as_slice() {
-                b"Cell" => {
+            Ev::Empty(name, a) => match name.as_str() {
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         upsert_cell(&mut s.sheet.children, n, cell);
                     }
                 }
-                b"Section" => upsert_section(&mut s.sheet.children, empty_section(a)),
-                b"Text" => {
+                "Section" => upsert_section(&mut s.sheet.children, empty_section(a)),
+                "Text" => {
                     s.sheet.text_raw = Some(String::new());
                     s.flow.push(ShapeFlow::Text);
                 }
@@ -686,7 +685,7 @@ fn parse_shape(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Shape> 
                     }
                 }
             },
-            Ev::End(name) if name.as_slice() == b"Shape" => break,
+            Ev::End(name) if name == "Shape" => break,
             Ev::Text => {}
             Ev::End(_) | Ev::Eof => break,
         }
@@ -783,9 +782,9 @@ fn parse_section(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Secti
     let mut rows = Vec::new();
     loop {
         match next(r)? {
-            Ev::Start(name, a) => match name.as_slice() {
-                b"Row" => rows.push(parse_row(r, a)?),
-                b"Cell" => {
+            Ev::Start(name, a) => match name.as_str() {
+                "Row" => rows.push(parse_row(r, a)?),
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         let cell = with_raw_inner(cell, r)?;
                         upsert_pair(&mut cells, n, cell);
@@ -793,16 +792,16 @@ fn parse_section(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Secti
                 }
                 _ => skip_element(r)?,
             },
-            Ev::Empty(name, a) => match name.as_slice() {
-                b"Row" => rows.push(empty_row(a)),
-                b"Cell" => {
+            Ev::Empty(name, a) => match name.as_str() {
+                "Row" => rows.push(empty_row(a)),
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         upsert_pair(&mut cells, n, cell);
                     }
                 }
                 _ => {}
             },
-            Ev::End(name) if name.as_slice() == b"Section" => break,
+            Ev::End(name) if name == "Section" => break,
             Ev::Text => {}
             Ev::End(_) | Ev::Eof => break,
         }
@@ -827,7 +826,7 @@ fn parse_row(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Row> {
     loop {
         match next(r)? {
             Ev::Start(name, a) => {
-                if name.as_slice() == b"Cell" {
+                if name == "Cell" {
                     if let Some((n, cell)) = parse_cell(&a) {
                         let cell = with_raw_inner(cell, r)?;
                         upsert_pair(&mut row.cells, n, cell);
@@ -837,13 +836,13 @@ fn parse_row(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Row> {
                 }
             }
             Ev::Empty(name, a) => {
-                if name.as_slice() == b"Cell" {
+                if name == "Cell" {
                     if let Some((n, cell)) = parse_cell(&a) {
                         upsert_pair(&mut row.cells, n, cell);
                     }
                 }
             }
-            Ev::End(name) if name.as_slice() == b"Row" => break,
+            Ev::End(name) if name == "Row" => break,
             Ev::Text => {}
             Ev::End(_) | Ev::Eof => break,
         }
@@ -863,33 +862,33 @@ fn parse_sheet_body(r: &mut quick_xml::Reader<&[u8]>, attrs: Attrs) -> Result<Sh
     };
     loop {
         match next(r)? {
-            Ev::Start(name, a) => match name.as_slice() {
-                b"Cell" => {
+            Ev::Start(name, a) => match name.as_str() {
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         let cell = with_raw_inner(cell, r)?;
                         upsert_cell(&mut sheet.children, n, cell);
                     }
                 }
-                b"Section" => {
+                "Section" => {
                     let sec = parse_section(r, a)?;
                     upsert_section(&mut sheet.children, sec);
                 }
                 _ => {
                     // Unknown sheet child (`<Trigger>`, …): verbatim.
                     sheet.children.push(SheetChild::Raw(RawEl {
-                        name: String::from_utf8_lossy(&name).into_owned(),
+                        name: name.clone(),
                         attrs: a,
                         inner: read_raw_inner(r)?,
                     }));
                 }
             },
-            Ev::Empty(name, a) => match name.as_slice() {
-                b"Cell" => {
+            Ev::Empty(name, a) => match name.as_str() {
+                "Cell" => {
                     if let Some((n, cell)) = parse_cell(&a) {
                         upsert_cell(&mut sheet.children, n, cell);
                     }
                 }
-                b"Section" => upsert_section(&mut sheet.children, empty_section(a)),
+                "Section" => upsert_section(&mut sheet.children, empty_section(a)),
                 _ => {
                     let name_str = String::from_utf8_lossy(name.as_ref()).into_owned();
                     if name_str != "Cell" {

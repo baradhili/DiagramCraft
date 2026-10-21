@@ -27,6 +27,12 @@ pub enum Action {
     ToggleUnits,
     ShowShapeSheet,
     Macros,
+    FillMenu,
+    LineMenu,
+    FontGrow,
+    FontShrink,
+    RotateLeft,
+    RotateRight,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

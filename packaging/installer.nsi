@@ -3,6 +3,11 @@
 ; from the repo root; expects target\release\diagramcraft.exe.
 
 !define APPNAME "DiagramCraft"
+; Local builds: makensis -DVERSION=x packaging/installer.nsi from the
+; repo root defaults LICENSEDIR to the repo root.
+!ifndef LICENSEDIR
+  !define LICENSEDIR "."
+!endif
 ; Binary directory passed in via -DBINDIR=... (NSIS resolves File
 ; paths relative to this script, not the invocation directory).
 Name "${APPNAME}"
@@ -22,6 +27,12 @@ Section "${APPNAME} (required)"
   SectionIn RO
   SetOutPath "$INSTDIR"
   File "${BINDIR}\diagramcraft.exe"
+  CreateDirectory "$INSTDIR\licenses"
+  SetOutPath "$INSTDIR\licenses"
+  File /oname=LICENSE-MIT "${LICENSEDIR}\LICENSE-MIT"
+  File /oname=LICENSE-APACHE "${LICENSEDIR}\LICENSE-APACHE"
+  File /oname=LICENSE-Carlito "${LICENSEDIR}\crates\dc-ui\assets\fonts\LICENSE-Carlito"
+  SetOutPath "$INSTDIR"
   WriteRegStr HKLM "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
     "DisplayName" "${APPNAME}"
@@ -43,6 +54,10 @@ Section "Desktop shortcut"
 SectionEnd
 
 Section "Uninstall"
+  Delete "$INSTDIR\licenses\LICENSE-MIT"
+  Delete "$INSTDIR\licenses\LICENSE-APACHE"
+  Delete "$INSTDIR\licenses\LICENSE-Carlito"
+  RMDir "$INSTDIR\licenses"
   Delete "$INSTDIR\diagramcraft.exe"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$DESKTOP\${APPNAME}.lnk"

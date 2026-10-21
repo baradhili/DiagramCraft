@@ -20,7 +20,7 @@ pub mod layers;
 pub mod scope;
 
 pub use commands::{
-    AddConnect, AddLayer, AddPage, AddShape, DuplicateShape, MovePage, ReorderShape,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicateShape, Macro, MovePage, ReorderShape,
     RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, SetCell,
     SetRowCell, SetText,
 };

@@ -118,3 +118,143 @@ fn right_click_menu_duplicate_creates_shape() {
     h.run();
     assert_eq!(h.state().debug_shape_count(), 1, "duplicate undoes");
 }
+
+#[test]
+fn marquee_selects_multiple_and_delete_removes_all() {
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes at DIFFERENT heights, so a mirrored (y-flipped)
+    // selection band would pick the wrong one.
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2);
+
+    // Upper shape only: a band around the upper-left placement picks
+    // exactly one — this fails if the band is mirrored vertically.
+    let c = canvas.center();
+    let a = c + egui::vec2(10.0, -80.0);
+    let b = c + egui::vec2(110.0, -20.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(
+        h.state().debug_sel_set().len(),
+        1,
+        "upper band selects exactly the upper shape (mirroring would pick the lower)"
+    );
+
+    // Full marquee over both.
+    let a = egui::pos2(c.x - 120.0, c.y - 90.0);
+    let b = egui::pos2(c.x + 120.0, c.y + 90.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert!(
+        h.state().debug_sel_set().len() >= 2,
+        "marquee selected multiple shapes, got {:?}",
+        h.state().debug_sel_set()
+    );
+
+    // Clicking a member keeps the multi-selection alive (Visio: dragging
+    // a selected shape moves the whole selection).
+    let c = canvas.center();
+    click_at(&mut h, c + egui::vec2(40.0, -40.0), egui::PointerButton::Primary);
+    assert_eq!(
+        h.state().debug_sel_set().len(),
+        2,
+        "clicking a member preserves the multi-selection"
+    );
+
+    // One Delete removes the whole selection (single undo step).
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0);
+}
+
+#[test]
+fn corner_drag_resizes_shape() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+
+    // Selection rect in screen coords comes from the app; approximate:
+    // the shape is ~1in at ~fit zoom centered where we dropped. Grab the
+    // bottom-right corner via the app's debug accessor.
+    let br = h.state().debug_sel_br_corner().expect("selection rect");
+    let tl_before = h.state().debug_sel_tl_corner().expect("selection rect");
+    let before = h.state().debug_sel_width();
+    let h_before = h.state().debug_sel_height();
+    h.hover_at(br);
+    h.event(egui::Event::PointerButton {
+        pos: br,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(br + egui::vec2(40.0, 30.0));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: br + egui::vec2(40.0, 30.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let after = h.state().debug_sel_width();
+    let h_after = h.state().debug_sel_height();
+    assert!(
+        after > before + 0.15,
+        "corner drag grew the shape: {before} → {after}"
+    );
+    assert!(
+        h_after > h_before + 0.1,
+        "corner drag grew the shape height: {h_before} → {h_after}"
+    );
+    // Dragging the bottom-right screen corner must anchor the opposite
+    // (top-left) corner: it stays put within a pixel.
+    let tl_after = h.state().debug_sel_tl_corner().expect("selection rect");
+    assert!(
+        (tl_after.x - tl_before.x).abs() <= 1.0 && (tl_after.y - tl_before.y).abs() <= 1.0,
+        "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
+    );
+}
