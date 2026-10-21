@@ -758,7 +758,12 @@ impl App {
         match self.shape_hit(page_pos) {
             Some(shape_id) => {
                 let page_id = self.page_id().expect("page");
-                self.sel_set = vec![(page_id, shape_id)];
+                // Clicking a member of the current multi-selection keeps
+                // the set (so a drag moves every member); clicking
+                // anything else selects just that shape.
+                if !self.sel_set.contains(&(page_id, shape_id)) {
+                    self.sel_set = vec![(page_id, shape_id)];
+                }
                 // begin a drag: grab offset keeps the pin under the fingers
                 if let Some(ed) = self.ed() {
                     let page = &ed.doc.pages[self.page_idx];

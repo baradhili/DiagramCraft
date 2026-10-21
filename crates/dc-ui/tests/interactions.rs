@@ -190,6 +190,16 @@ fn marquee_selects_multiple_and_delete_removes_all() {
         h.state().debug_sel_set()
     );
 
+    // Clicking a member keeps the multi-selection alive (Visio: dragging
+    // a selected shape moves the whole selection).
+    let c = canvas.center();
+    click_at(&mut h, c + egui::vec2(40.0, -40.0), egui::PointerButton::Primary);
+    assert_eq!(
+        h.state().debug_sel_set().len(),
+        2,
+        "clicking a member preserves the multi-selection"
+    );
+
     // One Delete removes the whole selection (single undo step).
     h.key_press(egui::Key::Delete);
     h.run();
