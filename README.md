@@ -127,8 +127,9 @@ Bypass a single commit with `COMMITLINT_SKIP=1`.
 ### M7 — VBA / `.vsdm` macro execution (planned)
 
 - **`.vsdm` package support**: recognize/round-trip `.vsdm` losslessly
-
-- (`vbaProject.bin` carried as a verbatim unmodeled part — the existing writer already preserves unknown parts; needs content-type/signature awareness and the macro-flag document settings).
+  (`vbaProject.bin` carried as a verbatim unmodeled part — the existing
+  writer already preserves unknown parts; needs content-type/signature
+  awareness and the macro-flag document settings).
 
 - **VBA project reader**: OLE compound parse of `vbaProject.bin` + MS-OVBA decompression → macro inventory (module list, names) shown in a Developer-tab macro dialog.
 
