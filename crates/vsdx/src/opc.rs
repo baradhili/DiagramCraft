@@ -35,7 +35,15 @@ impl Package {
     pub fn from_reader(reader: impl Read + Seek) -> Result<Self, OpcError> {
         let mut archive = zip::ZipArchive::new(reader)?;
         let mut parts = HashMap::new();
-        for name in archive.file_names().map(str::to_owned).collect::<Vec<_>>() {
+        // zip 9: file_names() yields Result<Cow<str>, ZipError> (non-UTF-8
+        // names can now fail); OPC part names are UTF-8, so propagate. The
+        // names are owned before the loop — the iterator borrows the archive
+        // while by_name below needs it mutably.
+        for name in archive
+            .file_names()
+            .map(|n| n.map(|n| n.into_owned()))
+            .collect::<Result<Vec<String>, zip::result::ZipError>>()?
+        {
             let mut f = archive.by_name(&name)?;
             let mut buf = Vec::new();
             f.read_to_end(&mut buf)?;
