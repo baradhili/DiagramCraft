@@ -9,9 +9,9 @@
 
 use std::fmt::Write as _;
 
-use vsdx::{Cell, Document, Row, Section, Shape, Sheet};
+use vsdx::{Cell, Document, Row, Shape};
 #[cfg(test)]
-use vsdx::model::SheetChild;
+use vsdx::model::{Section, Sheet, SheetChild};
 
 const PX_PER_IN: f64 = 96.0;
 
@@ -1123,11 +1123,10 @@ fn render_geometry(
     // Visio hides the outline when LinePattern = 0 (e.g. legend label
     // boxes carry THEMEGUARD(0)); the geometry still exists for hit
     // testing but must not stroke.
-    let no_line = flag("NoLine")
-        || doc
-            .resolve_cell(s, chain, "LinePattern")
-            .and_then(|c| cell_num(&c, &env))
-            .is_some_and(|p| p == 0.0);
+    let line_pattern = doc
+        .resolve_cell(s, chain, "LinePattern")
+        .and_then(|c| cell_num(&c, &env));
+    let no_line = flag("NoLine") || line_pattern.is_some_and(|p| p == 0.0);
     let row_num = |r: &Row, c: &str| -> Option<f64> {
         r.cell(c).and_then(|cell| {
             // Geometry rows: the formula is authoritative (Visio evaluates
@@ -1199,7 +1198,8 @@ fn render_geometry(
     } else {
         fill_color.clone()
     };
-    let style = style_attr(no_fill, no_line, &fill, &line_color, line_weight);
+    let dash = line_pattern.and_then(|p| line_dasharray(p, line_weight));
+    let style = style_attr(no_fill, no_line, &fill, &line_color, line_weight, dash.as_deref());
 
     // Master-space (unscaled) path state: geometry rows are authored in the
     // master's local units and scaled to the instance afterwards.
@@ -1560,18 +1560,47 @@ fn style_attr(
     fill: &str,
     line_color: &str,
     line_weight: f64,
+    dash: Option<&str>,
 ) -> String {
     let fill = if no_fill { "none".to_string() } else { fill.to_string() };
     let stroke = if no_line {
         r#"stroke="none""#.to_string()
     } else {
+        let dash = dash.map(|d| format!(r#" stroke-dasharray="{d}""#)).unwrap_or_default();
         format!(
-            r#"stroke="{}" stroke-width="{:.5}""#,
+            r#"stroke="{}" stroke-width="{:.5}"{dash}"#,
             escape_attr(line_color),
             line_weight.max(0.001)
         )
     };
     format!(r#"fill="{}" {}"#, escape_attr(&fill), stroke)
+}
+
+/// Visio's built-in dash/dot line patterns (LinePattern 2–23) as SVG
+/// `stroke-dasharray` values in LineWeight multiples (patterns scale with
+/// the line weight — the ShapeSheet gallery's defining property). Ratios
+/// calibrated against the Utilisation gold render (issue #13): the LP 2/4/5
+/// diagram arrows measured dash 8w/gap 4w and 10w,2w,3w,2w(,3w,2w) at
+/// 583 px/in; the dotted/short-dash family (3/7/8) from the Key sample
+/// rows (dot ≈1w gap ≈2w; short dash ≈4w). Patterns outside this set
+/// stay solid until a corpus exercises them.
+fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
+    let spec: &[f64] = match pattern as i64 {
+        2 => &[8.0, 4.0],                   // dashed
+        3 => &[1.0, 2.0],                   // dotted
+        4 => &[10.0, 2.0, 3.0, 2.0],        // dash-dot
+        5 => &[10.0, 2.0, 3.0, 2.0, 3.0, 2.0], // dash-dot-dot
+        7 => &[4.0, 2.0],                   // short dash
+        8 => &[4.0, 2.0, 1.0, 2.0],         // short dash-dot
+        _ => return None,
+    };
+    Some(
+        spec
+            .iter()
+            .map(|m| format!("{:.5}", (m * weight).max(1e-4)))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// Resolve a color-ish cell to `#rrggbb`.
@@ -1929,6 +1958,26 @@ mod tests {
         let env = mirror_env(&root, &inst, 2.657480296178819, 5.528301723437821);
         let v = env.get("User.IconY").copied().unwrap();
         assert!((v - (5.528301723437821 - 0.2362204724409449 / 2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_pattern_dasharrays_scale_with_weight() {
+        // Gold-calibrated ratios (issue #13), expressed in weight
+        // multiples: LP2 dashed 8/4, LP4 dash-dot 10,2,3,2 …
+        let w = 0.01041666666666667; // 0.75 pt
+        assert_eq!(
+            line_dasharray(2.0, w).as_deref(),
+            Some("0.08333 0.04167")
+        );
+        assert_eq!(
+            line_dasharray(5.0, w).as_deref(),
+            Some("0.10417 0.02083 0.03125 0.02083 0.03125 0.02083")
+        );
+        assert_eq!(line_dasharray(7.0, w).as_deref(), Some("0.04167 0.02083"));
+        // Solid (1), hidden (0, handled elsewhere) and uncalibrated
+        // patterns render solid — no dasharray attribute.
+        assert!(line_dasharray(1.0, w).is_none());
+        assert!(line_dasharray(23.0, w).is_none());
     }
 
     #[test]
