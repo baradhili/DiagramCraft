@@ -258,3 +258,63 @@ fn corner_drag_resizes_shape() {
         "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
     );
 }
+
+/// Fit-mode zoom (GitHub #18): the document opens fit-to-window and the
+/// fit follows window resizes; once the user zooms manually, resizes
+/// must not clobber the chosen view. Fit Page re-arms it.
+#[test]
+fn zoom_follows_window_resize_in_fit_mode() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    let z_fit = h.state().debug_zoom();
+
+    // Make the window taller: still in fit mode → the page re-fits
+    // (bigger zoom — the fit is height-limited in this window shape).
+    // This is the opening bug — nothing watched the content rect, so
+    // the view stayed frozen at the old size.
+    h.set_size(egui::vec2(1280.0, 1200.0));
+    h.run();
+    let z_tall = h.state().debug_zoom();
+    assert!(
+        z_tall > z_fit * 1.05,
+        "resize while in fit mode must re-fit: {z_fit} → {z_tall}"
+    );
+
+    // Manual zoom (ribbon View → Zoom In) leaves fit mode.
+    h.get_by_label_contains("View").click();
+    h.run();
+    h.get_by_label_contains("Zoom In").click();
+    h.run();
+    let z_manual = h.state().debug_zoom();
+    assert!(
+        (z_manual - (z_tall * 1.25)).abs() < 0.01,
+        "manual zoom: {z_tall} × 1.25 expected, got {z_manual}"
+    );
+
+    // Resize again: the manual view survives untouched.
+    h.set_size(egui::vec2(1280.0, 700.0));
+    h.run();
+    assert_eq!(
+        h.state().debug_zoom(),
+        z_manual,
+        "a resize must not clobber the user's manual zoom"
+    );
+
+    // Fit Window re-arms fit mode: the view fits the (now shorter)
+    // window again.
+    h.get_by_label_contains("Fit Window").click();
+    h.run();
+    let z_refit = h.state().debug_zoom();
+    assert!(
+        (z_refit - z_manual).abs() / z_manual > 0.05,
+        "Fit Page should re-fit away from the manual zoom: {z_manual} → {z_refit}"
+    );
+    // And following resumes.
+    h.set_size(egui::vec2(1280.0, 1200.0));
+    h.run();
+    assert!(
+        h.state().debug_zoom() > z_refit * 1.05,
+        "fit mode follows resizes again after Fit Page"
+    );
+}

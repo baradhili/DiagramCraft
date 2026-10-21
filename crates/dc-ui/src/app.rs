@@ -831,13 +831,20 @@ impl App {
                 }
             }
             Action::Delete => self.delete_selection(),
+            // Manual zooms leave fit mode: window resizes must not
+            // clobber the user's chosen view (Fit Page re-arms it).
             Action::ZoomIn => {
                 self.view.zoom = (self.view.zoom * 1.25).clamp(0.1, 8.0);
+                self.view.fit_mode = false;
             }
             Action::ZoomOut => {
                 self.view.zoom = (self.view.zoom / 1.25).clamp(0.1, 8.0);
+                self.view.fit_mode = false;
             }
-            Action::Zoom100 => self.view.zoom = 1.0,
+            Action::Zoom100 => {
+                self.view.zoom = 1.0;
+                self.view.fit_mode = false;
+            }
             Action::FitPage => self.view.fit_pending = true,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
@@ -1371,6 +1378,7 @@ impl App {
                     let sresp = ui.add_sized([110.0, 14.0], slider).on_hover_text("Zoom");
                     if sresp.changed() {
                         self.view.zoom = z.clamp(0.1, 8.0);
+                        self.view.fit_mode = false;
                     }
                     if ui.button("−").on_hover_text("Zoom Out").clicked() {
                         self.dispatch(Action::ZoomOut);
@@ -2062,6 +2070,11 @@ impl App {
     #[doc(hidden)]
     pub fn set_recent_for_test(&mut self, files: Vec<PathBuf>) {
         self.recent.set_entries_for_test(files);
+    }
+    /// Current canvas zoom (fit-mode interaction tests).
+    #[doc(hidden)]
+    pub fn debug_zoom(&self) -> f32 {
+        self.view.zoom
     }
 
     /// The inline text editor opened by Edit Text… (Visio F2).

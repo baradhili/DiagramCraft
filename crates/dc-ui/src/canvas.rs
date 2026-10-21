@@ -16,6 +16,14 @@ pub struct View {
     pub show_rulers: bool,
     pub unit: Unit,
     pub fit_pending: bool,
+    /// Following the content area: while true, a layout whose content
+    /// size changed re-fits (window resize, stencil/ShapeSheet pane
+    /// toggles). Manual zoom/pan clears it (Visio-like: resizing must
+    /// not clobber the user's view); Fit Page / open / page-switch
+    /// re-arm it via `fit_pending`.
+    pub fit_mode: bool,
+    /// Content size the last fit was computed against.
+    pub last_content: Vec2,
 }
 
 impl Default for View {
@@ -27,6 +35,8 @@ impl Default for View {
             show_rulers: true,
             unit: Unit::Mm,
             fit_pending: true,
+            fit_mode: false,
+            last_content: Vec2::ZERO,
         }
     }
 }
@@ -34,6 +44,26 @@ impl Default for View {
 impl View {
     pub fn px_per_in(&self) -> f32 {
         96.0 * self.zoom
+    }
+
+    /// Fit zoom + centered pan for a content area (origin = top-left of
+    /// the area below/right of any rulers), and enter fit mode.
+    pub fn apply_fit(&mut self, content: Vec2, origin: Vec2, page: &PageGeom) {
+        let zx = content.x / (page.w_in as f32 * 96.0);
+        let zy = content.y / (page.h_in as f32 * 96.0);
+        self.zoom = zx.min(zy).clamp(0.1, 8.0);
+        let pw = page.w_in as f32 * self.px_per_in();
+        let ph = page.h_in as f32 * self.px_per_in();
+        self.pan = origin
+            + Vec2::new((content.x - pw) / 2.0, (content.y - ph) / 2.0).max(Vec2::new(12.0, 12.0));
+        self.fit_mode = true;
+        self.last_content = content;
+    }
+
+    /// Whether a newly laid-out content size should trigger a re-fit:
+    /// only in fit mode, and only beyond sub-pixel layout jitter.
+    pub fn wants_refit(&self, content: Vec2) -> bool {
+        self.fit_mode && (self.last_content - content).length() > 0.5
     }
 }
 
@@ -134,7 +164,8 @@ pub fn show(
         canvas_r.left_top()
     };
 
-    // Wheel zoom around the hovered point.
+    // Wheel zoom around the hovered point — a manual zoom: leaves fit
+    // mode so later resizes keep the user's view.
     if let Some(hp) = resp.hover_pos() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
@@ -144,21 +175,20 @@ pub fn show(
             let k = view.zoom / old;
             // keep the point under the cursor stationary
             view.pan = hp.to_vec2() - (hp.to_vec2() - view.pan) * k;
+            view.fit_mode = false;
             out.zoom_changed = true;
         }
     }
 
-    // Fit on first layout.
-    if view.fit_pending {
-        let cw = (canvas_r.right() - content_origin.x - 12.0).max(50.0);
-        let ch = (canvas_r.bottom() - content_origin.y - 12.0).max(50.0);
-        let zx = cw / (page.w_in as f32 * 96.0);
-        let zy = ch / (page.h_in as f32 * 96.0);
-        view.zoom = zx.min(zy).clamp(0.1, 8.0);
-        let pw = page.w_in as f32 * view.px_per_in();
-        let ph = page.h_in as f32 * view.px_per_in();
-        view.pan = content_origin.to_vec2()
-            + Vec2::new((cw - pw) / 2.0, (ch - ph) / 2.0).max(Vec2::new(12.0, 12.0));
+    // Fit on first layout, and — while in fit mode — again whenever the
+    // content area itself changes size (window resize, side panes
+    // toggling), so the page stays centered and fully visible.
+    let content = Vec2::new(
+        (canvas_r.right() - content_origin.x - 12.0).max(50.0),
+        (canvas_r.bottom() - content_origin.y - 12.0).max(50.0),
+    );
+    if view.fit_pending || view.wants_refit(content) {
+        view.apply_fit(content, content_origin.to_vec2(), page);
         view.fit_pending = false;
         out.zoom_changed = true;
     }
@@ -175,11 +205,12 @@ pub fn show(
         )
     });
 
-    // Middle-drag or space-drag pans.
+    // Middle-drag or space-drag pans — manual: leaves fit mode.
     let pan_drag = resp.dragged_by(egui::PointerButton::Middle)
         || (ui.input(|i| i.modifiers.command) && resp.dragged());
     if pan_drag {
         view.pan += resp.drag_delta();
+        view.fit_mode = false;
     }
 
     // Selection-handle resize + marquee (empty-area) drag. Corner-handle
@@ -513,5 +544,57 @@ mod tests {
         let (x, y) = screen_to_page(Pos2::new(100.0 + 96.0, 50.0 + 96.0), &view, &page);
         assert!((x - 1.0).abs() < 1e-9);
         assert!((y - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn apply_fit_fits_and_centers_the_page() {
+        let mut view = View::default();
+        let page = PageGeom { w_in: 8.5, h_in: 11.0 };
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
+        assert!(view.fit_mode, "a fit enters fit mode");
+        // Height-constrained: 600 px / (11 in × 96 px/in).
+        let expected = 600.0 / (11.0 * 96.0);
+        assert!((view.zoom - expected).abs() < 1e-4, "zoom {}", view.zoom);
+        // The 8.5 in page is centered horizontally: origin + margin at
+        // least 12 px, page height fills the content area.
+        let pw = 8.5 * 96.0 * view.zoom;
+        assert!(
+            (view.pan.x - (22.0 + (800.0 - pw) / 2.0)).abs() < 0.5,
+            "pan.x {}",
+            view.pan.x
+        );
+        let ph = 11.0 * 96.0 * view.zoom;
+        assert!(
+            (view.pan.y - (22.0 + ((600.0 - ph).max(0.0) / 2.0).max(12.0))).abs() < 0.5,
+            "pan.y {}",
+            view.pan.y
+        );
+    }
+
+    #[test]
+    fn refit_follows_content_changes_until_manual_intervention() {
+        let mut view = View::default();
+        let page = PageGeom { w_in: 8.5, h_in: 11.0 };
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
+        let z0 = view.zoom;
+        // A resize re-fits (taller content → larger fit zoom).
+        assert!(view.wants_refit(Vec2::new(800.0, 900.0)), "resize triggers refit");
+        view.apply_fit(Vec2::new(800.0, 900.0), Vec2::ZERO, &page);
+        assert!(view.zoom > z0, "zoom grew: {z0} → {}", view.zoom);
+        // Same size — and sub-pixel jitter — must not re-fit every frame.
+        assert!(!view.wants_refit(Vec2::new(800.0, 900.0)));
+        assert!(!view.wants_refit(Vec2::new(800.2, 900.3)), "jitter is ignored");
+        // Manual zoom/pan clears fit mode: resizes stop re-fitting.
+        view.fit_mode = false;
+        assert!(
+            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            "manual view survives a resize"
+        );
+        // Fit Page re-arms: the pending fit re-enters fit mode.
+        view.fit_pending = true;
+        assert!(!view.wants_refit(Vec2::new(300.0, 200.0)), "pending alone doesn't refit");
+        view.apply_fit(Vec2::new(300.0, 200.0), Vec2::ZERO, &page);
+        assert!(view.fit_mode, "apply_fit re-enters fit mode");
+        assert!(view.wants_refit(Vec2::new(800.0, 900.0)), "and follows again");
     }
 }
