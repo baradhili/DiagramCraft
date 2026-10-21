@@ -9,7 +9,9 @@
 
 use std::fmt::Write as _;
 
-use vsdx::{Cell, Document, Row, Shape};
+use vsdx::{Cell, Document, Row, Section, Shape, Sheet};
+#[cfg(test)]
+use vsdx::model::SheetChild;
 
 const PX_PER_IN: f64 = 96.0;
 
@@ -352,8 +354,13 @@ fn multi_root_master(doc: &Document, s: &Shape) -> bool {
 ///   master-canvas Xform, with the union bbox mapped into the instance
 ///   rect (Visio draws the master's whole canvas).
 /// - single-root master: the instance/effective sheet already draws the
-///   root's own shape; mirror only the root's sub-shape tree, scaled by
-///   the instance/master size ratio.
+///   root's own shape; mirror the root's sub-shape tree. Each sub-shape's
+///   XForm is re-evaluated against the *instance* group size (Visio
+///   semantics: cells whose formulas reference the parent stretch with
+///   it; `GUARD(4MM)`-style absolute cells keep their size — issue #15),
+///   emitting a corrective transform per child. Cells we cannot
+///   evaluate fall back to the uniform instance/master scale, so masters
+///   without authored formulas keep their historical rendering.
 fn mirror_master(
     doc: &Document,
     s: &Shape,
@@ -412,15 +419,226 @@ fn mirror_master(
         let mw = root.sheet.cell("Width").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
         let mh = root.sheet.cell("Height").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
         let (kx, ky) = (mw.map_or(1.0, |mw| width / mw), mh.map_or(1.0, |mh| height / mh));
-        if (kx - 1.0).abs() > 1e-9 || (ky - 1.0).abs() > 1e-9 {
-            let _ = writeln!(out, r#"<g transform="scale({kx:.6},{ky:.6})">"#);
-        }
+        let env = mirror_env(root, s, width, height);
         for sub in &root.sub_shapes {
+            let wrapper = mirror_child_transform(sub, &env, (kx, ky));
+            if let Some(t) = &wrapper {
+                let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
+            }
             render_shape_local(doc, sub, chain, mpart, out);
+            if wrapper.is_some() {
+                let _ = writeln!(out, "</g>");
+            }
         }
-        if (kx - 1.0).abs() > 1e-9 || (ky - 1.0).abs() > 1e-9 {
-            let _ = writeln!(out, "</g>");
+    }
+}
+
+/// Evaluation environment for re-evaluating a master root's sub-shape
+/// XForms at instance size (issue #15): the group's effective Width /
+/// Height under both the bare and the `Sheet.N!` spellings master
+/// formulas use, plus the root's User cells — their formulas re-evaluate
+/// too, because layout cells like `User.IconY` reference the (instance)
+/// `Height`. Instance-local User rows override the master's.
+fn mirror_env(
+    root: &Shape,
+    instance: &Shape,
+    width: f64,
+    height: f64,
+) -> vsdx::formula::Env {
+    let mut env = vsdx::formula::Env::new();
+    env.insert("Width".into(), width);
+    env.insert("Height".into(), height);
+    env.insert(format!("Sheet.{}!Width", root.id), width);
+    env.insert(format!("Sheet.{}!Height", root.id), height);
+    // User rows: master root's, overridden by the instance's own (an
+    // instance can override editable User rows such as ShapeLayout).
+    let mut users: Vec<(String, &Cell)> = Vec::new();
+    for user in root.sheet.sections_named("User") {
+        for row in user.rows.iter().filter(|r| r.n.is_some()) {
+            if let Some(c) = row.cell("Value") {
+                users.push((row.n.clone().unwrap(), c));
+            }
         }
+    }
+    for user in instance.sheet.sections_named("User") {
+        for row in user.rows.iter().filter(|r| r.n.is_some()) {
+            if let Some(c) = row.cell("Value") {
+                if let Some(slot) = users.iter_mut().find(|(n, _)| n == row.n.as_deref().unwrap()) {
+                    slot.1 = c;
+                } else {
+                    users.push((row.n.clone().unwrap(), c));
+                }
+            }
+        }
+    }
+    let set = |env: &mut vsdx::formula::Env, name: &str, v: f64| {
+        env.insert(format!("User.{name}"), v);
+        env.insert(format!("Sheet.{}!User.{name}", root.id), v);
+    };
+    for (name, c) in &users {
+        if let Some(v) = c.numeric().filter(|v| v.is_finite()) {
+            set(&mut env, name, v);
+        }
+    }
+    // User formulas re-evaluate against the instance dims (e.g. IconY =
+    // IF(OR(User.ShapeLayout<>1), Height - User.InfoPanelHeight/2, …)).
+    // Two passes let a User formula reference another User formula.
+    for _ in 0..2 {
+        let mut changed = false;
+        for (name, c) in &users {
+            let Some(f) = c.f.as_deref() else { continue };
+            if f == "Inh" || f == "No Formula" {
+                continue;
+            }
+            if let Some(v) = vsdx::formula::eval(f, &env)
+                .ok()
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+            {
+                let cur = env.get(&format!("User.{name}")).copied();
+                if cur != Some(v) {
+                    set(&mut env, name, v);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    env
+}
+
+/// Corrective transform for one mirrored sub-shape: maps where
+/// [`render_shape_local`] places it from its master XForm (`M`) to where
+/// Visio places it at the instance's group size (`E`, from re-evaluated
+/// formulas, falling back to uniform `k`·master per axis). Result:
+/// `Some("identity-like scale")` / `Some(matrix)` / `None` when no
+/// correction is needed.
+fn mirror_child_transform(
+    sub: &Shape,
+    root_env: &vsdx::formula::Env,
+    (kx, ky): (f64, f64),
+) -> Option<String> {
+    let num = |n: &str| sub.sheet.cell(n).and_then(|c| c.numeric());
+    let m_w = num("Width").filter(|v| *v > 1e-9).unwrap_or(1.0);
+    let m_h = num("Height").filter(|v| *v > 1e-9).unwrap_or(1.0);
+    let m = |n: &str, d: f64| num(n).unwrap_or(d);
+    let (m_px, m_py) = (m("PinX", 0.0), m("PinY", 0.0));
+    let (m_lx, m_ly) = (m("LocPinX", m_w / 2.0), m("LocPinY", m_h / 2.0));
+    let ang = m("Angle", 0.0);
+
+    // Effective values: formula first (Visio re-evaluates against the
+    // instance group), then the uniform-scale fallback.
+    let mut env = root_env.clone();
+    let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
+        let Some(c) = sub.sheet.cell(name) else { return None };
+        if let Some(f) = c.f.as_deref() {
+            if f != "Inh" && f != "No Formula" {
+                if let Some(v) = vsdx::formula::eval(f, env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                {
+                    return Some(v);
+                }
+            }
+        }
+        c.numeric().map(|v| v * axis)
+    };
+    let e_w = eff("Width", kx, &env).unwrap_or(kx * m_w);
+    let e_h = eff("Height", ky, &env).unwrap_or(ky * m_h);
+    // Pin/LocPin formulas may reference the shape's own effective size.
+    env.insert("Width".into(), e_w);
+    env.insert("Height".into(), e_h);
+    let e_px = eff("PinX", kx, &env).unwrap_or(0.0);
+    let e_py = eff("PinY", ky, &env).unwrap_or(0.0);
+    let e_lx = eff("LocPinX", kx, &env).unwrap_or(e_w / 2.0);
+    let e_ly = eff("LocPinY", ky, &env).unwrap_or(e_h / 2.0);
+
+    // Matrices in SVG space (y-down), row-vector convention:
+    // (a b c d e f) ≡ x' = a·x + c·y + e ; y' = b·x + d·y + f.
+    let ident = Mat::identity();
+    let rot = Mat::rotation(-ang);
+    // Where render_shape_local places the shape from master values.
+    let placed = Mat::translate(m_px, -m_py)
+        .mul(&rot)
+        .mul(&Mat::translate(-m_lx, m_ly));
+    // Where Visio places it at instance size: same pin convention, the
+    // effective LocPin, and the local frame scaled to the effective size.
+    let wanted = Mat::translate(e_px, -e_py)
+        .mul(&rot)
+        .mul(&Mat::translate(-e_lx, e_ly))
+        .mul(&Mat::scale(e_w / m_w, e_h / m_h));
+    let w = wanted.mul(&placed.inv()?);
+    const EPS: f64 = 1e-9;
+    if w.near(&ident, EPS) {
+        return None;
+    }
+    if w.0[1].abs() < EPS && w.0[2].abs() < EPS && w.0[4].abs() < EPS && w.0[5].abs() < EPS {
+        return Some(format!("scale({:.6},{:.6})", w.0[0], w.0[3]));
+    }
+    Some(format!(
+        "matrix({:.6},{:.6},{:.6},{:.6},{:.6},{:.6})",
+        w.0[0], w.0[1], w.0[2], w.0[3], w.0[4], w.0[5]
+    ))
+}
+
+/// 2D affine transform as SVG `matrix(a,b,c,d,e,f)`.
+#[derive(Debug, Clone)]
+struct Mat([f64; 6]);
+
+impl Mat {
+    fn identity() -> Mat {
+        Mat([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    }
+    fn translate(tx: f64, ty: f64) -> Mat {
+        Mat([1.0, 0.0, 0.0, 1.0, tx, ty])
+    }
+    fn scale(sx: f64, sy: f64) -> Mat {
+        Mat([sx, 0.0, 0.0, sy, 0.0, 0.0])
+    }
+    fn rotation(rad: f64) -> Mat {
+        let (s, c) = rad.sin_cos();
+        Mat([c, s, -s, c, 0.0, 0.0])
+    }
+    /// self ∘ other (apply `other` first).
+    fn mul(&self, other: &Mat) -> Mat {
+        let a = &self.0;
+        let b = &other.0;
+        Mat([
+            a[0] * b[0] + a[2] * b[1],
+            a[1] * b[0] + a[3] * b[1],
+            a[0] * b[2] + a[2] * b[3],
+            a[1] * b[2] + a[3] * b[3],
+            a[0] * b[4] + a[2] * b[5] + a[4],
+            a[1] * b[4] + a[3] * b[5] + a[5],
+        ])
+    }
+    fn inv(&self) -> Option<Mat> {
+        let m = &self.0;
+        let det = m[0] * m[3] - m[1] * m[2];
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let inv00 = m[3] / det;
+        let inv01 = -m[1] / det;
+        let inv10 = -m[2] / det;
+        let inv11 = m[0] / det;
+        Some(Mat([
+            inv00,
+            inv01,
+            inv10,
+            inv11,
+            -(inv00 * m[4] + inv10 * m[5]),
+            -(inv01 * m[4] + inv11 * m[5]),
+        ]))
+    }
+    fn near(&self, other: &Mat, eps: f64) -> bool {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .all(|(a, b)| (a - b).abs() <= eps)
     }
 }
 
@@ -1569,6 +1787,149 @@ fn escape_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Synthetic Role-callout-shaped master (issue #15 specimen, values
+    /// recomputed — no Microsoft content): a root group whose children
+    /// mix proportional XForms (`Sheet.5!Width*1`) with GUARDed absolute
+    /// ones (`GUARD(4MM)`), driven by User cells whose formulas reference
+    /// the group Height.
+    fn role_master_fixture() -> (Shape, Shape) {
+        let mut set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
+            sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(format!("{v}")),
+                    f: f.map(str::to_string),
+                    ..Cell::default()
+                },
+            );
+        };
+        // Root: master canvas 1.1811 × 0.7874.
+        let mut root = Shape { id: 5, ..Shape::default() };
+        set(&mut root.sheet, "Width", 1.181102362204724, None);
+        set(&mut root.sheet, "Height", 0.7874015748031495, None);
+        let urow = |n: &str, v: f64, f: Option<&str>| Row {
+            n: Some(n.into()),
+            cells: vec![(
+                "Value".into(),
+                Cell {
+                    v: Some(format!("{v}")),
+                    f: f.map(str::to_string),
+                    ..Cell::default()
+                },
+            )],
+            ..Row::default()
+        };
+        root.sheet.children.push(SheetChild::Section(Section {
+            name: "User".into(),
+            rows: vec![
+                urow("ShapeLayout", 0.0, None),
+                urow("InfoPanelHeight", 0.2362204724409449, None),
+                urow("IconX", 0.1181102362204724, Some("User.InfoPanelHeight/2")),
+                urow(
+                    "IconY",
+                    0.6692913385826771,
+                    Some("IF(OR(User.ShapeLayout<>1), Height-User.InfoPanelHeight/2, User.InfoPanelHeight/2)"),
+                ),
+            ],
+            ..Section::default()
+        }));
+        // Container child: fully proportional.
+        let mut container = Shape { id: 6, ..Shape::default() };
+        set(&mut container.sheet, "Width", 1.181102362204721, Some("Sheet.5!Width*1"));
+        set(&mut container.sheet, "Height", 0.7874015748031491, Some("Sheet.5!Height*1"));
+        set(&mut container.sheet, "PinX", 0.5905511811023657, Some("Sheet.5!Width*0.5"));
+        set(&mut container.sheet, "PinY", 0.3937007874015748, Some("Sheet.5!Height*0.5"));
+        set(&mut container.sheet, "LocPinX", 0.5905511811023605, Some("Width*0.5"));
+        set(&mut container.sheet, "LocPinY", 0.3937007874015746, Some("Height*0.5"));
+        // Icon child: absolute size, pinned via User cells.
+        let mut icon = Shape { id: 8, ..Shape::default() };
+        set(&mut icon.sheet, "Width", 0.1574803149606299, Some("GUARD(4MM)"));
+        set(&mut icon.sheet, "Height", 0.1692913385826771, Some("GUARD(4.3MM)"));
+        set(&mut icon.sheet, "PinX", 0.1181102362204724, Some("GUARD(Sheet.5!User.IconX)"));
+        set(&mut icon.sheet, "PinY", 0.6692913385826771, Some("GUARD(Sheet.5!User.IconY)"));
+        set(&mut icon.sheet, "LocPinX", 0.07874015748031496, Some("Width*0.5"));
+        set(&mut icon.sheet, "LocPinY", 0.08464566929133857, Some("Height*0.5"));
+        // Literal child (no formulas): uniform-scale fallback.
+        let mut plain = Shape { id: 16, ..Shape::default() };
+        set(&mut plain.sheet, "Width", 0.5, None);
+        set(&mut plain.sheet, "Height", 0.25, None);
+        set(&mut plain.sheet, "PinX", 0.5, None);
+        set(&mut plain.sheet, "PinY", 0.25, None);
+        root.sub_shapes = vec![container, icon, plain];
+
+        // Instance: same master stretched tall (2.25 × 7.02 aspect change).
+        let mut inst = Shape { id: 65, master: Some(7), ..Shape::default() };
+        set(&mut inst.sheet, "Width", 2.657480296178819, None);
+        set(&mut inst.sheet, "Height", 5.528301723437821, None);
+        (root, inst)
+    }
+
+    /// Parse `matrix(a,b,c,d,e,f)` / `scale(sx,sy)` into (a..f).
+    fn parse_tf(t: &str) -> [f64; 6] {
+        let body = t
+            .trim_start_matches("matrix(")
+            .trim_start_matches("scale(")
+            .trim_end_matches(')');
+        let nums: Vec<f64> = body.split(',').map(|n| n.parse().unwrap()).collect();
+        if t.starts_with("scale(") {
+            [nums[0], 0.0, 0.0, nums[1], 0.0, 0.0]
+        } else {
+            nums.try_into().unwrap()
+        }
+    }
+
+    #[test]
+    fn mirrored_proportional_child_keeps_uniform_scale() {
+        let (root, inst) = role_master_fixture();
+        let (iw, ih) = (2.657480296178819, 5.528301723437821);
+        let (mw, mh) = (1.181102362204724, 0.7874015748031495);
+        let (kx, ky) = (iw / mw, ih / mh); // 2.25 × 7.020943
+        let env = mirror_env(&root, &inst, iw, ih);
+        // Container (Sheet.5!Width*1 …): exactly the historical uniform
+        // scale — no regression for proportional children.
+        let t = mirror_child_transform(&root.sub_shapes[0], &env, (kx, ky)).unwrap();
+        assert_eq!(t, "scale(2.250000,7.020943)", "got {t}");
+    }
+
+    #[test]
+    fn mirrored_guarded_child_keeps_absolute_size() {
+        let (root, inst) = role_master_fixture();
+        let (iw, ih) = (2.657480296178819, 5.528301723437821);
+        let env = mirror_env(&root, &inst, iw, ih);
+        // Icon: 4×4.3 mm stays absolute; its pin re-evaluates against the
+        // instance Height (User.IconY = H − InfoPanelHeight/2).
+        let t = mirror_child_transform(&root.sub_shapes[1], &env, (2.25, 7.02)).unwrap();
+        let m = parse_tf(&t);
+        let e_py = ih - 0.2362204724409449 / 2.0; // 5.410191487…
+        let m_py = 0.6692913385826771;
+        let m_h = 0.1692913385826771;
+        // wanted ∘ placed⁻¹ for angle 0, scale 1: pure translate by the
+        // pin delta (effective LocPin = W/2 in both frames).
+        let expected_ty = -((e_py - 0.1692913385826771 / 2.0) - (m_py - m_h / 2.0));
+        assert!((m[0] - 1.0).abs() < 1e-6, "a={}", m[0]);
+        assert!((m[3] - 1.0).abs() < 1e-6, "d={}", m[3]);
+        assert!(m[4].abs() < 1e-6, "e={}", m[4]);
+        assert!((m[5] - expected_ty).abs() < 1e-5, "f={} expected {expected_ty}", m[5]);
+    }
+
+    #[test]
+    fn mirrored_literal_child_falls_back_to_uniform_scale() {
+        let (root, inst) = role_master_fixture();
+        let env = mirror_env(&root, &inst, 2.657480296178819, 5.528301723437821);
+        // No formulas anywhere: behavior is byte-identical to the old
+        // uniform wrapper.
+        let t = mirror_child_transform(&root.sub_shapes[2], &env, (2.25, 7.020943)).unwrap();
+        assert_eq!(t, "scale(2.250000,7.020943)", "got {t}");
+    }
+
+    #[test]
+    fn mirror_env_resolves_user_formulas_against_instance_height() {
+        let (root, inst) = role_master_fixture();
+        let env = mirror_env(&root, &inst, 2.657480296178819, 5.528301723437821);
+        let v = env.get("User.IconY").copied().unwrap();
+        assert!((v - (5.528301723437821 - 0.2362204724409449 / 2.0)).abs() < 1e-9);
+    }
 
     #[test]
     fn elliptical_arc_half_circle() {
