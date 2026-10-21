@@ -716,9 +716,9 @@ fn parse_rels(bytes: &[u8]) -> Vec<RelEntry> {
                 let mut target = String::new();
                 for a in e.attributes().flatten() {
                     match a.key.as_ref() {
-                        "Id" => id = a.value.to_string(),
-                        "Type" => type_ = a.value.to_string(),
-                        "Target" => target = a.value.to_string(),
+                        "Id" => id = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                        "Type" => type_ = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                        "Target" => target = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
                         _ => {}
                     }
                 }

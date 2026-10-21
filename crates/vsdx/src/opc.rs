@@ -135,9 +135,9 @@ fn parse_content_types(xml: &str) -> Result<TypeMaps, OpcError> {
                     let mut pn = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            "Extension" => ext = Some(a.value.to_string()),
-                            "ContentType" => ct = Some(a.value.to_string()),
-                            "PartName" => pn = Some(a.value.to_string()),
+                            "Extension" => ext = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
+                            "ContentType" => ct = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
+                            "PartName" => pn = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
                             _ => {}
                         }
                     }
