@@ -51,7 +51,7 @@ jobs:
           cp diagramcraft_*_amd64.rpm dist/
           cp diagramcraft_*.AppImage dist/
           ls -la dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux
           path: dist/*
@@ -88,7 +88,7 @@ jobs:
           # NSIS writes OutFile relative to the script directory.
           cp packaging/diagramcraft_*_setup.exe dist/
           ls -la dist/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: dist/*
@@ -136,7 +136,7 @@ jobs:
           hdiutil create -volname "DiagramCraft" \
             -srcfolder "DiagramCraft.app" -ov -format UDZO \
             "dist/diagramcraft_${{ steps.ver.outputs.version }}_universal.dmg"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: dist/*
@@ -146,7 +146,7 @@ jobs:
     needs: [linux, windows, macos]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
