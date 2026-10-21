@@ -174,3 +174,45 @@ fn shell_snapshot_blank_drawing() {
     // File → New: empty page with the starter shape masters in the pane.
     run_shell("dc_ui_shell_blank", App::with_blank());
 }
+
+#[test]
+fn shell_snapshot_start_recent() {
+    // Start screen with a populated MRU: one live entry, one ghosted
+    // (its file is gone — Visio keeps it listed, grayed).
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let ghost = tmp.path().join("moved-away.vsdx");
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc, ghost]);
+    run_shell("dc_ui_shell_start_recent", app);
+}
+
+#[test]
+fn recent_entry_click_reopens() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc.clone()]);
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    harness.run();
+    assert_eq!(harness.state().debug_shape_count(), 0, "no document yet");
+    // Click the MRU entry (labeled with the file name) on the start
+    // screen; the document opens.
+    harness.get_by_label_contains("shell.vssx").click();
+    harness.run();
+    assert_eq!(
+        harness.state().debug_shape_count(),
+        1,
+        "clicking a recent entry reopened the document"
+    );
+    assert_eq!(harness.state().debug_recent(), &[doc]);
+}

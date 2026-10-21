@@ -14,6 +14,7 @@ use vsdx::model::{Document, Shape};
 
 use crate::canvas::{self, PageGeom, View};
 use crate::cmd::{AddMasterInstance, MoveShape};
+use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
@@ -63,6 +64,10 @@ pub struct App {
     text_edit: Option<(i64, String)>,
     /// Fill/Line color palette target (opened from the ribbon).
     color_pick: Option<ColorTarget>,
+    /// Most-recently-used files (start screen + backstage Open page).
+    /// Ephemeral in the headless constructors; `App::new` swaps in the
+    /// persistent on-disk list.
+    recent: RecentFiles,
 }
 
 /// Which cell a ribbon palette click targets.
@@ -110,7 +115,15 @@ struct DragState {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
         crate::theme::install(&cc.egui_ctx);
-        App::with_doc_opt(path)
+        let mut app = App::with_doc_opt(None);
+        // Production entry only: adopt the persistent on-disk MRU
+        // (tests and kittest constructors stay ephemeral so they never
+        // touch the user's real config dir).
+        app.recent = RecentFiles::open();
+        if let Some(p) = path {
+            app.load(p);
+        }
+        app
     }
 
     /// Headless-friendly constructor (theme applied by the host UI loop).
@@ -142,6 +155,7 @@ impl App {
             clipboard: None,
             text_edit: None,
             color_pick: None,
+            recent: RecentFiles::ephemeral(),
         };
         if let Some(p) = path {
             app.load(p);
@@ -176,6 +190,7 @@ impl App {
         match Editor::open(&path) {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
+                self.recent.record(&path);
                 self.ed = Some(ed);
                 self.path = path;
                 self.dirty = false;
@@ -372,6 +387,7 @@ impl App {
                 self.status = format!("saved {}", path.display());
                 self.dirty = false;
                 self.path = path.to_path_buf();
+                self.recent.record(path);
             }
             Err(e) => self.status = format!("save failed: {e:#}"),
         }
@@ -1474,6 +1490,42 @@ impl App {
         });
     }
 
+    /// The Recent list shared by the start screen and the backstage
+    /// Open page: one row per MRU entry, click to reopen. Files that no
+    /// longer exist stay listed but ghosted (Visio-style) rather than
+    /// being silently dropped. Returns the clicked path, if any.
+    fn recent_list_ui(&self, ui: &mut Ui) -> Option<PathBuf> {
+        if self.recent.entries().is_empty() {
+            ui.weak("Files you open will appear here.");
+            return None;
+        }
+        let mut clicked = None;
+        for p in self.recent.entries() {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string());
+            let missing = !p.exists();
+            // Theme-aware: the start screen's central area follows the
+            // egui visuals (dark by default), so live entries take the
+            // normal text color and ghosts the weak one — the same
+            // pairing the empty-list placeholder uses.
+            let txt = if missing {
+                egui::RichText::new(name).color(ui.visuals().weak_text_color())
+            } else {
+                egui::RichText::new(name)
+            };
+            if ui
+                .button(txt)
+                .on_hover_text(p.display().to_string())
+                .clicked()
+            {
+                clicked = Some(p.clone());
+            }
+        }
+        clicked
+    }
+
     fn central(&mut self, ui: &mut Ui) {
         if self.ed.is_none() {
             // Visio 2016 start screen shape: Recent on the left,
@@ -1484,7 +1536,9 @@ impl App {
                     ui.add_space(24.0);
                     ui.heading("Recent");
                     ui.add_space(6.0);
-                    ui.weak("Files you open will appear here.");
+                    if let Some(p) = self.recent_list_ui(ui) {
+                        self.load(p);
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     ui.vertical(|ui| {
@@ -1998,6 +2052,17 @@ impl App {
     pub fn debug_carry(&self) -> Option<i64> {
         self.stencil.carry
     }
+    /// MRU entries, most recent first (recent-files tests).
+    #[doc(hidden)]
+    pub fn debug_recent(&self) -> &[PathBuf] {
+        self.recent.entries()
+    }
+    /// Adopt an MRU verbatim, never persisted (kittest snapshot of the
+    /// populated Recent panes).
+    #[doc(hidden)]
+    pub fn set_recent_for_test(&mut self, files: Vec<PathBuf>) {
+        self.recent.set_entries_for_test(files);
+    }
 
     /// The inline text editor opened by Edit Text… (Visio F2).
     fn text_edit_window(&mut self, ctx: &egui::Context) {
@@ -2312,6 +2377,7 @@ impl App {
             });
         // Page content.
         let mut open_browse = false;
+        let mut open_recent: Option<PathBuf> = None;
         let mut new_blank = false;
         let page = self.backstage_page;
         if page == BackPage::Open {
@@ -2325,7 +2391,10 @@ impl App {
                 }
                 ui.add_space(16.0);
                 ui.heading("Recent");
-                ui.weak("Files you open will appear here.");
+                ui.add_space(6.0);
+                if let Some(p) = self.recent_list_ui(ui) {
+                    open_recent = Some(p);
+                }
             });
         } else {
             ui.vertical(|ui| {
@@ -2389,6 +2458,10 @@ impl App {
         if open_browse {
             close_backstage = true;
             self.do_open();
+        }
+        if let Some(p) = open_recent {
+            close_backstage = true;
+            self.load(p);
         }
         if new_blank {
             self.do_new();
@@ -2577,6 +2650,50 @@ mod tests {
         app.start_new();
         assert!(!app.confirm_new);
         assert!(!app.dirty);
+    }
+
+    // Recent-files (MRU) wiring: successful loads/saves record, failed
+    // ones must not (GitHub #16).
+
+    #[test]
+    fn opening_a_file_records_it_in_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("recent-src.vsdx");
+        Editor::new_blank().save_as(&p).unwrap();
+        let mut app = App::with_doc_opt(None);
+        app.load(p.clone());
+        assert_eq!(
+            app.debug_recent(),
+            &[p.clone()],
+            "successful open records the path"
+        );
+        // Re-opening moves it to the (single) front.
+        app.load(p.clone());
+        assert_eq!(app.debug_recent(), &[p]);
+    }
+
+    #[test]
+    fn failed_open_does_not_record() {
+        let mut app = App::with_doc_opt(None);
+        app.load(PathBuf::from("/nonexistent/missing.vsdx"));
+        assert!(
+            app.debug_recent().is_empty(),
+            "a failed open must not record anything"
+        );
+    }
+
+    #[test]
+    fn saving_records_the_saved_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::with_blank();
+        let p = tmp.path().join("saved.vsdx");
+        app.save_to(&p);
+        assert_eq!(
+            app.debug_recent(),
+            &[p],
+            "successful save-as records the path"
+        );
+        assert!(!app.dirty, "save clears the dirty flag");
     }
 }
 

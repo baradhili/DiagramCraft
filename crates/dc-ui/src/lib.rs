@@ -7,6 +7,7 @@ pub mod app;
 pub mod icontex;
 pub mod canvas;
 pub mod cmd;
+pub mod recent;
 pub mod ribbon;
 pub mod stencil;
 pub mod svgimg;

@@ -1026,6 +1026,7 @@ dependencies = [
  "image",
  "resvg 0.48.1",
  "rfd",
+ "serde_json",
  "tempfile",
  "vsdx",
  "zip",
