@@ -587,6 +587,8 @@ fn is_xform_cell(name: &str) -> bool {
             | "FlipY"
             | "TxtPinX"
             | "TxtPinY"
+            | "TxtLocPinX"
+            | "TxtLocPinY"
             | "TxtWidth"
             | "TxtHeight"
             | "TxtAngle"

@@ -481,16 +481,26 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
         i = if style_bits & 2 != 0 { r#" font-style="italic""# } else { "" },
     );
 
-    // Paragraph alignment: 1 left, 2 center, 3 right (Visio default center
-    // for shape text blocks). Vertical: 1 top, 2 middle, 3 bottom.
-    let halign = doc
-        .effective_sheet(s, chain)
+    // Paragraph alignment: Visio HorzAlign 0 = left, 1 = center, 2 = right,
+    // 3 = justify (rendered as left). Absent cell → Visio default 1 (center).
+    // Sections inherit separately from cells: a sub-shape that carries e.g.
+    // Character but no Paragraph still takes Paragraph from its master shape
+    // (`MasterShape` link) — effective_sheet stops at the instance sheet
+    // once it has any sections, so consult the source explicitly.
+    let para_row = s
+        .sheet
         .sections_named("Paragraph")
-        .first()
-        .and_then(|sec| sec.rows.first())
-        .and_then(|r| r.cell("HorizAlign"))
+        .into_iter()
+        .next()
+        .or_else(|| {
+            doc.instance_source(s, chain)
+                .and_then(|src| src.sheet.sections_named("Paragraph").into_iter().next())
+        })
+        .and_then(|sec| sec.rows.first());
+    let halign = para_row
+        .and_then(|r| r.cell("HorzAlign"))
         .and_then(|c| c.numeric())
-        .unwrap_or(2.0) as i32;
+        .unwrap_or(1.0) as i32;
     let valign = get("VertAlign").unwrap_or(2.0) as i32;
 
     // Text-block insets (Visio defaults: 0.1 in left/right, 0.0555 in
@@ -557,8 +567,8 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     // Line x per alignment: left edge of the text area, center, or right.
     let left_x = tx - lpx + ins_l;
     let (anchor, x) = match halign {
-        1 => ("start", left_x),
-        3 => ("end", left_x + (tw - ins_l - ins_r)),
+        0 | 3 => ("start", left_x),
+        2 => ("end", left_x + (tw - ins_l - ins_r)),
         _ => ("middle", left_x + (tw - ins_l - ins_r) / 2.0),
     };
 
@@ -804,6 +814,10 @@ fn render_all_geometry(
                         let patched = Cell::value(format!("{}", placed(sv)));
                         match row.cells.iter_mut().find(|(n, _)| n == cname) {
                             Some((_, cell)) => {
+                                // A local numeric V wins even under F='Inh':
+                                // Visio refreshes cached values at save, so
+                                // e.g. a legend member's flattened arc B=0 is
+                                // the live evaluation, not a stale snapshot.
                                 if cell.v.is_none()
                                     || (cell.is_inherited() && cell.numeric().is_none())
                                 {
@@ -872,7 +886,6 @@ fn render_geometry(
             .unwrap_or(false)
     };
     let no_fill = flag("NoFill");
-    let no_line = flag("NoLine");
     let no_show = flag("NoShow");
     if no_show {
         return;
@@ -889,6 +902,14 @@ fn render_geometry(
         Frame::Instance => shape_env_for(doc, s, chain, rows),
         Frame::Master(src) => shape_env_for(doc, src, &[], rows),
     };
+    // Visio hides the outline when LinePattern = 0 (e.g. legend label
+    // boxes carry THEMEGUARD(0)); the geometry still exists for hit
+    // testing but must not stroke.
+    let no_line = flag("NoLine")
+        || doc
+            .resolve_cell(s, chain, "LinePattern")
+            .and_then(|c| cell_num(&c, &env))
+            .is_some_and(|p| p == 0.0);
     let row_num = |r: &Row, c: &str| -> Option<f64> {
         r.cell(c).and_then(|cell| {
             // Geometry rows: the formula is authoritative (Visio evaluates
