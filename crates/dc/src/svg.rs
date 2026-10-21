@@ -692,8 +692,9 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
         (color, bits)
     };
     let font_attrs = format!(
-        r#"font-size="{s:.4}" fill="{c}"{b}{i}"#,
+        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
         s = size,
+        ff = font_family_attr(char_font(doc, s, chain).as_deref()),
         c = color,
         b = if style_bits & 1 != 0 { r#" font-weight="bold""# } else { "" },
         i = if style_bits & 2 != 0 { r#" font-style="italic""# } else { "" },
@@ -1729,6 +1730,83 @@ fn char_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<f64> {
     row.cell("Size").and_then(|c| c.numeric()).filter(|v| *v > 0.0)
 }
 
+/// First Character-section row's Font cell — the family name as stored
+/// in VSDX (`<Cell N='Font' V='Arial'/>`), inherited through the
+/// effective sheet like Size/Color. Legacy binary-format font indexes
+/// (numeric values) name no family and are ignored.
+fn char_font(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<String> {
+    let sheet = doc.effective_sheet(s, chain);
+    let row = sheet
+        .sections_named("Character")
+        .first()?
+        .rows
+        .first()?;
+    let name = row.cell("Font").and_then(|c| c.v.clone())?;
+    let name = name.trim();
+    if name.is_empty() || name.parse::<f64>().is_ok() {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Metric-compatible substitutes for the Microsoft core fonts (the
+/// libre designer-alternative set), with the CSS generic each family
+/// degrades to. Case-insensitive lookup.
+fn font_substitute(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "arial" => ("Liberation Sans", "sans-serif"),
+        "calibri" => ("Carlito", "sans-serif"),
+        "cambria" => ("Caladea", "serif"),
+        "segoe ui" => ("Carlito", "sans-serif"),
+        "times new roman" => ("Liberation Serif", "serif"),
+        "courier new" => ("Liberation Mono", "monospace"),
+        _ => return None,
+    })
+}
+
+/// Quote a font-family name for the CSS shorthand (single quotes when
+/// it contains anything but letters, digits and dashes).
+fn quote_family(name: &str) -> String {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
+        name.to_string()
+    } else {
+        format!("'{name}'")
+    }
+}
+
+fn push_family(chain: &mut Vec<String>, family: &str) {
+    if !chain.iter().any(|f| f.eq_ignore_ascii_case(family)) {
+        chain.push(quote_family(family));
+    }
+}
+
+/// `font-family` fallback chain for a document font (GitHub #17):
+/// the document's own family first (the best face on any viewer),
+/// then its metric-compatible substitute if the alias table covers
+/// it, then Carlito (the GUI's embedded face — also a sensible
+/// last-name fallback for viewers), then the CSS generic class.
+/// Deduplicated case-insensitively; empty when the document names no
+/// font, leaving the text element attribute-free as before.
+fn font_family_attr(font: Option<&str>) -> String {
+    let Some(name) = font.map(str::trim).filter(|f| !f.is_empty()) else {
+        return String::new();
+    };
+    let (substitute, class) = match font_substitute(name) {
+        Some((s, c)) => (Some(s), c),
+        None => (None, "sans-serif"),
+    };
+    let mut chain = vec![quote_family(name)];
+    if let Some(s) = substitute {
+        push_family(&mut chain, s);
+    }
+    push_family(&mut chain, "Carlito");
+    chain.push(class.to_string());
+    format!(" font-family=\"{}\"", chain.join(", "))
+}
+
 /// Resolved (Width, Height) for geometry scaling.
 fn shape_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> (f64, f64) {
     let env = shape_env(doc, s, chain);
@@ -1991,6 +2069,123 @@ mod tests {
         // patterns render solid — no dasharray attribute.
         assert!(line_dasharray(1.0, w).is_none());
         assert!(line_dasharray(23.0, w).is_none());
+    }
+
+    /// A Character row with Font/Size/Color cells for char_font tests.
+    fn char_row(font: Option<&str>) -> Row {
+        let mut cells = Vec::new();
+        if let Some(f) = font {
+            cells.push(("Font".to_string(), Cell { v: Some(f.to_string()), ..Cell::default() }));
+        }
+        Row { cells, ..Row::default() }
+    }
+
+    fn shape_with_character(font: Option<&str>) -> Shape {
+        let mut s = Shape::default();
+        s.sheet
+            .children
+            .push(SheetChild::Section(Section {
+                name: "Character".into(),
+                rows: vec![char_row(font)],
+                ..Section::default()
+            }));
+        s
+    }
+
+    #[test]
+    fn font_family_chains_follow_the_alias_table() {
+        // Document family first, then the metric-compatible substitute,
+        // then Carlito, then the CSS generic (GitHub #17's example).
+        assert_eq!(
+            font_family_attr(Some("Arial")),
+            " font-family=\"Arial, 'Liberation Sans', Carlito, sans-serif\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Calibri")),
+            " font-family=\"Calibri, Carlito, sans-serif\"",
+            "Calibri's substitute IS Carlito — no duplicate entry"
+        );
+        assert_eq!(
+            font_family_attr(Some("Times New Roman")),
+            " font-family=\"'Times New Roman', 'Liberation Serif', Carlito, serif\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Courier New")),
+            " font-family=\"'Courier New', 'Liberation Mono', Carlito, monospace\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Cambria")),
+            " font-family=\"Cambria, Caladea, Carlito, serif\""
+        );
+        // Unknown families: kept as-is, Carlito + sans-serif tail.
+        assert_eq!(
+            font_family_attr(Some("Wingdings")),
+            " font-family=\"Wingdings, Carlito, sans-serif\""
+        );
+        // Lookup is case-insensitive and trims; no attribute without a
+        // document font (today's behavior).
+        assert_eq!(
+            font_family_attr(Some("  ARIAL ")),
+            " font-family=\"ARIAL, 'Liberation Sans', Carlito, sans-serif\""
+        );
+        assert_eq!(font_family_attr(None), "");
+        assert_eq!(font_family_attr(Some("")), "");
+    }
+
+    #[test]
+    fn char_font_reads_the_first_character_row() {
+        let doc = Document::default();
+        let s = shape_with_character(Some("Arial"));
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain).as_deref(), Some("Arial"));
+        // Numeric (legacy binary index) values name no family.
+        let s = shape_with_character(Some("4"));
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+        // No Font cell / no section at all.
+        let s = shape_with_character(None);
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+        let s = Shape::default();
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+    }
+
+    #[test]
+    fn char_font_inherits_from_the_master_sheet() {
+        // The instance's own sheet carries no sections, so the
+        // effective sheet is its master's (the Size/Color path).
+        let mut root = shape_with_character(Some("Segoe UI"));
+        root.id = 1;
+        let doc = Document {
+            masters: vec![vsdx::Master { id: 7, shapes: vec![root], ..Default::default() }],
+            ..Document::default()
+        };
+        let inst = Shape { id: 2, master: Some(7), ..Shape::default() };
+        assert_eq!(char_font(&doc, &inst, &[]).as_deref(), Some("Segoe UI"));
+        // An own Character row wins over the master's.
+        let mut inst = Shape { id: 3, master: Some(7), ..Shape::default() };
+        inst.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![char_row(Some("Cambria"))],
+            ..Section::default()
+        }));
+        assert_eq!(char_font(&doc, &inst, &[]).as_deref(), Some("Cambria"));
+    }
+
+    #[test]
+    fn emitted_text_carries_the_font_family_chain() {
+        let doc = Document::default();
+        let mut s = shape_with_character(Some("Arial"));
+        s.sheet.text = Some("hello".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, &mut out);
+        assert!(
+            out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
+            "emitted text element: {out}"
+        );
+        assert!(out.contains("hello"), "emitted: {out}");
     }
 
     #[test]
