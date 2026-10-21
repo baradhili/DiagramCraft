@@ -31,6 +31,11 @@ fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
         db.set_sans_serif_family("Carlito");
         db.set_serif_family("Carlito");
         db.set_monospace_family("Carlito");
+        // Last-resort glyph fallback for scripts Carlito lacks (CJK,
+        // Arabic, …): better than invisible text. Latin text still
+        // resolves to the explicit Carlito families, so test rasters of
+        // Latin content stay machine-independent.
+        db.load_system_fonts();
         std::sync::Arc::new(db)
     })
     .clone()
