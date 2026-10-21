@@ -14,9 +14,13 @@ use std::collections::HashMap;
 /// (height follows the viewBox aspect).
 ///
 /// Fonts: the embedded Carlito set (metric-compatible with Calibri,
-/// OFL-1.1 — see assets/fonts/LICENSE-Carlito), NOT system fonts.
-/// System fonts made rasters machine-dependent and broke the snapshot
-/// tests on CI runners with different font sets.
+/// OFL-1.1 — see assets/fonts/LICENSE-Carlito) is the PRIMARY for
+/// every generic family (our text elements carry no font-family), so
+/// Latin rendering — everything the snapshot goldens contain — is
+/// machine-independent. System fonts are loaded ONLY as per-glyph
+/// fallback for scripts Carlito lacks (CJK, Arabic, …): better than
+/// invisible text, and it cannot displace Carlito for the families we
+/// resolve explicitly.
 /// The font database, built once: Carlito Regular/Bold plus generic
 /// family mappings — usvg resolves unknown/no font-family through the
 /// generic defaults (Arial / Times New Roman), which don't exist in a
@@ -31,10 +35,6 @@ fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
         db.set_sans_serif_family("Carlito");
         db.set_serif_family("Carlito");
         db.set_monospace_family("Carlito");
-        // Last-resort glyph fallback for scripts Carlito lacks (CJK,
-        // Arabic, …): better than invisible text. Latin text still
-        // resolves to the explicit Carlito families, so test rasters of
-        // Latin content stay machine-independent.
         db.load_system_fonts();
         std::sync::Arc::new(db)
     })

@@ -3,6 +3,11 @@
 ; from the repo root; expects target\release\diagramcraft.exe.
 
 !define APPNAME "DiagramCraft"
+; Local builds: makensis -DVERSION=x packaging/installer.nsi from the
+; repo root defaults LICENSEDIR to the repo root.
+!ifndef LICENSEDIR
+  !define LICENSEDIR "."
+!endif
 ; Binary directory passed in via -DBINDIR=... (NSIS resolves File
 ; paths relative to this script, not the invocation directory).
 Name "${APPNAME}"
