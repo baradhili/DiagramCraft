@@ -2055,7 +2055,8 @@ impl App {
             ];
             egui::Grid::new("theme-palette").num_columns(8).spacing([6.0, 6.0]).show(ui, |ui| {
                 for (i, c) in theme_colors.iter().enumerate() {
-                    let color = egui::Color32::from_hex(c.trim_start_matches('#')).unwrap();
+                    // from_hex requires the leading '#'.
+                    let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
                     let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
                     ui.painter().rect_filled(r, 2.0, color);
                     ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Middle);
