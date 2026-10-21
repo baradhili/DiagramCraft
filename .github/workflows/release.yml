@@ -76,7 +76,7 @@ jobs:
       - name: Build installer
         shell: cmd
         run: |
-          "C:\Program Files (x86)\NSIS\makensis.exe" -DVERSION=${{ steps.ver.outputs.version }} -DBINDIR="%GITHUB_WORKSPACE%\target\release" packaging\installer.nsi
+          "C:\Program Files (x86)\NSIS\makensis.exe" -DVERSION=${{ steps.ver.outputs.version }} -DBINDIR="%GITHUB_WORKSPACE%\target\release" -DLICENSEDIR="%GITHUB_WORKSPACE%" packaging\installer.nsi
       - name: Portable zip
         shell: bash
         run: |
@@ -128,6 +128,9 @@ jobs:
       - name: Bundle app + dmg
         run: |
           cp packaging/Info.plist "DiagramCraft.app/Contents/Info.plist"
+          mkdir -p "DiagramCraft.app/Contents/Resources/licenses"
+          cp LICENSE-MIT LICENSE-APACHE "DiagramCraft.app/Contents/Resources/licenses/"
+          cp crates/dc-ui/assets/fonts/LICENSE-Carlito "DiagramCraft.app/Contents/Resources/licenses/"
           codesign --force --sign - --deep "DiagramCraft.app"
           mkdir -p dist
           hdiutil create -volname "DiagramCraft" \
