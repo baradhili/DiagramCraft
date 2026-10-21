@@ -176,9 +176,18 @@ fn parse_relationships(xml: &str, base_dir: &str) -> Vec<(String, String, String
                     let mut target = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            "Id" => id = Some(a.value.to_string()),
-                            "Type" => ty = Some(a.value.to_string()),
-                            "Target" => target = Some(a.value.to_string()),
+                            "Id" => id = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()
+                                .map(|v| v.into_owned()),
+                            "Type" => ty = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()
+                                .map(|v| v.into_owned()),
+                            "Target" => target = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .ok()
+                                .map(|v| v.into_owned()),
                             _ => {}
                         }
                     }
