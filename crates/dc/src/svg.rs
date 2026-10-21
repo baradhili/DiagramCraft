@@ -424,8 +424,8 @@ fn mirror_master(
     }
 }
 
-/// Text: laid out inside the TxtPin/TxtWidth/TxtHeight block — word-
-/// wrapped to the block width, horizontally aligned per the Paragraph
+/// Text: laid out inside the TxtPin/TxtLocPin/TxtWidth/TxtHeight block —
+/// word-wrapped to the block width, horizontally aligned per the Paragraph
 /// row's HorizAlign, vertically per VertAlign, with the first Character
 /// row's size/color/bold. Rotated by TxtAngle around the pin (Visio
 /// vertical sidebars use TxtAngle 90).
@@ -541,20 +541,25 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     let n_lines = lines.len() as f64;
     let total_h = n_lines * line_h;
 
-    // Block top edge (y-up local coords): ty + th/2 is the top in Visio's
-    // frame; in the emitted (y-negated) path frame it becomes -(ty - th/2).
-    let top_y = -(ty - th / 2.0);
+    // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
+    // sits TxtLocPinX/TxtLocPinY from the block's lower-left corner, so that
+    // corner is (tx - lpx, ty - lpy) — masters can pin off-center, so no
+    // centered-pin assumption. In the emitted y-negated frame the top edge
+    // is -(ty - lpy + th).
+    let lpx = get("TxtLocPinX").unwrap_or(tw / 2.0);
+    let lpy = get("TxtLocPinY").unwrap_or(th / 2.0);
+    let top_edge = -(ty - lpy + th);
     let first_baseline = match valign {
-        3 => top_y - th + ins_b + total_h - line_h + size * 0.8, // bottom
-        1 => top_y + ins_t + size * 0.8,                          // top
-        _ => top_y - (th - total_h) / 2.0 + size * 0.8,           // middle
+        1 => top_edge + ins_t + size * 0.8,                // top
+        3 => top_edge + th - ins_b - total_h + size * 0.8, // bottom
+        _ => top_edge + (th - total_h) / 2.0 + size * 0.8, // middle
     };
     // Line x per alignment: left edge of the text area, center, or right.
-    let left_x = tx - tw / 2.0 + ins_l;
+    let left_x = tx - lpx + ins_l;
     let (anchor, x) = match halign {
         1 => ("start", left_x),
         3 => ("end", left_x + (tw - ins_l - ins_r)),
-        _ => ("middle", tx),
+        _ => ("middle", left_x + (tw - ins_l - ins_r) / 2.0),
     };
 
     let mut body = String::new();
