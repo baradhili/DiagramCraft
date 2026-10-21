@@ -165,7 +165,7 @@ impl App {
     /// Test hooks: select a shape / switch ribbon tab.
     #[doc(hidden)]
     pub fn select_shape_for_test(&mut self, page: i64, shape: i64) {
-        self.sel = Some((page, shape));
+        self.set_selection(Some((page, shape)));
     }
     #[doc(hidden)]
     pub fn set_tab_for_test(&mut self, tab: crate::ribbon::Tab) {
@@ -182,7 +182,7 @@ impl App {
                 self.version += 1;
                 self.view = View::default();
                 self.page_idx = 0;
-                self.sel = None;
+                self.set_selection(None);
                 self.stencil.armed = None;
                 self.tex.clear();
             }
@@ -239,7 +239,7 @@ impl App {
                     self.status = format!("undo: {l}");
                     self.dirty = true;
                     self.version += 1;
-                    self.sel = None;
+                    self.set_selection(None);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -293,7 +293,7 @@ impl App {
         self.version += 1;
         self.view = View::default();
         self.page_idx = 0;
-        self.sel = None;
+        self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
         self.status = "new blank drawing (unsaved)".into();
@@ -505,7 +505,7 @@ impl App {
                     self.copy_selection();
                     let (p, s) = self.sel.unwrap();
                     self.apply(RemoveShape::new(p, s));
-                    self.sel = None;
+                    self.set_selection(None);
                 }
                 if ctrl && i.key_pressed(egui::Key::C) {
                     self.copy_selection();
@@ -558,7 +558,7 @@ impl App {
             let shape_id = self.sel.unwrap().1;
             self.apply(RemoveShape::new(page_id, shape_id));
         }
-        self.sel = None;
+        self.set_selection(None);
         self.sel_set.clear();
     }
 
@@ -708,9 +708,22 @@ impl App {
                         }
                         self.apply(Macro::new("move shapes", cmds));
                     }
-                    self.sel = Some((page_id, d.shape));
+                    self.set_selection(Some((page_id, d.shape)));
                 }
             }
+        }
+    }
+
+    /// Route every single-selection write through here so `sel` and
+    /// `sel_set` stay consistent: the primary is always a member, and a
+    /// cleared selection clears the set. Multi-selection paths manage
+    /// `sel_set` directly and then set `sel`.
+    fn set_selection(&mut self, sel: Option<(i64, i64)>) {
+        self.sel = sel;
+        match sel {
+            Some(entry) if !self.sel_set.contains(&entry) => self.sel_set = vec![entry],
+            Some(_) => {}
+            None => self.sel_set.clear(),
         }
     }
 
@@ -725,7 +738,7 @@ impl App {
             self.stencil.armed = None;
             self.ctx_menu = None;
             if let Some(nid) = new_id {
-                self.sel = Some((page_id, nid));
+                self.set_selection(Some((page_id, nid)));
                 self.sel_set = vec![(page_id, nid)];
             }
             return;
@@ -774,11 +787,11 @@ impl App {
                         }
                     }
                 }
-                self.sel = Some((page_id, shape_id));
+                self.set_selection(Some((page_id, shape_id)));
                 self.status = format!("selected shape {shape_id}");
             }
             None => {
-                self.sel = None;
+                self.set_selection(None);
             }
         }
     }
@@ -1279,7 +1292,7 @@ impl App {
                     let resp = ui.add(b).on_hover_text(format!("page {} (id {})", i + 1, _id));
                     if resp.clicked() {
                         self.page_idx = i;
-                        self.sel = None;
+                        self.set_selection(None);
                         self.view.fit_pending = true;
                     }
                 }
@@ -1576,7 +1589,7 @@ impl App {
             match self.shape_hit(pos) {
                 Some(shape_id) => {
                     if let Some(p) = self.page_id() {
-                        self.sel = Some((p, shape_id));
+                        self.set_selection(Some((p, shape_id)));
                     }
                     let anchor = ui
                         .ctx()
@@ -1830,7 +1843,7 @@ impl App {
                 self.copy_selection();
                 if a == Act::Cut {
                     self.apply(RemoveShape::new(page_id, shape_id));
-                    self.sel = None;
+                    self.set_selection(None);
                 }
             }
             Act::Paste => {
@@ -1843,7 +1856,7 @@ impl App {
                     .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
                 self.apply(DuplicateShape::new(page_id, shape_id, (0.25, -0.25)));
                 if let Some(nid) = new_id {
-                    self.sel = Some((page_id, nid));
+                    self.set_selection(Some((page_id, nid)));
                 }
             }
             Act::Delete => self.delete_selection(),
@@ -1902,7 +1915,7 @@ impl App {
         }
         let new_id = pasted.id;
         self.apply(AddShape { page: page_id, parent: None, shape: pasted });
-        self.sel = Some((page_id, new_id));
+        self.set_selection(Some((page_id, new_id)));
     }
 
     /// One resolved numeric cell of a shape on the current page.
@@ -2363,7 +2376,7 @@ impl App {
                     self.ed = None;
                     self.path = PathBuf::new();
                     self.dirty = false;
-                    self.sel = None;
+                    self.set_selection(None);
                     self.stencil = Stencil::default();
                     self.tex.clear();
                     self.status = "document closed".into();
