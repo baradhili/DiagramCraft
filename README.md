@@ -1,7 +1,6 @@
 # DiagramCraft
 
-A Linux-native reimplementation of the Visio 2016 drawing experience in
-Rust: read and write `.vsdx`/`.vstx`/`.vssx` packages losslessly, render
+A Linux/Windows/MacOS-native reimplementation of the Visio 2016 drawing experience in Rust: read and write `.vsdx`/`.vstx`/`.vssx` packages losslessly, render
 them to SVG/PNG, edit them through an undoable command layer, and work in
 a native desktop GUI with the Visio shell (ribbon, stencils, ShapeSheet).
 
