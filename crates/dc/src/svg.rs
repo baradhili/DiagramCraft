@@ -988,7 +988,10 @@ fn render_geometry(
             }
             "ArcTo" => {
                 // Circular arc: |A| = sagitta (height of arc above the
-                // chord); A > 0 bows to the left of the travel direction.
+                // chord). Positive A bulges RIGHT of the travel direction —
+                // verified against the Process master's rounded rect, which
+                // traverses CCW (y-up, interior on the left) with positive-A
+                // corner arcs bulging outward.
                 let h = row_num(row, "A").unwrap_or(0.0);
                 let (sx, sy) = cur;
                 let chord = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
@@ -998,8 +1001,8 @@ fn render_geometry(
                     // On-arc point from the sagitta.
                     let mid = ((sx + x) / 2.0, (sy + y) / 2.0);
                     let dir = ((x - sx) / chord, (y - sy) / chord);
-                    let left = (-dir.1, dir.0); // rot90: left of travel
-                    let m = (mid.0 + h * left.0, mid.1 + h * left.1);
+                    let right = (dir.1, -dir.0); // rot90 CW: right of travel
+                    let m = (mid.0 + h * right.0, mid.1 + h * right.1);
                     let radius = (chord.powi(2) + 4.0 * h * h) / (8.0 * h.abs());
                     let large = h.abs() > chord / 2.0;
                     // cross > 0 (y-up frame) = CCW; path frame is mirrored → sweep 0.
