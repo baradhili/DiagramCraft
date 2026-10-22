@@ -2223,8 +2223,12 @@ impl App {
         }
         let popup = menu.show(|ui| {
             ui.set_min_width(232.0);
+            // Menu colors resolve from the live visuals via the theme
+            // mapping, so the popup follows a light/dark switch (GitHub
+            // #48) instead of assuming Visio-light surroundings.
+            let tokens = theme::menu_tokens(ui.visuals());
             ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-            ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(206, 227, 212);
+            ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
             for (menu, child) in &actions {
@@ -3046,6 +3050,8 @@ impl App {
 /// One context-menu row: full-width flat button, optional MDI icon on the
 /// left, a gray shortcut hint after the label (Visio shows it right-
 /// aligned; a single text run keeps the row one accessible widget).
+/// Label and hint colors come from the theme mapping over the live
+/// visuals, so rows stay readable in dark mode (GitHub #48).
 fn ctx_item(
     ui: &mut Ui,
     icon: Option<crate::ribbon::Icon>,
@@ -3053,6 +3059,7 @@ fn ctx_item(
     hint: &str,
     enabled: bool,
 ) -> bool {
+    let tokens = theme::menu_tokens(ui.visuals());
     let mut job = egui::text::LayoutJob::default();
     let text = if icon.is_some() {
         format!("      {label}")
@@ -3065,9 +3072,9 @@ fn ctx_item(
         egui::TextFormat::simple(
             egui::FontId::proportional(12.5),
             if enabled {
-                Color32::from_rgb(30, 30, 30)
+                tokens.label
             } else {
-                Color32::from_gray(160)
+                tokens.label_disabled
             },
         ),
     );
@@ -3075,7 +3082,7 @@ fn ctx_item(
         job.append(
             &format!("   {hint}"),
             0.0,
-            egui::TextFormat::simple(egui::FontId::proportional(11.0), Color32::from_gray(140)),
+            egui::TextFormat::simple(egui::FontId::proportional(11.0), tokens.hint),
         );
     }
     let resp = ui.add_enabled(

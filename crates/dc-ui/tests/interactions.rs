@@ -536,3 +536,67 @@ fn double_click_on_empty_page_is_a_no_op() {
     );
     assert_eq!(h.state().debug_shape_count(), 1);
 }
+
+/// GitHub #48: the context menu must derive every color it paints from
+/// the theme mapping over the live visuals — hover fill, label,
+/// disabled label, shortcut hint (separators ride the visuals' own
+/// noninteractive stroke) — so the menu stays readable when the shell
+/// runs under dark visuals, not just the installed Visio-light ones.
+fn open_menu_harness(dark: bool) -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        // kittest defaults to dark visuals and `theme::install` only
+        // fills the Light style slot, so the mode must be picked here:
+        // Light really runs the installed Visio-light style, Dark runs
+        // egui's defaults — the issue's "one theme switch away".
+        .with_theme(if dark {
+            egui::Theme::Dark
+        } else {
+            egui::Theme::Light
+        })
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    // High on the canvas so the tall menu fits beside the shape.
+    let to = egui::pos2(canvas.center().x, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    assert!(
+        h.state().debug_ctx_menu_rect().is_some(),
+        "context menu opened{}",
+        if dark { " (dark visuals)" } else { "" }
+    );
+    h
+}
+
+fn ctx_menu_snapshot(h: &mut Harness<'_, App>, name: &str) {
+    // Tolerances mirror shell.rs: anti-aliasing differs per GPU/driver.
+    h.snapshot_options(
+        name,
+        &egui_kittest::SnapshotOptions::new()
+            .threshold(3.0)
+            .max_failed_pixels(10_000),
+    );
+}
+
+#[test]
+fn context_menu_snapshot_light_visuals() {
+    let mut h = open_menu_harness(false);
+    ctx_menu_snapshot(&mut h, "dc_ui_ctx_menu_light");
+}
+
+#[test]
+fn context_menu_snapshot_dark_visuals() {
+    let mut h = open_menu_harness(true);
+    ctx_menu_snapshot(&mut h, "dc_ui_ctx_menu_dark");
+}

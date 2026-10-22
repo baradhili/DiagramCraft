@@ -60,3 +60,82 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.button_padding = egui::vec2(6.0, 3.0);
     ctx.set_style_of(egui::Theme::Light, style);
 }
+
+/// Context-menu color tokens, resolved from the active visuals so the
+/// popup follows a theme switch instead of assuming Visio-light
+/// surroundings (GitHub #48). Light values are the observed Visio 2016
+/// menu; dark values are our counterparts in the same green family,
+/// chosen here once — never at the call sites that paint the menu.
+pub struct MenuTokens {
+    /// Hovered-row fill (Visio light green; muted deep green in dark).
+    pub hover_fill: Color32,
+    /// Enabled-row label.
+    pub label: Color32,
+    /// Disabled-row label (the "v0.5" placeholders).
+    pub label_disabled: Color32,
+    /// Shortcut-hint text ("Ctrl+X", "Del").
+    pub hint: Color32,
+}
+
+/// Resolve menu tokens for the active visuals. Separators already ride
+/// `visuals.widgets.noninteractive.bg_stroke` and need no token.
+pub fn menu_tokens(v: &Visuals) -> MenuTokens {
+    if v.dark_mode {
+        MenuTokens {
+            hover_fill: Color32::from_rgb(43, 74, 56),
+            label: v.text_color(),
+            label_disabled: Color32::from_gray(110),
+            hint: Color32::from_gray(130),
+        }
+    } else {
+        MenuTokens {
+            hover_fill: Color32::from_rgb(206, 227, 212),
+            label: Color32::from_rgb(30, 30, 30),
+            label_disabled: Color32::from_gray(160),
+            hint: Color32::from_gray(140),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lum(c: Color32) -> f32 {
+        0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32
+    }
+
+    /// GitHub #48: light tokens pin the observed Visio 2016 menu, dark
+    /// tokens must be readable counterparts — brighter labels than the
+    /// hover fill, a hover fill that stands off the dark panel, and a
+    /// dimmer disabled label than an enabled one.
+    #[test]
+    fn menu_tokens_follow_the_active_visuals() {
+        let light = menu_tokens(&Visuals::light());
+        assert_eq!(light.hover_fill, Color32::from_rgb(206, 227, 212));
+        assert_eq!(light.label, Color32::from_rgb(30, 30, 30));
+        assert_eq!(light.label_disabled, Color32::from_gray(160));
+        assert_eq!(light.hint, Color32::from_gray(140));
+
+        let dark_vis = Visuals::dark();
+        let dark = menu_tokens(&dark_vis);
+        assert_ne!(
+            dark.hover_fill, light.hover_fill,
+            "hover has a dark counterpart"
+        );
+        assert!(
+            lum(dark.hover_fill) > lum(dark_vis.window_fill) + 15.0,
+            "dark hover {:?} must stand off the dark panel {:?}",
+            dark.hover_fill,
+            dark_vis.window_fill
+        );
+        assert!(
+            lum(dark.label) > lum(dark.hover_fill),
+            "dark labels must read on the dark hover fill"
+        );
+        assert!(
+            lum(dark.label_disabled) < lum(dark.label),
+            "disabled rows dim below enabled rows"
+        );
+    }
+}
