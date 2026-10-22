@@ -42,6 +42,15 @@ pub const RULER_TEXT: Color32 = Color32::from_rgb(90, 90, 90);
 /// Page-tab strip.
 pub const TABS_BG: Color32 = Color32::from_rgb(225, 225, 225);
 pub const TAB_ACTIVE: Color32 = Color32::from_rgb(255, 255, 255);
+/// Backstage (File screen) rail: the selected destination's band and
+/// dimmed command text on the green rail (Visio 2010 three-band rail,
+/// GitHub #55).
+pub const RAIL_SELECTED: Color32 = Color32::from_rgb(44, 145, 91);
+pub const RAIL_DISABLED: Color32 = Color32::from_gray(160);
+/// Backstage page headline text.
+pub const BACK_TITLE: Color32 = Color32::from_rgb(50, 50, 50);
+/// Backstage gallery card fill (edge rides RIBBON_GROUP, hover RIBBON_BG).
+pub const CARD_BG: Color32 = Color32::WHITE;
 
 /// Apply the Office-2016-ish light visuals.
 pub fn install(ctx: &egui::Context) {

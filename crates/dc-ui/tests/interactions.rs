@@ -599,3 +599,109 @@ fn context_menu_snapshot_dark_visuals() {
     let mut h = open_menu_harness(true);
     ctx_menu_snapshot(&mut h, "dc_ui_ctx_menu_dark");
 }
+
+/// Harness for the File backstage (#55): same shell builder, app state
+/// supplied by the caller.
+fn backstage_harness(app: App) -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    h.run();
+    h
+}
+
+/// #55 landing rule: File with a document opens Info; without one (and
+/// no recents) it opens the Recent page's welcome state.
+#[test]
+fn backstage_landing_rule() {
+    use egui_kittest::kittest::Queryable;
+    // with_blank carries a document (starter masters in the pane).
+    let mut with_doc = App::with_blank();
+    with_doc.open_backstage_for_test();
+    let mut h = backstage_harness(with_doc);
+    assert!(
+        h.query_all_by_label_contains("Protect Drawing").count() > 0,
+        "with a document the backstage lands on Info"
+    );
+
+    let mut no_doc = App::with_doc_opt(None);
+    no_doc.open_backstage_for_test();
+    let mut h = backstage_harness(no_doc);
+    assert!(
+        h.query_all_by_label_contains("New blank drawing").count() > 0,
+        "no document + no recents shows the Recent welcome state"
+    );
+    assert_eq!(
+        h.query_all_by_label_contains("Protect Drawing").count(),
+        0,
+        "Info-only content must not show without a document"
+    );
+}
+
+/// #55: Esc always returns from the File screen to the document.
+#[test]
+fn backstage_esc_returns_to_document() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    let mut h = backstage_harness(app);
+    assert!(h.state().debug_backstage(), "backstage is open");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(
+        !h.state().debug_backstage(),
+        "Esc closed the backstage back to the document"
+    );
+    assert!(
+        h.query_all_by_label_contains("Developer").count() > 0,
+        "the shell (tab strip) is back after Esc"
+    );
+}
+
+/// #55: the New page's search filters the template gallery instantly
+/// (elementary/Apple: results as you type).
+#[test]
+fn backstage_search_filters_templates() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("new");
+    let mut h = backstage_harness(app);
+    assert!(
+        h.query_all_by_label_contains("Network Diagram").count() > 0,
+        "gallery shows the placeholder templates unfiltered"
+    );
+
+    let edit = h.get_by_role(egui::Role::TextInput);
+    edit.set_text_value_accesskit("flow");
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Flowchart").count() > 0,
+        "flowchart survives the “flow” query"
+    );
+    assert_eq!(
+        h.query_all_by_label_contains("Network Diagram").count(),
+        0,
+        "network is filtered out by “flow”"
+    );
+
+    h.get_by_role(egui::Role::TextInput)
+        .set_text_value_accesskit("net");
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("Flowchart").count(),
+        0,
+        "flowchart is filtered out by “net”"
+    );
+    assert!(
+        h.query_all_by_label_contains("Network Diagram").count() > 0,
+        "network survives the “net” query"
+    );
+}

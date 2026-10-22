@@ -46,9 +46,11 @@ pub struct App {
     dialog: Option<PendingDialog>,
     /// Canvas area from the last frame (stencil drop target).
     canvas_rect: Rect,
-    /// File backstage view is open (green rail, Visio 2016).
+    /// File backstage view is open (green rail; 2010 three-band IA, #55).
     pub backstage: bool,
     backstage_page: BackPage,
+    /// Live query for the backstage New page's template search (#55).
+    backstage_search: String,
     /// "Save changes?" prompt before File → New discards a dirty doc.
     confirm_new: bool,
     /// Continue into a new blank drawing once the save-as dialog
@@ -97,17 +99,37 @@ enum PendingKind {
 /// Backstage rail command.
 #[derive(Clone, Copy)]
 enum BackAction {
-    Close,
     Save,
     SaveAs,
     CloseDoc,
 }
 
-/// Backstage content page.
+/// Backstage content page (GitHub #55: 2010 three-band rail — commands
+/// above, destinations Info/Recent/New/Print/Share/Export, Options
+/// pinned below; 2016 functions folded in).
 #[derive(Clone, Copy, PartialEq)]
 enum BackPage {
+    Info,
+    Recent,
     New,
-    Open,
+    Print,
+    Share,
+    Export,
+}
+
+impl BackPage {
+    /// Rail label for tests (`set_backstage_page_for_test`).
+    fn from_test_name(name: &str) -> Option<BackPage> {
+        Some(match name {
+            "info" => BackPage::Info,
+            "recent" => BackPage::Recent,
+            "new" => BackPage::New,
+            "print" => BackPage::Print,
+            "share" => BackPage::Share,
+            "export" => BackPage::Export,
+            _ => return None,
+        })
+    }
 }
 
 struct DragState {
@@ -154,7 +176,8 @@ impl App {
             dialog: None,
             canvas_rect: Rect::NOTHING,
             backstage: false,
-            backstage_page: BackPage::New,
+            backstage_page: BackPage::Info,
+            backstage_search: String::new(),
             confirm_new: false,
             new_after_save: false,
             ctx_menu: None,
@@ -1056,6 +1079,13 @@ impl App {
                     );
                     if fresp.clicked() {
                         self.backstage = true;
+                        // #55 landing rule (2010): Info with a document
+                        // open, Recent (welcome state) without one.
+                        self.backstage_page = if self.ed.is_some() {
+                            BackPage::Info
+                        } else {
+                            BackPage::Recent
+                        };
                     }
                     ui.add_space(8.0);
                     for t in TABS {
@@ -2617,6 +2647,31 @@ impl App {
     pub fn set_recent_for_test(&mut self, files: Vec<PathBuf>) {
         self.recent.set_entries_for_test(files);
     }
+    /// kittest: enter the backstage exactly like the File tab does —
+    /// the #55 landing rule included (Info with a document, Recent
+    /// without one).
+    #[doc(hidden)]
+    pub fn open_backstage_for_test(&mut self) {
+        self.backstage = true;
+        self.backstage_page = if self.ed.is_some() {
+            BackPage::Info
+        } else {
+            BackPage::Recent
+        };
+    }
+    /// kittest: jump straight to one backstage page ("info" | "recent"
+    /// | "new" | "print" | "share" | "export").
+    #[doc(hidden)]
+    pub fn set_backstage_page_for_test(&mut self, name: &str) {
+        if let Some(p) = BackPage::from_test_name(name) {
+            self.backstage_page = p;
+        }
+    }
+    /// kittest: whether the File backstage is showing.
+    #[doc(hidden)]
+    pub fn debug_backstage(&self) -> bool {
+        self.backstage
+    }
     /// Current canvas zoom (fit-mode interaction tests).
     #[doc(hidden)]
     pub fn debug_zoom(&self) -> f32 {
@@ -2933,9 +2988,21 @@ impl App {
 
     /// The File backstage (Visio 2016): green command rail on the left,
     /// page content on the right. Replaces the whole shell while open.
+    /// The File backstage (GitHub #55): the 2010 three-band rail —
+    /// commands (Save/Save As/Close) above the destinations (Info,
+    /// Recent, New, Print, Share, Export), Options pinned below — with
+    /// 2016's functions folded in (Share/Export split, Close-document,
+    /// search-first New). Every color rides theme tokens; Esc and the
+    /// back control return to the document.
     fn backstage_view(&mut self, ui: &mut Ui) {
         let mut close_backstage = false;
         let mut action: Option<BackAction> = None;
+        // Esc always returns to the document — unless the unsaved-
+        // changes prompt owns the screen.
+        if !self.confirm_new && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_backstage = true;
+        }
+        let has_doc = self.ed.is_some();
         egui::Panel::left("backstage_rail")
             .frame(
                 egui::Frame::new()
@@ -2957,21 +3024,22 @@ impl App {
                         close_backstage = true;
                     }
                     ui.add_space(10.0);
+                    // One row builder for both bands: a command runs an
+                    // action immediately; a destination switches pages.
                     let mut rail = |ui: &mut Ui,
                                     label: &str,
                                     enabled: bool,
                                     page: Option<BackPage>,
-                                    act: Option<BackAction>|
-                     -> egui::Response {
-                        let selected = page == Some(self.backstage_page) && act.is_none();
+                                    act: Option<BackAction>| {
+                        let selected = page.is_some() && page == Some(self.backstage_page);
                         let txt = egui::RichText::new(label).size(14.0).color(if enabled {
                             Color32::WHITE
                         } else {
-                            Color32::from_gray(160)
+                            theme::RAIL_DISABLED
                         });
                         let mut b = egui::Button::new(txt).frame(false);
                         if selected {
-                            b = b.fill(Color32::from_rgb(0x2c, 0x91, 0x5b));
+                            b = b.fill(theme::RAIL_SELECTED);
                         }
                         let resp = ui.add_enabled(enabled, b);
                         if resp.clicked() {
@@ -2982,101 +3050,220 @@ impl App {
                         }
                         resp
                     };
-                    rail(ui, "Home", true, None, Some(BackAction::Close));
+                    // Band 1 — the command cluster above the destinations
+                    // (2010's separation of actions from navigation, the
+                    // structure Apple's and Material's rail guidance ask
+                    // for).
+                    rail(ui, "Save", has_doc, None, Some(BackAction::Save));
+                    rail(ui, "Save As", has_doc, None, Some(BackAction::SaveAs));
+                    rail(ui, "Close", has_doc, None, Some(BackAction::CloseDoc));
+                    // Band divider.
+                    let (sep, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter().hline(
+                        sep.left()..=sep.right(),
+                        sep.center().y,
+                        Stroke::new(1.0, Color32::from_white_alpha(60)),
+                    );
+                    ui.add_space(4.0);
+                    // Band 2 — destinations (six, inside M3's 3–7 window;
+                    // 2016's Share/Export split replaces 2010's
+                    // "Save & Send").
+                    rail(ui, "Info", true, Some(BackPage::Info), None);
+                    rail(ui, "Recent", true, Some(BackPage::Recent), None);
                     rail(ui, "New", true, Some(BackPage::New), None);
-                    rail(ui, "Open", true, Some(BackPage::Open), None);
-                    rail(ui, "Save", self.ed.is_some(), None, Some(BackAction::Save));
-                    rail(
-                        ui,
-                        "Save As",
-                        self.ed.is_some(),
-                        None,
-                        Some(BackAction::SaveAs),
-                    );
-                    rail(ui, "Print", false, None, None).on_hover_text("Printing arrives with M6");
-                    rail(ui, "Share", false, None, None).on_hover_text("Sharing arrives with M6");
-                    rail(ui, "Export", false, None, None)
-                        .on_hover_text("Export filters arrive with M6");
-                    rail(
-                        ui,
-                        "Close",
-                        self.ed.is_some(),
-                        None,
-                        Some(BackAction::CloseDoc),
-                    );
+                    rail(ui, "Print", true, Some(BackPage::Print), None)
+                        .on_hover_text("Print the current drawing");
+                    rail(ui, "Share", true, Some(BackPage::Share), None)
+                        .on_hover_text("Share a copy of the drawing");
+                    rail(ui, "Export", true, Some(BackPage::Export), None)
+                        .on_hover_text("Save the drawing in another format");
+                });
+                // Band 3 — pinned footer, non-critical items only (Apple:
+                // "avoid putting critical information or actions at the
+                // bottom of a sidebar").
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(
+                            egui::RichText::new("Options")
+                                .size(14.0)
+                                .color(theme::RAIL_DISABLED),
+                        )
+                        .frame(false),
+                    )
+                    .on_disabled_hover_text("Options arrive with a later milestone");
                 });
             });
-        // Page content.
+        // Page content (the 2010 white backstage surface).
         let mut open_browse = false;
         let mut open_recent: Option<PathBuf> = None;
         let mut new_blank = false;
         let page = self.backstage_page;
-        if page == BackPage::Open {
-            ui.vertical(|ui| {
-                ui.add_space(24.0);
-                ui.add_space(24.0);
-                ui.heading("Open");
-                ui.add_space(8.0);
-                if ui.button("Browse for a Visio file...").clicked() {
-                    open_browse = true;
-                }
-                ui.add_space(16.0);
-                ui.heading("Recent");
-                ui.add_space(6.0);
-                if let Some(p) = self.recent_list_ui(ui) {
-                    open_recent = Some(p);
-                }
-            });
-        } else {
-            ui.vertical(|ui| {
-                ui.add_space(24.0);
-                ui.add_space(24.0);
-                ui.heading("New");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    let (r, resp) = ui.allocate_exact_size(Vec2::new(120.0, 120.0), Sense::click());
-                    let hot = resp.hovered();
-                    ui.painter().rect_filled(
-                        r,
-                        3.0,
-                        if hot {
-                            theme::RIBBON_BG
-                        } else {
-                            Color32::WHITE
-                        },
-                    );
-                    ui.painter().rect_stroke(
-                        r,
-                        3.0,
-                        Stroke::new(1.0, theme::RIBBON_GROUP),
-                        egui::StrokeKind::Middle,
-                    );
-                    Icon::New.paint(
-                        ui,
-                        Rect::from_center_size(r.center(), Vec2::splat(56.0)),
-                        true,
-                    );
-                    let gal = ui.painter().layout_no_wrap(
-                        "Blank drawing".to_string(),
-                        egui::FontId::proportional(12.0),
-                        Color32::from_rgb(50, 50, 50),
-                    );
-                    ui.painter().galley(
-                        Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 26.0),
-                        gal,
-                        Color32::WHITE,
-                    );
-                    if resp.clicked() {
-                        new_blank = true;
-                    }
-                });
+        let mut search_text = self.backstage_search.clone();
+        egui::Frame::new()
+            .fill(theme::RIBBON_CONTENT)
+            .inner_margin(egui::Margin::same(28))
+            .show(ui, |ui| {
                 ui.add_space(12.0);
-                ui.weak("Templates (.vstx) arrive with the M5 template flow.");
+                match page {
+                    BackPage::Info => {
+                        if has_doc {
+                            let name = self
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "Untitled".into());
+                            let dir = self
+                                .path
+                                .parent()
+                                .map(|p| p.display().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "Not saved yet".into());
+                            let status = if self.dirty {
+                                "Unsaved changes"
+                            } else {
+                                "All changes saved"
+                            };
+                            ui.heading(&name);
+                            ui.add_space(8.0);
+                            egui::Grid::new("backstage_info")
+                                .num_columns(2)
+                                .spacing(Vec2::new(18.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.weak("Name");
+                                    ui.label(&name);
+                                    ui.end_row();
+                                    ui.weak("Location");
+                                    ui.label(&dir);
+                                    ui.end_row();
+                                    ui.weak("Status");
+                                    ui.label(status);
+                                    ui.end_row();
+                                });
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(false, egui::Button::new("Protect Drawing…"))
+                                    .on_disabled_hover_text(
+                                        "Document protection arrives with a later milestone",
+                                    );
+                                ui.add_enabled(false, egui::Button::new("Inspect Drawing…"))
+                                    .on_disabled_hover_text(
+                                        "Document inspection arrives with a later milestone",
+                                    );
+                            });
+                        } else {
+                            ui.heading("No document open");
+                            ui.add_space(8.0);
+                            if ui.button("Open a file…").clicked() {
+                                open_browse = true;
+                            }
+                        }
+                    }
+                    BackPage::Recent => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Recent");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                if ui.button("Browse…").clicked() {
+                                    open_browse = true;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        if self.recent.entries().is_empty() {
+                            // elementary Welcome Screen: context plus
+                            // named actions instead of an empty list.
+                            ui.weak("Drawings you open will appear here.");
+                            ui.add_space(12.0);
+                            if welcome_action(
+                                ui,
+                                Icon::New,
+                                "New blank drawing",
+                                "Start an empty drawing on a letter-size page.",
+                            ) {
+                                new_blank = true;
+                            }
+                            if welcome_action(
+                                ui,
+                                Icon::Open,
+                                "Open a file",
+                                "Browse for an existing Visio package.",
+                            ) {
+                                open_browse = true;
+                            }
+                        } else if let Some(p) = self.recent_list_ui(ui) {
+                            open_recent = Some(p);
+                        }
+                    }
+                    BackPage::New => {
+                        ui.horizontal(|ui| {
+                            ui.heading("New");
+                            // 2016's search-first New page; elementary/
+                            // Apple: trailing toolbar position, instant
+                            // type-to-filter.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut search_text)
+                                        .hint_text("Search Templates")
+                                        .desired_width(200.0),
+                                );
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.weak("Suggested: flowchart · network · floor plan");
+                        ui.add_space(12.0);
+                        let q = search_text.trim().to_lowercase();
+                        let mut card_click = false;
+                        ui.horizontal_wrapped(|ui| {
+                            if backstage_card(ui, Icon::New, "Blank drawing", q.is_empty()) {
+                                card_click = true;
+                            }
+                            for (name, icon) in NEW_TEMPLATE_ENTRIES {
+                                if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                                    continue;
+                                }
+                                backstage_card(ui, *icon, name, false);
+                            }
+                        });
+                        if card_click {
+                            new_blank = true;
+                        }
+                        if !q.is_empty()
+                            && !"blank drawing".contains(&q)
+                            && NEW_TEMPLATE_ENTRIES
+                                .iter()
+                                .all(|(n, _)| !n.to_lowercase().contains(&q))
+                        {
+                            ui.add_space(8.0);
+                            ui.weak(format!("No templates match “{}”.", search_text.trim()));
+                        }
+                    }
+                    BackPage::Print => backstage_stub(
+                        ui,
+                        "Print",
+                        "Send the drawing to a printer or save it as a PDF.",
+                        "Print…",
+                        "Printing arrives with M6",
+                    ),
+                    BackPage::Share => backstage_stub(
+                        ui,
+                        "Share",
+                        "Share a copy of the drawing with other people.",
+                        "Share a Copy…",
+                        "Sharing arrives with M6",
+                    ),
+                    BackPage::Export => backstage_stub(
+                        ui,
+                        "Export",
+                        "Save the drawing in another format.",
+                        "Export…",
+                        "Export filters arrive with M6",
+                    ),
+                }
             });
-        }
+        self.backstage_search = search_text;
         if let Some(a) = action {
             match a {
-                BackAction::Close => close_backstage = true,
                 BackAction::Save => {
                     self.do_save(false);
                     close_backstage = true;
@@ -3115,6 +3302,99 @@ impl App {
             self.backstage = false;
         }
     }
+}
+
+/// Placeholder template names on the backstage New page (generic
+/// diagram-type names, ours — template bodies arrive with the M5 flow).
+const NEW_TEMPLATE_ENTRIES: &[(&str, Icon)] = &[
+    ("Flowchart", Icon::Swimlane),
+    ("Cross-functional", Icon::Container),
+    ("Network Diagram", Icon::Link),
+    ("Org Chart", Icon::Group),
+    ("Floor Plan", Icon::Grid),
+];
+
+/// One New-page gallery card: icon over the caption, 2010 tile metrics.
+/// The caption is a real Label so the card stays in the accessibility
+/// tree (kittest queries it); all colors ride theme tokens (#55).
+fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        let (tile, _) = ui.allocate_exact_size(Vec2::new(120.0, 96.0), Sense::hover());
+        ui.painter().rect_filled(tile, 3.0, theme::CARD_BG);
+        ui.painter().rect_stroke(
+            tile,
+            3.0,
+            Stroke::new(1.0, theme::RIBBON_GROUP),
+            egui::StrokeKind::Middle,
+        );
+        icon.paint(
+            ui,
+            Rect::from_center_size(tile.center(), Vec2::splat(44.0)),
+            enabled,
+        );
+        let tip = if enabled {
+            "Start an empty drawing"
+        } else {
+            "Template gallery arrives with the M5 template flow"
+        };
+        let caption = ui
+            .add(
+                egui::Label::new(
+                    egui::RichText::new(name)
+                        .size(12.0)
+                        .color(theme::BACK_TITLE),
+                )
+                .selectable(false),
+            )
+            .on_hover_text(tip);
+        let card = tile.union(caption.rect);
+        let resp = ui.interact(card, ui.id().with(("backstage_card", name)), Sense::click());
+        if resp.hovered() && enabled {
+            ui.painter().rect_stroke(
+                card.shrink(1.0),
+                3.0,
+                Stroke::new(1.5, theme::RIBBON_HOVER_EDGE),
+                egui::StrokeKind::Middle,
+            );
+        }
+        enabled && resp.clicked()
+    })
+    .inner
+}
+
+/// elementary-style welcome action: icon beside a bold title with a
+/// one-line description — one button keeps it one accessible widget.
+fn welcome_action(ui: &mut Ui, icon: Icon, title: &str, desc: &str) -> bool {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &format!("    {title}"),
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(13.0), theme::BACK_TITLE),
+    );
+    job.append(
+        &format!("\n    {desc}"),
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(10.5), theme::RIBBON_LABEL),
+    );
+    let resp = ui.add(egui::Button::new(job).min_size(Vec2::new(280.0, 44.0)));
+    let r = resp.rect;
+    icon.paint(
+        ui,
+        Rect::from_center_size(Pos2::new(r.left() + 16.0, r.center().y), Vec2::splat(20.0)),
+        true,
+    );
+    resp.clicked()
+}
+
+/// A labelled placeholder page: context sentence plus a clearly-named
+/// disabled action — no dead ends (elementary), no vague labels.
+fn backstage_stub(ui: &mut Ui, title: &str, context: &str, action: &str, tip: &str) {
+    ui.heading(title);
+    ui.add_space(6.0);
+    ui.weak(context);
+    ui.add_space(10.0);
+    ui.add_enabled(false, egui::Button::new(action))
+        .on_disabled_hover_text(tip);
 }
 
 /// Encode an egui ColorImage as PNG (via the raster stack we already ship).

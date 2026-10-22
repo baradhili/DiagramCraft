@@ -168,8 +168,31 @@ fn shell_snapshot_selected_shapesheet() {
 fn shell_snapshot_backstage() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::with_doc(&fixture(tmp.path()));
-    app.backstage = true;
+    // The #55 landing rule: with a document the File screen opens on
+    // Info (2010 three-band rail: commands, destinations, Options).
+    app.open_backstage_for_test();
     run_shell("dc_ui_shell_backstage", app);
+}
+
+#[test]
+fn shell_snapshot_backstage_recent() {
+    // No document → the Recent page, with its recents list.
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let ghost = tmp.path().join("moved-away.vsdx");
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc, ghost]);
+    app.open_backstage_for_test();
+    run_shell("dc_ui_shell_backstage_recent", app);
+}
+
+#[test]
+fn shell_snapshot_backstage_new() {
+    // The search-first New page (gallery + search box, #55).
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("new");
+    run_shell("dc_ui_shell_backstage_new", app);
 }
 
 #[test]
