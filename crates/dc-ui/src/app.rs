@@ -986,7 +986,7 @@ impl App {
             )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.set_height(26.0);
+                    ui.set_height(30.0);
                     qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
                     qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
                     qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
@@ -1017,31 +1017,52 @@ impl App {
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {
-        // Visio 2016: File is a solid green block slightly taller than
-        // the strip; other tabs are plain text with an accent underline
-        // on the active one.
+        // Visio 2016 "Colorful" shell: a white strip where the File tab
+        // is a green block running flush up into the green title band
+        // (square top, rounded bottom corners — taller than the text
+        // tabs), the active tab carries the accent underline, and
+        // Office's "Tell me" search box sits at the strip's right end.
+        const STRIP_H: f32 = 28.0;
         egui::Panel::top("tab_strip")
-            .frame(egui::Frame::new().fill(theme::RIBBON_BG))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RIBBON_CONTENT)
+                    .inner_margin(egui::Margin::same(0)),
+            )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(6.0);
+                ui.horizontal_centered(|ui| {
+                    ui.set_min_height(STRIP_H);
+                    // File: a green block spanning the full strip height
+                    // — the green title band above makes it read as one
+                    // tall tab, like the Office File tab.
+                    let (fr, fresp) =
+                        ui.allocate_exact_size(Vec2::new(54.0, STRIP_H), Sense::click());
+                    ui.painter().rect_filled(
+                        fr,
+                        egui::CornerRadius {
+                            nw: 0,
+                            ne: 0,
+                            se: 2,
+                            sw: 2,
+                        },
+                        theme::ACCENT,
+                    );
+                    ui.painter().text(
+                        fr.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "File",
+                        egui::FontId::proportional(12.5),
+                        Color32::WHITE,
+                    );
+                    if fresp.clicked() {
+                        self.backstage = true;
+                    }
+                    ui.add_space(8.0);
                     for t in TABS {
-                        let active = *t == self.tab;
                         if *t == Tab::File {
-                            let txt = egui::RichText::new("File")
-                                .size(12.5)
-                                .color(Color32::WHITE)
-                                .strong();
-                            let b = egui::Button::new(txt)
-                                .small()
-                                .fill(theme::ACCENT)
-                                .frame(true);
-                            if ui.add(b).clicked() {
-                                self.backstage = true;
-                            }
-                            ui.add_space(8.0);
                             continue;
                         }
+                        let active = *t == self.tab;
                         let txt = egui::RichText::new(t_title(*t))
                             .size(12.0)
                             .color(if active {
@@ -1064,6 +1085,46 @@ impl App {
                         }
                         ui.add_space(6.0);
                     }
+                    // Office's "Tell me what you want to do" search box.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let (pr, presp) =
+                            ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
+                        let hot = presp.hovered();
+                        ui.painter().rect_filled(pr, 2, Color32::WHITE);
+                        ui.painter().rect_stroke(
+                            pr,
+                            2,
+                            Stroke::new(
+                                1.0,
+                                if hot {
+                                    theme::RULER_TICK
+                                } else {
+                                    theme::RIBBON_EDGE
+                                },
+                            ),
+                            egui::StrokeKind::Middle,
+                        );
+                        Icon::TellMe.paint(
+                            ui,
+                            Rect::from_min_size(
+                                pr.left_top() + Vec2::new(5.0, 3.0),
+                                Vec2::splat(14.0),
+                            ),
+                            true,
+                        );
+                        ui.painter().text(
+                            Pos2::new(pr.left() + 24.0, pr.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "Tell me what you want to do",
+                            egui::FontId::proportional(11.0),
+                            Color32::from_rgb(130, 130, 130),
+                        );
+                        let presp = presp.on_hover_text("Tell Me — planned for a later milestone");
+                        if presp.clicked() {
+                            self.status = "Tell Me search arrives with a later milestone".into();
+                        }
+                    });
                 });
             });
     }
@@ -1154,7 +1215,8 @@ impl App {
                                 .tip("Text color — planned"),
                         ],
                     ])],
-                ),
+                )
+                .with_launcher(),
                 crate::ribbon::Group::new(
                     "Paragraph",
                     vec![grid(vec![
@@ -1187,7 +1249,8 @@ impl App {
                                 .tip("Increase indent — planned"),
                         ],
                     ])],
-                ),
+                )
+                .with_launcher(),
                 crate::ribbon::Group::new(
                     "Shape Styles",
                     vec![
@@ -2748,10 +2811,15 @@ impl App {
         egui::Panel::top("ribbon_content")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::RIBBON_BG)
+                    .fill(theme::RIBBON_CONTENT)
                     .inner_margin(egui::Margin::symmetric(4, 3)),
             )
             .show(ui, |ui| self.ribbon_content(ui));
+        // Visio: a hairline rule closes the ribbon off from the canvas.
+        egui::Panel::top("ribbon_rule")
+            .exact_size(1.0)
+            .frame(egui::Frame::new().fill(theme::RIBBON_EDGE))
+            .show(ui, |_| {});
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()

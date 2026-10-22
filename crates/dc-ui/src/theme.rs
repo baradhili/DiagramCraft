@@ -9,6 +9,17 @@ pub const ACCENT: Color32 = Color32::from_rgb(33, 115, 70);
 pub const ACCENT_DARK: Color32 = Color32::from_rgb(23, 84, 51);
 /// Ribbon content background (Office 2016 light shell).
 pub const RIBBON_BG: Color32 = Color32::from_rgb(245, 245, 245);
+/// Tab strip + ribbon content surface (Office 2016 "Colorful": white
+/// under the colored title band, observed in Visio 2016 shots).
+pub const RIBBON_CONTENT: Color32 = Color32::WHITE;
+/// Ribbon hairlines: bottom rule and control borders (#C9C9C9).
+pub const RIBBON_EDGE: Color32 = Color32::from_rgb(201, 201, 201);
+/// Ribbon-button hover chip (Office 2016 flat neutral hover).
+pub const RIBBON_HOVER: Color32 = Color32::from_rgb(232, 232, 232);
+pub const RIBBON_HOVER_EDGE: Color32 = Color32::from_rgb(198, 198, 198);
+/// Ribbon-button toggled/selected chip (slightly deeper than hover).
+pub const RIBBON_SELECTED: Color32 = Color32::from_rgb(220, 220, 220);
+pub const RIBBON_SELECTED_EDGE: Color32 = Color32::from_rgb(178, 178, 178);
 /// Ribbon group label / separators.
 pub const RIBBON_GROUP: Color32 = Color32::from_rgb(214, 214, 214);
 pub const RIBBON_LABEL: Color32 = Color32::from_rgb(95, 95, 95);

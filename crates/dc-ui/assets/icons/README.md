@@ -55,6 +55,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | shapesheet | table-edit |
 | units | swap-horizontal |
 | delete | trash-can-outline |
+| lightbulb | lightbulb (Tell Me search box, 2026-10-22) |
 
 Posters note: MDI is an open-source set, not Microsoft artwork; the
 cleanroom rule (no Microsoft assets) still holds. Fluent UI icons were

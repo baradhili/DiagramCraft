@@ -127,6 +127,7 @@ pub enum Icon {
     ShapeSheet,
     Units,
     Delete,
+    TellMe,
 }
 
 impl Icon {
@@ -195,6 +196,7 @@ impl Icon {
             Icon::ShapeSheet => "shapesheet",
             Icon::Units => "units",
             Icon::Delete => "delete",
+            Icon::TellMe => "lightbulb",
         };
         Some(a)
     }
@@ -231,6 +233,7 @@ impl Icon {
             Icon::Spell | Icon::Refresh | Icon::Check | Icon::New => {
                 Color32::from_rgb(0x2e, 0x8b, 0x57)
             }
+            Icon::TellMe => Color32::from_rgb(0x82, 0x82, 0x82),
             _ => Color32::from_rgb(0x42, 0x42, 0x42),
         }
     }
@@ -1020,6 +1023,14 @@ impl Icon {
                     Stroke::new(2.6, red),
                 );
             }
+            Icon::TellMe => {
+                // bulb outline (fallback only; the MDI glyph is shipped)
+                p.circle_stroke(c + Vec2::new(0.0, -1.5), 5.5, Stroke::new(1.4, gray));
+                p.line_segment(
+                    [c + Vec2::new(-2.0, 5.0), c + Vec2::new(2.0, 5.0)],
+                    Stroke::new(1.4, gray),
+                );
+            }
         }
     }
 }
@@ -1081,24 +1092,21 @@ impl RibbonButton {
     }
 
     fn paint_frame(self, ui: &Ui, r: Rect, resp: &egui::Response) {
-        let hot = resp.hovered() && self.enabled;
-        let bg = if !self.enabled {
-            Color32::TRANSPARENT
-        } else if hot || self.selected {
-            Color32::from_rgb(226, 240, 231)
-        } else {
-            Color32::TRANSPARENT
-        };
-        if bg != Color32::TRANSPARENT {
-            ui.painter().rect_filled(r, 2.0, bg);
-            if self.selected {
-                ui.painter().hline(
-                    r.left()..=r.right(),
-                    r.bottom() - 1.0,
-                    Stroke::new(2.0, theme::ACCENT),
-                );
-            }
+        // Office 2016 states are flat neutral chips with a hairline
+        // border (observed in Visio 2016 shots — no colored fills).
+        if !self.enabled {
+            return;
         }
+        let (fill, edge) = if self.selected {
+            (theme::RIBBON_SELECTED, theme::RIBBON_SELECTED_EDGE)
+        } else if resp.hovered() {
+            (theme::RIBBON_HOVER, theme::RIBBON_HOVER_EDGE)
+        } else {
+            return;
+        };
+        ui.painter().rect_filled(r, 2, fill);
+        ui.painter()
+            .rect_stroke(r, 2, Stroke::new(1.0, edge), egui::StrokeKind::Middle);
     }
 
     fn label_color(self) -> Color32 {
@@ -1111,12 +1119,12 @@ impl RibbonButton {
 
     /// Visio "hero" button: large icon above the label.
     pub fn show_big(self, ui: &mut Ui) -> bool {
-        let size = Vec2::new(56.0, 68.0);
+        let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r =
-            Rect::from_center_size(Pos2::new(r.center().x, r.top() + 20.0), Vec2::splat(30.0));
+            Rect::from_center_size(Pos2::new(r.center().x, r.top() + 21.0), Vec2::splat(32.0));
         if std::env::var_os("DC_UI_DEBUG_ICON").is_some() {
             eprintln!(
                 "DEBUG show_big {} r={:?} icon_r={:?}",
@@ -1130,7 +1138,7 @@ impl RibbonButton {
             self.label_color(),
         );
         ui.painter().galley(
-            Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 16.0),
+            Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 15.0),
             gal,
             egui::Color32::WHITE,
         );
@@ -1215,20 +1223,34 @@ pub fn grid(rows: Vec<Vec<RibbonButton>>) -> Col {
 }
 
 /// One ribbon tab's content row: groups separated by thin vertical
-/// rules, each group's label centered beneath it (Visio 2016 layout).
+/// rules that stop above the label strip, each group's label centered
+/// beneath it (Visio 2016 layout). Only some groups carry the dialog
+/// launcher (Visio: Font, Paragraph — never Clipboard/Arrange).
 pub struct Group {
     pub label: &'static str,
     pub cols: Vec<Col>,
+    /// Whether to draw the group dialog launcher (pop-out arrow).
+    pub launcher: bool,
 }
 
 impl Group {
     pub fn new(label: &'static str, cols: Vec<Col>) -> Self {
-        Group { label, cols }
+        Group {
+            label,
+            cols,
+            launcher: false,
+        }
+    }
+    /// Mark this group as having a dialog launcher (Visio's Font and
+    /// Paragraph groups open Format dialogs from theirs).
+    pub fn with_launcher(mut self) -> Self {
+        self.launcher = true;
+        self
     }
 }
 
-const CONTENT_H: f32 = 66.0;
-const LABEL_H: f32 = 16.0;
+const CONTENT_H: f32 = 74.0;
+const LABEL_H: f32 = 18.0;
 
 fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
     match col {
@@ -1274,7 +1296,7 @@ pub fn content_row(
     on_action: &mut dyn FnMut(Action),
     on_launcher: &mut dyn FnMut(&'static str),
 ) {
-    let mut spans: Vec<(&'static str, f32, f32)> = Vec::new();
+    let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
     ui.vertical(|ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -1290,14 +1312,11 @@ pub fn content_row(
                     }
                 });
                 let x1 = ui.next_widget_position().x - ui.spacing().item_spacing.x;
-                spans.push((g.label, x0, x1));
+                spans.push((g.label, x0, x1, g.launcher));
                 if i + 1 < groups.len() {
-                    // Visio: the separator runs through the label strip
-                    // to the ribbon's bottom edge.
-                    let (sr, _) = ui.allocate_exact_size(
-                        Vec2::new(1.0, CONTENT_H + LABEL_H - 2.0),
-                        Sense::hover(),
-                    );
+                    // Visio: the separator spans the content row and
+                    // stops above the group-label strip.
+                    let (sr, _) = ui.allocate_exact_size(Vec2::new(1.0, CONTENT_H), Sense::hover());
                     ui.painter().vline(
                         sr.center().x,
                         sr.top()..=sr.bottom(),
@@ -1309,22 +1328,30 @@ pub fn content_row(
         });
         let (strip, _) =
             ui.allocate_exact_size(Vec2::new(ui.available_width(), LABEL_H), Sense::hover());
-        for (label, x0, x1) in &spans {
+        for (label, x0, x1, launcher) in &spans {
             let gal = ui.painter().layout_no_wrap(
                 label.to_string(),
                 egui::FontId::proportional(9.5),
                 theme::RIBBON_LABEL,
             );
-            // leave room for the launcher at the group's right edge
-            let centre = (x0 + x1 - 13.0) / 2.0;
+            // the label centers on the group; leave room for the
+            // launcher only where the group has one
+            let centre = if *launcher {
+                (x0 + x1 - 13.0) / 2.0
+            } else {
+                (x0 + x1) / 2.0
+            };
             ui.painter().galley(
-                Pos2::new(centre - gal.size().x / 2.0, strip.top() + 2.0),
+                Pos2::new(centre - gal.size().x / 2.0, strip.top() + 3.0),
                 gal,
                 egui::Color32::WHITE,
             );
+            if !launcher {
+                continue;
+            }
             // the group dialog launcher (pop-out): tiny bordered square
             let lr =
-                Rect::from_min_size(Pos2::new(x1 - 11.0, strip.top() + 1.0), Vec2::splat(11.0));
+                Rect::from_min_size(Pos2::new(x1 - 11.0, strip.top() + 2.0), Vec2::splat(11.0));
             let lresp = ui.interact(lr, ui.scope_id().with(("launcher", label)), Sense::click());
             let hot = lresp.hovered();
             ui.painter().rect_stroke(
@@ -1354,7 +1381,6 @@ pub fn content_row(
             if lresp.clicked() {
                 on_launcher(label);
             }
-            let _ = hot;
         }
     });
 }
