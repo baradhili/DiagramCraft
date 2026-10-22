@@ -8,6 +8,9 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn harness_with_blank() -> Harness<'static, App> {
+    // Goldens/steps must be machine-independent: pin text to the
+    // embedded Carlito rather than this machine's installed fonts.
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(

@@ -1788,11 +1788,13 @@ fn push_family(chain: &mut Vec<String>, family: &str) {
 /// then its metric-compatible substitute if the alias table covers
 /// it, then Carlito (the GUI's embedded face — also a sensible
 /// last-name fallback for viewers), then the CSS generic class.
-/// Deduplicated case-insensitively; empty when the document names no
-/// font, leaving the text element attribute-free as before.
+/// Text with no Font cell gets Visio's default family — Calibri —
+/// through the same table (Calibri → Carlito). Deduplicated
+/// case-insensitively.
 fn font_family_attr(font: Option<&str>) -> String {
-    let Some(name) = font.map(str::trim).filter(|f| !f.is_empty()) else {
-        return String::new();
+    let name = match font.map(str::trim) {
+        Some(f) if !f.is_empty() => f,
+        _ => "Calibri",
     };
     let (substitute, class) = match font_substitute(name) {
         Some((s, c)) => (Some(s), c),
@@ -2122,14 +2124,18 @@ mod tests {
             font_family_attr(Some("Wingdings")),
             " font-family=\"Wingdings, Carlito, sans-serif\""
         );
-        // Lookup is case-insensitive and trims; no attribute without a
-        // document font (today's behavior).
+        // Lookup is case-insensitive and trims; no Font cell (or an
+        // empty one) falls back to Visio's default family, Calibri.
         assert_eq!(
             font_family_attr(Some("  ARIAL ")),
             " font-family=\"ARIAL, 'Liberation Sans', Carlito, sans-serif\""
         );
-        assert_eq!(font_family_attr(None), "");
-        assert_eq!(font_family_attr(Some("")), "");
+        assert_eq!(
+            font_family_attr(None),
+            " font-family=\"Calibri, Carlito, sans-serif\"",
+            "Visio's default family is Calibri"
+        );
+        assert_eq!(font_family_attr(Some("")), " font-family=\"Calibri, Carlito, sans-serif\"");
     }
 
     #[test]

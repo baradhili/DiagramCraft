@@ -118,6 +118,9 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
 
 fn run_shell(name: &str, app: App) {
     let mut app = app;
+    // Goldens must render identically on every machine: pin text to
+    // the embedded Carlito rather than this machine's installed fonts.
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui(move |ui| {
@@ -194,6 +197,7 @@ fn recent_entry_click_reopens() {
     let doc = fixture(tmp.path());
     let mut app = App::with_doc_opt(None);
     app.set_recent_for_test(vec![doc.clone()]);
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
