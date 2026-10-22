@@ -155,7 +155,11 @@ impl Stencil {
         let svg = svg::render_master(&ed.doc, m).unwrap_or_default();
         let img = svgimg::rasterize(&svg, 64.0)
             .unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
-        let tex = ctx.load_texture(format!("master-{master_id}"), img, egui::TextureOptions::LINEAR);
+        let tex = ctx.load_texture(
+            format!("master-{master_id}"),
+            img,
+            egui::TextureOptions::LINEAR,
+        );
         self.textures.push((master_id, tex.clone()));
         tex
     }
