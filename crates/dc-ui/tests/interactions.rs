@@ -539,25 +539,24 @@ fn double_click_on_empty_page_is_a_no_op() {
 
 /// GitHub #48: the context menu must derive every color it paints from
 /// the theme mapping over the live visuals — hover fill, label,
-/// disabled label, shortcut hint (separators ride the visuals' own
-/// noninteractive stroke) — so the menu stays readable when the shell
-/// runs under dark visuals, not just the installed Visio-light ones.
+/// disabled label, shortcut hint, separators and icon tints — so the
+/// menu stays readable when the shell runs under dark visuals, not
+/// just the installed Visio-light ones.
 fn open_menu_harness(dark: bool) -> Harness<'static, App> {
     dc_ui::svgimg::pin_embedded_fonts_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
-        // kittest defaults to dark visuals and `theme::install` only
-        // fills the Light style slot, so the mode must be picked here:
-        // Light really runs the installed Visio-light style, Dark runs
-        // egui's defaults — the issue's "one theme switch away".
-        .with_theme(if dark {
-            egui::Theme::Dark
-        } else {
-            egui::Theme::Light
-        })
         .build_ui_state(
-            |ui, app: &mut App| {
+            move |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
+                if dark {
+                    // install() pins Light (the app is a light app; see
+                    // the #48 review — eframe on Linux reports no system
+                    // theme and egui falls back to Dark). The dark test
+                    // re-switches AFTER it, per frame, to keep the menu's
+                    // dark token path exercised.
+                    ui.ctx().set_theme(egui::ThemePreference::Dark);
+                }
                 app.draw(ui);
             },
             App::with_blank(),

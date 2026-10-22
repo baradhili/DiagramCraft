@@ -70,6 +70,13 @@ pub fn install(ctx: &egui::Context) {
     style.spacing.item_spacing = egui::vec2(6.0, 4.0);
     style.spacing.button_padding = egui::vec2(6.0, 3.0);
     ctx.set_style_of(egui::Theme::Light, style);
+    // The shell is a light app (every palette constant above is the
+    // Visio light look), so select the Light slot too. Without this,
+    // native surfaces render dark: eframe on Linux reports no system
+    // theme, egui's fallback is Dark, and the OS being in Light mode
+    // never reaches the context — popups/menus went dark while the
+    // custom chrome stayed light (GitHub #48 review).
+    ctx.set_theme(egui::ThemePreference::Light);
 }
 
 /// Context-menu color tokens, resolved from the active visuals so the
@@ -77,6 +84,7 @@ pub fn install(ctx: &egui::Context) {
 /// surroundings (GitHub #48). Light values are the observed Visio 2016
 /// menu; dark values are our counterparts in the same green family,
 /// chosen here once — never at the call sites that paint the menu.
+#[derive(Clone, Copy)]
 pub struct MenuTokens {
     /// Hovered-row fill (Visio light green; muted deep green in dark).
     pub hover_fill: Color32,
@@ -86,17 +94,58 @@ pub struct MenuTokens {
     pub label_disabled: Color32,
     /// Shortcut-hint text ("Ctrl+X", "Del").
     pub hint: Color32,
+    /// Separator stroke (light rides the visuals' noninteractive
+    /// stroke; dark lightens it so rules stay visible on the dark fill).
+    pub separator: Color32,
+    /// Whether the tokens resolved for dark visuals (drives icon tints).
+    pub dark: bool,
 }
 
-/// Resolve menu tokens for the active visuals. Separators already ride
-/// `visuals.widgets.noninteractive.bg_stroke` and need no token.
+impl MenuTokens {
+    /// Tint for an MDI icon glyph on the menu. Light keeps the Office
+    /// palette; dark lifts each color so its hue survives the dark
+    /// fill — e.g. the gray ShapeSheet glyph must not vanish (the
+    /// review gap that kept #48 open).
+    pub fn icon_tint(&self, office: Color32, enabled: bool) -> Color32 {
+        if !enabled {
+            return if self.dark {
+                Color32::from_gray(150)
+            } else {
+                Color32::from_gray(178)
+            };
+        }
+        if !self.dark {
+            return office;
+        }
+        lift_for_dark(office)
+    }
+}
+
+/// Scale a light-palette color up so its brightest channel reaches
+/// ~200 — presence on a ~gray(50) menu fill while keeping the hue.
+fn lift_for_dark(c: Color32) -> Color32 {
+    let m = c.r().max(c.g()).max(c.b()) as f32;
+    if m >= 200.0 {
+        return c;
+    }
+    let s = 200.0 / m.max(1.0);
+    Color32::from_rgb(
+        ((c.r() as f32) * s).min(255.0) as u8,
+        ((c.g() as f32) * s).min(255.0) as u8,
+        ((c.b() as f32) * s).min(255.0) as u8,
+    )
+}
+
+/// Resolve menu tokens for the active visuals.
 pub fn menu_tokens(v: &Visuals) -> MenuTokens {
     if v.dark_mode {
         MenuTokens {
             hover_fill: Color32::from_rgb(43, 74, 56),
             label: v.text_color(),
-            label_disabled: Color32::from_gray(110),
-            hint: Color32::from_gray(130),
+            label_disabled: Color32::from_gray(135),
+            hint: Color32::from_gray(150),
+            separator: Color32::from_gray(95),
+            dark: true,
         }
     } else {
         MenuTokens {
@@ -104,6 +153,8 @@ pub fn menu_tokens(v: &Visuals) -> MenuTokens {
             label: Color32::from_rgb(30, 30, 30),
             label_disabled: Color32::from_gray(160),
             hint: Color32::from_gray(140),
+            separator: v.widgets.noninteractive.bg_stroke.color,
+            dark: false,
         }
     }
 }
@@ -147,6 +198,36 @@ mod tests {
         assert!(
             lum(dark.label_disabled) < lum(dark.label),
             "disabled rows dim below enabled rows"
+        );
+
+        // Icons: light keeps the Office palette; dark lifts it enough
+        // to read on the dark fill while keeping the hue (the #48
+        // review gap — the gray ShapeSheet glyph vanished on dark).
+        let shapesheet_gray = Color32::from_rgb(66, 66, 66);
+        assert_eq!(light.icon_tint(shapesheet_gray, true), shapesheet_gray);
+        let lifted = dark.icon_tint(shapesheet_gray, true);
+        assert!(
+            lifted.r() >= 200 && lifted.r() == lifted.g() && lifted.g() == lifted.b(),
+            "gray glyphs lift to a readable gray, got {lifted:?}"
+        );
+        let blue = Color32::from_rgb(42, 111, 181);
+        let lb = dark.icon_tint(blue, true);
+        assert!(
+            lb.b() >= 200 && lb.b() >= lb.g() && lb.g() >= lb.r(),
+            "hue order preserved on lift, got {lb:?}"
+        );
+        assert_ne!(dark.icon_tint(blue, false), lb, "disabled tints dim");
+        assert_eq!(light.icon_tint(blue, false), Color32::from_gray(178));
+
+        // Separators stay visible on their fill.
+        assert_eq!(
+            light.separator,
+            Visuals::light().widgets.noninteractive.bg_stroke.color
+        );
+        assert!(
+            lum(dark.separator) > lum(dark_vis.window_fill) + 20.0,
+            "dark separators {:?} must clear the dark fill",
+            dark.separator
         );
     }
 }

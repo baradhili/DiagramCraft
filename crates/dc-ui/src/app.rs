@@ -2292,6 +2292,9 @@ impl App {
             let tokens = theme::menu_tokens(ui.visuals());
             ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
+            // separators ride the token too (egui's dark default is too
+            // faint on the dark menu fill)
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
             for (menu, child) in &actions {
@@ -3162,7 +3165,10 @@ fn ctx_item(
             Pos2::new(resp.rect.left() + 7.0, resp.rect.center().y - 8.0),
             Vec2::splat(16.0),
         );
-        ic.paint(ui, r, enabled);
+        // icons take the theme-derived tint: the light Office palette
+        // (the gray ShapeSheet glyph included) vanishes on a dark menu
+        // (GitHub #48 review).
+        ic.paint_tinted(ui, r, tokens.icon_tint(ic.office_color(), enabled));
     }
     resp.clicked()
 }

@@ -207,7 +207,9 @@ impl Icon {
     /// built-in epaint glyph.
     /// Office-family accent per icon (wordcraft-style: one accent tone
     /// per command family — clipboard warm, text dark, data blue...).
-    fn office_color(self) -> Color32 {
+    /// `pub(crate)`: the context menu re-tints per theme via
+    /// `MenuTokens::icon_tint` (GitHub #48).
+    pub(crate) fn office_color(self) -> Color32 {
         match self {
             Icon::Paste | Icon::Open => Color32::from_rgb(0xb5, 0x8a, 0x2a),
             Icon::Cut
@@ -244,6 +246,14 @@ impl Icon {
         } else {
             Color32::from_gray(178)
         };
+        self.paint_tinted(ui, r, tint);
+    }
+
+    /// Paint with an explicit tint — for surfaces that follow the theme
+    /// (the context menu derives it from `MenuTokens::icon_tint`). The
+    /// default [`Self::paint`] keeps the light Office palette, which is
+    /// right for the always-light ribbon surface.
+    pub fn paint_tinted(self, ui: &Ui, r: Rect, tint: Color32) {
         if let Some(name) = self.asset() {
             if let Some(tex) = crate::icontex::texture(ui.ctx(), name, tint) {
                 let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
@@ -251,7 +261,7 @@ impl Icon {
                 return;
             }
         }
-        self.paint_glyph(ui, r, enabled);
+        self.paint_glyph(ui, r, true);
     }
 
     /// The built-in epaint glyph (fallback and baseline for compare).
