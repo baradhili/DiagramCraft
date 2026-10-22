@@ -176,6 +176,83 @@ fn right_click_menu_duplicate_creates_shape() {
     assert_eq!(h.state().debug_shape_count(), 1, "duplicate undoes");
 }
 
+// Visio anchors the context menu just outside the shape's top-right
+// corner (menu growing right/down); near the right screen edge it
+// mirrors to just outside the top-left corner (GitHub #49).
+#[test]
+fn right_click_menu_opens_beside_shape() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    // High on the canvas so the tall menu fits below the shape (egui
+    // clamps popups into the viewport; tops stay level when it fits).
+    let canvas = h.state().debug_canvas_rect();
+    let to = egui::pos2(canvas.center().x, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+
+    let (_, shape) = h.state().debug_sel().expect("right-click selects");
+    let s = h
+        .state()
+        .debug_shape_screen_rect(shape)
+        .expect("shape rect");
+    let m = h.state().debug_ctx_menu_rect().expect("menu shown");
+    // Menu's top-left sits ~2 px right of the shape's top-right corner,
+    // tops level: the menu never covers the shape.
+    assert!(
+        (m.left() - (s.right() + 2.0)).abs() <= 0.5,
+        "menu left {} should sit 2px right of shape right {}",
+        m.left(),
+        s.right()
+    );
+    assert!(
+        (m.top() - s.top()).abs() <= 0.5,
+        "menu top {} should align with shape top {}",
+        m.top(),
+        s.top()
+    );
+}
+
+#[test]
+fn right_click_menu_flips_near_right_edge() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    // The flip decision compares against the window's right edge; the
+    // canvas must reach it for this placement to force the mirror. High
+    // on the canvas so the menu fits below (see test above).
+    assert!(canvas.right() >= 1270.0, "canvas reaches window edge");
+    let to = egui::pos2(canvas.right() - 6.0, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+
+    let (_, shape) = h.state().debug_sel().expect("right-click selects");
+    let s = h
+        .state()
+        .debug_shape_screen_rect(shape)
+        .expect("shape rect");
+    let m = h.state().debug_ctx_menu_rect().expect("menu shown");
+    // Mirrored: the menu's top-right sits ~2 px LEFT of the shape's
+    // top-left corner, tops still level.
+    assert!(
+        (m.right() - (s.left() - 2.0)).abs() <= 0.5,
+        "menu right {} should sit 2px left of shape left {}",
+        m.right(),
+        s.left()
+    );
+    assert!(
+        (m.top() - s.top()).abs() <= 0.5,
+        "menu top {} should align with shape top {}",
+        m.top(),
+        s.top()
+    );
+}
+
 #[test]
 fn marquee_selects_multiple_and_delete_removes_all() {
     let mut h = harness_with_blank();

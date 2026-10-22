@@ -57,6 +57,9 @@ pub struct App {
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
+    /// Last frame's context-menu rect in screen coords; None while the
+    /// menu is closed (kept for the placement tests, issue #49).
+    ctx_menu_rect: Option<egui::Rect>,
     /// In-app shape clipboard (Cut/Copy/Paste within DiagramCraft; rich
     /// OS-clipboard formats arrive with a later milestone).
     clipboard: Option<Shape>,
@@ -155,6 +158,7 @@ impl App {
             confirm_new: false,
             new_after_save: false,
             ctx_menu: None,
+            ctx_menu_rect: None,
             clipboard: None,
             text_edit: None,
             placed_last_click: false,
@@ -472,6 +476,26 @@ impl App {
         Some(Rect::from_min_size(
             Pos2::new(x as f32, (geom.h_in - y - h) as f32),
             Vec2::new(w as f32, h as f32),
+        ))
+    }
+
+    /// One shape's bbox in SCREEN coords (y-down), for anchoring the
+    /// context menu beside the shape (issue #49).
+    fn shape_screen_rect(&self, shape_id: i64) -> Option<egui::Rect> {
+        let ed = self.ed()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
+        let geom = self.page_geom();
+        let ppi = self.view.px_per_in();
+        let min = Pos2::new(
+            self.view.pan.x + x as f32 * ppi,
+            self.view.pan.y + (geom.h_in - y - h) as f32 * ppi,
+        );
+        Some(egui::Rect::from_min_size(
+            min,
+            Vec2::new(w as f32 * ppi, h as f32 * ppi),
         ))
     }
 
@@ -2131,7 +2155,8 @@ impl App {
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
     fn shape_context_menu(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, anchor, _page_pos)) = self.ctx_menu else {
+        let Some((shape_id, pointer_anchor, _page_pos)) = self.ctx_menu else {
+            self.ctx_menu_rect = None;
             return;
         };
         let has_clip = self.clipboard.is_some();
@@ -2157,15 +2182,46 @@ impl App {
             ShapeSheet,
         }
         let mut act: Option<Act> = None;
-        let popup = egui::Popup::new(
+        // Min menu width incl. frame, until the popup reports its own
+        // measured size (used only for the right-edge flip decision).
+        const MENU_MIN_W: f32 = 244.0;
+        let mut menu = egui::Popup::new(
             egui::Id::new("dc-shape-ctx-menu"), // stable per-menu id is intended
             ctx.clone(),
-            anchor,
+            pointer_anchor,
             egui::LayerId::background(),
         )
         .kind(egui::PopupKind::Menu)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
+        // Cap the sizing pass: menu rows stretch to available width, so
+        // without this the first frame balloons the menu to the viewport
+        // width and it covers the page (the pre-#49 symptom).
+        .width(232.0);
+        // Visio anchors the menu just outside the shape's top-right
+        // corner, mirroring to the top-left corner when the right screen
+        // edge is too close (issue #49). Anchoring to the shape's live
+        // rect keeps the menu glued to it through zoom/pan; if the rect
+        // cannot be resolved, fall back to the pointer position like a
+        // classic context menu (egui defaults). Alternatives stay empty
+        // so the corner anchor is deterministic.
+        if let Some(r) = self.shape_screen_rect(shape_id) {
+            let menu_w = menu
+                .get_expected_size()
+                .map_or(MENU_MIN_W, |s| s.x.max(MENU_MIN_W));
+            // The popup Area is constrained into the content rect, so
+            // measure room against the same rect.
+            let room_right = ctx.content_rect().right() - r.right() >= menu_w;
+            menu = menu
+                .anchor(r)
+                .gap(2.0)
+                .align(if room_right {
+                    egui::RectAlign::RIGHT_START
+                } else {
+                    egui::RectAlign::LEFT_START
+                })
+                .align_alternatives(&[]);
+        }
+        let popup = menu.show(|ui| {
             ui.set_min_width(232.0);
             ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(206, 227, 212);
@@ -2269,6 +2325,7 @@ impl App {
                 act = Some(Act::EditText);
             }
         });
+        self.ctx_menu_rect = popup.as_ref().map(|ir| ir.response.rect);
         // Close on an outside primary click; a right-click elsewhere
         // re-anchors through central()'s handler.
         let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
@@ -2459,6 +2516,17 @@ impl App {
             self.view.pan.x + r.left() as f32 * ppi,
             self.view.pan.y + r.top() as f32 * ppi,
         ))
+    }
+    /// One shape's bbox in SCREEN coords (context-menu placement tests).
+    #[doc(hidden)]
+    pub fn debug_shape_screen_rect(&self, shape_id: i64) -> Option<egui::Rect> {
+        self.shape_screen_rect(shape_id)
+    }
+    /// Context-menu rect from the last frame; None while closed
+    /// (placement tests, issue #49).
+    #[doc(hidden)]
+    pub fn debug_ctx_menu_rect(&self) -> Option<egui::Rect> {
+        self.ctx_menu_rect
     }
     #[doc(hidden)]
     pub fn debug_armed(&self) -> Option<i64> {
