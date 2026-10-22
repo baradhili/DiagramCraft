@@ -173,7 +173,11 @@ fn open_fixture() -> (Editor, tempfile::TempDir) {
 }
 
 fn part_bytes(path: &std::path::Path, name: &str) -> Vec<u8> {
-    vsdx::Package::open(path).unwrap().part(name).unwrap().to_vec()
+    vsdx::Package::open(path)
+        .unwrap()
+        .part(name)
+        .unwrap()
+        .to_vec()
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +187,11 @@ fn part_bytes(path: &std::path::Path, name: &str) -> Vec<u8> {
 fn bare_doc() -> Document {
     let mut sheet = vsdx::model::Sheet::default();
     sheet.set_cell("LineWeight", Cell::value("0.01"));
-    let mut shape = Shape { id: 1, type_: Some("Shape".into()), ..Shape::default() };
+    let mut shape = Shape {
+        id: 1,
+        type_: Some("Shape".into()),
+        ..Shape::default()
+    };
     shape.sheet.set_cell("PinX", Cell::value("1"));
     let page = vsdx::model::Page {
         id: 0,
@@ -196,32 +204,69 @@ fn bare_doc() -> Document {
         shapes: vec![shape],
         ..vsdx::model::Page::default()
     };
-    Document { pages: vec![page], ..Document::default() }
+    Document {
+        pages: vec![page],
+        ..Document::default()
+    }
 }
 
 #[test]
 fn history_undo_redo_and_labels() {
     let mut doc = bare_doc();
     let mut h = History::new(10);
-    h.apply(Box::new(SetCell::new(Scope::PageSheet { page: 0 }, "LineWeight", Cell::value("0.05"))), &mut doc).unwrap();
-    h.apply(Box::new(SetCell::new(Scope::Shape { page: 0, shape: 1 }, "PinX", Cell::value("9"))), &mut doc).unwrap();
+    h.apply(
+        Box::new(SetCell::new(
+            Scope::PageSheet { page: 0 },
+            "LineWeight",
+            Cell::value("0.05"),
+        )),
+        &mut doc,
+    )
+    .unwrap();
+    h.apply(
+        Box::new(SetCell::new(
+            Scope::Shape { page: 0, shape: 1 },
+            "PinX",
+            Cell::value("9"),
+        )),
+        &mut doc,
+    )
+    .unwrap();
     assert_eq!(h.undo_labels().len(), 2);
     assert!(h.can_redo() == false);
 
     let label = h.undo(&mut doc).unwrap().unwrap();
     assert!(label.contains("PinX"));
     assert_eq!(
-        doc.pages[0].shapes[0].sheet.cell("PinX").unwrap().v.as_deref(),
+        doc.pages[0].shapes[0]
+            .sheet
+            .cell("PinX")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("1")
     );
     let _ = h.redo(&mut doc).unwrap().unwrap();
     assert_eq!(
-        doc.pages[0].shapes[0].sheet.cell("PinX").unwrap().v.as_deref(),
+        doc.pages[0].shapes[0]
+            .sheet
+            .cell("PinX")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("9")
     );
 
     // A new apply clears redo.
-    h.apply(Box::new(SetCell::new(Scope::Shape { page: 0, shape: 1 }, "PinX", Cell::value("8"))), &mut doc).unwrap();
+    h.apply(
+        Box::new(SetCell::new(
+            Scope::Shape { page: 0, shape: 1 },
+            "PinX",
+            Cell::value("8"),
+        )),
+        &mut doc,
+    )
+    .unwrap();
     assert!(!h.can_redo());
     // Three applied commands → three undos back to the pristine sheet.
     for _ in 0..3 {
@@ -229,11 +274,22 @@ fn history_undo_redo_and_labels() {
     }
     assert!(!h.can_undo());
     assert_eq!(
-        doc.pages[0].sheet().unwrap().cell("LineWeight").unwrap().v.as_deref(),
+        doc.pages[0]
+            .sheet()
+            .unwrap()
+            .cell("LineWeight")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("0.01")
     );
     assert_eq!(
-        doc.pages[0].shapes[0].sheet.cell("PinX").unwrap().v.as_deref(),
+        doc.pages[0].shapes[0]
+            .sheet
+            .cell("PinX")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("1")
     );
 }
@@ -243,7 +299,15 @@ fn history_limit_truncates_oldest() {
     let mut doc = bare_doc();
     let mut h = History::new(2);
     for v in ["0.1", "0.2", "0.3"] {
-        h.apply(Box::new(SetCell::new(Scope::PageSheet { page: 0 }, "LineWeight", Cell::value(v))), &mut doc).unwrap();
+        h.apply(
+            Box::new(SetCell::new(
+                Scope::PageSheet { page: 0 },
+                "LineWeight",
+                Cell::value(v),
+            )),
+            &mut doc,
+        )
+        .unwrap();
     }
     assert_eq!(h.undo_labels().len(), 2);
     assert!(h.undo(&mut doc).unwrap().is_some());
@@ -251,7 +315,13 @@ fn history_limit_truncates_oldest() {
     assert!(h.undo(&mut doc).unwrap().is_none());
     // After two undos we are back at 0.1 (the first edit fell off).
     assert_eq!(
-        doc.pages[0].sheet().unwrap().cell("LineWeight").unwrap().v.as_deref(),
+        doc.pages[0]
+            .sheet()
+            .unwrap()
+            .cell("LineWeight")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("0.1")
     );
 }
@@ -288,7 +358,11 @@ fn set_cell_is_surgical_and_undo_is_byte_exact() {
         "visio/masters/_rels/masters.xml.rels",
         "visio/masters/master1.xml",
     ] {
-        assert_eq!(part_bytes(&base, name), part_bytes(&edited, name), "{name} changed");
+        assert_eq!(
+            part_bytes(&base, name),
+            part_bytes(&edited, name),
+            "{name} changed"
+        );
     }
     assert_ne!(
         vsdx::canonical_form(&part_bytes(&base, "visio/pages/page1.xml")),
@@ -298,7 +372,10 @@ fn set_cell_is_surgical_and_undo_is_byte_exact() {
     // Re-parsed edit shows the new value.
     let reparsed = vsdx::parse::parse(&edited).unwrap();
     let shape1 = vsdx::model::find_shape_by_id(&reparsed.pages[0].shapes, 1).unwrap();
-    assert_eq!(shape1.sheet.cell("LineWeight").unwrap().v.as_deref(), Some("0.05"));
+    assert_eq!(
+        shape1.sheet.cell("LineWeight").unwrap().v.as_deref(),
+        Some("0.05")
+    );
     // Untouched cell keeps formula + attrs.
     assert_eq!(
         shape1.sheet.cell("LocPinX").unwrap().f.as_deref(),
@@ -325,8 +402,12 @@ fn set_cell_is_surgical_and_undo_is_byte_exact() {
 fn set_cell_on_absent_cell_undo_removes_it() {
     let (ed, tmp) = open_fixture();
     let mut ed = ed;
-    ed.apply(SetCell::new(Scope::Shape { page: 0, shape: 1 }, "RotateCmd", Cell::value("1")))
-        .unwrap();
+    ed.apply(SetCell::new(
+        Scope::Shape { page: 0, shape: 1 },
+        "RotateCmd",
+        Cell::value("1"),
+    ))
+    .unwrap();
     let shape = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 1).unwrap();
     assert!(shape.sheet.cell("RotateCmd").is_some());
     ed.undo().unwrap();
@@ -342,7 +423,12 @@ fn set_row_cell_and_undo() {
     let scope = Scope::Shape { page: 0, shape: 1 };
     let old = {
         let s = scope_sheet(&ed.doc, &scope).unwrap();
-        s.sections_named("Geometry")[0].row_by_ix(2).unwrap().cell("X").unwrap().clone()
+        s.sections_named("Geometry")[0]
+            .row_by_ix(2)
+            .unwrap()
+            .cell("X")
+            .unwrap()
+            .clone()
     };
     ed.apply(SetRowCell::new(
         scope.clone(),
@@ -355,7 +441,13 @@ fn set_row_cell_and_undo() {
     .unwrap();
     let s = scope_sheet(&ed.doc, &scope).unwrap();
     assert_eq!(
-        s.sections_named("Geometry")[0].row_by_ix(2).unwrap().cell("X").unwrap().v.as_deref(),
+        s.sections_named("Geometry")[0]
+            .row_by_ix(2)
+            .unwrap()
+            .cell("X")
+            .unwrap()
+            .v
+            .as_deref(),
         Some("1.5")
     );
     // formula preserved by replace? set semantics: new cell has no formula → V only.
@@ -363,7 +455,11 @@ fn set_row_cell_and_undo() {
     ed.undo().unwrap();
     let s = scope_sheet(&ed.doc, &scope).unwrap();
     assert_eq!(
-        s.sections_named("Geometry")[0].row_by_ix(2).unwrap().cell("X").unwrap(),
+        s.sections_named("Geometry")[0]
+            .row_by_ix(2)
+            .unwrap()
+            .cell("X")
+            .unwrap(),
         &old
     );
 }
@@ -372,7 +468,11 @@ fn set_row_cell_and_undo() {
 fn set_text_escapes_and_round_trips() {
     let (ed, tmp) = open_fixture();
     let mut ed = ed;
-    ed.apply(SetText::new(Scope::Shape { page: 0, shape: 1 }, "a & b <c>")).unwrap();
+    ed.apply(SetText::new(
+        Scope::Shape { page: 0, shape: 1 },
+        "a & b <c>",
+    ))
+    .unwrap();
     let out = tmp.path().join("text.vsdx");
     ed.save_as(&out).unwrap();
     let reparsed = vsdx::parse::parse(&out).unwrap();
@@ -380,7 +480,10 @@ fn set_text_escapes_and_round_trips() {
     assert_eq!(shape.sheet.text.as_deref(), Some("a & b <c>"));
     // undo restores the original raw text exactly
     ed.undo().unwrap();
-    assert_eq!(ed.doc.pages[0].shapes[0].sheet.text_raw.as_deref(), Some("hello world"));
+    assert_eq!(
+        ed.doc.pages[0].shapes[0].sheet.text_raw.as_deref(),
+        Some("hello world")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -404,14 +507,27 @@ fn add_page_materializes_part_rels_and_content_type() {
     let pkg = vsdx::Package::open(&out).unwrap();
     let names: Vec<&str> = pkg.part_names();
     assert!(names.contains(&"visio/pages/page2.xml"));
-    let rels = String::from_utf8(pkg.part("visio/pages/_rels/pages.xml.rels").unwrap().to_vec()).unwrap();
+    let rels = String::from_utf8(
+        pkg.part("visio/pages/_rels/pages.xml.rels")
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(rels.contains("page2.xml"));
     let ct = String::from_utf8(pkg.part("[Content_Types].xml").unwrap().to_vec()).unwrap();
     assert!(ct.contains("/visio/pages/page2.xml"));
 
     // Untouched parts stay byte-identical.
-    for name in ["visio/document.xml", "visio/pages/page1.xml", "visio/masters/master1.xml"] {
-        assert_eq!(part_bytes(&base, name), part_bytes(&out, name), "{name} changed");
+    for name in [
+        "visio/document.xml",
+        "visio/pages/page1.xml",
+        "visio/masters/master1.xml",
+    ] {
+        assert_eq!(
+            part_bytes(&base, name),
+            part_bytes(&out, name),
+            "{name} changed"
+        );
     }
 
     // Re-parse: two pages, the new one empty with its name.
@@ -431,8 +547,16 @@ fn add_page_materializes_part_rels_and_content_type() {
         vsdx::canonical_form(a.part("visio/pages/pages.xml").unwrap()),
         vsdx::canonical_form(b.part("visio/pages/pages.xml").unwrap())
     );
-    for name in ["visio/document.xml", "visio/pages/page1.xml", "visio/masters/masters.xml"] {
-        assert_eq!(a.part(name).unwrap(), b.part(name).unwrap(), "{name} changed");
+    for name in [
+        "visio/document.xml",
+        "visio/pages/page1.xml",
+        "visio/masters/masters.xml",
+    ] {
+        assert_eq!(
+            a.part(name).unwrap(),
+            b.part(name).unwrap(),
+            "{name} changed"
+        );
     }
 }
 
@@ -463,10 +587,16 @@ fn rename_and_move_page() {
     ed.apply(AddPage::new("Page-3")).unwrap();
     ed.apply(RenamePage::new(1, "Middle")).unwrap();
     assert_eq!(ed.doc.pages[1].name, "Middle");
-    assert!(ed.doc.pages[1].attrs.iter().any(|(k, v)| k == "NameU" && v == "Middle"));
+    assert!(ed.doc.pages[1]
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "NameU" && v == "Middle"));
     ed.undo().unwrap();
     assert_eq!(ed.doc.pages[1].name, "Page-2");
-    assert!(ed.doc.pages[1].attrs.iter().any(|(k, v)| k == "NameU" && v == "Page-2"));
+    assert!(ed.doc.pages[1]
+        .attrs
+        .iter()
+        .any(|(k, v)| k == "NameU" && v == "Page-2"));
 
     ed.apply(MovePage { from: 2, to: 0 }).unwrap();
     let names: Vec<&str> = ed.doc.pages.iter().map(|p| p.name.as_str()).collect();
@@ -486,9 +616,18 @@ fn add_and_remove_shape_undo() {
     let mut ed = ed;
     let id = dc_core::commands::next_shape_id(&ed.doc, 0);
     assert_eq!(id, 3);
-    let mut shape = Shape { id, type_: Some("Shape".into()), ..Shape::default() };
+    let mut shape = Shape {
+        id,
+        type_: Some("Shape".into()),
+        ..Shape::default()
+    };
     shape.sheet.set_cell("PinX", Cell::value("1"));
-    ed.apply(AddShape { page: 0, parent: None, shape }).unwrap();
+    ed.apply(AddShape {
+        page: 0,
+        parent: None,
+        shape,
+    })
+    .unwrap();
     assert!(vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 3).is_some());
     ed.undo().unwrap();
     assert!(vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 3).is_none());
@@ -532,7 +671,10 @@ fn connects_parse_store_idempotent_and_editable() {
         .map(|r| r.inner.clone())
         .unwrap();
     let c = ConnectsOwner::Page(0).read_connects(&ed.doc).unwrap();
-    ConnectsOwner::Page(0).host(&mut ed.doc).unwrap().set_connects(&c);
+    ConnectsOwner::Page(0)
+        .host(&mut ed.doc)
+        .unwrap()
+        .set_connects(&c);
     let after_inner = ed.doc.pages[0]
         .contents_raw
         .iter()
@@ -547,17 +689,46 @@ fn connects_parse_store_idempotent_and_editable() {
         connect: Connect::new(2, "EndX", 12, 1, "PinX", 0),
     })
     .unwrap();
-    assert_eq!(ConnectsOwner::Page(0).read_connects(&ed.doc).unwrap().list.len(), 2);
+    assert_eq!(
+        ConnectsOwner::Page(0)
+            .read_connects(&ed.doc)
+            .unwrap()
+            .list
+            .len(),
+        2
+    );
     ed.undo().unwrap();
-    assert_eq!(ConnectsOwner::Page(0).read_connects(&ed.doc).unwrap().list.len(), 1);
+    assert_eq!(
+        ConnectsOwner::Page(0)
+            .read_connects(&ed.doc)
+            .unwrap()
+            .list
+            .len(),
+        1
+    );
 
     // RemoveConnect by index.
-    ed.apply(RemoveConnect::new(ConnectsOwner::Page(0), 0)).unwrap();
-    assert!(ConnectsOwner::Page(0).read_connects(&ed.doc).unwrap().list.is_empty());
+    ed.apply(RemoveConnect::new(ConnectsOwner::Page(0), 0))
+        .unwrap();
+    assert!(ConnectsOwner::Page(0)
+        .read_connects(&ed.doc)
+        .unwrap()
+        .list
+        .is_empty());
     // An empty Connects is dropped entirely.
-    assert!(!ed.doc.pages[0].contents_raw.iter().any(|r| r.name == "Connects"));
+    assert!(!ed.doc.pages[0]
+        .contents_raw
+        .iter()
+        .any(|r| r.name == "Connects"));
     ed.undo().unwrap();
-    assert_eq!(ConnectsOwner::Page(0).read_connects(&ed.doc).unwrap().list.len(), 1);
+    assert_eq!(
+        ConnectsOwner::Page(0)
+            .read_connects(&ed.doc)
+            .unwrap()
+            .list
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -650,12 +821,23 @@ fn scopes_parse_and_resolve() {
     );
     assert_eq!(
         Scope::parse("master:7/shape:1").unwrap(),
-        Scope::Master { master: 7, shape: Some(1) }
+        Scope::Master {
+            master: 7,
+            shape: Some(1)
+        }
     );
     assert!(Scope::parse("bogus").is_err());
     assert!(Scope::parse("page:x").is_err());
 
-    for s in ["doc", "page:0", "page:0/shape:1", "page:0/shape:2", "style:0", "master:7", "master:7/shape:1"] {
+    for s in [
+        "doc",
+        "page:0",
+        "page:0/shape:1",
+        "page:0/shape:2",
+        "style:0",
+        "master:7",
+        "master:7/shape:1",
+    ] {
         let scope = Scope::parse(s).unwrap();
         assert!(scope_sheet(&ed.doc, &scope).is_ok(), "{s} should resolve");
     }
@@ -665,7 +847,10 @@ fn scopes_parse_and_resolve() {
     // Inheritance-aware cell resolution: shape 2 (master-backed, no
     // LineWeight of its own) resolves through the master's PageSheet.
     let chain = dc_core::scope::shape_chain(&ed.doc, 0, 2).unwrap();
-    let cell = ed.doc.resolve_cell(&chain[chain.len() - 1], &chain, "LineWeight").unwrap();
+    let cell = ed
+        .doc
+        .resolve_cell(&chain[chain.len() - 1], &chain, "LineWeight")
+        .unwrap();
     assert_eq!(cell.v.as_deref(), Some("0.015625"));
 }
 
@@ -675,11 +860,21 @@ fn new_blank_roundtrips() {
     assert_eq!(ed.doc.pages.len(), 1);
     // Starter masters ship with the blank drawing (Basic Shapes set).
     assert_eq!(ed.doc.masters.len(), 7);
-    assert!(ed.doc.masters.iter().any(|m| m.name_u.as_deref() == Some("Rectangle")));
+    assert!(ed
+        .doc
+        .masters
+        .iter()
+        .any(|m| m.name_u.as_deref() == Some("Rectangle")));
     let page = &ed.doc.pages[0];
     assert_eq!(page.name, "Page-1");
-    let w = page.sheet().and_then(|s| s.cell("PageWidth")).and_then(|c| c.numeric());
-    let h = page.sheet().and_then(|s| s.cell("PageHeight")).and_then(|c| c.numeric());
+    let w = page
+        .sheet()
+        .and_then(|s| s.cell("PageWidth"))
+        .and_then(|c| c.numeric());
+    let h = page
+        .sheet()
+        .and_then(|s| s.cell("PageHeight"))
+        .and_then(|c| c.numeric());
     assert_eq!((w, h), (Some(8.5), Some(11.0)));
     assert!(page.shapes.is_empty());
 
@@ -724,7 +919,11 @@ fn atomic_save_never_truncates_existing_drawings() {
     for round in 0..3 {
         ed.save_as(&path).unwrap();
         let reopened = Editor::open(&path).unwrap();
-        assert_eq!(reopened.doc.pages.len(), 1, "round {round}: package complete");
+        assert_eq!(
+            reopened.doc.pages.len(),
+            1,
+            "round {round}: package complete"
+        );
         let before = std::fs::read(&path).unwrap();
         assert!(before.len() > 1000, "round {round}: non-trivial package");
     }
@@ -755,13 +954,17 @@ fn duplicate_shape_clones_offsets_and_undoes() {
     .unwrap();
 
     let new_id = dc_core::commands::next_shape_id(&ed.doc, page);
-    ed.apply(dc_core::DuplicateShape::new(page, first, (0.25, -0.25))).unwrap();
+    ed.apply(dc_core::DuplicateShape::new(page, first, (0.25, -0.25)))
+        .unwrap();
     let shapes = &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes;
     assert_eq!(shapes.len(), 2);
     let dup = shapes.iter().find(|s| s.id == new_id).unwrap();
     let px = dup.sheet.cell("PinX").and_then(|c| c.numeric()).unwrap();
     let py = dup.sheet.cell("PinY").and_then(|c| c.numeric()).unwrap();
-    assert!((px - 2.25).abs() < 1e-9 && (py - 2.75).abs() < 1e-9, "nudged pin, got ({px},{py})");
+    assert!(
+        (px - 2.25).abs() < 1e-9 && (py - 2.75).abs() < 1e-9,
+        "nudged pin, got ({px},{py})"
+    );
 
     ed.undo().unwrap();
     let shapes = &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes;
@@ -778,16 +981,31 @@ fn reorder_shape_moves_zorder_and_restores() {
         ids[i] = dc_core::commands::next_shape_id(&ed.doc, page);
         let mut s = vsdx::model::Shape::default();
         s.id = ids[i];
-        ed.apply(dc_core::AddShape { page, parent: None, shape: s }).unwrap();
+        ed.apply(dc_core::AddShape {
+            page,
+            parent: None,
+            shape: s,
+        })
+        .unwrap();
     }
     let order = |ed: &Editor| -> Vec<i64> {
-        ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes.iter().map(|s| s.id).collect()
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page)
+            .unwrap()
+            .shapes
+            .iter()
+            .map(|s| s.id)
+            .collect()
     };
     assert_eq!(order(&ed), ids.to_vec());
 
-    ed.apply(dc_core::ReorderShape::new(page, ids[0], true)).unwrap(); // bring to front
+    ed.apply(dc_core::ReorderShape::new(page, ids[0], true))
+        .unwrap(); // bring to front
     assert_eq!(order(&ed), vec![ids[1], ids[2], ids[0]]);
-    ed.apply(dc_core::ReorderShape::new(page, ids[0], false)).unwrap(); // send to back
+    ed.apply(dc_core::ReorderShape::new(page, ids[0], false))
+        .unwrap(); // send to back
     assert_eq!(order(&ed), vec![ids[0], ids[1], ids[2]]);
 
     ed.undo().unwrap();
@@ -805,7 +1023,12 @@ fn set_row_cell_materializes_missing_character_section_with_undo() {
     let mut s = vsdx::model::Shape::default();
     s.id = sid;
     s.master = Some(7); // blank template master with Character rows
-    ed.apply(dc_core::AddShape { page, parent: None, shape: s }).unwrap();
+    ed.apply(dc_core::AddShape {
+        page,
+        parent: None,
+        shape: s,
+    })
+    .unwrap();
 
     ed.apply(dc_core::SetRowCell::new(
         dc_core::Scope::Shape { page, shape: sid },
@@ -820,9 +1043,7 @@ fn set_row_cell_materializes_missing_character_section_with_undo() {
     // The local section/row now exist with the written value.
     let sh = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, sid).unwrap();
     let secs = sh.sheet.sections_named("Character");
-    let sec = secs
-        .first()
-        .expect("Character section materialized");
+    let sec = secs.first().expect("Character section materialized");
     let size = sec.rows[0].cell("Size").and_then(|c| c.numeric()).unwrap();
     assert!((size - 0.1666).abs() < 1e-9);
 
@@ -858,13 +1079,22 @@ fn macro_rolls_back_applied_children_on_failure() {
     let a = dc_core::commands::next_shape_id(&ed.doc, page);
     let mut sa = vsdx::model::Shape::default();
     sa.id = a;
-    ed.apply(dc_core::AddShape { page, parent: None, shape: sa }).unwrap();
+    ed.apply(dc_core::AddShape {
+        page,
+        parent: None,
+        shape: sa,
+    })
+    .unwrap();
 
     let mut sb = vsdx::model::Shape::default();
     sb.id = a + 1;
     let cmds: Vec<Box<dyn dc_core::Command>> = vec![
         Box::new(dc_core::RemoveShape::new(page, a)),
-        Box::new(dc_core::AddShape { page, parent: None, shape: sb }),
+        Box::new(dc_core::AddShape {
+            page,
+            parent: None,
+            shape: sb,
+        }),
         Box::new(Failing),
     ];
     let undo_depth_before = ed.history.undo_labels().len();

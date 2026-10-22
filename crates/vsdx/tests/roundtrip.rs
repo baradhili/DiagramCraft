@@ -181,13 +181,25 @@ fn write_messy_package(dir: &Path) -> PathBuf {
         ("[Content_Types].xml", content_types.as_bytes().to_vec()),
         ("_rels/.rels", root_rels.as_bytes().to_vec()),
         ("visio/document.xml", document.as_bytes().to_vec()),
-        ("visio/_rels/document.xml.rels", document_rels.as_bytes().to_vec()),
+        (
+            "visio/_rels/document.xml.rels",
+            document_rels.as_bytes().to_vec(),
+        ),
         ("visio/pages/pages.xml", pages.as_bytes().to_vec()),
-        ("visio/pages/_rels/pages.xml.rels", pages_rels.as_bytes().to_vec()),
+        (
+            "visio/pages/_rels/pages.xml.rels",
+            pages_rels.as_bytes().to_vec(),
+        ),
         ("visio/pages/page1.xml", page1.as_bytes().to_vec()),
-        ("visio/pages/_rels/page1.xml.rels", page1_rels.as_bytes().to_vec()),
+        (
+            "visio/pages/_rels/page1.xml.rels",
+            page1_rels.as_bytes().to_vec(),
+        ),
         ("visio/masters/masters.xml", masters.as_bytes().to_vec()),
-        ("visio/masters/_rels/masters.xml.rels", masters_rels.as_bytes().to_vec()),
+        (
+            "visio/masters/_rels/masters.xml.rels",
+            masters_rels.as_bytes().to_vec(),
+        ),
         ("visio/masters/master1.xml", master1.as_bytes().to_vec()),
         ("docProps/core.xml", core.as_bytes().to_vec()),
         ("custom/blob.bin", vec![0x00, 0x01, 0xFE, 0xFF, 0x7F, 0x80]),
@@ -248,17 +260,30 @@ fn roundtrip_preserves_messy_package() {
 
     // Spot-check that the messy constructs actually survived the model.
     let page = &doc.pages[0];
-    assert_eq!(page.attrs.iter().find(|(k, _)| k == "ViewScale").map(|(_, v)| v.as_str()), Some("1"));
-    assert_eq!(page.sheet().and_then(|s| s.cell("PageWidth")).and_then(|c| c.numeric()), Some(8.5));
+    assert_eq!(
+        page.attrs
+            .iter()
+            .find(|(k, _)| k == "ViewScale")
+            .map(|(_, v)| v.as_str()),
+        Some("1")
+    );
+    assert_eq!(
+        page.sheet()
+            .and_then(|s| s.cell("PageWidth"))
+            .and_then(|c| c.numeric()),
+        Some(8.5)
+    );
     // Stencil-style page (no part) kept.
     assert_eq!(doc.pages.len(), 2);
     assert_eq!(doc.pages[1].part, "");
     // Interleaved Trigger survived inside the PageSheet.
     let sheet = page.sheet().unwrap();
-    let has_trigger = sheet.children.iter().any(|c| matches!(
-        c,
-        vsdx::model::SheetChild::Raw(r) if r.name == "Trigger"
-    ));
+    let has_trigger = sheet.children.iter().any(|c| {
+        matches!(
+            c,
+            vsdx::model::SheetChild::Raw(r) if r.name == "Trigger"
+        )
+    });
     assert!(has_trigger, "PageSheet Trigger lost");
     // RefBy survived inside the User row cell (on the shape's sheet).
     let user = doc.pages[0].shapes[0].sheet.section("User", 0).unwrap();
@@ -267,11 +292,17 @@ fn roundtrip_preserves_messy_package() {
     assert!(val.raw_inner.as_deref().unwrap().contains("RefBy"));
     // Text markup and entities survive verbatim.
     let text_raw = doc.pages[0].shapes[0].sheet.text_raw.as_deref().unwrap();
-    assert!(text_raw.contains("<cp IX=\"0\"/>"), "cp markup lost: {text_raw}");
+    assert!(
+        text_raw.contains("<cp IX=\"0\"/>"),
+        "cp markup lost: {text_raw}"
+    );
     assert!(text_raw.contains("&amp;"), "entity lost: {text_raw}");
     assert!(text_raw.contains("&#65;"), "numeric ref lost: {text_raw}");
     // Plain text decodes entities.
-    assert_eq!(doc.pages[0].shapes[0].sheet.text.as_deref(), Some("a & b <tag> lineA"));
+    assert_eq!(
+        doc.pages[0].shapes[0].sheet.text.as_deref(),
+        Some("a & b <tag> lineA")
+    );
     // Deleted empty-form shape survived.
     let g = &doc.pages[0].shapes[1];
     assert_eq!(g.sub_shapes.len(), 2);
@@ -279,8 +310,12 @@ fn roundtrip_preserves_messy_package() {
     assert!(g.sub_shapes[1].attrs.iter().any(|(k, _)| k == "Del"));
     // ForeignData before Text order preserved.
     let flow = &doc.pages[0].shapes[0].flow;
-    let fi = flow.iter().position(|f| matches!(f, vsdx::model::ShapeFlow::Raw(_)));
-    let ti = flow.iter().position(|f| matches!(f, vsdx::model::ShapeFlow::Text));
+    let fi = flow
+        .iter()
+        .position(|f| matches!(f, vsdx::model::ShapeFlow::Raw(_)));
+    let ti = flow
+        .iter()
+        .position(|f| matches!(f, vsdx::model::ShapeFlow::Text));
     assert!(fi.map_or(false, |fi| ti.map_or(false, |ti| fi < ti)));
     // Icon survived in the masters index.
     let m = doc.master(7).unwrap();
@@ -304,7 +339,11 @@ fn roundtrip_keeps_edits_and_verbatim_parts() {
 
     let doc2 = vsdx::parse::parse(&out).unwrap();
     assert_eq!(
-        doc2.pages[0].shapes[0].sheet.cell("PinX").unwrap().numeric(),
+        doc2.pages[0].shapes[0]
+            .sheet
+            .cell("PinX")
+            .unwrap()
+            .numeric(),
         Some(9.75),
         "edited cell did not survive"
     );
@@ -331,8 +370,14 @@ fn writes_fresh_document_from_model() {
 
     use vsdx::model::*;
     let xmlns = vec![
-        ("xmlns".to_string(), "http://schemas.microsoft.com/office/visio/2012/main".to_string()),
-        ("xmlns:r".to_string(), "http://schemas.openxmlformats.org/officeDocument/2006/relationships".to_string()),
+        (
+            "xmlns".to_string(),
+            "http://schemas.microsoft.com/office/visio/2012/main".to_string(),
+        ),
+        (
+            "xmlns:r".to_string(),
+            "http://schemas.openxmlformats.org/officeDocument/2006/relationships".to_string(),
+        ),
     ];
     let mut doc = Document::default();
     doc.root_attrs = xmlns.clone();
@@ -355,7 +400,11 @@ fn writes_fresh_document_from_model() {
     });
 
     let mut page_sheet = Sheet {
-        attrs: vec![("LineStyle".into(), "0".into()), ("FillStyle".into(), "0".into()), ("TextStyle".into(), "0".into())],
+        attrs: vec![
+            ("LineStyle".into(), "0".into()),
+            ("FillStyle".into(), "0".into()),
+            ("TextStyle".into(), "0".into()),
+        ],
         ..Default::default()
     };
     page_sheet.set_cell("PageWidth", Cell::value("8.5"));
@@ -462,11 +511,18 @@ fn writes_fresh_document_from_model() {
         Some(8.5)
     );
     assert_eq!(
-        doc2.pages[0].shapes[0].sheet.cell("PinX").unwrap().numeric(),
+        doc2.pages[0].shapes[0]
+            .sheet
+            .cell("PinX")
+            .unwrap()
+            .numeric(),
         Some(4.25)
     );
     assert_eq!(
-        doc2.pages[0].shapes[0].sheet.sections_named("Geometry").len(),
+        doc2.pages[0].shapes[0]
+            .sheet
+            .sections_named("Geometry")
+            .len(),
         1
     );
     assert_eq!(doc2.stylesheets.len(), 1);

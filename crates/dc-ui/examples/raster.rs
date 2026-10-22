@@ -9,8 +9,12 @@ fn main() {
     let width: f32 = args.next().map_or(1200.0, |s| s.parse().unwrap());
     let img = dc_ui::svgimg::rasterize(&svg, width).unwrap();
     let png = resvg::tiny_skia::Pixmap::from_vec(
-        img.pixels.iter().flat_map(|p| p.to_srgba_unmultiplied().as_slice().to_vec()).collect(),
+        img.pixels
+            .iter()
+            .flat_map(|p| p.to_srgba_unmultiplied().as_slice().to_vec())
+            .collect(),
         resvg::tiny_skia::IntSize::from_wh(img.size[0] as u32, img.size[1] as u32).unwrap(),
-    ).unwrap();
+    )
+    .unwrap();
     std::fs::write(out, png.encode_png().unwrap()).unwrap();
 }

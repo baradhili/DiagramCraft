@@ -41,19 +41,31 @@ impl SvgIconSet {
     /// fallback exists, [`Self::source`] returns empty bytes for egui to report as a load error.
     /// Invalid UTF-8 is replaced lossily, matching the existing app loaders. This API is for
     /// trusted embedded assets, not user-supplied SVG documents.
-    pub fn new(icons: &'static [(&'static str, &'static [u8])], style: SvgStyle, uri_prefix: &'static str, fallback: &'static str) -> Self {
-        let stroke = style.stroke_width.map(|width| format!("stroke-width=\"{width}\""));
+    pub fn new(
+        icons: &'static [(&'static str, &'static [u8])],
+        style: SvgStyle,
+        uri_prefix: &'static str,
+        fallback: &'static str,
+    ) -> Self {
+        let stroke = style
+            .stroke_width
+            .map(|width| format!("stroke-width=\"{width}\""));
         let icons = icons
             .iter()
             .map(|(name, bytes)| {
-                let mut svg = String::from_utf8_lossy(bytes).replace("currentColor", style.current_color);
+                let mut svg =
+                    String::from_utf8_lossy(bytes).replace("currentColor", style.current_color);
                 if let Some(stroke) = &stroke {
                     svg = svg.replace("stroke-width=\"2\"", stroke);
                 }
                 (*name, Arc::from(svg.into_bytes()))
             })
             .collect();
-        Self { icons, uri_prefix, fallback }
+        Self {
+            icons,
+            uri_prefix,
+            fallback,
+        }
     }
 
     /// Whether the catalog contains `name`, without applying the fallback.
@@ -69,8 +81,16 @@ impl SvgIconSet {
     /// A source suitable for `egui::Image::new`, with shared bytes and the caller's requested
     /// name in the URI, even when the fallback is used. This preserves existing app cache keys.
     pub fn source(&self, name: &str) -> ImageSource<'static> {
-        let bytes = self.icons.get(name).or_else(|| self.icons.get(self.fallback)).cloned().unwrap_or_default();
-        ImageSource::Bytes { uri: format!("{}{name}.svg", self.uri_prefix).into(), bytes: Bytes::Shared(bytes) }
+        let bytes = self
+            .icons
+            .get(name)
+            .or_else(|| self.icons.get(self.fallback))
+            .cloned()
+            .unwrap_or_default();
+        ImageSource::Bytes {
+            uri: format!("{}{name}.svg", self.uri_prefix).into(),
+            bytes: Bytes::Shared(bytes),
+        }
     }
 }
 

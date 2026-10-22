@@ -68,7 +68,11 @@ fn format_num(n: f64) -> String {
 /// can fall back to the cached value.
 pub fn eval(expr: &str, env: &Env) -> Result<Value, String> {
     let toks = tokenize(expr)?;
-    let mut p = Parser { toks: &toks, pos: 0, env };
+    let mut p = Parser {
+        toks: &toks,
+        pos: 0,
+        env,
+    };
     let v = p.expr()?;
     if p.pos != toks.len() {
         return Err(format!("trailing tokens at {}", p.pos));
@@ -312,8 +316,12 @@ impl<'a> Parser<'a> {
                 }
                 // Non-numeric operands: only (in)equality is meaningful.
                 _ => match which {
-                    0 => Value::Num(f64::from((lhs.clone().coerce_str() == rhs.clone().coerce_str()) as i32)),
-                    1 => Value::Num(f64::from((lhs.clone().coerce_str() != rhs.clone().coerce_str()) as i32)),
+                    0 => Value::Num(f64::from(
+                        (lhs.clone().coerce_str() == rhs.clone().coerce_str()) as i32,
+                    )),
+                    1 => Value::Num(f64::from(
+                        (lhs.clone().coerce_str() != rhs.clone().coerce_str()) as i32,
+                    )),
                     _ => return Err("ordering comparison on strings".into()),
                 },
             };
@@ -467,15 +475,18 @@ impl<'a> Parser<'a> {
                     return Err("OR needs arguments".into());
                 }
                 let r: bool = (0..args.len())
-                    .try_fold(false, |acc, i| -> Result<bool, String> { Ok(acc || arg(&args, i)? != 0.0) })?;
+                    .try_fold(false, |acc, i| -> Result<bool, String> {
+                        Ok(acc || arg(&args, i)? != 0.0)
+                    })?;
                 Ok(Value::Num(f64::from(r as i32)))
             }
             "AND" => {
                 if args.is_empty() {
                     return Err("AND needs arguments".into());
                 }
-                let r: bool = (0..args.len())
-                    .try_fold(true, |acc, i| -> Result<bool, String> { Ok(acc && arg(&args, i)? != 0.0) })?;
+                let r: bool = (0..args.len()).try_fold(true, |acc, i| -> Result<bool, String> {
+                    Ok(acc && arg(&args, i)? != 0.0)
+                })?;
                 Ok(Value::Num(f64::from(r as i32)))
             }
             "NOT" => {
@@ -576,15 +587,36 @@ mod tests {
     #[test]
     fn control_functions() {
         let e = env();
-        assert_eq!(eval("IF(Width=2, 10, 20)", &e).unwrap().as_f64(), Some(10.0));
-        assert_eq!(eval("IF(Width=3, 10, 20)", &e).unwrap().as_f64(), Some(20.0));
-        assert_eq!(eval("OR(Width=3, Height=1)", &e).unwrap().as_f64(), Some(1.0));
-        assert_eq!(eval("OR(Width=3, Height=2)", &e).unwrap().as_f64(), Some(0.0));
-        assert_eq!(eval("AND(Width=2, Height=1)", &e).unwrap().as_f64(), Some(1.0));
+        assert_eq!(
+            eval("IF(Width=2, 10, 20)", &e).unwrap().as_f64(),
+            Some(10.0)
+        );
+        assert_eq!(
+            eval("IF(Width=3, 10, 20)", &e).unwrap().as_f64(),
+            Some(20.0)
+        );
+        assert_eq!(
+            eval("OR(Width=3, Height=1)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            eval("OR(Width=3, Height=2)", &e).unwrap().as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            eval("AND(Width=2, Height=1)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
         assert_eq!(eval("NOT(Width=3)", &e).unwrap().as_f64(), Some(1.0));
         // GUARD transparently yields its protected expression.
-        assert_eq!(eval("GUARD(4MM)", &e).unwrap().as_f64(), Some(4.0 * 0.03937007874015748));
-        assert_eq!(eval("THEMEGUARD(Width*0.5)", &e).unwrap().as_f64(), Some(1.0));
+        assert_eq!(
+            eval("GUARD(4MM)", &e).unwrap().as_f64(),
+            Some(4.0 * 0.03937007874015748)
+        );
+        assert_eq!(
+            eval("THEMEGUARD(Width*0.5)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
         // Unknown functions still error (callers fall back to cached V).
         assert!(eval("SETF(GetRef(Width), 1)", &e).is_err());
     }
@@ -601,7 +633,9 @@ mod tests {
             Some(2.657480296178819)
         );
         assert_eq!(
-            eval("GUARD(Sheet.5!User.InfoPanelHeight)", &e).unwrap().as_f64(),
+            eval("GUARD(Sheet.5!User.InfoPanelHeight)", &e)
+                .unwrap()
+                .as_f64(),
             Some(0.2362204724409449)
         );
     }

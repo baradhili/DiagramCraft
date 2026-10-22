@@ -36,7 +36,10 @@ impl MoveShape {
 
 impl Command for MoveShape {
     fn label(&self) -> String {
-        format!("move shape {} to ({:.3}, {:.3})", self.shape, self.to.0, self.to.1)
+        format!(
+            "move shape {} to ({:.3}, {:.3})",
+            self.shape, self.to.0, self.to.1
+        )
     }
     fn apply(&mut self, doc: &mut Document) -> anyhow::Result<()> {
         self.x.apply(doc)?;
@@ -62,7 +65,12 @@ pub struct AddMasterInstance {
 
 impl AddMasterInstance {
     pub fn new(page: i64, master: i64, pin: (f64, f64)) -> AddMasterInstance {
-        AddMasterInstance { page, master, pin, id: None }
+        AddMasterInstance {
+            page,
+            master,
+            pin,
+            id: None,
+        }
     }
 }
 
@@ -140,14 +148,17 @@ pub(crate) fn pin_of(doc: &Document, page: i64, shape: i64) -> Option<(f64, f64)
     Some((x, y))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use dc_core::Editor;
 
     fn doc_with_shape() -> Editor {
-        let mut shape = Shape { id: 1, type_: Some("Shape".into()), ..Shape::default() };
+        let mut shape = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
         shape.sheet.set_cell("PinX", Cell::value("1.5"));
         shape.sheet.set_cell("PinY", Cell::value("2.5"));
         let page = vsdx::model::Page {
@@ -157,7 +168,10 @@ mod tests {
             shapes: vec![shape],
             ..vsdx::model::Page::default()
         };
-        Editor::new(Document { pages: vec![page], ..Document::default() })
+        Editor::new(Document {
+            pages: vec![page],
+            ..Document::default()
+        })
     }
 
     #[test]

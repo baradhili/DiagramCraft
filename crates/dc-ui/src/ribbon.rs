@@ -61,7 +61,6 @@ pub const TABS: &[Tab] = &[
     Tab::Developer,
 ];
 
-
 /// Icon glyphs drawn with epaint primitives. One enum per ribbon icon;
 /// cheap and colorful like the Office ribbon, but ours.
 #[derive(Debug, Clone, Copy)]
@@ -209,13 +208,24 @@ impl Icon {
     fn office_color(self) -> Color32 {
         match self {
             Icon::Paste | Icon::Open => Color32::from_rgb(0xb5, 0x8a, 0x2a),
-            Icon::Cut | Icon::Copy | Icon::Bucket | Icon::OnlinePic | Icon::Field
-            | Icon::Container | Icon::Callout | Icon::DataGraphic | Icon::Save => {
-                Color32::from_rgb(0x2a, 0x6f, 0xb5)
+            Icon::Cut
+            | Icon::Copy
+            | Icon::Bucket
+            | Icon::OnlinePic
+            | Icon::Field
+            | Icon::Container
+            | Icon::Callout
+            | Icon::DataGraphic
+            | Icon::Save => Color32::from_rgb(0x2a, 0x6f, 0xb5),
+            Icon::Painter | Icon::Comment | Icon::Effects | Icon::ClearAll => {
+                Color32::from_rgb(0xe0, 0x7b, 0x1f)
             }
-            Icon::Painter | Icon::Comment | Icon::Effects | Icon::ClearAll => Color32::from_rgb(0xe0, 0x7b, 0x1f),
             Icon::TextColor | Icon::Strike => Color32::from_rgb(0xc0, 0x3a, 0x2b),
-            Icon::Grow | Icon::Shrink | Icon::Numbering | Icon::IndentLess | Icon::IndentMore
+            Icon::Grow
+            | Icon::Shrink
+            | Icon::Numbering
+            | Icon::IndentLess
+            | Icon::IndentMore
             | Icon::LineSpacing => Color32::from_rgb(0x42, 0x42, 0x42),
             Icon::Delete => Color32::from_rgb(0xc0, 0x3a, 0x2b),
             Icon::Spell | Icon::Refresh | Icon::Check | Icon::New => {
@@ -226,7 +236,11 @@ impl Icon {
     }
 
     pub fn paint(self, ui: &Ui, r: Rect, enabled: bool) {
-        let tint = if enabled { self.office_color() } else { Color32::from_gray(178) };
+        let tint = if enabled {
+            self.office_color()
+        } else {
+            Color32::from_gray(178)
+        };
         if let Some(name) = self.asset() {
             if let Some(tex) = crate::icontex::texture(ui.ctx(), name, tint) {
                 let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
@@ -246,7 +260,11 @@ impl Icon {
         let blue = lit(Color32::from_rgb(0x2a, 0x6f, 0xb5));
         let green = lit(theme::ACCENT);
         let orange = lit(Color32::from_rgb(0xd8, 0x7b, 0x0b));
-        let gray = if enabled { Color32::from_rgb(0x77, 0x77, 0x77) } else { Color32::from_gray(190) };
+        let gray = if enabled {
+            Color32::from_rgb(0x77, 0x77, 0x77)
+        } else {
+            Color32::from_gray(190)
+        };
         let red = lit(Color32::from_rgb(0xc0, 0x3a, 0x2b));
         let stroke = |col| Stroke::new(1.6, col);
         match self {
@@ -264,7 +282,11 @@ impl Icon {
                 );
             }
             Icon::Undo | Icon::Redo => {
-                let dir = if matches!(self, Icon::Redo) { 1.0 } else { -1.0 };
+                let dir = if matches!(self, Icon::Redo) {
+                    1.0
+                } else {
+                    -1.0
+                };
                 let pts: Vec<Pos2> = (0..=10)
                     .map(|i| {
                         let a = 0.6 + (i as f32 / 10.0) * 3.4;
@@ -273,11 +295,17 @@ impl Icon {
                     .collect();
                 p.add(egui::Shape::line(pts, stroke(blue)));
                 p.line_segment(
-                    [c + Vec2::new(dir * 7.0, -4.0), c + Vec2::new(dir * 3.0, -4.0)],
+                    [
+                        c + Vec2::new(dir * 7.0, -4.0),
+                        c + Vec2::new(dir * 3.0, -4.0),
+                    ],
                     stroke(blue),
                 );
                 p.line_segment(
-                    [c + Vec2::new(dir * 7.0, -4.0), c + Vec2::new(dir * 5.0, -7.0)],
+                    [
+                        c + Vec2::new(dir * 7.0, -4.0),
+                        c + Vec2::new(dir * 5.0, -7.0),
+                    ],
                     stroke(blue),
                 );
             }
@@ -288,11 +316,22 @@ impl Icon {
                 p.rect_stroke(pg, 1.0, stroke(blue), egui::StrokeKind::Middle);
                 let fold = Vec2::new(3.0, 3.0);
                 let tr = pg.right_top();
-                p.line_segment([tr - Vec2::new(0.0, fold.y), tr + Vec2::new(fold.x, 0.0)], stroke(blue));
-                p.line_segment([tr - Vec2::new(fold.x, 0.0), tr + Vec2::new(fold.x, 0.0)], stroke(blue));
+                p.line_segment(
+                    [tr - Vec2::new(0.0, fold.y), tr + Vec2::new(fold.x, 0.0)],
+                    stroke(blue),
+                );
+                p.line_segment(
+                    [tr - Vec2::new(fold.x, 0.0), tr + Vec2::new(fold.x, 0.0)],
+                    stroke(blue),
+                );
             }
             Icon::Open => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::splat(11.0)), 1.0, stroke(orange), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::splat(11.0)),
+                    1.0,
+                    stroke(orange),
+                    egui::StrokeKind::Middle,
+                );
                 p.rect_filled(
                     Rect::from_min_size(r.left_top() + Vec2::new(4.0, 6.0), Vec2::new(9.0, 5.0)),
                     0.0,
@@ -301,49 +340,101 @@ impl Icon {
             }
             Icon::Copy => {
                 // Office style: two crisp white pages, blue outlines.
-                let back = Rect::from_min_size(r.left_top() + Vec2::new(2.0, 2.0), Vec2::splat(11.0));
-                let front = Rect::from_min_size(r.left_top() + Vec2::new(7.0, 7.0), Vec2::splat(11.0));
+                let back =
+                    Rect::from_min_size(r.left_top() + Vec2::new(2.0, 2.0), Vec2::splat(11.0));
+                let front =
+                    Rect::from_min_size(r.left_top() + Vec2::new(7.0, 7.0), Vec2::splat(11.0));
                 p.rect_filled(back, 1.5, Color32::from_gray(235));
-                p.rect_stroke(back, 1.5, Stroke::new(1.4, Color32::from_gray(150)), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    back,
+                    1.5,
+                    Stroke::new(1.4, Color32::from_gray(150)),
+                    egui::StrokeKind::Middle,
+                );
                 p.rect_filled(front, 1.5, Color32::WHITE);
                 p.rect_stroke(front, 1.5, Stroke::new(1.6, blue), egui::StrokeKind::Middle);
                 for i in 0..3 {
                     let y = front.top() + 3.5 + i as f32 * 2.6;
                     p.line_segment(
-                        [Pos2::new(front.left() + 2.5, y), Pos2::new(front.right() - 2.5, y)],
+                        [
+                            Pos2::new(front.left() + 2.5, y),
+                            Pos2::new(front.right() - 2.5, y),
+                        ],
                         Stroke::new(1.1, Color32::from_gray(185)),
                     );
                 }
             }
             Icon::Painter => {
                 // Office format painter: angled brush, wooden handle.
-                p.line_segment([c + Vec2::new(-7.0, 7.0), c + Vec2::new(-1.0, 1.0)], Stroke::new(3.4, lit(Color32::from_rgb(0x8a, 0x5a, 0x2b))));
+                p.line_segment(
+                    [c + Vec2::new(-7.0, 7.0), c + Vec2::new(-1.0, 1.0)],
+                    Stroke::new(3.4, lit(Color32::from_rgb(0x8a, 0x5a, 0x2b))),
+                );
                 let tip = Rect::from_center_size(c + Vec2::new(3.0, -3.0), Vec2::new(7.0, 7.0));
                 p.rect_filled(tip, 1.5, Color32::from_gray(170));
-                p.line_segment([c + Vec2::new(6.0, -8.0), c + Vec2::new(9.0, -5.0)], Stroke::new(3.2, blue));
-                p.line_segment([c + Vec2::new(-1.0, 1.0), c + Vec2::new(2.0, -2.0)], Stroke::new(2.4, Color32::from_gray(120)));
+                p.line_segment(
+                    [c + Vec2::new(6.0, -8.0), c + Vec2::new(9.0, -5.0)],
+                    Stroke::new(3.2, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-1.0, 1.0), c + Vec2::new(2.0, -2.0)],
+                    Stroke::new(2.4, Color32::from_gray(120)),
+                );
             }
             Icon::FontA => {
-                p.text(c, egui::Align2::CENTER_CENTER, "A", egui::FontId::proportional(17.0), lit(Color32::from_rgb(0x31, 0x31, 0x31)));
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "A",
+                    egui::FontId::proportional(17.0),
+                    lit(Color32::from_rgb(0x31, 0x31, 0x31)),
+                );
                 p.line_segment(
-                    [Pos2::new(r.left() + 1.0, r.bottom() - 1.0), Pos2::new(r.right() - 1.0, r.bottom() - 1.0)],
+                    [
+                        Pos2::new(r.left() + 1.0, r.bottom() - 1.0),
+                        Pos2::new(r.right() - 1.0, r.bottom() - 1.0),
+                    ],
                     Stroke::new(1.6, blue),
                 );
             }
             Icon::Bold => {
-                p.text(c, egui::Align2::CENTER_CENTER, "B", egui::FontId::proportional(17.0), lit(Color32::from_rgb(0x31, 0x31, 0x31)));
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "B",
+                    egui::FontId::proportional(17.0),
+                    lit(Color32::from_rgb(0x31, 0x31, 0x31)),
+                );
             }
             Icon::Italic => {
-                p.text(c, egui::Align2::CENTER_CENTER, "I", egui::FontId::proportional(17.0), lit(Color32::from_rgb(0x31, 0x31, 0x31)));
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "I",
+                    egui::FontId::proportional(17.0),
+                    lit(Color32::from_rgb(0x31, 0x31, 0x31)),
+                );
                 p.line_segment(
-                    [Pos2::new(r.left() + 2.0, r.bottom() - 1.0), Pos2::new(r.right() - 2.0, r.bottom() - 1.0)],
+                    [
+                        Pos2::new(r.left() + 2.0, r.bottom() - 1.0),
+                        Pos2::new(r.right() - 2.0, r.bottom() - 1.0),
+                    ],
                     Stroke::new(1.4, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
                 );
             }
             Icon::Underline => {
-                p.text(c + Vec2::new(0.0, -1.5), egui::Align2::CENTER_CENTER, "U", egui::FontId::proportional(16.0), lit(Color32::from_rgb(0x31, 0x31, 0x31)));
+                p.text(
+                    c + Vec2::new(0.0, -1.5),
+                    egui::Align2::CENTER_CENTER,
+                    "U",
+                    egui::FontId::proportional(16.0),
+                    lit(Color32::from_rgb(0x31, 0x31, 0x31)),
+                );
                 p.line_segment(
-                    [Pos2::new(r.left() + 2.0, r.bottom() - 2.0), Pos2::new(r.right() - 2.0, r.bottom() - 2.0)],
+                    [
+                        Pos2::new(r.left() + 2.0, r.bottom() - 2.0),
+                        Pos2::new(r.right() - 2.0, r.bottom() - 2.0),
+                    ],
                     Stroke::new(1.6, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
                 );
             }
@@ -358,36 +449,88 @@ impl Icon {
                     c + Vec2::new(4.0, -5.0),
                     Pos2::new(body.right() - 1.0, body.top() + 1.0),
                 ];
-                p.line(vec![handle[0], handle[1], handle[2], handle[3]], Stroke::new(1.5, Color32::from_gray(130)));
-                p.line_segment([c + Vec2::new(6.0, -6.0), c + Vec2::new(8.0, -3.0)], Stroke::new(2.6, lit(Color32::from_rgb(0xe0, 0x4a, 0x2f))));
-                p.circle_filled(c + Vec2::new(8.5, -1.5), 1.4, lit(Color32::from_rgb(0xe0, 0x4a, 0x2f)));
+                p.line(
+                    vec![handle[0], handle[1], handle[2], handle[3]],
+                    Stroke::new(1.5, Color32::from_gray(130)),
+                );
+                p.line_segment(
+                    [c + Vec2::new(6.0, -6.0), c + Vec2::new(8.0, -3.0)],
+                    Stroke::new(2.6, lit(Color32::from_rgb(0xe0, 0x4a, 0x2f))),
+                );
+                p.circle_filled(
+                    c + Vec2::new(8.5, -1.5),
+                    1.4,
+                    lit(Color32::from_rgb(0xe0, 0x4a, 0x2f)),
+                );
             }
             Icon::Pen => {
                 // Office line color: felt pen at 45°.
-                p.line_segment([c + Vec2::new(-7.0, 7.0), c + Vec2::new(2.0, -2.0)], Stroke::new(4.0, lit(Color32::from_rgb(0x3a, 0x3a, 0x3a))));
-                p.line_segment([c + Vec2::new(2.0, -2.0), c + Vec2::new(5.0, -5.0)], Stroke::new(4.0, blue));
-                p.line_segment([c + Vec2::new(5.0, -5.0), c + Vec2::new(9.0, -7.0)], Stroke::new(2.8, lit(Color32::from_rgb(0xe0, 0x4a, 0x2f))));
+                p.line_segment(
+                    [c + Vec2::new(-7.0, 7.0), c + Vec2::new(2.0, -2.0)],
+                    Stroke::new(4.0, lit(Color32::from_rgb(0x3a, 0x3a, 0x3a))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(2.0, -2.0), c + Vec2::new(5.0, -5.0)],
+                    Stroke::new(4.0, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.0, -5.0), c + Vec2::new(9.0, -7.0)],
+                    Stroke::new(2.8, lit(Color32::from_rgb(0xe0, 0x4a, 0x2f))),
+                );
             }
             Icon::BringFront | Icon::SendBack => {
                 // Office z-order: layered rounded squares + arrow.
                 let front = matches!(self, Icon::BringFront);
-                let top = Rect::from_center_size(c + Vec2::new(-1.5, if front { -3.5 } else { 3.5 }), Vec2::splat(8.0));
-                let bot = Rect::from_center_size(c + Vec2::new(2.5, if front { 3.0 } else { -3.0 }), Vec2::splat(8.0));
+                let top = Rect::from_center_size(
+                    c + Vec2::new(-1.5, if front { -3.5 } else { 3.5 }),
+                    Vec2::splat(8.0),
+                );
+                let bot = Rect::from_center_size(
+                    c + Vec2::new(2.5, if front { 3.0 } else { -3.0 }),
+                    Vec2::splat(8.0),
+                );
                 p.rect_filled(bot, 1.5, Color32::from_gray(180));
                 p.rect_stroke(bot, 1.5, Stroke::new(1.2, gray), egui::StrokeKind::Middle);
                 p.rect_filled(top, 1.5, lit(Color32::from_rgb(0x8f, 0xcd, 0xb4)));
-                p.rect_stroke(top, 1.5, Stroke::new(1.4, theme::ACCENT), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    top,
+                    1.5,
+                    Stroke::new(1.4, theme::ACCENT),
+                    egui::StrokeKind::Middle,
+                );
                 let ay = if front { c.y - 6.5 } else { c.y + 6.5 };
                 let dir: f32 = if front { -1.0 } else { 1.0 };
                 p.line(
-                    vec![Pos2::new(c.x + 8.0, ay + 6.0 * dir), Pos2::new(c.x + 8.0, ay - 2.0 * dir), Pos2::new(c.x + 8.0, ay - 2.0 * dir), Pos2::new(c.x + 5.5, ay + 0.5 * dir), Pos2::new(c.x + 8.0, ay - 2.0 * dir), Pos2::new(c.x + 10.5, ay + 0.5 * dir)],
+                    vec![
+                        Pos2::new(c.x + 8.0, ay + 6.0 * dir),
+                        Pos2::new(c.x + 8.0, ay - 2.0 * dir),
+                        Pos2::new(c.x + 8.0, ay - 2.0 * dir),
+                        Pos2::new(c.x + 5.5, ay + 0.5 * dir),
+                        Pos2::new(c.x + 8.0, ay - 2.0 * dir),
+                        Pos2::new(c.x + 10.5, ay + 0.5 * dir),
+                    ],
                     Stroke::new(1.6, Color32::from_rgb(0x2a, 0x6f, 0xb5)),
                 );
             }
-            Icon::Strike | Icon::Subscript | Icon::Superscript | Icon::TextColor | Icon::Grow
-            | Icon::Shrink | Icon::ClearAll | Icon::Numbering | Icon::IndentLess | Icon::IndentMore
-            | Icon::LineSpacing | Icon::Effects => {
-                p.text(c, egui::Align2::CENTER_CENTER, "a", egui::FontId::proportional(13.0), blue);
+            Icon::Strike
+            | Icon::Subscript
+            | Icon::Superscript
+            | Icon::TextColor
+            | Icon::Grow
+            | Icon::Shrink
+            | Icon::ClearAll
+            | Icon::Numbering
+            | Icon::IndentLess
+            | Icon::IndentMore
+            | Icon::LineSpacing
+            | Icon::Effects => {
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "a",
+                    egui::FontId::proportional(13.0),
+                    blue,
+                );
             }
             Icon::Align | Icon::AlignCenter | Icon::AlignRight | Icon::Bullets => {
                 // MDI texture covers these; fallback = generic align bars
@@ -395,7 +538,14 @@ impl Icon {
                     let y = c.y - 4.5 + i as f32 * 3.0;
                     p.line_segment(
                         [Pos2::new(c.x - w / 2.0, y), Pos2::new(c.x - w / 2.0 + w, y)],
-                        Stroke::new(2.0, if i == 0 { blue } else { lit(Color32::from_rgb(0x59, 0x59, 0x59)) }),
+                        Stroke::new(
+                            2.0,
+                            if i == 0 {
+                                blue
+                            } else {
+                                lit(Color32::from_rgb(0x59, 0x59, 0x59))
+                            },
+                        ),
                     );
                 }
             }
@@ -409,7 +559,11 @@ impl Icon {
                     Stroke::new(1.8, blue),
                 );
                 p.line(
-                    vec![Pos2::new(c.x + 4.0, c.y - 6.0), Pos2::new(c.x + 8.0, c.y - 3.0), Pos2::new(c.x + 4.0, c.y)],
+                    vec![
+                        Pos2::new(c.x + 4.0, c.y - 6.0),
+                        Pos2::new(c.x + 8.0, c.y - 3.0),
+                        Pos2::new(c.x + 4.0, c.y),
+                    ],
                     Stroke::new(1.8, blue),
                 );
             }
@@ -433,38 +587,90 @@ impl Icon {
                 }
             }
             Icon::Container => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(14.0, 10.0)), 2.0, stroke(blue), egui::StrokeKind::Middle);
-                p.rect_filled(Rect::from_center_size(c + Vec2::new(0.0, -2.0), Vec2::new(8.0, 4.0)), 1.0, Color32::from_rgb(0xff, 0xe8, 0xb0));
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(14.0, 10.0)),
+                    2.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(0.0, -2.0), Vec2::new(8.0, 4.0)),
+                    1.0,
+                    Color32::from_rgb(0xff, 0xe8, 0xb0),
+                );
             }
             Icon::Callout => {
-                p.rect_stroke(Rect::from_center_size(c + Vec2::new(0.0, -1.5), Vec2::new(13.0, 8.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c + Vec2::new(0.0, -1.5), Vec2::new(13.0, 8.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
                 p.line(
-                    vec![Pos2::new(c.x - 3.0, c.y + 2.5), Pos2::new(c.x - 5.0, c.y + 7.0), Pos2::new(c.x, c.y + 2.5)],
+                    vec![
+                        Pos2::new(c.x - 3.0, c.y + 2.5),
+                        Pos2::new(c.x - 5.0, c.y + 7.0),
+                        Pos2::new(c.x, c.y + 2.5),
+                    ],
                     Stroke::new(1.4, blue),
                 );
             }
             Icon::Field => {
-                p.text(c, egui::Align2::CENTER_CENTER, "{ }", egui::FontId::monospace(12.0), blue);
+                p.text(
+                    c,
+                    egui::Align2::CENTER_CENTER,
+                    "{ }",
+                    egui::FontId::monospace(12.0),
+                    blue,
+                );
             }
             Icon::Comment => {
-                p.rect_stroke(Rect::from_center_size(c + Vec2::new(0.0, -1.0), Vec2::new(13.0, 8.0)), 3.0, stroke(orange), egui::StrokeKind::Middle);
-                p.line_segment([Pos2::new(c.x - 2.0, c.y + 3.0), Pos2::new(c.x - 4.0, c.y + 7.0)], stroke(orange));
+                p.rect_stroke(
+                    Rect::from_center_size(c + Vec2::new(0.0, -1.0), Vec2::new(13.0, 8.0)),
+                    3.0,
+                    stroke(orange),
+                    egui::StrokeKind::Middle,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(c.x - 2.0, c.y + 3.0),
+                        Pos2::new(c.x - 4.0, c.y + 7.0),
+                    ],
+                    stroke(orange),
+                );
             }
             Icon::Spell => {
-                p.text(c + Vec2::new(-2.0, 0.0), egui::Align2::CENTER_CENTER, "abc", egui::FontId::proportional(9.0), Color32::BLACK);
+                p.text(
+                    c + Vec2::new(-2.0, 0.0),
+                    egui::Align2::CENTER_CENTER,
+                    "abc",
+                    egui::FontId::proportional(9.0),
+                    Color32::BLACK,
+                );
                 p.line(
-                    vec![Pos2::new(c.x + 1.0, c.y + 3.0), Pos2::new(c.x + 3.5, c.y + 6.0), Pos2::new(c.x + 8.0, c.y - 4.0)],
+                    vec![
+                        Pos2::new(c.x + 1.0, c.y + 3.0),
+                        Pos2::new(c.x + 3.5, c.y + 6.0),
+                        Pos2::new(c.x + 8.0, c.y - 4.0),
+                    ],
                     Stroke::new(1.8, green),
                 );
             }
             Icon::DataGraphic => {
                 for (i, h) in [5.0, 9.0, 12.0].iter().enumerate() {
                     let x = c.x - 6.0 + i as f32 * 5.0;
-                    p.rect_filled(Rect::from_min_size(Pos2::new(x, c.y + 6.0 - h), Vec2::new(3.5, *h)), 0.5, if i == 2 { orange } else { blue });
+                    p.rect_filled(
+                        Rect::from_min_size(Pos2::new(x, c.y + 6.0 - h), Vec2::new(3.5, *h)),
+                        0.5,
+                        if i == 2 { orange } else { blue },
+                    );
                 }
             }
             Icon::Link => {
-                p.line_segment([c + Vec2::new(-6.0, -3.0), c + Vec2::new(6.0, 3.0)], Stroke::new(2.2, gray));
+                p.line_segment(
+                    [c + Vec2::new(-6.0, -3.0), c + Vec2::new(6.0, 3.0)],
+                    Stroke::new(2.2, gray),
+                );
                 p.circle_stroke(c + Vec2::new(-5.0, -3.0), 3.5, stroke(blue));
                 p.circle_stroke(c + Vec2::new(5.0, 3.0), 3.5, stroke(blue));
             }
@@ -478,50 +684,116 @@ impl Icon {
                     ],
                     Stroke::new(1.7, green),
                 );
-                p.line(vec![Pos2::new(c.x - 5.0, c.y - 7.0), Pos2::new(c.x - 8.0, c.y - 4.0), Pos2::new(c.x - 5.0, c.y - 1.0)], stroke(green));
+                p.line(
+                    vec![
+                        Pos2::new(c.x - 5.0, c.y - 7.0),
+                        Pos2::new(c.x - 8.0, c.y - 4.0),
+                        Pos2::new(c.x - 5.0, c.y - 1.0),
+                    ],
+                    stroke(green),
+                );
             }
             Icon::Swimlane => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(14.0, 11.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
-                p.line_segment([Pos2::new(c.x - 4.0, c.y - 5.5), Pos2::new(c.x - 4.0, c.y + 5.5)], stroke(blue));
-                p.line_segment([Pos2::new(c.x - 7.0, c.y - 1.0), Pos2::new(c.x + 7.0, c.y - 1.0)], stroke(blue));
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(14.0, 11.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(c.x - 4.0, c.y - 5.5),
+                        Pos2::new(c.x - 4.0, c.y + 5.5),
+                    ],
+                    stroke(blue),
+                );
+                p.line_segment(
+                    [
+                        Pos2::new(c.x - 7.0, c.y - 1.0),
+                        Pos2::new(c.x + 7.0, c.y - 1.0),
+                    ],
+                    stroke(blue),
+                );
             }
             Icon::Check => {
                 p.line(
-                    vec![Pos2::new(c.x - 6.0, c.y), Pos2::new(c.x - 2.0, c.y + 4.0), Pos2::new(c.x + 7.0, c.y - 5.0)],
+                    vec![
+                        Pos2::new(c.x - 6.0, c.y),
+                        Pos2::new(c.x - 2.0, c.y + 4.0),
+                        Pos2::new(c.x + 7.0, c.y - 5.0),
+                    ],
                     Stroke::new(2.0, green),
                 );
             }
             Icon::Picture => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::splat(12.0)), 1.0, stroke(gray), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::splat(12.0)),
+                    1.0,
+                    stroke(gray),
+                    egui::StrokeKind::Middle,
+                );
                 p.circle_filled(c + Vec2::new(-3.0, -3.0), 1.8, orange);
                 p.line(
-                    vec![Pos2::new(c.x - 5.0, c.y + 4.0), Pos2::new(c.x - 1.0, c.y - 1.0), Pos2::new(c.x + 2.0, c.y + 2.0), Pos2::new(c.x + 5.0, c.y - 1.0)],
+                    vec![
+                        Pos2::new(c.x - 5.0, c.y + 4.0),
+                        Pos2::new(c.x - 1.0, c.y - 1.0),
+                        Pos2::new(c.x + 2.0, c.y + 2.0),
+                        Pos2::new(c.x + 5.0, c.y - 1.0),
+                    ],
                     stroke(green),
                 );
             }
             Icon::OnlinePic => {
                 p.circle_stroke(c, 6.0, stroke(blue));
-                p.line_segment([Pos2::new(c.x - 6.0, c.y), Pos2::new(c.x + 6.0, c.y)], stroke(blue));
-                p.line_segment([Pos2::new(c.x, c.y - 6.0), Pos2::new(c.x, c.y + 6.0)], stroke(blue));
+                p.line_segment(
+                    [Pos2::new(c.x - 6.0, c.y), Pos2::new(c.x + 6.0, c.y)],
+                    stroke(blue),
+                );
+                p.line_segment(
+                    [Pos2::new(c.x, c.y - 6.0), Pos2::new(c.x, c.y + 6.0)],
+                    stroke(blue),
+                );
             }
             Icon::Orientation => {
-                p.rect_stroke(Rect::from_center_size(c + Vec2::new(-3.5, -1.0), Vec2::new(6.0, 9.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
-                p.rect_stroke(Rect::from_center_size(c + Vec2::new(4.5, 2.0), Vec2::new(9.0, 6.0)), 1.0, stroke(gray), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c + Vec2::new(-3.5, -1.0), Vec2::new(6.0, 9.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
+                p.rect_stroke(
+                    Rect::from_center_size(c + Vec2::new(4.5, 2.0), Vec2::new(9.0, 6.0)),
+                    1.0,
+                    stroke(gray),
+                    egui::StrokeKind::Middle,
+                );
             }
             Icon::Paste => {
                 // Office paste: warm clipboard, clip at top, paper lines.
                 let board = r.shrink(3.0);
                 p.rect_filled(board, 2.0, lit(Color32::from_rgb(0xf3, 0xe2, 0xb8)));
-                p.rect_stroke(board, 2.0, Stroke::new(1.5, lit(Color32::from_rgb(0xb5, 0x8a, 0x2a))), egui::StrokeKind::Middle);
-                let clip = Rect::from_center_size(Pos2::new(c.x, board.top() + 1.0), Vec2::new(7.0, 4.0));
+                p.rect_stroke(
+                    board,
+                    2.0,
+                    Stroke::new(1.5, lit(Color32::from_rgb(0xb5, 0x8a, 0x2a))),
+                    egui::StrokeKind::Middle,
+                );
+                let clip =
+                    Rect::from_center_size(Pos2::new(c.x, board.top() + 1.0), Vec2::new(7.0, 4.0));
                 p.rect_filled(clip, 1.0, lit(Color32::from_rgb(0xb5, 0x8a, 0x2a)));
                 p.rect_filled(
                     Rect::from_center_size(c + Vec2::new(0.0, -5.5), Vec2::new(6.0, 3.0)),
                     0.0,
                     gray,
                 );
-                p.line(vec![c + Vec2::new(-3.0, 1.0), c + Vec2::new(3.0, 1.0)], stroke(blue));
-                p.line(vec![c + Vec2::new(-3.0, 4.0), c + Vec2::new(3.0, 4.0)], stroke(blue));
+                p.line(
+                    vec![c + Vec2::new(-3.0, 1.0), c + Vec2::new(3.0, 1.0)],
+                    stroke(blue),
+                );
+                p.line(
+                    vec![c + Vec2::new(-3.0, 4.0), c + Vec2::new(3.0, 4.0)],
+                    stroke(blue),
+                );
             }
             Icon::Cut => {
                 // Office scissors: silver filled blades, blue ring handles.
@@ -553,14 +825,24 @@ impl Icon {
                 ));
             }
             Icon::TextBox => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(13.0, 9.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(13.0, 9.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
                 p.line_segment(
                     [c + Vec2::new(-4.0, 0.0), c + Vec2::new(4.0, 0.0)],
                     Stroke::new(1.2, blue),
                 );
             }
             Icon::NewPage => {
-                p.rect_stroke(Rect::from_center_size(c + Vec2::new(-1.0, 0.0), Vec2::new(10.0, 13.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c + Vec2::new(-1.0, 0.0), Vec2::new(10.0, 13.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
                 p.line_segment(
                     [c + Vec2::new(-4.0, 0.0), c + Vec2::new(5.0, 0.0)],
                     Stroke::new(1.6, green),
@@ -584,39 +866,96 @@ impl Icon {
                 );
             }
             Icon::Fit => {
-                p.line_segment([c + Vec2::new(-6.0, -4.0), c + Vec2::new(-6.0, 4.0)], stroke(gray));
-                p.line_segment([c + Vec2::new(-6.0, -4.0), c + Vec2::new(-3.0, -4.0)], stroke(gray));
-                p.line_segment([c + Vec2::new(6.0, 4.0), c + Vec2::new(6.0, -4.0)], stroke(gray));
-                p.line_segment([c + Vec2::new(6.0, 4.0), c + Vec2::new(3.0, 4.0)], stroke(gray));
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(7.0, 5.0)), 0.5, stroke(blue), egui::StrokeKind::Middle);
+                p.line_segment(
+                    [c + Vec2::new(-6.0, -4.0), c + Vec2::new(-6.0, 4.0)],
+                    stroke(gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-6.0, -4.0), c + Vec2::new(-3.0, -4.0)],
+                    stroke(gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(6.0, 4.0), c + Vec2::new(6.0, -4.0)],
+                    stroke(gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(6.0, 4.0), c + Vec2::new(3.0, 4.0)],
+                    stroke(gray),
+                );
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(7.0, 5.0)),
+                    0.5,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
             }
             Icon::ZoomIn => {
-                p.circle_stroke(c + Vec2::new(-2.0, -2.0), 5.0, Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))));
-                p.line_segment([c + Vec2::new(1.5, 1.5), c + Vec2::new(6.5, 6.5)], Stroke::new(2.6, lit(Color32::from_rgb(0x31, 0x31, 0x31))));
-                p.line_segment([c + Vec2::new(-4.5, -2.0), c + Vec2::new(0.5, -2.0)], Stroke::new(1.8, blue));
-                p.line_segment([c + Vec2::new(-2.0, -4.0), c + Vec2::new(-2.0, 0.0)], Stroke::new(1.2, blue));
+                p.circle_stroke(
+                    c + Vec2::new(-2.0, -2.0),
+                    5.0,
+                    Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, 1.5), c + Vec2::new(6.5, 6.5)],
+                    Stroke::new(2.6, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-4.5, -2.0), c + Vec2::new(0.5, -2.0)],
+                    Stroke::new(1.8, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-2.0, -4.0), c + Vec2::new(-2.0, 0.0)],
+                    Stroke::new(1.2, blue),
+                );
             }
             Icon::ZoomOut => {
-                p.circle_stroke(c + Vec2::new(-2.0, -2.0), 5.0, Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))));
-                p.line_segment([c + Vec2::new(1.5, 1.5), c + Vec2::new(6.5, 6.5)], Stroke::new(2.6, lit(Color32::from_rgb(0x31, 0x31, 0x31))));
-                p.line_segment([c + Vec2::new(-4.5, -2.0), c + Vec2::new(0.5, -2.0)], Stroke::new(1.8, blue));
+                p.circle_stroke(
+                    c + Vec2::new(-2.0, -2.0),
+                    5.0,
+                    Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, 1.5), c + Vec2::new(6.5, 6.5)],
+                    Stroke::new(2.6, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-4.5, -2.0), c + Vec2::new(0.5, -2.0)],
+                    Stroke::new(1.8, blue),
+                );
             }
             Icon::Grid => {
                 for i in -1..=1 {
                     let t = i as f32;
-                    p.line_segment([c + Vec2::new(t * 5.0, -6.0), c + Vec2::new(t * 5.0, 6.0)], Stroke::new(0.8, gray));
-                    p.line_segment([c + Vec2::new(-6.0, t * 5.0), c + Vec2::new(6.0, t * 5.0)], Stroke::new(0.8, gray));
+                    p.line_segment(
+                        [c + Vec2::new(t * 5.0, -6.0), c + Vec2::new(t * 5.0, 6.0)],
+                        Stroke::new(0.8, gray),
+                    );
+                    p.line_segment(
+                        [c + Vec2::new(-6.0, t * 5.0), c + Vec2::new(6.0, t * 5.0)],
+                        Stroke::new(0.8, gray),
+                    );
                 }
             }
             Icon::Rulers => {
-                p.rect_filled(Rect::from_center_size(c, Vec2::new(14.0, 6.0)), 0.0, Color32::from_rgb(0xf5, 0xef, 0xd8));
+                p.rect_filled(
+                    Rect::from_center_size(c, Vec2::new(14.0, 6.0)),
+                    0.0,
+                    Color32::from_rgb(0xf5, 0xef, 0xd8),
+                );
                 for i in -2..=2 {
                     let t = i as f32;
-                    p.line_segment([c + Vec2::new(t * 3.0, -3.0), c + Vec2::new(t * 3.0, -1.0)], Stroke::new(0.8, gray));
+                    p.line_segment(
+                        [c + Vec2::new(t * 3.0, -3.0), c + Vec2::new(t * 3.0, -1.0)],
+                        Stroke::new(0.8, gray),
+                    );
                 }
             }
             Icon::Shapes => {
-                p.rect_filled(Rect::from_center_size(c + Vec2::new(-4.0, -3.0), Vec2::splat(6.0)), 0.5, orange);
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(-4.0, -3.0), Vec2::splat(6.0)),
+                    0.5,
+                    orange,
+                );
                 p.circle_filled(c + Vec2::new(4.0, -3.0), 3.5, green);
                 p.add(egui::Shape::convex_polygon(
                     vec![
@@ -629,26 +968,57 @@ impl Icon {
                 ));
             }
             Icon::Macro => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(12.0, 9.0)), 1.0, stroke(green), egui::StrokeKind::Middle);
-                p.line_segment([c + Vec2::new(-4.0, -1.0), c + Vec2::new(4.0, -1.0)], Stroke::new(1.4, green));
-                p.line_segment([c + Vec2::new(-4.0, 2.0), c + Vec2::new(2.0, 2.0)], Stroke::new(1.4, green));
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(12.0, 9.0)),
+                    1.0,
+                    stroke(green),
+                    egui::StrokeKind::Middle,
+                );
+                p.line_segment(
+                    [c + Vec2::new(-4.0, -1.0), c + Vec2::new(4.0, -1.0)],
+                    Stroke::new(1.4, green),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-4.0, 2.0), c + Vec2::new(2.0, 2.0)],
+                    Stroke::new(1.4, green),
+                );
             }
             Icon::ShapeSheet => {
-                p.rect_stroke(Rect::from_center_size(c, Vec2::new(13.0, 10.0)), 1.0, stroke(blue), egui::StrokeKind::Middle);
+                p.rect_stroke(
+                    Rect::from_center_size(c, Vec2::new(13.0, 10.0)),
+                    1.0,
+                    stroke(blue),
+                    egui::StrokeKind::Middle,
+                );
                 for y in [-1.0, 1.5] {
                     p.line_segment(
                         [c + Vec2::new(-6.0, y * 2.0), c + Vec2::new(6.0, y * 2.0)],
                         Stroke::new(0.7, gray),
                     );
                 }
-                p.line_segment([c + Vec2::new(-2.0, -5.0), c + Vec2::new(-2.0, 5.0)], Stroke::new(0.7, gray));
+                p.line_segment(
+                    [c + Vec2::new(-2.0, -5.0), c + Vec2::new(-2.0, 5.0)],
+                    Stroke::new(0.7, gray),
+                );
             }
             Icon::Units => {
-                p.text(c, Align2::CENTER_CENTER, "mm", egui::FontId::monospace(12.0), theme::ACCENT);
+                p.text(
+                    c,
+                    Align2::CENTER_CENTER,
+                    "mm",
+                    egui::FontId::monospace(12.0),
+                    theme::ACCENT,
+                );
             }
             Icon::Delete => {
-                p.line_segment([c + Vec2::new(-5.5, -5.5), c + Vec2::new(5.5, 5.5)], Stroke::new(2.6, red));
-                p.line_segment([c + Vec2::new(5.5, -5.5), c + Vec2::new(-5.5, 5.5)], Stroke::new(2.6, red));
+                p.line_segment(
+                    [c + Vec2::new(-5.5, -5.5), c + Vec2::new(5.5, 5.5)],
+                    Stroke::new(2.6, red),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.5, -5.5), c + Vec2::new(-5.5, 5.5)],
+                    Stroke::new(2.6, red),
+                );
             }
         }
     }
@@ -673,7 +1043,17 @@ pub struct RibbonButton {
 
 impl RibbonButton {
     pub fn new(icon: Icon, label: &'static str, action: Action) -> Self {
-        RibbonButton { icon, label, tip: label, enabled: true, selected: false, action, combo: false, split: false, width: None }
+        RibbonButton {
+            icon,
+            label,
+            tip: label,
+            enabled: true,
+            selected: false,
+            action,
+            combo: false,
+            split: false,
+            width: None,
+        }
     }
     pub fn tip(mut self, tip: &'static str) -> Self {
         self.tip = tip;
@@ -712,13 +1092,21 @@ impl RibbonButton {
         if bg != Color32::TRANSPARENT {
             ui.painter().rect_filled(r, 2.0, bg);
             if self.selected {
-                ui.painter().hline(r.left()..=r.right(), r.bottom() - 1.0, Stroke::new(2.0, theme::ACCENT));
+                ui.painter().hline(
+                    r.left()..=r.right(),
+                    r.bottom() - 1.0,
+                    Stroke::new(2.0, theme::ACCENT),
+                );
             }
         }
     }
 
     fn label_color(self) -> Color32 {
-        if self.enabled { Color32::from_rgb(50, 50, 50) } else { Color32::from_rgb(160, 160, 160) }
+        if self.enabled {
+            Color32::from_rgb(50, 50, 50)
+        } else {
+            Color32::from_rgb(160, 160, 160)
+        }
     }
 
     /// Visio "hero" button: large icon above the label.
@@ -727,13 +1115,25 @@ impl RibbonButton {
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
-        let icon_r = Rect::from_center_size(Pos2::new(r.center().x, r.top() + 20.0), Vec2::splat(30.0));
+        let icon_r =
+            Rect::from_center_size(Pos2::new(r.center().x, r.top() + 20.0), Vec2::splat(30.0));
         if std::env::var_os("DC_UI_DEBUG_ICON").is_some() {
-            eprintln!("DEBUG show_big {} r={:?} icon_r={:?}", self.label, r, icon_r);
+            eprintln!(
+                "DEBUG show_big {} r={:?} icon_r={:?}",
+                self.label, r, icon_r
+            );
         }
         self.icon.paint(ui, icon_r, self.enabled);
-        let gal = ui.painter().layout_no_wrap(self.label.to_string(), egui::FontId::proportional(11.5), self.label_color());
-        ui.painter().galley(Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 16.0), gal, egui::Color32::WHITE);
+        let gal = ui.painter().layout_no_wrap(
+            self.label.to_string(),
+            egui::FontId::proportional(11.5),
+            self.label_color(),
+        );
+        ui.painter().galley(
+            Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 16.0),
+            gal,
+            egui::Color32::WHITE,
+        );
         self.enabled && resp.clicked()
     }
 
@@ -741,7 +1141,11 @@ impl RibbonButton {
     /// narrow column, Visio small-button style).
     pub fn show_small(self, ui: &mut Ui) -> bool {
         let h = 22.0;
-        let gal = ui.painter().layout_no_wrap(self.label.to_string(), egui::FontId::proportional(11.5), self.label_color());
+        let gal = ui.painter().layout_no_wrap(
+            self.label.to_string(),
+            egui::FontId::proportional(11.5),
+            self.label_color(),
+        );
         let w = self
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
@@ -750,7 +1154,11 @@ impl RibbonButton {
         self.paint_frame(ui, r, &resp);
         let icon_r = Rect::from_min_size(r.left_top() + Vec2::new(1.0, 2.0), Vec2::splat(18.0));
         self.icon.paint(ui, icon_r, self.enabled);
-        ui.painter().galley(Pos2::new(icon_r.right() + 4.0, r.center().y - gal.size().y / 2.0), gal, egui::Color32::WHITE);
+        ui.painter().galley(
+            Pos2::new(icon_r.right() + 4.0, r.center().y - gal.size().y / 2.0),
+            gal,
+            egui::Color32::WHITE,
+        );
         if self.combo {
             // Office combobox: visible input border around the control
             ui.painter().rect_stroke(
@@ -766,7 +1174,11 @@ impl RibbonButton {
                     Pos2::new(cx + 2.5, r.center().y - 1.0),
                     Pos2::new(cx, r.center().y + 2.0),
                 ],
-                if self.enabled { Color32::from_rgb(90, 90, 90) } else { Color32::from_gray(185) },
+                if self.enabled {
+                    Color32::from_rgb(90, 90, 90)
+                } else {
+                    Color32::from_gray(185)
+                },
                 Stroke::NONE,
             ));
             egui::Popup::menu(&resp).show(|ui| {
@@ -895,7 +1307,8 @@ pub fn content_row(
                 }
             }
         });
-        let (strip, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), LABEL_H), Sense::hover());
+        let (strip, _) =
+            ui.allocate_exact_size(Vec2::new(ui.available_width(), LABEL_H), Sense::hover());
         for (label, x0, x1) in &spans {
             let gal = ui.painter().layout_no_wrap(
                 label.to_string(),
@@ -910,14 +1323,16 @@ pub fn content_row(
                 egui::Color32::WHITE,
             );
             // the group dialog launcher (pop-out): tiny bordered square
-            let lr = Rect::from_min_size(
-                Pos2::new(x1 - 11.0, strip.top() + 1.0),
-                Vec2::splat(11.0),
-            );
+            let lr =
+                Rect::from_min_size(Pos2::new(x1 - 11.0, strip.top() + 1.0), Vec2::splat(11.0));
             let lresp = ui.interact(lr, ui.scope_id().with(("launcher", label)), Sense::click());
             let hot = lresp.hovered();
-            ui.painter()
-                .rect_stroke(lr, 1.0, Stroke::new(0.8, theme::RULER_TICK), egui::StrokeKind::Middle);
+            ui.painter().rect_stroke(
+                lr,
+                1.0,
+                Stroke::new(0.8, theme::RULER_TICK),
+                egui::StrokeKind::Middle,
+            );
             let c = lr.center();
             ui.painter().line(
                 vec![
@@ -927,7 +1342,14 @@ pub fn content_row(
                     Pos2::new(c.x + 3.0, c.y - 3.0),
                     Pos2::new(c.x - 0.5, c.y - 3.0),
                 ],
-                Stroke::new(1.2, if hot { theme::ACCENT } else { Color32::from_gray(120) }),
+                Stroke::new(
+                    1.2,
+                    if hot {
+                        theme::ACCENT
+                    } else {
+                        Color32::from_gray(120)
+                    },
+                ),
             );
             if lresp.clicked() {
                 on_launcher(label);

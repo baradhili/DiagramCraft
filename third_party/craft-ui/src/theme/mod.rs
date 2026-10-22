@@ -71,7 +71,13 @@ mod tests {
         assert_eq!(widgets.hovered.bg_fill, Color32::GREEN);
         assert_eq!(widgets.active.bg_fill, Color32::BLUE);
         assert_eq!(widgets.open.bg_fill, Color32::TRANSPARENT);
-        for widget in [&widgets.noninteractive, &widgets.inactive, &widgets.hovered, &widgets.active, &widgets.open] {
+        for widget in [
+            &widgets.noninteractive,
+            &widgets.inactive,
+            &widgets.hovered,
+            &widgets.active,
+            &widgets.open,
+        ] {
             assert_eq!(widget.weak_bg_fill, widget.bg_fill);
             assert_eq!(widget.corner_radius, CornerRadius::same(4));
             assert_eq!(widget.fg_stroke, foreground);
@@ -89,7 +95,11 @@ mod tests {
         );
         // A second theme application replaces prior fills, including an app's outline override.
         widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
-        WidgetPalette { inactive: Color32::GRAY, ..palette }.apply_to(&mut widgets, CornerRadius::ZERO, foreground);
+        WidgetPalette {
+            inactive: Color32::GRAY,
+            ..palette
+        }
+        .apply_to(&mut widgets, CornerRadius::ZERO, foreground);
         assert_eq!(widgets.inactive.bg_fill, Color32::GRAY);
         assert_eq!(widgets.inactive.weak_bg_fill, Color32::GRAY);
         assert_eq!(widgets.active.bg_stroke, Stroke::new(3.0, Color32::YELLOW));

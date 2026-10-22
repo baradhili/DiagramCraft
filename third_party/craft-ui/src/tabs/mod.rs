@@ -22,7 +22,11 @@ pub struct TabFit {
 const MAX_EXTENT: f32 = 1_000_000.0;
 
 fn extent(value: f32) -> f32 {
-    if value.is_finite() { value.clamp(0.0, MAX_EXTENT) } else { 0.0 }
+    if value.is_finite() {
+        value.clamp(0.0, MAX_EXTENT)
+    } else {
+        0.0
+    }
 }
 
 /// Fit tab widths into `available` points, shrinking the widest tabs first to a common cap.
@@ -34,21 +38,36 @@ fn extent(value: f32) -> f32 {
 /// points. Empty input and an out-of-range selection are valid. The widths of all shown tabs plus
 /// `overflow_width` never exceed the sanitized available width. Work and storage are linear in
 /// the input count (with at most 32 fitting passes); callers keep their own tab-count policy.
-pub fn fit(natural: &[f32], selected: usize, available: f32, minimum_width: f32, overflow_width: f32) -> TabFit {
+pub fn fit(
+    natural: &[f32],
+    selected: usize,
+    available: f32,
+    minimum_width: f32,
+    overflow_width: f32,
+) -> TabFit {
     let available = extent(available);
     let minimum_width = extent(minimum_width);
     let natural: Vec<f32> = natural.iter().map(|&w| extent(w)).collect();
     let all: Vec<usize> = (0..natural.len()).collect();
     if natural.iter().map(|&w| f64::from(w)).sum::<f64>() <= f64::from(available) {
-        return TabFit { shown: all.into_iter().zip(natural).collect(), ..Default::default() };
+        return TabFit {
+            shown: all.into_iter().zip(natural).collect(),
+            ..Default::default()
+        };
     }
     // One tab has nowhere to overflow; all available space belongs to it.
     if natural.len() == 1 {
-        return TabFit { shown: vec![(0, available)], ..Default::default() };
+        return TabFit {
+            shown: vec![(0, available)],
+            ..Default::default()
+        };
     }
     let floor = |w: f32| w.min(minimum_width);
     if natural.iter().map(|&w| f64::from(floor(w))).sum::<f64>() <= f64::from(available) {
-        return TabFit { shown: squeeze(&natural, &all, available, minimum_width), ..Default::default() };
+        return TabFit {
+            shown: squeeze(&natural, &all, available, minimum_width),
+            ..Default::default()
+        };
     }
     let overflow_width = extent(overflow_width).min(available);
     let budget = available - overflow_width;
@@ -56,7 +75,9 @@ pub fn fit(natural: &[f32], selected: usize, available: f32, minimum_width: f32,
     let mut keep = vec![false; natural.len()];
     let mut used = 0.0f64;
     for i in std::iter::once(selected).chain(all.iter().copied().filter(|&i| i != selected)) {
-        let Some(&width) = natural.get(i) else { continue };
+        let Some(&width) = natural.get(i) else {
+            continue;
+        };
         let width = f64::from(floor(width));
         if i == selected || used + width <= f64::from(budget) {
             if let Some(keep) = keep.get_mut(i) {
@@ -65,15 +86,29 @@ pub fn fit(natural: &[f32], selected: usize, available: f32, minimum_width: f32,
             used += width;
         }
     }
-    let (shown, overflow): (Vec<usize>, Vec<usize>) = all.into_iter().partition(|&i| keep.get(i).copied().unwrap_or(false));
+    let (shown, overflow): (Vec<usize>, Vec<usize>) = all
+        .into_iter()
+        .partition(|&i| keep.get(i).copied().unwrap_or(false));
     let shown = squeeze(&natural, &shown, budget, minimum_width);
-    TabFit { shown, overflow, overflow_width }
+    TabFit {
+        shown,
+        overflow,
+        overflow_width,
+    }
 }
 
 fn squeeze(natural: &[f32], indices: &[usize], total: f32, minimum: f32) -> Vec<(usize, f32)> {
     let width = |i: usize| natural.get(i).copied().unwrap_or(0.0);
-    let sum_at = |cap: f32| indices.iter().map(|&i| f64::from(width(i).min(cap.max(width(i).min(minimum))))).sum::<f64>();
-    let (mut lo, mut hi) = (minimum, indices.iter().map(|&i| width(i)).fold(minimum, f32::max));
+    let sum_at = |cap: f32| {
+        indices
+            .iter()
+            .map(|&i| f64::from(width(i).min(cap.max(width(i).min(minimum)))))
+            .sum::<f64>()
+    };
+    let (mut lo, mut hi) = (
+        minimum,
+        indices.iter().map(|&i| width(i)).fold(minimum, f32::max),
+    );
     if sum_at(hi) > f64::from(total) {
         for _ in 0..32 {
             let mid = lo + (hi - lo) * 0.5;
@@ -114,7 +149,13 @@ pub struct Tab<'a> {
 
 impl<'a> Tab<'a> {
     pub fn new(id: Id, label: &'a str, selected: bool) -> Self {
-        Self { id, label, selected, sense: Sense::click(), focus_stroke: None }
+        Self {
+            id,
+            label,
+            selected,
+            sense: Sense::click(),
+            focus_stroke: None,
+        }
     }
 
     pub fn sense(mut self, sense: Sense) -> Self {
@@ -136,10 +177,29 @@ impl<'a> Tab<'a> {
     /// zero-size response and do not invoke the painter. Parent disabled state applies normally.
     pub fn show_at(self, ui: &mut Ui, rect: Rect, paint: impl FnOnce(&Ui, &Response)) -> Response {
         let size = rect.size();
-        let valid = rect.is_finite() && size.x > 0.0 && size.y > 0.0 && size.x <= MAX_EXTENT && size.y <= MAX_EXTENT;
-        let safe_rect = if valid { rect } else { Rect::from_min_size(egui::Pos2::ZERO, Vec2::ZERO) };
-        let response = ui.interact(safe_rect, self.id, if valid { self.sense } else { Sense::hover() });
-        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, valid && ui.is_enabled(), self.selected, self.label));
+        let valid = rect.is_finite()
+            && size.x > 0.0
+            && size.y > 0.0
+            && size.x <= MAX_EXTENT
+            && size.y <= MAX_EXTENT;
+        let safe_rect = if valid {
+            rect
+        } else {
+            Rect::from_min_size(egui::Pos2::ZERO, Vec2::ZERO)
+        };
+        let response = ui.interact(
+            safe_rect,
+            self.id,
+            if valid { self.sense } else { Sense::hover() },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::Role::Button,
+                valid && ui.is_enabled(),
+                self.selected,
+                self.label,
+            )
+        });
         ui.ctx().accesskit_node_builder(self.id, |node| {
             node.set_role(egui::accesskit::Role::Tab);
             node.clear_toggled();
@@ -153,8 +213,12 @@ impl<'a> Tab<'a> {
             let focus = rect.shrink(2.0);
             let stroke = self.focus_stroke.unwrap_or(ui.visuals().selection.stroke);
             if stroke.width.is_finite() && stroke.width > 0.0 {
-                let stroke = Stroke::new(stroke.width.min(focus.width().min(focus.height()) * 0.5), stroke.color);
-                ui.painter().rect_stroke(focus, 0.0, stroke, StrokeKind::Inside);
+                let stroke = Stroke::new(
+                    stroke.width.min(focus.width().min(focus.height()) * 0.5),
+                    stroke.color,
+                );
+                ui.painter()
+                    .rect_stroke(focus, 0.0, stroke, StrokeKind::Inside);
             }
         }
         response

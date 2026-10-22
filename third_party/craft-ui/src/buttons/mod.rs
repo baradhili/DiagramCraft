@@ -55,7 +55,13 @@ pub struct IconButton<'a> {
 
 impl<'a> IconButton<'a> {
     pub fn new(label: &'a str, size: Vec2, style: &'a IconButtonStyle) -> Self {
-        Self { label, size, selected: false, style, single_shape_frame: false }
+        Self {
+            label,
+            size,
+            selected: false,
+            style,
+            single_shape_frame: false,
+        }
     }
 
     pub fn selected(mut self, selected: bool) -> Self {
@@ -78,24 +84,57 @@ impl<'a> IconButton<'a> {
     /// an SVG, painter shapes or another app-owned asset. Non-finite, non-positive or excessively
     /// large dimensions (over 4096 points) produce an inert zero-size response without painting.
     pub fn show(self, ui: &mut Ui, paint_icon: impl FnOnce(&Ui, Rect, Color32)) -> Response {
-        let valid = self.size.is_finite() && self.size.x > 0.0 && self.size.y > 0.0 && self.size.x <= 4096.0 && self.size.y <= 4096.0;
-        let (rect, response) =
-            ui.allocate_exact_size(if valid { self.size } else { Vec2::ZERO }, if valid { Sense::click() } else { Sense::hover() });
-        response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, valid && ui.is_enabled(), self.selected, self.label));
+        let valid = self.size.is_finite()
+            && self.size.x > 0.0
+            && self.size.y > 0.0
+            && self.size.x <= 4096.0
+            && self.size.y <= 4096.0;
+        let (rect, response) = ui.allocate_exact_size(
+            if valid { self.size } else { Vec2::ZERO },
+            if valid {
+                Sense::click()
+            } else {
+                Sense::hover()
+            },
+        );
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(
+                egui::Role::Button,
+                valid && ui.is_enabled(),
+                self.selected,
+                self.label,
+            )
+        });
         if !valid {
             return response;
         }
 
-        let visuals = self.style.visuals(self.selected, response.hovered(), response.is_pointer_button_down_on());
+        let visuals = self.style.visuals(
+            self.selected,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+        );
         let stroke = bounded_stroke(visuals.stroke, rect);
         if self.single_shape_frame {
-            ui.painter().rect(rect, self.style.corner_radius, visuals.fill, stroke, StrokeKind::Inside);
+            ui.painter().rect(
+                rect,
+                self.style.corner_radius,
+                visuals.fill,
+                stroke,
+                StrokeKind::Inside,
+            );
         } else {
             if visuals.fill != Color32::TRANSPARENT {
-                ui.painter().rect_filled(rect, self.style.corner_radius, visuals.fill);
+                ui.painter()
+                    .rect_filled(rect, self.style.corner_radius, visuals.fill);
             }
             if !stroke.is_empty() {
-                ui.painter().rect_stroke(rect, self.style.corner_radius, stroke, StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    rect,
+                    self.style.corner_radius,
+                    stroke,
+                    StrokeKind::Inside,
+                );
             }
         }
         paint_icon(ui, rect, visuals.icon);
@@ -103,7 +142,12 @@ impl<'a> IconButton<'a> {
             let focus_rect = rect.shrink(2.0);
             let stroke = bounded_stroke(self.style.focus_stroke, focus_rect);
             if !stroke.is_empty() {
-                ui.painter().rect_stroke(focus_rect, self.style.corner_radius, stroke, StrokeKind::Inside);
+                ui.painter().rect_stroke(
+                    focus_rect,
+                    self.style.corner_radius,
+                    stroke,
+                    StrokeKind::Inside,
+                );
             }
         }
         response
@@ -112,7 +156,10 @@ impl<'a> IconButton<'a> {
 
 fn bounded_stroke(stroke: Stroke, rect: Rect) -> Stroke {
     if stroke.width.is_finite() && stroke.width > 0.0 {
-        Stroke::new(stroke.width.min(rect.width().min(rect.height()) * 0.5), stroke.color)
+        Stroke::new(
+            stroke.width.min(rect.width().min(rect.height()) * 0.5),
+            stroke.color,
+        )
     } else {
         Stroke::NONE
     }

@@ -4,9 +4,9 @@
 //! the dc-core command layer. No web stack.
 
 pub mod app;
-pub mod icontex;
 pub mod canvas;
 pub mod cmd;
+pub mod icontex;
 pub mod recent;
 pub mod ribbon;
 pub mod stencil;

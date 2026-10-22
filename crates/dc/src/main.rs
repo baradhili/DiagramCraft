@@ -14,7 +14,11 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(name = "dc", version, about = "DiagramCraft — Linux Visio (VSDX) toolchain")]
+#[command(
+    name = "dc",
+    version,
+    about = "DiagramCraft — Linux Visio (VSDX) toolchain"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -113,7 +117,12 @@ fn main() -> Result<()> {
     match cli.cmd {
         Cmd::Info { file } => info(&file),
         Cmd::Inspect { file } => inspect(&file),
-        Cmd::Render { file, out, page, masters } => render(&file, &out, page, masters),
+        Cmd::Render {
+            file,
+            out,
+            page,
+            masters,
+        } => render(&file, &out, page, masters),
         Cmd::Roundtrip { file, out, verify } => roundtrip(&file, &out, verify),
         Cmd::Edit {
             file,
@@ -140,11 +149,11 @@ fn main() -> Result<()> {
                     .map(|c| (c[0].clone(), c[1].clone(), c[2].clone()))
                     .collect()
             };
-            let pairs_i64 = |v: &[i64]| -> Vec<(i64, i64)> {
-                v.chunks(2).map(|c| (c[0], c[1])).collect()
-            };
+            let pairs_i64 =
+                |v: &[i64]| -> Vec<(i64, i64)> { v.chunks(2).map(|c| (c[0], c[1])).collect() };
             let parse = |s: &str, what: &str| -> Result<i64> {
-                s.parse::<i64>().with_context(|| format!("{what}: {s:?} is not a number"))
+                s.parse::<i64>()
+                    .with_context(|| format!("{what}: {s:?} is not a number"))
             };
             let args = edit::EditArgs {
                 cell: triples(&cell),
@@ -169,13 +178,7 @@ fn main() -> Result<()> {
                 remove_layer: pairs_i64(&remove_layer),
                 rename_layer: rename_layer
                     .chunks(3)
-                    .map(|c| {
-                        Ok((
-                            parse(&c[0], "PAGE_ID")?,
-                            parse(&c[1], "IX")?,
-                            c[2].clone(),
-                        ))
-                    })
+                    .map(|c| Ok((parse(&c[0], "PAGE_ID")?, parse(&c[1], "IX")?, c[2].clone())))
                     .collect::<Result<Vec<_>>>()?,
                 connect: connect
                     .chunks(7)
@@ -232,8 +235,14 @@ fn inspect(path: &Path) -> Result<()> {
         );
     }
     for (i, page) in doc.pages.iter().enumerate() {
-        let w = page.sheet().and_then(|s| s.cell("PageWidth")).and_then(|c| c.numeric());
-        let h = page.sheet().and_then(|s| s.cell("PageHeight")).and_then(|c| c.numeric());
+        let w = page
+            .sheet()
+            .and_then(|s| s.cell("PageWidth"))
+            .and_then(|c| c.numeric());
+        let h = page
+            .sheet()
+            .and_then(|s| s.cell("PageHeight"))
+            .and_then(|c| c.numeric());
         println!(
             "page {} ({}): {:?} — {:?} × {:?} in, {} top-level shape(s)",
             i + 1,
@@ -275,15 +284,18 @@ fn print_shape(doc: &vsdx::Document, s: &vsdx::Shape, chain: &[&vsdx::Shape], in
         pin("Width"),
         pin("Height"),
         n_geo,
-        s.sheet.text.as_deref().map(|t| {
-            let t = t.trim();
-            if t.len() > 24 {
-                format!("{}…", &t[..24])
-            } else {
-                t.to_string()
-            }
-        })
-        .unwrap_or_default()
+        s.sheet
+            .text
+            .as_deref()
+            .map(|t| {
+                let t = t.trim();
+                if t.len() > 24 {
+                    format!("{}…", &t[..24])
+                } else {
+                    t.to_string()
+                }
+            })
+            .unwrap_or_default()
     );
     for sub in &s.sub_shapes {
         print_shape(doc, sub, &chain, indent + 2);
@@ -377,11 +389,13 @@ fn verify_roundtrip(source: &vsdx::Document, src_path: &Path, out_path: &Path) -
         let sa = svg::render_page(source, a)?;
         let sb = svg::render_page(&reparsed, b)?;
         if sa != sb {
-            bail!("rendered page {} differs between source and round-trip", i + 1);
+            bail!(
+                "rendered page {} differs between source and round-trip",
+                i + 1
+            );
         }
     }
-    if !source.masters.is_empty()
-        && svg::render_masters(source)? != svg::render_masters(&reparsed)?
+    if !source.masters.is_empty() && svg::render_masters(source)? != svg::render_masters(&reparsed)?
     {
         bail!("rendered master contact sheet differs between source and round-trip");
     }

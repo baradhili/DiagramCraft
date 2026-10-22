@@ -49,7 +49,9 @@ fn icon_paints_pixels_standalone() {
 fn icon_paints_pixels_inside_content_row() {
     let groups = vec![Group::new(
         "Clipboard",
-        vec![big(RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false))],
+        vec![big(
+            RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
+        )],
     )];
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
@@ -61,7 +63,10 @@ fn icon_paints_pixels_inside_content_row() {
     let n = ink(&img);
     // the galley text alone is ~250-400 px; a visible (grayed) icon adds
     // far more than that
-    assert!(n > 800, "content-row Paste painted only {n} px — icon missing");
+    assert!(
+        n > 800,
+        "content-row Paste painted only {n} px — icon missing"
+    );
 }
 
 #[test]
@@ -69,7 +74,9 @@ fn icon_paints_with_theme_and_panel() {
     // Same structure as the shell: theme installed, panel with frame.
     let groups = vec![Group::new(
         "Clipboard",
-        vec![big(RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false))],
+        vec![big(
+            RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
+        )],
     )];
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
@@ -86,7 +93,10 @@ fn icon_paints_with_theme_and_panel() {
     h.run();
     let img = h.render().unwrap();
     let n = ink(&img);
-    assert!(n > 800, "theme+panel Paste painted only {n} px — icon missing");
+    assert!(
+        n > 800,
+        "theme+panel Paste painted only {n} px — icon missing"
+    );
 }
 
 #[test]
@@ -112,7 +122,10 @@ fn icon_paints_in_full_shell() {
             }
         }
     }
-    assert!(n > 2000, "full-shell ribbon band has only {n} ink px — icons missing");
+    assert!(
+        n > 2000,
+        "full-shell ribbon band has only {n} ink px — icons missing"
+    );
 }
 
 #[test]

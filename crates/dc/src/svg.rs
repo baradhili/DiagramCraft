@@ -105,7 +105,8 @@ fn master_bbox(doc: &Document, m: &vsdx::Master, master_h: f64) -> Option<(f64, 
         let chain: Vec<&Shape> = std::iter::once(s).collect();
         let env = shape_env(doc, s, &chain);
         let get = |n: &str| -> Option<f64> {
-            doc.resolve_cell(s, &chain, n).and_then(|c| cell_num(&c, &env))
+            doc.resolve_cell(s, &chain, n)
+                .and_then(|c| cell_num(&c, &env))
         };
         let (pin_x, pin_y) = (get("PinX")?, get("PinY")?);
         let (w, h) = (get("Width").unwrap_or(1.0), get("Height").unwrap_or(1.0));
@@ -347,8 +348,7 @@ fn render_shape_local<'a>(
 /// mirrored into the instance rect.
 fn multi_root_master(doc: &Document, s: &Shape) -> bool {
     s.sub_shapes.is_empty()
-        && s
-            .master
+        && s.master
             .and_then(|id| doc.master(id))
             .map(|m| m.shapes.len() > 1)
             .unwrap_or(false)
@@ -377,7 +377,9 @@ fn mirror_master(
     if !s.sub_shapes.is_empty() {
         return;
     }
-    let Some(m) = s.master.and_then(|id| doc.master(id)) else { return };
+    let Some(m) = s.master.and_then(|id| doc.master(id)) else {
+        return;
+    };
     let mpart = &m.part;
     if m.shapes.len() > 1 {
         // Union bbox (y-up master canvas) over all roots.
@@ -421,9 +423,20 @@ fn mirror_master(
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
-        let mw = root.sheet.cell("Width").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
-        let mh = root.sheet.cell("Height").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
-        let (kx, ky) = (mw.map_or(1.0, |mw| width / mw), mh.map_or(1.0, |mh| height / mh));
+        let mw = root
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric())
+            .filter(|v| v.abs() > 1e-9);
+        let mh = root
+            .sheet
+            .cell("Height")
+            .and_then(|c| c.numeric())
+            .filter(|v| v.abs() > 1e-9);
+        let (kx, ky) = (
+            mw.map_or(1.0, |mw| width / mw),
+            mh.map_or(1.0, |mh| height / mh),
+        );
         let env = mirror_env(root, s, width, height);
         for sub in &root.sub_shapes {
             let wrapper = mirror_child_transform(sub, &env, (kx, ky));
@@ -444,12 +457,7 @@ fn mirror_master(
 /// formulas use, plus the root's User cells — their formulas re-evaluate
 /// too, because layout cells like `User.IconY` reference the (instance)
 /// `Height`. Instance-local User rows override the master's.
-fn mirror_env(
-    root: &Shape,
-    instance: &Shape,
-    width: f64,
-    height: f64,
-) -> vsdx::formula::Env {
+fn mirror_env(root: &Shape, instance: &Shape, width: f64, height: f64) -> vsdx::formula::Env {
     let mut env = vsdx::formula::Env::new();
     env.insert("Width".into(), width);
     env.insert("Height".into(), height);
@@ -468,7 +476,10 @@ fn mirror_env(
     for user in instance.sheet.sections_named("User") {
         for row in user.rows.iter().filter(|r| r.n.is_some()) {
             if let Some(c) = row.cell("Value") {
-                if let Some(slot) = users.iter_mut().find(|(n, _)| n == row.n.as_deref().unwrap()) {
+                if let Some(slot) = users
+                    .iter_mut()
+                    .find(|(n, _)| n == row.n.as_deref().unwrap())
+                {
                     slot.1 = c;
                 } else {
                     users.push((row.n.clone().unwrap(), c));
@@ -537,7 +548,9 @@ fn mirror_child_transform(
     // instance group), then the uniform-scale fallback.
     let mut env = root_env.clone();
     let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
-        let Some(c) = sub.sheet.cell(name) else { return None };
+        let Some(c) = sub.sheet.cell(name) else {
+            return None;
+        };
         if let Some(f) = c.f.as_deref() {
             if f != "Inh" && f != "No Formula" {
                 if let Some(v) = vsdx::formula::eval(f, env)
@@ -671,7 +684,13 @@ fn emit_text(
     sy: f64,
     out: &mut String,
 ) {
-    let Some(text) = s.sheet.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+    let Some(text) = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
         return;
     };
     let env = shape_env(doc, s, chain);
@@ -711,8 +730,16 @@ fn emit_text(
         s = size,
         ff = font_family_attr(char_font(doc, s, chain).as_deref()),
         c = color,
-        b = if style_bits & 1 != 0 { r#" font-weight="bold""# } else { "" },
-        i = if style_bits & 2 != 0 { r#" font-style="italic""# } else { "" },
+        b = if style_bits & 1 != 0 {
+            r#" font-weight="bold""#
+        } else {
+            ""
+        },
+        i = if style_bits & 2 != 0 {
+            r#" font-style="italic""#
+        } else {
+            ""
+        },
     );
 
     // Paragraph alignment: Visio HorzAlign 0 = left, 1 = center, 2 = right,
@@ -813,9 +840,17 @@ fn emit_text(
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
         if i == 0 {
-            let _ = write!(body, r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#, escape_text(line));
+            let _ = write!(
+                body,
+                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+                escape_text(line)
+            );
         } else {
-            let _ = write!(body, r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#, escape_text(line));
+            let _ = write!(
+                body,
+                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+                escape_text(line)
+            );
         }
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
@@ -915,8 +950,16 @@ fn base64(data: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -1019,9 +1062,8 @@ fn render_all_geometry(
                 }
                 for row in m.rows.iter_mut() {
                     let Some(t) = row.t.clone() else { continue };
-                    let by_ix = src_geo.and_then(|sg| {
-                        sg.rows.iter().find(|r| r.ix == row.ix && r.ix > 0)
-                    });
+                    let by_ix =
+                        src_geo.and_then(|sg| sg.rows.iter().find(|r| r.ix == row.ix && r.ix > 0));
                     let occ = {
                         let c = src_occ.entry(t.clone()).or_insert(0);
                         *c += 1;
@@ -1051,8 +1093,7 @@ fn render_all_geometry(
                             .map(|f| f.contains("Width") || f.contains("Height"))
                             .unwrap_or(true);
                         let placed = |v: f64| if proportional { scaled(cname, v) } else { v };
-                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound)
-                        else {
+                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound) else {
                             continue;
                         };
                         let patched = Cell::value(format!("{}", placed(sv)));
@@ -1083,7 +1124,9 @@ fn render_all_geometry(
         }
         return;
     }
-    let Some(src) = doc.instance_source(s, chain) else { return };
+    let Some(src) = doc.instance_source(s, chain) else {
+        return;
+    };
     let mw = src
         .sheet
         .cell("Width")
@@ -1205,7 +1248,10 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .map(|rad| rad.to_degrees())
             .unwrap_or(90.0);
-        let id = format!("dc-grad{:x}", fnv(&format!("{fill_color}|{fill_bkgnd}|{angle_deg:.0}")));
+        let id = format!(
+            "dc-grad{:x}",
+            fnv(&format!("{fill_color}|{fill_bkgnd}|{angle_deg:.0}"))
+        );
         if !out.contains(&format!(r#"id="{id}""#)) {
             // Angle from north, clockwise → SVG gradient vector.
             let rad = angle_deg.to_radians();
@@ -1225,7 +1271,14 @@ fn render_geometry(
         fill_color.clone()
     };
     let dash = line_pattern.and_then(|p| line_dasharray(p, line_weight));
-    let style = style_attr(no_fill, no_line, &fill, &line_color, line_weight, dash.as_deref());
+    let style = style_attr(
+        no_fill,
+        no_line,
+        &fill,
+        &line_color,
+        line_weight,
+        dash.as_deref(),
+    );
 
     // Master-space (unscaled) path state: geometry rows are authored in the
     // master's local units and scaled to the instance afterwards.
@@ -1240,7 +1293,10 @@ fn render_geometry(
 
     for row in rows.iter().filter(|r| r.t.is_some()) {
         let Some(t) = row.t.as_deref() else { continue };
-        let (mx, my) = (row_num(row, "X").unwrap_or(0.0), row_num(row, "Y").unwrap_or(0.0));
+        let (mx, my) = (
+            row_num(row, "X").unwrap_or(0.0),
+            row_num(row, "Y").unwrap_or(0.0),
+        );
         let (x, y) = rel_adjust(t, mx, my, width, height);
         match t {
             "MoveTo" | "RelMoveTo" => {
@@ -1271,12 +1327,17 @@ fn render_geometry(
                     let radius = (chord.powi(2) + 4.0 * h * h) / (8.0 * h.abs());
                     let large = h.abs() > chord / 2.0;
                     // cross > 0 (y-up frame) = CCW; path frame is mirrored → sweep 0.
-                    let cross =
-                        (m.0 - sx) * (y - m.1) - (m.1 - sy) * (x - m.0);
+                    let cross = (m.0 - sx) * (y - m.1) - (m.1 - sy) * (x - m.0);
                     let sweep = if cross > 0.0 { 0 } else { 1 };
                     let r = sc((radius, radius)).0.max(1e-6);
                     let e = emit_pt((x, y));
-                    let _ = write!(d, "A {r:.5} {r:.5} 0 {la} {sw} {e}", la = large as u8, sw = sweep, e = e.trim_end());
+                    let _ = write!(
+                        d,
+                        "A {r:.5} {r:.5} 0 {la} {sw} {e}",
+                        la = large as u8,
+                        sw = sweep,
+                        e = e.trim_end()
+                    );
                 }
                 cur = (x, y);
             }
@@ -1298,7 +1359,9 @@ fn render_geometry(
                 let in_bounds = |v: f64, b: f64| v.abs() <= b;
                 match solve_ellipse_arc(cur, m, (x, y), c_ang, ratio, scale) {
                     Some((rx, ry, rot_deg, large, sweep))
-                        if rx.max(ry) <= 20.0 * ((x - cur.0).powi(2) + (y - cur.1).powi(2)).sqrt().max(1e-9)
+                        if rx.max(ry)
+                            <= 20.0
+                                * ((x - cur.0).powi(2) + (y - cur.1).powi(2)).sqrt().max(1e-9)
                             && in_bounds(ex, bound_x)
                             && in_bounds(ey, bound_y)
                             && in_bounds(mx, bound_x)
@@ -1332,8 +1395,9 @@ fn render_geometry(
                 let rx = ((a - x).powi(2) + (b - y).powi(2)).sqrt().max(1e-6);
                 let ry = ((c2 - x).powi(2) + (d2 - y).powi(2)).sqrt().max(1e-6);
                 let ang = (b - y).atan2(a - x); // major-axis angle, y-up frame
-                // Anisotropic instance scaling of the ellipse.
-                let (rx2, ry2, ang2) = transform_ellipse(rx.max(ry), (rx.min(ry)) / rx.max(ry), ang, scale);
+                                                // Anisotropic instance scaling of the ellipse.
+                let (rx2, ry2, ang2) =
+                    transform_ellipse(rx.max(ry), (rx.min(ry)) / rx.max(ry), ang, scale);
                 let (rx2, ry2) = if rx >= ry { (rx2, ry2) } else { (ry2, rx2) };
                 let p = sc((x, y));
                 let _ = writeln!(
@@ -1351,8 +1415,20 @@ fn render_geometry(
             "CubicBezTo" | "RelCubBezTo" => {
                 // Controls (A,B) and (C,D); end (X,Y) — all possibly
                 // relative fractions of Width/Height.
-                let (a, b) = rel_adjust(t, row_num(row, "A").unwrap_or(cur.0), row_num(row, "B").unwrap_or(cur.1), width, height);
-                let (c2, d2) = rel_adjust(t, row_num(row, "C").unwrap_or(x), row_num(row, "D").unwrap_or(y), width, height);
+                let (a, b) = rel_adjust(
+                    t,
+                    row_num(row, "A").unwrap_or(cur.0),
+                    row_num(row, "B").unwrap_or(cur.1),
+                    width,
+                    height,
+                );
+                let (c2, d2) = rel_adjust(
+                    t,
+                    row_num(row, "C").unwrap_or(x),
+                    row_num(row, "D").unwrap_or(y),
+                    width,
+                    height,
+                );
                 let _ = write!(
                     d,
                     "C {}{}{}",
@@ -1363,8 +1439,19 @@ fn render_geometry(
                 cur = (x, y);
             }
             "QuadBezTo" | "RelQuadBezTo" => {
-                let (a, b) = rel_adjust(t, row_num(row, "A").unwrap_or((cur.0 + x) / 2.0), row_num(row, "B").unwrap_or((cur.1 + y) / 2.0), width, height);
-                let _ = write!(d, "Q {} {}", emit_pt((a, b)).trim_end(), emit_pt((x, y)).trim_end());
+                let (a, b) = rel_adjust(
+                    t,
+                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    width,
+                    height,
+                );
+                let _ = write!(
+                    d,
+                    "Q {} {}",
+                    emit_pt((a, b)).trim_end(),
+                    emit_pt((x, y)).trim_end()
+                );
                 cur = (x, y);
             }
             "SplineStart" | "SplineKnot" | "NURBSTo" | "PolylineTo" | "InfiniteLine" => {
@@ -1409,7 +1496,11 @@ fn render_geometry(
             if !out_all.contains(&format!(r#"id="{id}""#)) {
                 // Triangle along +x for end markers, -x for begin markers
                 // (both orient=auto relative to path direction).
-                let path = if begin { "M10,0 L0,5 L10,10 z" } else { "M0,0 L10,5 L0,10 z" };
+                let path = if begin {
+                    "M10,0 L0,5 L10,10 z"
+                } else {
+                    "M0,0 L10,5 L0,10 z"
+                };
                 let _ = writeln!(
                     out_all,
                     r#"<defs><marker id="{id}" viewBox="0 0 10 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto"><path d="{path}" fill="{line_color}" stroke="{line_color}" stroke-width="0.5"/></marker></defs>"#,
@@ -1463,9 +1554,8 @@ fn solve_ellipse_arc(
 ) -> Option<(f64, f64, f64, bool, u8)> {
     let k = ratio;
     let (cos_c, sin_c) = (c_ang.cos(), c_ang.sin());
-    let rot = |p: (f64, f64)| -> (f64, f64) {
-        (cos_c * p.0 + sin_c * p.1, -sin_c * p.0 + cos_c * p.1)
-    };
+    let rot =
+        |p: (f64, f64)| -> (f64, f64) { (cos_c * p.0 + sin_c * p.1, -sin_c * p.0 + cos_c * p.1) };
     let ps = rot(s);
     let pm = rot(m);
     let pe = rot(e);
@@ -1521,7 +1611,13 @@ fn solve_ellipse_arc(
 
     // Scale the ellipse anisotropically to the instance frame.
     let (rx2, ry2, ang2) = transform_ellipse(rx, k, c_ang, scale);
-    Some((rx2.max(1e-6), ry2.max(1e-6), -ang2.to_degrees(), large, sweep))
+    Some((
+        rx2.max(1e-6),
+        ry2.max(1e-6),
+        -ang2.to_degrees(),
+        large,
+        sweep,
+    ))
 }
 
 /// Transform an ellipse (semi-major `r_major`, ratio `k = minor/major`, axis
@@ -1530,12 +1626,7 @@ fn solve_ellipse_arc(
 ///
 /// The image ellipse's squared semi-axes are the eigenvalues of
 /// `D·R·diag(r², (k·r)²)·Rᵀ·D` with `D = diag(scale)`.
-fn transform_ellipse(
-    r_major: f64,
-    k: f64,
-    ang: f64,
-    scale: (f64, f64),
-) -> (f64, f64, f64) {
+fn transform_ellipse(r_major: f64, k: f64, ang: f64, scale: (f64, f64)) -> (f64, f64, f64) {
     let (c, si) = (ang.cos(), ang.sin());
     let a = r_major * r_major;
     let b = (k * r_major) * (k * r_major);
@@ -1554,7 +1645,7 @@ fn transform_ellipse(
     let disc = ((tr * tr / 4.0) - det).max(0.0).sqrt();
     let lam1 = tr / 2.0 + disc; // major²
     let lam2 = (tr / 2.0 - disc).max(1e-12); // minor²
-    // Eigenvector for lam1: B·(λ-m22, m12) = λ·(λ-m22, m12) for symmetric B.
+                                             // Eigenvector for lam1: B·(λ-m22, m12) = λ·(λ-m22, m12) for symmetric B.
     let (vx, vy) = if m12.abs() > 1e-12 {
         (lam1 - m22, m12)
     } else if m11 >= m22 {
@@ -1588,11 +1679,17 @@ fn style_attr(
     line_weight: f64,
     dash: Option<&str>,
 ) -> String {
-    let fill = if no_fill { "none".to_string() } else { fill.to_string() };
+    let fill = if no_fill {
+        "none".to_string()
+    } else {
+        fill.to_string()
+    };
     let stroke = if no_line {
         r#"stroke="none""#.to_string()
     } else {
-        let dash = dash.map(|d| format!(r#" stroke-dasharray="{d}""#)).unwrap_or_default();
+        let dash = dash
+            .map(|d| format!(r#" stroke-dasharray="{d}""#))
+            .unwrap_or_default();
         format!(
             r#"stroke="{}" stroke-width="{:.5}"{dash}"#,
             escape_attr(line_color),
@@ -1615,17 +1712,16 @@ fn style_attr(
 /// exercises them.
 fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 3.0],                      // dashed (lgDash)
-        3 => &[1.0, 3.0],                      // dotted (dot)
-        4 => &[4.0, 3.0, 1.0, 3.0],            // dash-dot (dashDot)
-        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0],  // dash-dot-dot (dashDotDot)
-        7 => &[8.0, 3.0, 4.0, 3.0],            // long dash + normal dash
-        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0],  // long + 2× normal dashes
+        2 => &[8.0, 3.0],                     // dashed (lgDash)
+        3 => &[1.0, 3.0],                     // dotted (dot)
+        4 => &[4.0, 3.0, 1.0, 3.0],           // dash-dot (dashDot)
+        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0], // dash-dot-dot (dashDotDot)
+        7 => &[8.0, 3.0, 4.0, 3.0],           // long dash + normal dash
+        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0], // long + 2× normal dashes
         _ => return None,
     };
     Some(
-        spec
-            .iter()
+        spec.iter()
             .map(|m| format!("{:.5}", (m * weight).max(1e-4)))
             .collect::<Vec<_>>()
             .join(" "),
@@ -1636,8 +1732,12 @@ fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
 /// Variant colors from visio/theme/theme1.xml (DrawingML scheme),
 /// indexed by THEMEVAL("VariantColorN") formulas.
 fn theme_variant_colors(doc: &Document) -> Vec<String> {
-    let Some(pkg) = doc.package.as_ref() else { return Vec::new() };
-    let Some(raw) = pkg.part("visio/theme/theme1.xml") else { return Vec::new() };
+    let Some(pkg) = doc.package.as_ref() else {
+        return Vec::new();
+    };
+    let Some(raw) = pkg.part("visio/theme/theme1.xml") else {
+        return Vec::new();
+    };
     let xml = String::from_utf8_lossy(raw).into_owned();
     let mut out = Vec::new();
     // <vt:varColorN><a:srgbClr val="RRGGBB"/>...</vt:varColorN>
@@ -1692,7 +1792,6 @@ fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) 
         None => palette(-1),
     }
 }
-
 
 /// Standard color table for indices 0–23, verbatim from [MS-VSDX]
 /// "Color Table": any integer color value ≤ 23 resolves here; ≥ 24 resolves
@@ -1843,10 +1942,7 @@ fn font_substitute(name: &str) -> Option<(&'static str, &'static str)> {
 /// Quote a font-family name for the CSS shorthand (single quotes when
 /// it contains anything but letters, digits and dashes).
 fn quote_family(name: &str) -> String {
-    if name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         name.to_string()
     } else {
         format!("'{name}'")
@@ -1913,8 +2009,18 @@ fn shape_env_for(doc: &Document, s: &Shape, chain: &[&Shape], rows: &[Row]) -> v
 /// two passes (values first, then formulas against those values).
 pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::Env {
     let names = [
-        "PinX", "PinY", "Width", "Height", "LocPinX", "LocPinY", "Angle",
-        "TxtPinX", "TxtPinY", "TxtWidth", "TxtHeight", "LineWeight",
+        "PinX",
+        "PinY",
+        "Width",
+        "Height",
+        "LocPinX",
+        "LocPinY",
+        "Angle",
+        "TxtPinX",
+        "TxtPinY",
+        "TxtWidth",
+        "TxtHeight",
+        "LineWeight",
         "Char.Size",
     ];
     let mut env = vsdx::formula::Env::new();
@@ -1969,7 +2075,9 @@ fn escape_attr(s: &str) -> String {
 }
 
 fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
@@ -1993,7 +2101,10 @@ mod tests {
             );
         };
         // Root: master canvas 1.1811 × 0.7874.
-        let mut root = Shape { id: 5, ..Shape::default() };
+        let mut root = Shape {
+            id: 5,
+            ..Shape::default()
+        };
         set(&mut root.sheet, "Width", 1.181102362204724, None);
         set(&mut root.sheet, "Height", 0.7874015748031495, None);
         let urow = |n: &str, v: f64, f: Option<&str>| Row {
@@ -2023,23 +2134,92 @@ mod tests {
             ..Section::default()
         }));
         // Container child: fully proportional.
-        let mut container = Shape { id: 6, ..Shape::default() };
-        set(&mut container.sheet, "Width", 1.181102362204721, Some("Sheet.5!Width*1"));
-        set(&mut container.sheet, "Height", 0.7874015748031491, Some("Sheet.5!Height*1"));
-        set(&mut container.sheet, "PinX", 0.5905511811023657, Some("Sheet.5!Width*0.5"));
-        set(&mut container.sheet, "PinY", 0.3937007874015748, Some("Sheet.5!Height*0.5"));
-        set(&mut container.sheet, "LocPinX", 0.5905511811023605, Some("Width*0.5"));
-        set(&mut container.sheet, "LocPinY", 0.3937007874015746, Some("Height*0.5"));
+        let mut container = Shape {
+            id: 6,
+            ..Shape::default()
+        };
+        set(
+            &mut container.sheet,
+            "Width",
+            1.181102362204721,
+            Some("Sheet.5!Width*1"),
+        );
+        set(
+            &mut container.sheet,
+            "Height",
+            0.7874015748031491,
+            Some("Sheet.5!Height*1"),
+        );
+        set(
+            &mut container.sheet,
+            "PinX",
+            0.5905511811023657,
+            Some("Sheet.5!Width*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "PinY",
+            0.3937007874015748,
+            Some("Sheet.5!Height*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "LocPinX",
+            0.5905511811023605,
+            Some("Width*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "LocPinY",
+            0.3937007874015746,
+            Some("Height*0.5"),
+        );
         // Icon child: absolute size, pinned via User cells.
-        let mut icon = Shape { id: 8, ..Shape::default() };
-        set(&mut icon.sheet, "Width", 0.1574803149606299, Some("GUARD(4MM)"));
-        set(&mut icon.sheet, "Height", 0.1692913385826771, Some("GUARD(4.3MM)"));
-        set(&mut icon.sheet, "PinX", 0.1181102362204724, Some("GUARD(Sheet.5!User.IconX)"));
-        set(&mut icon.sheet, "PinY", 0.6692913385826771, Some("GUARD(Sheet.5!User.IconY)"));
-        set(&mut icon.sheet, "LocPinX", 0.07874015748031496, Some("Width*0.5"));
-        set(&mut icon.sheet, "LocPinY", 0.08464566929133857, Some("Height*0.5"));
+        let mut icon = Shape {
+            id: 8,
+            ..Shape::default()
+        };
+        set(
+            &mut icon.sheet,
+            "Width",
+            0.1574803149606299,
+            Some("GUARD(4MM)"),
+        );
+        set(
+            &mut icon.sheet,
+            "Height",
+            0.1692913385826771,
+            Some("GUARD(4.3MM)"),
+        );
+        set(
+            &mut icon.sheet,
+            "PinX",
+            0.1181102362204724,
+            Some("GUARD(Sheet.5!User.IconX)"),
+        );
+        set(
+            &mut icon.sheet,
+            "PinY",
+            0.6692913385826771,
+            Some("GUARD(Sheet.5!User.IconY)"),
+        );
+        set(
+            &mut icon.sheet,
+            "LocPinX",
+            0.07874015748031496,
+            Some("Width*0.5"),
+        );
+        set(
+            &mut icon.sheet,
+            "LocPinY",
+            0.08464566929133857,
+            Some("Height*0.5"),
+        );
         // Literal child (no formulas): uniform-scale fallback.
-        let mut plain = Shape { id: 16, ..Shape::default() };
+        let mut plain = Shape {
+            id: 16,
+            ..Shape::default()
+        };
         set(&mut plain.sheet, "Width", 0.5, None);
         set(&mut plain.sheet, "Height", 0.25, None);
         set(&mut plain.sheet, "PinX", 0.5, None);
@@ -2047,7 +2227,11 @@ mod tests {
         root.sub_shapes = vec![container, icon, plain];
 
         // Instance: same master stretched tall (2.25 × 7.02 aspect change).
-        let mut inst = Shape { id: 65, master: Some(7), ..Shape::default() };
+        let mut inst = Shape {
+            id: 65,
+            master: Some(7),
+            ..Shape::default()
+        };
         set(&mut inst.sheet, "Width", 2.657480296178819, None);
         set(&mut inst.sheet, "Height", 5.528301723437821, None);
         (root, inst)
@@ -2098,7 +2282,11 @@ mod tests {
         assert!((m[0] - 1.0).abs() < 1e-6, "a={}", m[0]);
         assert!((m[3] - 1.0).abs() < 1e-6, "d={}", m[3]);
         assert!(m[4].abs() < 1e-6, "e={}", m[4]);
-        assert!((m[5] - expected_ty).abs() < 1e-5, "f={} expected {expected_ty}", m[5]);
+        assert!(
+            (m[5] - expected_ty).abs() < 1e-5,
+            "f={} expected {expected_ty}",
+            m[5]
+        );
     }
 
     #[test]
@@ -2153,20 +2341,27 @@ mod tests {
     fn char_row(font: Option<&str>) -> Row {
         let mut cells = Vec::new();
         if let Some(f) = font {
-            cells.push(("Font".to_string(), Cell { v: Some(f.to_string()), ..Cell::default() }));
+            cells.push((
+                "Font".to_string(),
+                Cell {
+                    v: Some(f.to_string()),
+                    ..Cell::default()
+                },
+            ));
         }
-        Row { cells, ..Row::default() }
+        Row {
+            cells,
+            ..Row::default()
+        }
     }
 
     fn shape_with_character(font: Option<&str>) -> Shape {
         let mut s = Shape::default();
-        s.sheet
-            .children
-            .push(SheetChild::Section(Section {
-                name: "Character".into(),
-                rows: vec![char_row(font)],
-                ..Section::default()
-            }));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![char_row(font)],
+            ..Section::default()
+        }));
         s
     }
 
@@ -2211,7 +2406,10 @@ mod tests {
             " font-family=\"Calibri, Carlito, sans-serif\"",
             "Visio's default family is Calibri"
         );
-        assert_eq!(font_family_attr(Some("")), " font-family=\"Calibri, Carlito, sans-serif\"");
+        assert_eq!(
+            font_family_attr(Some("")),
+            " font-family=\"Calibri, Carlito, sans-serif\""
+        );
     }
 
     #[test]
@@ -2240,13 +2438,25 @@ mod tests {
         let mut root = shape_with_character(Some("Segoe UI"));
         root.id = 1;
         let doc = Document {
-            masters: vec![vsdx::Master { id: 7, shapes: vec![root], ..Default::default() }],
+            masters: vec![vsdx::Master {
+                id: 7,
+                shapes: vec![root],
+                ..Default::default()
+            }],
             ..Document::default()
         };
-        let inst = Shape { id: 2, master: Some(7), ..Shape::default() };
+        let inst = Shape {
+            id: 2,
+            master: Some(7),
+            ..Shape::default()
+        };
         assert_eq!(char_font(&doc, &inst, &[]).as_deref(), Some("Segoe UI"));
         // An own Character row wins over the master's.
-        let mut inst = Shape { id: 3, master: Some(7), ..Shape::default() };
+        let mut inst = Shape {
+            id: 3,
+            master: Some(7),
+            ..Shape::default()
+        };
         inst.sheet.children.push(SheetChild::Section(Section {
             name: "Character".into(),
             rows: vec![char_row(Some("Cambria"))],
@@ -2291,17 +2501,32 @@ mod tests {
     fn elliptical_arc_junction_circle() {
         let w = 0.03937007874015748;
         // Row 2: arc from (0, W/2) via on-arc point (W/2, W) to (W, W/2).
-        let (rx, ry, _, large, sweep) =
-            solve_ellipse_arc((0.0, w / 2.0), (w / 2.0, w), (w, w / 2.0), 0.0, 1.0, (1.0, 1.0))
-                .unwrap();
-        assert!((rx - ry).abs() < 1e-9, "ratio 1 ⇒ circle, got rx={rx} ry={ry}");
+        let (rx, ry, _, large, sweep) = solve_ellipse_arc(
+            (0.0, w / 2.0),
+            (w / 2.0, w),
+            (w, w / 2.0),
+            0.0,
+            1.0,
+            (1.0, 1.0),
+        )
+        .unwrap();
+        assert!(
+            (rx - ry).abs() < 1e-9,
+            "ratio 1 ⇒ circle, got rx={rx} ry={ry}"
+        );
         assert!((rx - w / 2.0).abs() < 1e-9, "rx={rx} expected={}", w / 2.0);
         assert!(!large, "exact half arc");
         assert_eq!(sweep, 0);
         // Row 3 closes the circle back to (0, W/2) via (W/2, 0).
-        let (rx2, ry2, _, large2, sweep2) =
-            solve_ellipse_arc((w, w / 2.0), (w / 2.0, 0.0), (0.0, w / 2.0), 0.0, 1.0, (1.0, 1.0))
-                .unwrap();
+        let (rx2, ry2, _, large2, sweep2) = solve_ellipse_arc(
+            (w, w / 2.0),
+            (w / 2.0, 0.0),
+            (0.0, w / 2.0),
+            0.0,
+            1.0,
+            (1.0, 1.0),
+        )
+        .unwrap();
         assert!((rx2 - w / 2.0).abs() < 1e-9);
         assert!((ry2 - w / 2.0).abs() < 1e-9);
         assert!(!large2);

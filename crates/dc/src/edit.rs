@@ -18,18 +18,18 @@ use vsdx::model::{Attrs, Cell, Shape};
 use vsdx::Document;
 
 pub struct EditArgs {
-    pub cell: Vec<(String, String, String)>,        // target, name, value
-    pub formula: Vec<(String, String, String)>,     // target, name, formula
-    pub text: Vec<(String, String)>,                // target(shape), text
-    pub add_shape: Vec<i64>,                        // page ids
-    pub remove_shape: Vec<(i64, i64)>,              // page, shape
-    pub add_page: Vec<String>,                      // names
-    pub remove_page: Vec<i64>,                      // ids
-    pub rename_page: Vec<(i64, String)>,            // id, new name
-    pub move_page: Vec<(usize, usize)>,             // 1-based positions
-    pub add_layer: Vec<(i64, String)>,              // page, name
-    pub remove_layer: Vec<(i64, i64)>,              // page, ix
-    pub rename_layer: Vec<(i64, i64, String)>,      // page, ix, name
+    pub cell: Vec<(String, String, String)>, // target, name, value
+    pub formula: Vec<(String, String, String)>, // target, name, formula
+    pub text: Vec<(String, String)>,         // target(shape), text
+    pub add_shape: Vec<i64>,                 // page ids
+    pub remove_shape: Vec<(i64, i64)>,       // page, shape
+    pub add_page: Vec<String>,               // names
+    pub remove_page: Vec<i64>,               // ids
+    pub rename_page: Vec<(i64, String)>,     // id, new name
+    pub move_page: Vec<(usize, usize)>,      // 1-based positions
+    pub add_layer: Vec<(i64, String)>,       // page, name
+    pub remove_layer: Vec<(i64, i64)>,       // page, ix
+    pub rename_layer: Vec<(i64, i64, String)>, // page, ix, name
     pub connect: Vec<ConnectSpec>,
     pub disconnect: Vec<(dc_core::connects::ConnectsOwner, i64)>, // owner, index
     pub undo_count: u8,
@@ -83,14 +83,21 @@ pub fn run(file: &Path, out: &Path, args: EditArgs) -> Result<()> {
 fn apply_all(ed: &mut Editor, args: &EditArgs) -> Result<()> {
     for (target, name, value) in &args.cell {
         let scope = Scope::parse(target)?;
-        ed.apply(SetCell::new(scope, name.clone(), Cell::value(value.clone())))?;
+        ed.apply(SetCell::new(
+            scope,
+            name.clone(),
+            Cell::value(value.clone()),
+        ))?;
     }
     for (target, name, formula) in &args.formula {
         let scope = Scope::parse(target)?;
         ed.apply(SetCell::new(
             scope,
             name.clone(),
-            Cell { f: Some(formula.clone()), ..Cell::default() },
+            Cell {
+                f: Some(formula.clone()),
+                ..Cell::default()
+            },
         ))?;
     }
     for (target, text) in &args.text {
@@ -99,7 +106,11 @@ fn apply_all(ed: &mut Editor, args: &EditArgs) -> Result<()> {
     }
     for page in &args.add_shape {
         let shape = placeholder_shape(&ed.doc, *page)?;
-        ed.apply(AddShape { page: *page, parent: None, shape })?;
+        ed.apply(AddShape {
+            page: *page,
+            parent: None,
+            shape,
+        })?;
     }
     for (page, shape) in &args.remove_shape {
         ed.apply(RemoveShape::new(*page, *shape))?;
@@ -114,7 +125,10 @@ fn apply_all(ed: &mut Editor, args: &EditArgs) -> Result<()> {
         ed.apply(RenamePage::new(*id, name.clone()))?;
     }
     for (from, to) in &args.move_page {
-        ed.apply(MovePage { from: from - 1, to: to - 1 })?;
+        ed.apply(MovePage {
+            from: from - 1,
+            to: to - 1,
+        })?;
     }
     for (page, name) in &args.add_layer {
         ed.apply(AddLayer::new(*page, name.clone()))?;

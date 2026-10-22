@@ -126,7 +126,11 @@ fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> Strin
     let mut rest = svg;
     while let Some(i) = rest.find(NEEDLE) {
         // also swallow the separating space before the attribute
-        let cut = if i > 0 && rest.as_bytes()[i - 1] == b' ' { i - 1 } else { i };
+        let cut = if i > 0 && rest.as_bytes()[i - 1] == b' ' {
+            i - 1
+        } else {
+            i
+        };
         out.push_str(&rest[..cut]);
         let after = &rest[i + NEEDLE.len()..];
         match after.find('"') {
@@ -198,11 +202,16 @@ impl TextureCache {
         let key = (key_part.to_string(), version, bucket);
         if !self.map.contains_key(&key) {
             let image = rasterize(svg, page_w_in as f32 * px_per_in)?;
-            let tex = ctx.load_texture(format!("page-{key_part}-{version}"), image, TextureOptions::LINEAR);
+            let tex = ctx.load_texture(
+                format!("page-{key_part}-{version}"),
+                image,
+                TextureOptions::LINEAR,
+            );
             self.map.insert(key.clone(), tex);
         }
         // Keep at most a few live entries per page; drop stale versions.
-        self.map.retain(|(p, v, _), _| p != key_part || *v == version);
+        self.map
+            .retain(|(p, v, _), _| p != key_part || *v == version);
         Ok(&self.map[&key])
     }
 
@@ -226,8 +235,7 @@ mod tests {
 
     #[test]
     fn chain_resolves_to_the_first_installed_family() {
-        let arial =
-            |n: &str| (n.eq_ignore_ascii_case("Arial")).then(|| "Arial".to_string());
+        let arial = |n: &str| (n.eq_ignore_ascii_case("Arial")).then(|| "Arial".to_string());
         let liberation = |n: &str| {
             (n.eq_ignore_ascii_case("Liberation Sans")).then(|| "Liberation Sans".to_string())
         };
@@ -242,11 +250,17 @@ mod tests {
         // Nothing installed: the chain's generic tail carries it; a
         // chain with neither an installed name nor a generic is None
         // (the caller pins that to Carlito).
-        assert_eq!(resolve_font_chain(chain, &none).as_deref(), Some("sans-serif"));
+        assert_eq!(
+            resolve_font_chain(chain, &none).as_deref(),
+            Some("sans-serif")
+        );
         assert_eq!(resolve_font_chain("Wingdings", &none), None);
         // Case-insensitive match, canonical (database) spelling back.
         let canonical = |n: &str| (n.eq_ignore_ascii_case("arial")).then(|| "Arial".to_string());
-        assert_eq!(resolve_font_chain("ARIAL, Carlito", &canonical).as_deref(), Some("Arial"));
+        assert_eq!(
+            resolve_font_chain("ARIAL, Carlito", &canonical).as_deref(),
+            Some("Arial")
+        );
     }
 
     #[test]
@@ -289,7 +303,8 @@ mod tests {
         pin_embedded_fonts_for_tests();
         let head = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="50"><text x="10" y="35" font-size="24""#;
         let tail = ">Hamburg fi 51</text></svg>";
-        let doc_chain = format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
+        let doc_chain =
+            format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
         let explicit = format!(r#"{head} font-family="Carlito"{tail}"#);
         let bare = format!(r#"{head}{tail}"#);
         let a = rasterize(&doc_chain, 200.0).unwrap();

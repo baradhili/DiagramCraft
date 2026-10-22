@@ -156,8 +156,7 @@ impl Sheet {
                 }
             }
         }
-        self.children
-            .push(SheetChild::Cell(name.to_string(), cell));
+        self.children.push(SheetChild::Cell(name.to_string(), cell));
     }
 
     /// Whether the sheet carries any section.
@@ -419,7 +418,12 @@ impl Document {
     /// cascade — i.e. stops before the document-sheet and builtin
     /// fallbacks. Used to spot values that are only defaults (e.g. 1-D
     /// connectors must not inherit the builtin FillPattern=1).
-    pub fn resolve_cell_explicit(&self, shape: &Shape, ancestors: &[&Shape], name: &str) -> Option<Cell> {
+    pub fn resolve_cell_explicit(
+        &self,
+        shape: &Shape,
+        ancestors: &[&Shape],
+        name: &str,
+    ) -> Option<Cell> {
         if let Some(c) = shape.sheet.cell(name) {
             if c.v.is_some() && is_xform_cell(name) {
                 return Some(c.clone());
@@ -511,12 +515,10 @@ impl Document {
                     .and_then(|c| c.numeric())
                     .map(|v| v as i64);
                 match next_id {
-                    Some(nid) if nid != cur.id => {
-                        match self.stylesheet(nid) {
-                            Some(next) => cur = next,
-                            None => break,
-                        }
-                    }
+                    Some(nid) if nid != cur.id => match self.stylesheet(nid) {
+                        Some(next) => cur = next,
+                        None => break,
+                    },
                     _ => break,
                 }
             }

@@ -23,6 +23,12 @@ fn main() {
     }
     let ctx = 220;
     println!("{part}: differs at a:{i} b:{j}");
-    println!("  A …{}", &ca[i.saturating_sub(60)..(i + ctx).min(ca.len())]);
-    println!("  B …{}", &cb[j.saturating_sub(60)..(j + ctx).min(cb.len())]);
+    println!(
+        "  A …{}",
+        &ca[i.saturating_sub(60)..(i + ctx).min(ca.len())]
+    );
+    println!(
+        "  B …{}",
+        &cb[j.saturating_sub(60)..(j + ctx).min(cb.len())]
+    );
 }

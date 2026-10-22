@@ -17,7 +17,9 @@ pub fn layer_rows(doc: &Document, page: i64) -> Result<Vec<Row>> {
         .iter()
         .find(|p| p.id == page)
         .ok_or_else(|| anyhow::anyhow!("page {page} not found"))?;
-    let sheet = p.sheet().ok_or_else(|| anyhow::anyhow!("page {page} has no PageSheet"))?;
+    let sheet = p
+        .sheet()
+        .ok_or_else(|| anyhow::anyhow!("page {page} has no PageSheet"))?;
     Ok(sheet
         .sections_named("Layer")
         .into_iter()
@@ -30,27 +32,28 @@ pub fn layer_name(row: &Row) -> Option<&str> {
     row.cell("Name").and_then(|c| c.v.as_deref())
 }
 
-fn layer_section_mut<'a>(
-    doc: &'a mut Document,
-    page: i64,
-) -> Result<(&'a mut Section, bool)> {
+fn layer_section_mut<'a>(doc: &'a mut Document, page: i64) -> Result<(&'a mut Section, bool)> {
     let sheet = sheet_mut(doc, &Scope::PageSheet { page })?;
-    if let Some(i) = sheet.children.iter().position(|c| {
-        matches!(c, vsdx::model::SheetChild::Section(s) if s.name == "Layer")
-    }) {
+    if let Some(i) = sheet
+        .children
+        .iter()
+        .position(|c| matches!(c, vsdx::model::SheetChild::Section(s) if s.name == "Layer"))
+    {
         if let vsdx::model::SheetChild::Section(s) = &mut sheet.children[i] {
             return Ok((s, false));
         }
         unreachable!();
     }
     // Create the Layer section after existing cells/sections (end of body).
-    sheet.children.push(vsdx::model::SheetChild::Section(Section {
-        name: "Layer".to_string(),
-        ix: 0,
-        attrs: vec![("N".to_string(), "Layer".to_string())],
-        cells: Vec::new(),
-        rows: Vec::new(),
-    }));
+    sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(Section {
+            name: "Layer".to_string(),
+            ix: 0,
+            attrs: vec![("N".to_string(), "Layer".to_string())],
+            cells: Vec::new(),
+            rows: Vec::new(),
+        }));
     let last = sheet.children.len() - 1;
     if let vsdx::model::SheetChild::Section(s) = &mut sheet.children[last] {
         Ok((s, true))
@@ -77,7 +80,11 @@ fn layer_row(ix: i64, name: &str) -> Row {
         t: None,
         ix,
         n: None,
-        attrs: if ix != 0 { vec![("IX".to_string(), ix.to_string())] } else { Vec::new() },
+        attrs: if ix != 0 {
+            vec![("IX".to_string(), ix.to_string())]
+        } else {
+            Vec::new()
+        },
         cells,
     }
 }
@@ -94,7 +101,12 @@ pub struct AddLayer {
 
 impl AddLayer {
     pub fn new(page: i64, name: impl Into<String>) -> AddLayer {
-        AddLayer { page, name: name.into(), ix: None, created_section: false }
+        AddLayer {
+            page,
+            name: name.into(),
+            ix: None,
+            created_section: false,
+        }
     }
 }
 
@@ -105,7 +117,13 @@ impl crate::Command for AddLayer {
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
         let (sec, created) = layer_section_mut(doc, self.page)?;
         self.created_section = created;
-        let ix = sec.rows.iter().map(|r| r.ix).max().map(|m| m + 1).unwrap_or(0);
+        let ix = sec
+            .rows
+            .iter()
+            .map(|r| r.ix)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(0);
         sec.rows.push(layer_row(ix, &self.name));
         self.ix = Some(ix);
         Ok(())
@@ -136,7 +154,11 @@ pub struct RemoveLayer {
 
 impl RemoveLayer {
     pub fn new(page: i64, ix: i64) -> RemoveLayer {
-        RemoveLayer { page, ix, removed: None }
+        RemoveLayer {
+            page,
+            ix,
+            removed: None,
+        }
     }
 }
 
@@ -150,7 +172,9 @@ impl crate::Command for RemoveLayer {
             .rows
             .iter()
             .position(|r| r.ix == self.ix)
-            .ok_or_else(|| anyhow::anyhow!("layer {0} not found on page:{1}", self.ix, self.page))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("layer {0} not found on page:{1}", self.ix, self.page)
+            })?;
         self.removed = Some((sec.rows.remove(pos), pos));
         Ok(())
     }
@@ -174,13 +198,21 @@ pub struct RenameLayer {
 
 impl RenameLayer {
     pub fn new(page: i64, ix: i64, new_name: impl Into<String>) -> RenameLayer {
-        RenameLayer { page, ix, new_name: new_name.into(), old: None }
+        RenameLayer {
+            page,
+            ix,
+            new_name: new_name.into(),
+            old: None,
+        }
     }
 }
 
 impl crate::Command for RenameLayer {
     fn label(&self) -> String {
-        format!("rename layer {} on page:{} to {:?}", self.ix, self.page, self.new_name)
+        format!(
+            "rename layer {} on page:{} to {:?}",
+            self.ix, self.page, self.new_name
+        )
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
         let (sec, _) = layer_section_mut(doc, self.page)?;
@@ -188,7 +220,9 @@ impl crate::Command for RenameLayer {
             .rows
             .iter_mut()
             .find(|r| r.ix == self.ix)
-            .ok_or_else(|| anyhow::anyhow!("layer {0} not found on page:{1}", self.ix, self.page))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("layer {0} not found on page:{1}", self.ix, self.page)
+            })?;
         self.old = Some((
             row.cell("Name").and_then(|c| c.v.clone()),
             row.cell("NameUniv").and_then(|c| c.v.clone()),
@@ -196,7 +230,9 @@ impl crate::Command for RenameLayer {
         for key in ["Name", "NameUniv"] {
             match row.cells.iter_mut().find(|(n, _)| n == key) {
                 Some((_, slot)) => *slot = Cell::value(self.new_name.clone()),
-                None => row.cells.push((key.to_string(), Cell::value(self.new_name.clone()))),
+                None => row
+                    .cells
+                    .push((key.to_string(), Cell::value(self.new_name.clone()))),
             }
         }
         Ok(())

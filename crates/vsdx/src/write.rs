@@ -19,7 +19,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::model::{Attrs, Cell, Document, IndexChild, Master, Page, RawEl, Section, Shape, ShapeFlow, Sheet};
+use crate::model::{
+    Attrs, Cell, Document, IndexChild, Master, Page, RawEl, Section, Shape, ShapeFlow, Sheet,
+};
 use crate::opc::unescape;
 
 const REL_NS: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -143,7 +145,14 @@ fn push_section(out: &mut String, sec: &Section) {
         let rattrs = if row.attrs.is_empty() {
             synth_attrs(&[
                 ("T", row.t.clone()),
-                ("IX", if row.ix != 0 { Some(row.ix.to_string()) } else { None }),
+                (
+                    "IX",
+                    if row.ix != 0 {
+                        Some(row.ix.to_string())
+                    } else {
+                        None
+                    },
+                ),
                 ("N", row.n.clone()),
             ])
         } else {
@@ -268,7 +277,12 @@ fn with_xmlns(attrs: &Attrs) -> Cow<'_, Attrs> {
 /// Serialize the main document part (`document.xml`).
 pub fn document_xml(doc: &Document) -> String {
     let mut out = String::from(decl());
-    push_open(&mut out, "VisioDocument", &with_xmlns(&doc.root_attrs), false);
+    push_open(
+        &mut out,
+        "VisioDocument",
+        &with_xmlns(&doc.root_attrs),
+        false,
+    );
     for item in &doc.items {
         match item {
             crate::model::DocItem::StyleSheets => {
@@ -286,10 +300,7 @@ pub fn document_xml(doc: &Document) -> String {
                     push_open(
                         &mut out,
                         "ColorEntry",
-                        &[
-                            ("IX".into(), ix.to_string()),
-                            ("RGB".into(), rgb.clone()),
-                        ],
+                        &[("IX".into(), ix.to_string()), ("RGB".into(), rgb.clone())],
                         true,
                     );
                 }
@@ -331,7 +342,12 @@ pub fn pages_index_xml(doc: &Document) -> String {
 /// Serialize one page's contents part.
 pub fn page_xml(page: &Page) -> String {
     let mut out = String::from(decl());
-    push_open(&mut out, "PageContents", &with_xmlns(&page.contents_attrs), false);
+    push_open(
+        &mut out,
+        "PageContents",
+        &with_xmlns(&page.contents_attrs),
+        false,
+    );
     if !page.shapes.is_empty() {
         push_shapes(&mut out, &page.shapes);
     }
@@ -348,10 +364,7 @@ pub fn masters_index_xml(doc: &Document) -> String {
     push_open(&mut out, "Masters", &with_xmlns(&doc.masters_attrs), false);
     for m in &doc.masters {
         let attrs = if m.attrs.is_empty() {
-            synth_attrs(&[
-                ("ID", Some(m.id.to_string())),
-                ("NameU", m.name_u.clone()),
-            ])
+            synth_attrs(&[("ID", Some(m.id.to_string())), ("NameU", m.name_u.clone())])
         } else {
             m.attrs.clone()
         };
@@ -366,7 +379,12 @@ pub fn masters_index_xml(doc: &Document) -> String {
 /// Serialize one master's contents part.
 pub fn master_xml(m: &Master) -> String {
     let mut out = String::from(decl());
-    push_open(&mut out, "MasterContents", &with_xmlns(&m.contents_attrs), false);
+    push_open(
+        &mut out,
+        "MasterContents",
+        &with_xmlns(&m.contents_attrs),
+        false,
+    );
     if !m.shapes.is_empty() {
         push_shapes(&mut out, &m.shapes);
     }
@@ -534,7 +552,11 @@ fn rel_type(kind: &str) -> String {
 }
 
 /// `_rels/.rels` plus the document part's rels.
-fn generate_rels(parts: &mut BTreeMap<String, Vec<u8>>, doc_part: &str, targets: Vec<(&str, String)>) {
+fn generate_rels(
+    parts: &mut BTreeMap<String, Vec<u8>>,
+    doc_part: &str,
+    targets: Vec<(&str, String)>,
+) {
     let mut root_rels = String::from(decl());
     root_rels.push_str(&format!("<Relationships xmlns=\"{REL_NS}\">"));
     root_rels.push_str(&format!(
@@ -598,16 +620,24 @@ fn content_types_xml(
     let mut out = String::from(decl());
     out.push_str("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
     if parts.keys().any(|n| n.ends_with(".rels")) {
-        out.push_str(&format!("<Default Extension=\"rels\" ContentType=\"{CT_RELS}\"/>"));
+        out.push_str(&format!(
+            "<Default Extension=\"rels\" ContentType=\"{CT_RELS}\"/>"
+        ));
     }
-    out.push_str(&format!("<Default Extension=\"xml\" ContentType=\"{CT_XML}\"/>"));
+    out.push_str(&format!(
+        "<Default Extension=\"xml\" ContentType=\"{CT_XML}\"/>"
+    ));
     fn override_part(part: &str, ct: &str, out: &mut String) {
         out.push_str(&format!(
             "<Override PartName=\"/{}\" ContentType=\"{}\"/>",
             part, ct
         ));
     }
-    override_part(doc_part, "application/vnd.ms-visio.drawing.main+xml", &mut out);
+    override_part(
+        doc_part,
+        "application/vnd.ms-visio.drawing.main+xml",
+        &mut out,
+    );
     for part in &page_set {
         override_part(part, "application/vnd.ms-visio.pages+xml", &mut out);
     }
@@ -659,8 +689,8 @@ fn relative_target(base_dir: &str, target: &str) -> String {
 /// Write the document to `path` as an OPC zip package.
 pub fn save(doc: &Document, path: &Path) -> Result<()> {
     let parts = build_parts(doc);
-    let file = std::fs::File::create(path)
-        .with_context(|| format!("creating {}", path.display()))?;
+    let file =
+        std::fs::File::create(path).with_context(|| format!("creating {}", path.display()))?;
     write_parts(&parts, file)
 }
 
@@ -681,7 +711,8 @@ fn write_parts<W: std::io::Write + std::io::Seek>(
     for (name, data) in parts {
         w.start_file(name.as_str(), opts)
             .with_context(|| format!("starting zip entry {name}"))?;
-        w.write_all(data).with_context(|| format!("writing {name}"))?;
+        w.write_all(data)
+            .with_context(|| format!("writing {name}"))?;
     }
     w.finish().context("finishing zip")?;
     Ok(())
@@ -708,17 +739,30 @@ fn parse_rels(bytes: &[u8]) -> Vec<RelEntry> {
     loop {
         buf.clear();
         match r.read_event_into(&mut buf) {
-            Ok(Event::Start(e)) | Ok(Event::Empty(e))
-                if e.name().as_ref() == "Relationship" =>
-            {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) if e.name().as_ref() == "Relationship" => {
                 let mut id = String::new();
                 let mut type_ = String::new();
                 let mut target = String::new();
                 for a in e.attributes().flatten() {
                     match a.key.as_ref() {
-                        "Id" => id = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
-                        "Type" => type_ = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
-                        "Target" => target = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                        "Id" => {
+                            id = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .unwrap_or_default()
+                                .into_owned()
+                        }
+                        "Type" => {
+                            type_ = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .unwrap_or_default()
+                                .into_owned()
+                        }
+                        "Target" => {
+                            target = a
+                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                .unwrap_or_default()
+                                .into_owned()
+                        }
                         _ => {}
                     }
                 }
@@ -811,10 +855,7 @@ fn parse_content_types(bytes: &[u8]) -> (Vec<(String, String)>, Vec<(String, Str
     (defaults, overrides)
 }
 
-fn build_content_types(
-    defaults: &[(String, String)],
-    overrides: &[(String, String)],
-) -> Vec<u8> {
+fn build_content_types(defaults: &[(String, String)], overrides: &[(String, String)]) -> Vec<u8> {
     let mut out = String::from(decl());
     out.push_str("<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">");
     for (ext, ct) in defaults {
@@ -892,7 +933,10 @@ fn reconcile_page_parts(
         .collect();
     let mut next_rid = 1 + entries
         .iter()
-        .filter_map(|e| e.id.strip_prefix("rId").and_then(|n| n.parse::<usize>().ok()))
+        .filter_map(|e| {
+            e.id.strip_prefix("rId")
+                .and_then(|n| n.parse::<usize>().ok())
+        })
         .max()
         .unwrap_or(0);
     for page in &added {
@@ -1003,7 +1047,9 @@ fn canon_tag(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: boo
         .map(|a| {
             (
                 a.key.as_ref().to_string(),
-                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .unwrap_or_default()
+                    .into_owned(),
             )
         })
         .collect();
