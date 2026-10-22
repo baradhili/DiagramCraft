@@ -9,9 +9,10 @@
 
 use std::fmt::Write as _;
 
-use vsdx::{Cell, Document, Row, Shape};
+use vsdx::model::Sheet;
 #[cfg(test)]
-use vsdx::model::{Section, Sheet, SheetChild};
+use vsdx::model::{Section, SheetChild};
+use vsdx::{Cell, Document, Row, Shape};
 
 const PX_PER_IN: f64 = 96.0;
 
@@ -244,14 +245,16 @@ fn render_shape<'a>(
     let angle = get("Angle").unwrap_or(0.0);
     let flip_x = get("FlipX").unwrap_or(0.0) != 0.0;
     let flip_y = get("FlipY").unwrap_or(0.0) != 0.0;
+    let (sx, sy) = (
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+    );
 
     let transform = format!(
         "translate({px:.6},{py:.6}) rotate({deg:.6}) scale({sx},{sy}) translate({lx:.6},{ly:.6})",
         px = pin_x,
         py = page_h - pin_y,
         deg = -angle.to_degrees(),
-        sx = if flip_x { -1.0 } else { 1.0 },
-        sy = if flip_y { -1.0 } else { 1.0 },
         lx = -loc_x,
         ly = loc_y,
     );
@@ -283,7 +286,7 @@ fn render_shape<'a>(
     }
     mirror_master(doc, s, &chain, width, height, out);
 
-    emit_text(doc, s, &chain, width, height, out);
+    emit_text(doc, s, &chain, width, height, sx, sy, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -333,7 +336,9 @@ fn render_shape_local<'a>(
         render_shape_local(doc, sub, &chain, part, out);
     }
     mirror_master(doc, s, &chain, width, height, out);
-    emit_text(doc, s, &chain, width, height, out);
+    // Group-local rendering applies no flip scale of its own, so the text
+    // needs no flip compensation here.
+    emit_text(doc, s, &chain, width, height, 1.0, 1.0, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -647,7 +652,25 @@ impl Mat {
 /// row's HorizAlign, vertically per VertAlign, with the first Character
 /// row's size/color/bold. Rotated by TxtAngle around the pin (Visio
 /// vertical sidebars use TxtAngle 90).
-fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f64, out: &mut String) {
+///
+/// `sx`/`sy` are the flip factors the caller's shape transform applied
+/// (±1). Visio flips mirror geometry but never the text block: the block
+/// keeps its TxtPin placement inside the flipped frame, yet the glyphs
+/// must stay un-mirrored, and a TxtAngle rotation inside a mirrored frame
+/// inverts its page-space sense — the connector masters author
+/// `TxtAngle = IF(BITXOR(FlipX,FlipY),1,-1)*Angle` against exactly that,
+/// so the page-space net is `Angle + sx*sy*TxtAngle` (0 = horizontal
+/// labels, issue #19).
+fn emit_text(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    width: f64,
+    height: f64,
+    sx: f64,
+    sy: f64,
+    out: &mut String,
+) {
     let Some(text) = s.sheet.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
         return;
     };
@@ -666,31 +689,23 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     // value is the SVG font-size directly.
     let size = char_size(doc, s, &chain).unwrap_or(0.13888).max(0.02);
     // First Character row extras: color (palette/theme aware) and the
-    // Style bitmask (1 = bold, 2 = italic).
-    let (color, style_bits) = {
-        let sheet = doc.effective_sheet(s, chain);
-        let row = sheet
-            .sections_named("Character")
-            .first()
-            .and_then(|sec| sec.rows.first());
-        let color = row
-            .and_then(|r| r.cell("Color"))
-            .and_then(|c| c.v.clone())
-            .map(|v| match v.trim() {
-                v if v.starts_with('#') => v.to_string(),
-                v => v
-                    .parse::<i64>()
-                    .ok()
-                    .map(|idx| doc.color(idx).cloned().unwrap_or_else(|| palette(idx)))
-                    .unwrap_or_else(|| "#000000".into()),
-            })
-            .unwrap_or_else(|| "#000000".into());
-        let bits = row
-            .and_then(|r| r.cell("Style"))
-            .and_then(|c| c.numeric())
-            .unwrap_or(0.0) as u32;
-        (color, bits)
-    };
+    // Style bitmask (1 = bold, 2 = italic). Both resolve per-cell through
+    // `char_cell`, so a LangID-only instance row picks them up from the
+    // master/style rows instead of silently taking the built-in defaults.
+    let color = char_cell(doc, s, chain, "Color")
+        .and_then(|c| c.v.clone())
+        .map(|v| match v.trim() {
+            v if v.starts_with('#') => v.to_string(),
+            v => v
+                .parse::<i64>()
+                .ok()
+                .map(|idx| doc.color(idx).cloned().unwrap_or_else(|| palette(idx)))
+                .unwrap_or_else(|| "#000000".into()),
+        })
+        .unwrap_or_else(|| "#000000".into());
+    let style_bits = char_cell(doc, s, chain, "Style")
+        .and_then(|c| c.numeric())
+        .unwrap_or(0.0) as u32;
     let font_attrs = format!(
         r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
         s = size,
@@ -737,7 +752,10 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     // mixed case is ~0.5 em; Calibri runs slightly narrower.
     let max_chars = (((tw - ins_l - ins_r) / (size * 0.5)).floor() as usize).max(1);
     let mut lines: Vec<String> = Vec::new();
-    for para in text.split(|c| c == '\n' || c == '\r') {
+    // Visio stores line breaks as CRLF: breaking on each of \r and \n
+    // separately would insert an empty paragraph between every pair of
+    // lines, so normalize CRLF (and lone CR) to one break first.
+    for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
         if para.trim().is_empty() {
             lines.push(String::new());
             continue;
@@ -800,14 +818,21 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
             let _ = write!(body, r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#, escape_text(line));
         }
     }
-    if angle.abs() > 1e-6 {
-        let _ = writeln!(
-            out,
-            r#"<g transform="translate({x:.5},{y:.5}) rotate({deg:.5})">"#,
-            x = tx,
-            y = -ty,
-            deg = -angle.to_degrees()
-        );
+    // Flip-aware block rotation (issue #19): the counter-scale keeps the
+    // glyphs un-mirrored inside the caller's flipped frame, and the
+    // rotation composes with flip parity so the page-space net is
+    // Angle + sx*sy*TxtAngle.
+    let flipped = sx < 0.0 || sy < 0.0;
+    let net_txt_deg = -(sx * sy) * angle.to_degrees();
+    let mut transform = format!("translate({x:.5},{y:.5})", x = tx, y = -ty);
+    if flipped {
+        let _ = write!(transform, " scale({sx:.0},{sy:.0})", sx = sx, sy = sy);
+    }
+    if net_txt_deg.abs() > 1e-6 {
+        let _ = write!(transform, " rotate({deg:.5})", deg = net_txt_deg);
+    }
+    if flipped || net_txt_deg.abs() > 1e-6 {
+        let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
             out,
             r#"<text text-anchor="{a}" {f}>{b}</text>"#,
@@ -1718,32 +1743,83 @@ fn cell_num(cell: &Cell, env: &vsdx::formula::Env) -> Option<f64> {
     vsdx::formula::eval(f, env).ok()?.as_f64()
 }
 
-/// First Character-section row's Size cell (inches), if present on the
-/// effective sheet.
+/// A cell of the first Character row, inherited per-cell the way Visio
+/// resolves character formatting: the instance's own row first (master
+/// instances typically carry a LangID-only row), then the source shape's
+/// row via the master link, then the text-style stylesheet cascade. A row
+/// that omits a cell inherits it — sections inherit separately from
+/// cells, and `effective_sheet` stops at the instance sheet as soon as it
+/// has any section (the same gap the Paragraph lookup in `emit_text`
+/// works around).
+fn char_cell<'a>(
+    doc: &'a Document,
+    s: &'a Shape,
+    chain: &[&'a Shape],
+    name: &str,
+) -> Option<&'a Cell> {
+    let first_row = |sheet: &'a Sheet| {
+        sheet
+            .sections_named("Character")
+            .into_iter()
+            .next()
+            .and_then(|sec| sec.rows.first())
+    };
+    if let Some(c) = first_row(&s.sheet).and_then(|r| r.cell(name)) {
+        return Some(c);
+    }
+    let source = doc.instance_source(s, chain);
+    if let Some(src) = source {
+        if let Some(c) = first_row(&src.sheet).and_then(|r| r.cell(name)) {
+            return Some(c);
+        }
+    }
+    // Text-style stylesheet cascade. The instance usually leaves the
+    // style attributes to its master root; stylesheets reference their
+    // parents through a TextStyle attribute.
+    let style_id = s
+        .text_style
+        .or_else(|| source.and_then(|src| src.text_style))?;
+    let mut cur = doc.stylesheet(style_id)?;
+    for _ in 0..8 {
+        if let Some(c) = first_row(&cur.sheet).and_then(|r| r.cell(name)) {
+            return Some(c);
+        }
+        let next_id = cur
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "TextStyle")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+            .or_else(|| {
+                cur.sheet
+                    .cell("TextStyle")
+                    .and_then(|c| c.numeric())
+                    .map(|v| v as i64)
+            })?;
+        if next_id == cur.id {
+            return None;
+        }
+        cur = doc.stylesheet(next_id)?;
+    }
+    None
+}
+
+/// First Character-section row's Size cell (inches), per-cell inherited
+/// through `char_cell`.
 fn char_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<f64> {
-    let sheet = doc.effective_sheet(s, chain);
-    let row = sheet
-        .sections_named("Character")
-        .first()?
-        .rows
-        .first()?;
-    row.cell("Size").and_then(|c| c.numeric()).filter(|v| *v > 0.0)
+    char_cell(doc, s, chain, "Size")
+        .and_then(|c| c.numeric())
+        .filter(|v| *v > 0.0)
 }
 
 /// First Character-section row's Font cell — the family name as stored
-/// in VSDX (`<Cell N='Font' V='Arial'/>`), inherited through the
-/// effective sheet like Size/Color. Legacy binary-format font indexes
-/// (numeric values) name no family and are ignored.
+/// in VSDX (`<Cell N='Font' V='Arial'/>`), inherited per-cell like Size.
+/// Legacy binary-format font indexes (numeric values) and the `Themed`
+/// placeholder (meaning "the theme's font", rendered with Visio's default
+/// family) name no family.
 fn char_font(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<String> {
-    let sheet = doc.effective_sheet(s, chain);
-    let row = sheet
-        .sections_named("Character")
-        .first()?
-        .rows
-        .first()?;
-    let name = row.cell("Font").and_then(|c| c.v.clone())?;
+    let name = char_cell(doc, s, chain, "Font").and_then(|c| c.v.clone())?;
     let name = name.trim();
-    if name.is_empty() || name.parse::<f64>().is_ok() {
+    if name.is_empty() || name.parse::<f64>().is_ok() || name.eq_ignore_ascii_case("themed") {
         return None;
     }
     Some(name.to_string())
@@ -2186,7 +2262,7 @@ mod tests {
         s.sheet.text = Some("hello".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, &mut out);
         assert!(
             out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
             "emitted text element: {out}"
