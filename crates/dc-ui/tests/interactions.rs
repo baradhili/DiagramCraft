@@ -1,6 +1,7 @@
 //! kittest coverage for the Visio 2016 shape paradigm: drag a master from
 //! the stencil onto the page, right-click a shape for its context menu,
-//! and act on it (delete / duplicate).
+//! act on it (delete / duplicate), and double-click into text editing
+//! (EventDblClick, GitHub #20).
 
 use dc_ui::app::App;
 use egui::Pos2;
@@ -22,6 +23,26 @@ fn harness_with_blank() -> Harness<'static, App> {
         )
 }
 
+/// egui groups a click pair only when the two releases land inside its
+/// double-click window (0.3 s of input time), and each kittest step
+/// advances that clock by `step_dt` — the default 0.25 s pushes the
+/// pair's releases 0.5 s apart, so these tests step at 0.05 s (and may
+/// then need more steps to settle the same frames).
+fn dblclick_harness_with_blank() -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .with_step_dt(0.05)
+        .with_max_steps(30)
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        )
+}
+
 /// Click (press + release queued together, then settle — the kittest
 /// convention; settling between press and release cancels the click).
 fn click_at(h: &mut Harness<'_, App>, pos: Pos2, button: egui::PointerButton) {
@@ -32,6 +53,24 @@ fn click_at(h: &mut Harness<'_, App>, pos: Pos2, button: egui::PointerButton) {
         modifiers: egui::Modifiers::NONE,
     };
     h.hover_at(pos);
+    h.event(b(true));
+    h.event(b(false));
+    h.run();
+}
+
+/// Double-click: both press/release pairs queued back-to-back so the
+/// releases stay inside egui's double-click window (see the harness
+/// builder above for the step timing that makes this deterministic).
+fn dbl_click_at(h: &mut Harness<'_, App>, pos: Pos2) {
+    let b = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(pos);
+    h.event(b(true));
+    h.event(b(false));
     h.event(b(true));
     h.event(b(false));
     h.run();
@@ -69,7 +108,11 @@ fn stencil_drag_places_shape() {
     });
     h.run();
 
-    assert_eq!(h.state().debug_shape_count(), 1, "drag from stencil placed a shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "drag from stencil placed a shape"
+    );
 }
 
 #[test]
@@ -86,7 +129,10 @@ fn right_click_menu_delete_removes_shape() {
     // Right-click the placed shape.
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
-    assert!(h.state().debug_sel().is_some(), "right-click selects the shape");
+    assert!(
+        h.state().debug_sel().is_some(),
+        "right-click selects the shape"
+    );
 
     // The Visio context menu shows Delete; the row is the short node
     // (the menu container's aggregated label also contains the word).
@@ -97,7 +143,11 @@ fn right_click_menu_delete_removes_shape() {
         .expect("Delete menu row");
     row.click();
     h.run();
-    assert_eq!(h.state().debug_shape_count(), 0, "menu Delete removed the shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        0,
+        "menu Delete removed the shape"
+    );
 }
 
 #[test]
@@ -115,7 +165,11 @@ fn right_click_menu_duplicate_creates_shape() {
 
     h.get_by_label_contains("Duplicate").click();
     h.run();
-    assert_eq!(h.state().debug_shape_count(), 2, "menu Duplicate cloned the shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        2,
+        "menu Duplicate cloned the shape"
+    );
     // And it is undoable like every command-layer action.
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
@@ -196,7 +250,11 @@ fn marquee_selects_multiple_and_delete_removes_all() {
     // Clicking a member keeps the multi-selection alive (Visio: dragging
     // a selected shape moves the whole selection).
     let c = canvas.center();
-    click_at(&mut h, c + egui::vec2(40.0, -40.0), egui::PointerButton::Primary);
+    click_at(
+        &mut h,
+        c + egui::vec2(40.0, -40.0),
+        egui::PointerButton::Primary,
+    );
     assert_eq!(
         h.state().debug_sel_set().len(),
         2,
@@ -320,4 +378,84 @@ fn zoom_follows_window_resize_in_fit_mode() {
         h.state().debug_zoom() > z_refit * 1.05,
         "fit mode follows resizes again after Fit Page"
     );
+}
+
+/// GitHub #20: double-clicking a shape opens its linked text for
+/// editing (the F2 window reached by mouse, honoring EventDblClick — a
+/// placed shape has no formula, so Visio's default: open the editor).
+#[test]
+fn double_click_opens_text_editor_and_edits_shape_text() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "a fresh master instance carries no text"
+    );
+
+    dbl_click_at(&mut h, to);
+    assert!(
+        h.query_all_by_label_contains("Edit Text").count() > 0,
+        "double-click opened the Edit Text window"
+    );
+
+    // Set the field's value the accesskit way (the stencil pane's
+    // search box is another TextInput, so scope the query to the
+    // window), then OK: the text lands through SetText (one undo step).
+    h.get_by_label_contains("Edit Text")
+        .get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Server");
+    h.run();
+    assert_eq!(
+        h.get_by_label_contains("Edit Text")
+            .get_by_role(egui::Role::MultilineTextInput)
+            .value()
+            .as_deref(),
+        Some("Server"),
+        "typed text visible in the field"
+    );
+    h.get_by_label_contains("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Server"),
+        "OK committed the typed text"
+    );
+
+    // Ctrl+Z restores the shape's original (empty) text.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "undo restores the pre-edit text"
+    );
+}
+
+/// GitHub #20: a double-click on empty page area opens nothing.
+#[test]
+fn double_click_on_empty_page_is_a_no_op() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+
+    // Well off the placed shape (~3 in at fit zoom), still on the page.
+    dbl_click_at(&mut h, to + egui::vec2(200.0, 200.0));
+    assert!(
+        h.query_all_by_label_contains("Edit Text").count() == 0,
+        "double-click on empty page must not open an editor"
+    );
+    assert_eq!(h.state().debug_shape_count(), 1);
 }

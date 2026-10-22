@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use dc_core::commands::{AddPage, AddShape, DuplicateShape, RemoveShape, ReorderShape};
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
-use dc_core::{Macro, SetCell, SetRowCell, SetText, Editor};
+use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
@@ -62,6 +62,9 @@ pub struct App {
     clipboard: Option<Shape>,
     /// Inline text editor target: (shape id, draft text).
     text_edit: Option<(i64, String)>,
+    /// The last canvas click placed a stencil master — a double-click
+    /// completing that click pair must not open a text editor.
+    placed_last_click: bool,
     /// Fill/Line color palette target (opened from the ribbon).
     color_pick: Option<ColorTarget>,
     /// Most-recently-used files (start screen + backstage Open page).
@@ -154,6 +157,7 @@ impl App {
             ctx_menu: None,
             clipboard: None,
             text_edit: None,
+            placed_last_click: false,
             color_pick: None,
             recent: RecentFiles::ephemeral(),
         };
@@ -223,9 +227,15 @@ impl App {
                         .and_then(|c| c.numeric())
                         .unwrap_or(0.0)
                 };
-                PageGeom { w_in: n("PageWidth").max(0.1), h_in: n("PageHeight").max(0.1) }
+                PageGeom {
+                    w_in: n("PageWidth").max(0.1),
+                    h_in: n("PageHeight").max(0.1),
+                }
             }
-            None => PageGeom { w_in: 8.5, h_in: 11.0 },
+            None => PageGeom {
+                w_in: 8.5,
+                h_in: 11.0,
+            },
         }
     }
 
@@ -346,7 +356,9 @@ impl App {
     /// while one is still open so the UI loop (and the window's event
     /// processing) never stalls behind it.
     fn poll_dialog(&mut self, ctx: &Context) {
-        let Some(dialog) = self.dialog.take() else { return };
+        let Some(dialog) = self.dialog.take() else {
+            return;
+        };
         let (path, again) = match &dialog {
             PendingDialog::Open(rx) | PendingDialog::SaveAs(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
@@ -428,8 +440,12 @@ impl App {
 
     /// Selection frame in canvas rect space (inches, y-down origin).
     fn sel_extra_page_rects(&self) -> Vec<Rect> {
-        let Some(ed) = self.ed.as_ref() else { return Vec::new() };
-        let Some((page_id, primary)) = self.sel else { return Vec::new() };
+        let Some(ed) = self.ed.as_ref() else {
+            return Vec::new();
+        };
+        let Some((page_id, primary)) = self.sel else {
+            return Vec::new();
+        };
         let page_h = self.page_geom().h_in;
         self.sel_set
             .iter()
@@ -510,8 +526,7 @@ impl App {
             if ctrl && i.key_pressed(egui::Key::Y) {
                 self.do_redo();
             }
-            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned
-            {
+            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
             // Shape clipboard / duplicate / text edit (Visio keys). Not
@@ -582,7 +597,9 @@ impl App {
     /// shape whose bbox intersects joins the selection set.
     fn apply_marquee(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         let Some(ed) = self.ed() else { return };
-        let Some(page_id) = self.page_id() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         let mut picked = Vec::new();
         for shape in page.shapes.iter() {
@@ -602,16 +619,20 @@ impl App {
     /// page-inch delta (y-down); the opposite corner stays anchored and
     /// LocPin stays proportional (Visio's `Width*0.5` semantics).
     fn apply_resize(&mut self, corner: canvas::Corner, dx: f64, dy: f64) {
-        let Some((page_id, shape_id)) = self.sel else { return };
-        let Some(ed) = self.ed.as_ref() else { return };
-        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return };
-        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else { return };
-        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else { return };
-        let get = |n: &str| {
-            ed.doc
-                .resolve_cell(sh, &chain, n)
-                .and_then(|c| c.numeric())
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
         };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(px), Some(py), Some(w), Some(h), Some(lx), Some(ly)) = (
             get("PinX"),
             get("PinY"),
@@ -636,7 +657,7 @@ impl App {
         // position, selected by the dragged (screen-oriented) corner.
         // LocPin stays proportional (Visio's Width*0.5 semantics).
         let (ax, ay) = match corner {
-            canvas::Corner::TopLeft => (1.0, 0.0), // anchor bottom-right
+            canvas::Corner::TopLeft => (1.0, 0.0),  // anchor bottom-right
             canvas::Corner::TopRight => (0.0, 0.0), // anchor bottom-left
             canvas::Corner::BottomLeft => (1.0, 1.0), // anchor top-right
             canvas::Corner::BottomRight => (0.0, 1.0), // anchor top-left
@@ -646,7 +667,10 @@ impl App {
         let nly = ly * nh / h;
         let npx = anchor.0 - ax * nw + nlx;
         let npy = anchor.1 - ay * nh + nly;
-        let scope = Scope::Shape { page: page_id, shape: shape_id };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
         let cmds: Vec<Box<dyn dc_core::Command>> = vec![
             Box::new(SetCell::new(scope.clone(), "Width", cell(nw))),
@@ -671,7 +695,8 @@ impl App {
         if pressed {
             if let (Some(p), Some(d)) = (pointer, self.drag.as_mut()) {
                 let x_in = (p.x - self.view.pan.x) as f64 / self.view.px_per_in() as f64;
-                let y_up = geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
+                let y_up =
+                    geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
                 let new_pin = (x_in + d.grab_off.0, y_up + d.grab_off.1);
                 if (new_pin.0 - d.last_pin.0).abs() * self.view.px_per_in() as f64 > 0.5
                     || (new_pin.1 - d.last_pin.1).abs() * self.view.px_per_in() as f64 > 0.5
@@ -701,11 +726,12 @@ impl App {
                             vec![Box::new(MoveShape::new(page_id, d.shape, d.last_pin))];
                         for sid in others {
                             let page = &ed.doc.pages[self.page_idx];
-                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid)
-                            else {
+                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
                                 continue;
                             };
-                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                                continue;
+                            };
                             let get = |n: &str| {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
@@ -739,6 +765,7 @@ impl App {
     }
 
     fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool) {
+        self.placed_last_click = false;
         // Stencil placement takes priority.
         if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
             let new_id = self
@@ -748,6 +775,7 @@ impl App {
             self.apply(AddMasterInstance::new(page_id, master, page_pos));
             self.stencil.armed = None;
             self.ctx_menu = None;
+            self.placed_last_click = true;
             if let Some(nid) = new_id {
                 self.set_selection(Some((page_id, nid)));
                 self.sel_set = vec![(page_id, nid)];
@@ -812,6 +840,44 @@ impl App {
         }
     }
 
+    /// Double-click on the canvas (page inches, y-up): Visio's route into
+    /// a shape's linked text. The shape's `EventDblClick` formula,
+    /// resolved through the inheritance chain (instance → master, like
+    /// the Paragraph/Character handling), decides what happens.
+    fn on_canvas_dbl_click(&mut self, page_pos: (f64, f64)) {
+        // A stencil placement wins the click pair: its first click
+        // placed the master, and the pair must not also open an editor.
+        if self.stencil.armed.is_some() || self.placed_last_click {
+            self.placed_last_click = false;
+            return;
+        }
+        let Some(shape_id) = self.shape_hit(page_pos) else {
+            return;
+        };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        self.set_selection(Some((page_id, shape_id)));
+        let formula = self.ed.as_ref().and_then(|ed| {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+            let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+            ed.doc
+                .resolve_cell(sh, &chain, "EventDblClick")
+                .and_then(|c| c.f)
+        });
+        match classify_dbl_click(formula.as_deref()) {
+            DblClick::OpenText => {
+                // The F2 path reached by mouse: seed the draft and let
+                // `text_edit_window` run it.
+                let draft = self.selected_text(shape_id).unwrap_or_default();
+                self.text_edit = Some((shape_id, draft));
+                self.status = format!("editing text of shape {shape_id}");
+            }
+            DblClick::Deferred(msg) => self.status = msg,
+        }
+    }
+
     fn dispatch(&mut self, a: Action) {
         match a {
             Action::NewDoc => self.do_new(),
@@ -824,7 +890,10 @@ impl App {
                 if let Some(page_id) = self.page_id() {
                     let _ = page_id;
                 }
-                self.apply(AddPage::new(format!("Page-{}", self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1))));
+                self.apply(AddPage::new(format!(
+                    "Page-{}",
+                    self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1)
+                )));
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
@@ -856,9 +925,7 @@ impl App {
                 };
             }
             Action::ShowShapeSheet => self.show_shapesheet = !self.show_shapesheet,
-            Action::Macros => {
-                self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into()
-            }
+            Action::Macros => self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into(),
             Action::FillMenu | Action::LineMenu => {
                 self.color_pick = Some(if a == Action::FillMenu {
                     ColorTarget::Fill
@@ -883,9 +950,16 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Drawing1".into());
-        let title = format!("{name} - DiagramCraft{}", if self.dirty { " *" } else { "" });
+        let title = format!(
+            "{name} - DiagramCraft{}",
+            if self.dirty { " *" } else { "" }
+        );
         egui::Panel::top("title_band")
-            .frame(egui::Frame::new().fill(theme::ACCENT).inner_margin(egui::Margin::symmetric(8, 2)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::ACCENT)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.set_height(26.0);
@@ -930,19 +1004,27 @@ impl App {
                     for t in TABS {
                         let active = *t == self.tab;
                         if *t == Tab::File {
-                            let txt = egui::RichText::new("File").size(12.5).color(Color32::WHITE).strong();
-                            let b = egui::Button::new(txt).small().fill(theme::ACCENT).frame(true);
+                            let txt = egui::RichText::new("File")
+                                .size(12.5)
+                                .color(Color32::WHITE)
+                                .strong();
+                            let b = egui::Button::new(txt)
+                                .small()
+                                .fill(theme::ACCENT)
+                                .frame(true);
                             if ui.add(b).clicked() {
                                 self.backstage = true;
                             }
                             ui.add_space(8.0);
                             continue;
                         }
-                        let txt = egui::RichText::new(t_title(*t)).size(12.0).color(if active {
-                            theme::ACCENT_DARK
-                        } else {
-                            Color32::from_rgb(70, 70, 70)
-                        });
+                        let txt = egui::RichText::new(t_title(*t))
+                            .size(12.0)
+                            .color(if active {
+                                theme::ACCENT_DARK
+                            } else {
+                                Color32::from_rgb(70, 70, 70)
+                            });
                         let b = egui::Button::new(txt).small().frame(false);
                         let resp = ui.add_enabled(true, b);
                         if resp.clicked() {
@@ -950,7 +1032,11 @@ impl App {
                         }
                         let r = resp.rect;
                         if active {
-                            ui.painter().hline(r.left() + 2.0..=r.right() - 2.0, r.bottom(), Stroke::new(2.0, theme::ACCENT));
+                            ui.painter().hline(
+                                r.left() + 2.0..=r.right() - 2.0,
+                                r.bottom(),
+                                Stroke::new(2.0, theme::ACCENT),
+                            );
                         }
                         ui.add_space(6.0);
                     }
@@ -979,12 +1065,20 @@ impl App {
                             .tip("Clipboard — planned for a later milestone")),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Cut, "Cut", Action::Macros).enabled(false).tip("Clipboard — planned"),
-                                RibbonButton::new(Icon::Copy, "Copy", Action::Macros).enabled(false).tip("Clipboard — planned"),
+                                RibbonButton::new(Icon::Cut, "Cut", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Clipboard — planned"),
+                                RibbonButton::new(Icon::Copy, "Copy", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Clipboard — planned"),
                             ],
-                            vec![
-                                RibbonButton::new(Icon::Painter, "Format Painter", Action::Macros).enabled(false).tip("Format Painter — planned"),
-                            ],
+                            vec![RibbonButton::new(
+                                Icon::Painter,
+                                "Format Painter",
+                                Action::Macros,
+                            )
+                            .enabled(false)
+                            .tip("Format Painter — planned")],
                         ]),
                     ],
                 ),
@@ -992,20 +1086,48 @@ impl App {
                     "Font",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::FontA, "Calibri", Action::Macros).combo().width(128.0).enabled(false).tip("Font family — planned"),
-                            RibbonButton::new(Icon::FontA, "11", Action::Macros).combo().width(46.0).enabled(false).tip("Font size — planned"),
-                            RibbonButton::new(Icon::Grow, "", Action::FontGrow).enabled(has_sel).tip("Increase font size"),
-                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink).enabled(has_sel).tip("Decrease font size"),
-                            RibbonButton::new(Icon::ClearAll, "", Action::Macros).enabled(false).tip("Clear all formatting — planned"),
+                            RibbonButton::new(Icon::FontA, "Calibri", Action::Macros)
+                                .combo()
+                                .width(128.0)
+                                .enabled(false)
+                                .tip("Font family — planned"),
+                            RibbonButton::new(Icon::FontA, "11", Action::Macros)
+                                .combo()
+                                .width(46.0)
+                                .enabled(false)
+                                .tip("Font size — planned"),
+                            RibbonButton::new(Icon::Grow, "", Action::FontGrow)
+                                .enabled(has_sel)
+                                .tip("Increase font size"),
+                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink)
+                                .enabled(has_sel)
+                                .tip("Decrease font size"),
+                            RibbonButton::new(Icon::ClearAll, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Clear all formatting — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Bold, "", Action::Macros).enabled(false).tip("Bold — planned"),
-                            RibbonButton::new(Icon::Italic, "", Action::Macros).enabled(false).tip("Italic — planned"),
-                            RibbonButton::new(Icon::Underline, "", Action::Macros).enabled(false).tip("Underline — planned"),
-                            RibbonButton::new(Icon::Strike, "", Action::Macros).enabled(false).tip("Strikethrough — planned"),
-                            RibbonButton::new(Icon::Subscript, "", Action::Macros).enabled(false).tip("Subscript — planned"),
-                            RibbonButton::new(Icon::Superscript, "", Action::Macros).enabled(false).tip("Superscript — planned"),
-                            RibbonButton::new(Icon::TextColor, "", Action::Macros).enabled(false).tip("Text color — planned"),
+                            RibbonButton::new(Icon::Bold, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Bold — planned"),
+                            RibbonButton::new(Icon::Italic, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Italic — planned"),
+                            RibbonButton::new(Icon::Underline, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Underline — planned"),
+                            RibbonButton::new(Icon::Strike, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Strikethrough — planned"),
+                            RibbonButton::new(Icon::Subscript, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Subscript — planned"),
+                            RibbonButton::new(Icon::Superscript, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Superscript — planned"),
+                            RibbonButton::new(Icon::TextColor, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Text color — planned"),
                         ],
                     ])],
                 ),
@@ -1013,49 +1135,89 @@ impl App {
                     "Paragraph",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Align, "", Action::Macros).enabled(false).tip("Align left — planned"),
-                            RibbonButton::new(Icon::AlignCenter, "", Action::Macros).enabled(false).tip("Align center — planned"),
-                            RibbonButton::new(Icon::AlignRight, "", Action::Macros).enabled(false).tip("Align right — planned"),
-                            RibbonButton::new(Icon::LineSpacing, "", Action::Macros).enabled(false).tip("Line spacing — planned"),
+                            RibbonButton::new(Icon::Align, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align left — planned"),
+                            RibbonButton::new(Icon::AlignCenter, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align center — planned"),
+                            RibbonButton::new(Icon::AlignRight, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align right — planned"),
+                            RibbonButton::new(Icon::LineSpacing, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Line spacing — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Bullets, "", Action::Macros).enabled(false).tip("Bullets — planned"),
-                            RibbonButton::new(Icon::Numbering, "", Action::Macros).enabled(false).tip("Numbering — planned"),
-                            RibbonButton::new(Icon::IndentLess, "", Action::Macros).enabled(false).tip("Decrease indent — planned"),
-                            RibbonButton::new(Icon::IndentMore, "", Action::Macros).enabled(false).tip("Increase indent — planned"),
+                            RibbonButton::new(Icon::Bullets, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Bullets — planned"),
+                            RibbonButton::new(Icon::Numbering, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Numbering — planned"),
+                            RibbonButton::new(Icon::IndentLess, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Decrease indent — planned"),
+                            RibbonButton::new(Icon::IndentMore, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Increase indent — planned"),
                         ],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Shape Styles",
                     vec![
-                        big(RibbonButton::new(Icon::Theme, "Quick Styles", Action::Macros)
-                            .enabled(false)
-                            .tip("Style gallery — planned")),
+                        big(
+                            RibbonButton::new(Icon::Theme, "Quick Styles", Action::Macros)
+                                .enabled(false)
+                                .tip("Style gallery — planned"),
+                        ),
                         stack(vec![
-                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu).enabled(has_sel).tip("Shape fill color"),
-                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu).enabled(has_sel).tip("Line color"),
-                            RibbonButton::new(Icon::Effects, "Effects", Action::Macros).enabled(false).tip("Shape effects — planned"),
+                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu)
+                                .enabled(has_sel)
+                                .tip("Shape fill color"),
+                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu)
+                                .enabled(has_sel)
+                                .tip("Line color"),
+                            RibbonButton::new(Icon::Effects, "Effects", Action::Macros)
+                                .enabled(false)
+                                .tip("Shape effects — planned"),
                         ]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Arrange",
                     vec![
-                        big(RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
-                            .enabled(false)
-                            .tip("Z-order — planned")),
-                        big(RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
-                            .enabled(false)
-                            .tip("Z-order — planned")),
+                        big(
+                            RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
+                                .enabled(false)
+                                .tip("Z-order — planned"),
+                        ),
+                        big(
+                            RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
+                                .enabled(false)
+                                .tip("Z-order — planned"),
+                        ),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Align, "Align", Action::Macros).enabled(false).tip("Alignment — planned"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Right", Action::RotateRight).enabled(has_sel).tip("Rotate selection 90° clockwise"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft).enabled(has_sel).tip("Rotate selection 90° counter-clockwise"),
+                                RibbonButton::new(Icon::Align, "Align", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Alignment — planned"),
+                                RibbonButton::new(
+                                    Icon::Rotate,
+                                    "Rotate Right",
+                                    Action::RotateRight,
+                                )
+                                .enabled(has_sel)
+                                .tip("Rotate selection 90° clockwise"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft)
+                                    .enabled(has_sel)
+                                    .tip("Rotate selection 90° counter-clockwise"),
                             ],
                             vec![
-                                RibbonButton::new(Icon::Group, "Group", Action::Macros).enabled(false).tip("Grouping — planned"),
+                                RibbonButton::new(Icon::Group, "Group", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Grouping — planned"),
                                 RibbonButton::new(Icon::Delete, "Delete", Action::Delete)
                                     .enabled(sel_active)
                                     .tip("Delete the selected shape (Del)"),
@@ -1068,17 +1230,29 @@ impl App {
                 crate::ribbon::Group::new(
                     "Blocks",
                     vec![
-                        big(RibbonButton::new(Icon::Container, "Container", Action::Macros).enabled(false).tip("Containers — planned")),
-                        big(RibbonButton::new(Icon::Callout, "Callout", Action::Macros).enabled(false).tip("Callouts — planned")),
+                        big(
+                            RibbonButton::new(Icon::Container, "Container", Action::Macros)
+                                .enabled(false)
+                                .tip("Containers — planned"),
+                        ),
+                        big(RibbonButton::new(Icon::Callout, "Callout", Action::Macros)
+                            .enabled(false)
+                            .tip("Callouts — planned")),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Illustrations",
                     vec![
-                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros).enabled(false).tip("Picture shapes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::OnlinePic, "Online Pictures", Action::Macros).enabled(false).tip("Picture shapes — planned"),
-                        ]),
+                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros)
+                            .enabled(false)
+                            .tip("Picture shapes — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::OnlinePic,
+                            "Online Pictures",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Picture shapes — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -1087,50 +1261,79 @@ impl App {
                         big(RibbonButton::new(Icon::TextBox, "Text Box", Action::Macros)
                             .enabled(false)
                             .tip("Text shapes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Field, "Field", Action::Macros).enabled(false).tip("Fields — planned"),
-                        ]),
+                        stack(vec![RibbonButton::new(
+                            Icon::Field,
+                            "Field",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Fields — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Pages",
-                    vec![big(RibbonButton::new(Icon::NewPage, "New Page", Action::NewPage).enabled(has_doc))],
+                    vec![big(RibbonButton::new(
+                        Icon::NewPage,
+                        "New Page",
+                        Action::NewPage,
+                    )
+                    .enabled(has_doc))],
                 ),
                 crate::ribbon::Group::new(
                     "Comments",
-                    vec![big(RibbonButton::new(Icon::Comment, "New Comment", Action::Macros).enabled(false).tip("Comments — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Comment,
+                        "New Comment",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Comments — planned"))],
                 ),
             ],
             Tab::Design => vec![
                 crate::ribbon::Group::new(
                     "Themes",
                     vec![
-                        big(RibbonButton::new(Icon::Theme, "Themes", Action::Macros).enabled(false).tip("Themes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Theme, "Variants", Action::Macros).enabled(false).tip("Theme variants — planned"),
-                        ]),
+                        big(RibbonButton::new(Icon::Theme, "Themes", Action::Macros)
+                            .enabled(false)
+                            .tip("Themes — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::Theme,
+                            "Variants",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Theme variants — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Page Setup",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros).enabled(false).tip("Page orientation — planned"),
-                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros).enabled(false).tip("Page size — planned"),
+                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros)
+                                .enabled(false)
+                                .tip("Page orientation — planned"),
+                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros)
+                                .enabled(false)
+                                .tip("Page size — planned"),
                         ],
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros).enabled(false).tip("Auto page size — planned"),
-                        ],
+                        vec![RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros)
+                            .enabled(false)
+                            .tip("Auto page size — planned")],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Backgrounds",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros).enabled(false).tip("Page backgrounds — planned"),
+                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros)
+                                .enabled(false)
+                                .tip("Page backgrounds — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros).enabled(false).tip("Borders & titles — planned"),
+                            RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros)
+                                .enabled(false)
+                                .tip("Borders & titles — planned"),
                         ],
                     ])],
                 ),
@@ -1139,53 +1342,91 @@ impl App {
                 crate::ribbon::Group::new(
                     "Display Data",
                     vec![
-                        big(RibbonButton::new(Icon::DataGraphic, "Data Graphic", Action::Macros).enabled(false).tip("Data graphics (M6)")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Shapes, "Legend", Action::Macros).enabled(false).tip("Legends (M6)"),
-                        ]),
+                        big(
+                            RibbonButton::new(Icon::DataGraphic, "Data Graphic", Action::Macros)
+                                .enabled(false)
+                                .tip("Data graphics (M6)"),
+                        ),
+                        stack(vec![RibbonButton::new(
+                            Icon::Shapes,
+                            "Legend",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Legends (M6)")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "External Data",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Link, "Link Data to Shapes", Action::Macros).enabled(false).tip("Data linking (M6)"),
-                            RibbonButton::new(Icon::Refresh, "Refresh Data", Action::Macros).enabled(false).tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Link, "Link Data to Shapes", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Refresh, "Refresh Data", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros).enabled(false).tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
                         ],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Show/Hide",
                     vec![stack(vec![
-                        RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros).enabled(false).tip("Shape data window (M6)"),
-                        RibbonButton::new(Icon::Units, "External Data Window", Action::Macros).enabled(false).tip("External data window (M6)"),
+                        RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros)
+                            .enabled(false)
+                            .tip("Shape data window (M6)"),
+                        RibbonButton::new(Icon::Units, "External Data Window", Action::Macros)
+                            .enabled(false)
+                            .tip("External data window (M6)"),
                     ])],
                 ),
             ],
             Tab::Process => vec![
                 crate::ribbon::Group::new(
                     "Cross-Functional Flowchart",
-                    vec![big(RibbonButton::new(Icon::Swimlane, "Swimlane", Action::Macros).enabled(false).tip("Swimlanes — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Swimlane,
+                        "Swimlane",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Swimlanes — planned"))],
                 ),
                 crate::ribbon::Group::new(
                     "Diagram Layout",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Re-layout Page", Action::Macros).enabled(false).tip("Auto layout — planned"),
+                            RibbonButton::new(Icon::Shapes, "Re-layout Page", Action::Macros)
+                                .enabled(false)
+                                .tip("Auto layout — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Align, "Align & Space", Action::Macros).enabled(false).tip("Auto alignment — planned"),
+                            RibbonButton::new(Icon::Align, "Align & Space", Action::Macros)
+                                .enabled(false)
+                                .tip("Auto alignment — planned"),
                         ],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Validate",
                     vec![
-                        big(RibbonButton::new(Icon::Check, "Check Diagram", Action::Macros).enabled(false).tip("Diagram validation — planned")),
-                        stack(vec![RibbonButton::new(Icon::Open, "Import Flowchart Data", Action::Macros).enabled(false).tip("Flowchart data import — planned")]),
+                        big(
+                            RibbonButton::new(Icon::Check, "Check Diagram", Action::Macros)
+                                .enabled(false)
+                                .tip("Diagram validation — planned"),
+                        ),
+                        stack(vec![RibbonButton::new(
+                            Icon::Open,
+                            "Import Flowchart Data",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Flowchart data import — planned")]),
                     ],
                 ),
             ],
@@ -1193,13 +1434,27 @@ impl App {
                 crate::ribbon::Group::new(
                     "Proofing",
                     vec![
-                        big(RibbonButton::new(Icon::Spell, "Spelling", Action::Macros).enabled(false).tip("Spell check — planned")),
-                        stack(vec![RibbonButton::new(Icon::FontA, "Language", Action::Macros).enabled(false).tip("Language settings — planned")]),
+                        big(RibbonButton::new(Icon::Spell, "Spelling", Action::Macros)
+                            .enabled(false)
+                            .tip("Spell check — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::FontA,
+                            "Language",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Language settings — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Comments",
-                    vec![big(RibbonButton::new(Icon::Comment, "New Comment", Action::Macros).enabled(false).tip("Comments — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Comment,
+                        "New Comment",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Comments — planned"))],
                 ),
             ],
             Tab::View => vec![
@@ -1207,12 +1462,18 @@ impl App {
                     "Show",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Rulers, "Rulers", Action::ToggleRulers).selected(self.view.show_rulers),
-                            RibbonButton::new(Icon::Grid, "Grid", Action::ToggleGrid).selected(self.view.show_grid),
+                            RibbonButton::new(Icon::Rulers, "Rulers", Action::ToggleRulers)
+                                .selected(self.view.show_rulers),
+                            RibbonButton::new(Icon::Grid, "Grid", Action::ToggleGrid)
+                                .selected(self.view.show_grid),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros).enabled(false).tip("Connection points — planned"),
-                            RibbonButton::new(Icon::Shapes, "Guides", Action::Macros).enabled(false).tip("Guides — planned"),
+                            RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros)
+                                .enabled(false)
+                                .tip("Connection points — planned"),
+                            RibbonButton::new(Icon::Shapes, "Guides", Action::Macros)
+                                .enabled(false)
+                                .tip("Guides — planned"),
                         ],
                     ])],
                 ),
@@ -1229,11 +1490,21 @@ impl App {
                 ),
                 crate::ribbon::Group::new(
                     "Visual Aids",
-                    vec![big(RibbonButton::new(Icon::Check, "Visual Aids", Action::Macros).enabled(false).tip("Snap & glue settings — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Check,
+                        "Visual Aids",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Snap & glue settings — planned"))],
                 ),
                 crate::ribbon::Group::new(
                     "Macros",
-                    vec![big(RibbonButton::new(Icon::Macro, "Macros", Action::Macros))],
+                    vec![big(RibbonButton::new(
+                        Icon::Macro,
+                        "Macros",
+                        Action::Macros,
+                    ))],
                 ),
             ],
             Tab::Developer => vec![
@@ -1241,14 +1512,20 @@ impl App {
                     "Show/Hide",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::ShapeSheet, "ShapeSheet", Action::ShowShapeSheet)
-                                .selected(self.show_shapesheet)
-                                .tip("Inspect the selected shape's cells"),
+                            RibbonButton::new(
+                                Icon::ShapeSheet,
+                                "ShapeSheet",
+                                Action::ShowShapeSheet,
+                            )
+                            .selected(self.show_shapesheet)
+                            .tip("Inspect the selected shape's cells"),
                             RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
                                 .tip("Toggle display units (model stays inches)"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros).enabled(false).tip("Drawing explorer — planned"),
+                            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros)
+                                .enabled(false)
+                                .tip("Drawing explorer — planned"),
                         ],
                     ])],
                 ),
@@ -1256,12 +1533,16 @@ impl App {
                     "Shape Design",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros).enabled(false).tip("Boolean shape operations — planned"),
-                            RibbonButton::new(Icon::Group, "Behavior", Action::Macros).enabled(false).tip("Shape behavior — planned"),
+                            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros)
+                                .enabled(false)
+                                .tip("Boolean shape operations — planned"),
+                            RibbonButton::new(Icon::Group, "Behavior", Action::Macros)
+                                .enabled(false)
+                                .tip("Shape behavior — planned"),
                         ],
-                        vec![
-                            RibbonButton::new(Icon::Check, "Protection", Action::Macros).enabled(false).tip("Shape protection — planned"),
-                        ],
+                        vec![RibbonButton::new(Icon::Check, "Protection", Action::Macros)
+                            .enabled(false)
+                            .tip("Shape protection — planned")],
                     ])],
                 ),
                 crate::ribbon::Group::new(
@@ -1270,20 +1551,21 @@ impl App {
                         big(RibbonButton::new(Icon::Macro, "Macros", Action::Macros)
                             .enabled(false)
                             .tip("VBA macros arrive with M7 (.vsdm)")),
-                        stack(vec![RibbonButton::new(Icon::Link, "Add-ins", Action::Macros)
-                            .enabled(false)
-                            .tip("Real Visio add-in hosting arrives with M8")]),
+                        stack(vec![RibbonButton::new(
+                            Icon::Link,
+                            "Add-ins",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Real Visio add-in hosting arrives with M8")]),
                     ],
                 ),
             ],
         };
         let mut launcher: Option<&'static str> = None;
-        crate::ribbon::content_row(
-            ui,
-            &groups,
-            &mut |a| dispatch(a, &mut act),
-            &mut |label| launcher = Some(label),
-        );
+        crate::ribbon::content_row(ui, &groups, &mut |a| dispatch(a, &mut act), &mut |label| {
+            launcher = Some(label)
+        });
         if let Some(label) = launcher {
             self.status = format!("{label} dialog — planned for a later milestone");
         }
@@ -1299,7 +1581,13 @@ impl App {
             let tabs: Vec<(String, i64)> = self
                 .ed
                 .as_ref()
-                .map(|ed| ed.doc.pages.iter().map(|p| (p.name.clone(), p.id)).collect())
+                .map(|ed| {
+                    ed.doc
+                        .pages
+                        .iter()
+                        .map(|p| (p.name.clone(), p.id))
+                        .collect()
+                })
                 .unwrap_or_default();
             if !tabs.is_empty() {
                 for (i, (name, _id)) in tabs.iter().enumerate() {
@@ -1311,9 +1599,15 @@ impl App {
                     });
                     let b = egui::Button::new(txt)
                         .small()
-                        .fill(if active { theme::TAB_ACTIVE } else { theme::TABS_BG })
+                        .fill(if active {
+                            theme::TAB_ACTIVE
+                        } else {
+                            theme::TABS_BG
+                        })
                         .frame(true);
-                    let resp = ui.add(b).on_hover_text(format!("page {} (id {})", i + 1, _id));
+                    let resp = ui
+                        .add(b)
+                        .on_hover_text(format!("page {} (id {})", i + 1, _id));
                     if resp.clicked() {
                         self.page_idx = i;
                         self.set_selection(None);
@@ -1336,7 +1630,16 @@ impl App {
                     "Page {} of {}    {}",
                     self.page_idx + 1,
                     ed.doc.pages.len(),
-                    self.view.unit.fmt(geom.w_in) + " × " + &self.view.unit.fmt(geom.h_in).replace(" mm", "").replace(" in", "") + " " + self.view.unit.suffix(),
+                    self.view.unit.fmt(geom.w_in)
+                        + " × "
+                        + &self
+                            .view
+                            .unit
+                            .fmt(geom.h_in)
+                            .replace(" mm", "")
+                            .replace(" in", "")
+                        + " "
+                        + self.view.unit.suffix(),
                 );
                 if let Some((_, sid)) = self.sel {
                     if let Some(page) = ed.doc.pages.get(self.page_idx) {
@@ -1362,7 +1665,11 @@ impl App {
             } else {
                 left = "no document".into();
             }
-            ui.label(egui::RichText::new(left).color(theme::STATUS_TEXT).size(11.0));
+            ui.label(
+                egui::RichText::new(left)
+                    .color(theme::STATUS_TEXT)
+                    .size(11.0),
+            );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Visio status bar right end: − [zoom slider] + N%
                 if self.ed.is_some() {
@@ -1410,7 +1717,13 @@ impl App {
                 return;
             };
             let Some(ed) = self.ed() else { return };
-            let Ok(sheet) = scope_sheet(&ed.doc, &Scope::Shape { page: page_id, shape: shape_id }) else {
+            let Ok(sheet) = scope_sheet(
+                &ed.doc,
+                &Scope::Shape {
+                    page: page_id,
+                    shape: shape_id,
+                },
+            ) else {
                 ui.label("shape not found");
                 return;
             };
@@ -1607,7 +1920,9 @@ impl App {
             }
         };
         let mut mouse = self.mouse_page;
-        let App { view, ed, page_idx, .. } = self;
+        let App {
+            view, ed, page_idx, ..
+        } = self;
         let ed = ed.as_ref();
         let page = ed.map(|e| &e.doc.pages[(*page_idx).min(e.doc.pages.len().saturating_sub(1))]);
         let hit = |pos: (f64, f64)| -> bool {
@@ -1637,7 +1952,12 @@ impl App {
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
-        if let Some(pos) = out.click_page_pos {
+        if let Some(pos) = out.dbl_click_page_pos {
+            // The second click of the pair completes a double-click
+            // instead of a plain click: the first click already ran its
+            // select (and possible drag-start) semantics on its frame.
+            self.on_canvas_dbl_click(pos);
+        } else if let Some(pos) = out.click_page_pos {
             self.on_canvas_click(pos, out.shift_click);
         }
         if let Some((x0, y0, x1, y1)) = out.marquee_done {
@@ -1675,28 +1995,28 @@ impl App {
     /// menu with these.
     fn master_actions(&self, shape_id: i64) -> Vec<(String, bool)> {
         fn collect(self_: &App, shape_id: i64) -> Option<Vec<(String, bool)>> {
-        fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
-            for sec in sh.sheet.sections_named("Actions") {
-                for row in &sec.rows {
-                    let Some(menu) = row
-                        .cell("Menu")
-                        .and_then(|c| c.v.clone())
-                        .map(|t| t.trim().to_owned())
-                        .filter(|t| !t.is_empty())
-                    else {
-                        continue;
-                    };
-                    if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
-                        continue;
+            fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
+                for sec in sh.sheet.sections_named("Actions") {
+                    for row in &sec.rows {
+                        let Some(menu) = row
+                            .cell("Menu")
+                            .and_then(|c| c.v.clone())
+                            .map(|t| t.trim().to_owned())
+                            .filter(|t| !t.is_empty())
+                        else {
+                            continue;
+                        };
+                        if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
+                            continue;
+                        }
+                        let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
+                        out.push((menu, child));
                     }
-                    let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
-                    out.push((menu, child));
+                }
+                for sub in &sh.sub_shapes {
+                    walk(sub, out);
                 }
             }
-            for sub in &sh.sub_shapes {
-                walk(sub, out);
-            }
-        }
             let ed = self_.ed.as_ref()?;
             let page = ed.doc.pages.get(self_.page_idx)?;
             let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
@@ -1716,9 +2036,15 @@ impl App {
         let Some(ed) = self.ed.as_ref() else { return };
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
-            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
-            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
-            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+                continue;
+            };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                continue;
+            };
             let sheet = ed.doc.effective_sheet(sh, &chain);
             let cur = sheet
                 .sections_named("Character")
@@ -1729,7 +2055,10 @@ impl App {
                 .unwrap_or(0.13888);
             let next = ((cur * 72.0 + delta_pt).max(4.0).min(200.0)) / 72.0;
             cmds.push(Box::new(SetRowCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 "Character",
                 0,
                 dc_core::commands::RowSel::Ix(0),
@@ -1748,9 +2077,15 @@ impl App {
         let Some(ed) = self.ed.as_ref() else { return };
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
-            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
-            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
-            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+                continue;
+            };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                continue;
+            };
             let cur = ed
                 .doc
                 .resolve_cell(sh, &chain, "Angle")
@@ -1758,7 +2093,10 @@ impl App {
                 .unwrap_or(0.0);
             let next = cur + deg.to_radians();
             cmds.push(Box::new(SetCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 "Angle",
                 vsdx::Cell::value(format!("{next:.8}")),
             )));
@@ -1778,7 +2116,10 @@ impl App {
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
             cmds.push(Box::new(SetCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 cell_name,
                 vsdx::Cell::value(color.to_owned()),
             )));
@@ -1790,7 +2131,9 @@ impl App {
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
     fn shape_context_menu(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, anchor, _page_pos)) = self.ctx_menu else { return };
+        let Some((shape_id, anchor, _page_pos)) = self.ctx_menu else {
+            return;
+        };
         let has_clip = self.clipboard.is_some();
         // Master-defined actions (the ShapeSheet Actions section) head the
         // menu in Visio — e.g. the Capability master's "Shape Layout"
@@ -1839,7 +2182,13 @@ impl App {
             if !actions.is_empty() {
                 ui.separator();
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::ShapeSheet), "Show ShapeSheet", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::ShapeSheet),
+                "Show ShapeSheet",
+                "",
+                true,
+            ) {
                 act = Some(Act::ShapeSheet);
             }
             ui.separator();
@@ -1849,7 +2198,13 @@ impl App {
             if ctx_item(ui, Some(crate::ribbon::Icon::Copy), "Copy", "Ctrl+C", true) {
                 act = Some(Act::Copy);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Paste), "Paste", "Ctrl+V", has_clip) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Paste),
+                "Paste",
+                "Ctrl+V",
+                has_clip,
+            ) {
                 act = Some(Act::Paste);
             }
             if ctx_item(ui, None, "Duplicate", "Ctrl+D", true) {
@@ -1859,17 +2214,41 @@ impl App {
                 act = Some(Act::Delete);
             }
             ui.separator();
-            if ctx_item(ui, Some(crate::ribbon::Icon::BringFront), "Bring to Front", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::BringFront),
+                "Bring to Front",
+                "",
+                true,
+            ) {
                 act = Some(Act::Front);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::SendBack), "Send to Back", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::SendBack),
+                "Send to Back",
+                "",
+                true,
+            ) {
                 act = Some(Act::Back);
             }
             ui.separator();
-            if ctx_item(ui, Some(crate::ribbon::Icon::Rotate), "Rotate Right 90°", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Rotate),
+                "Rotate Right 90°",
+                "",
+                true,
+            ) {
                 act = Some(Act::Rot(-std::f64::consts::FRAC_PI_2));
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Rotate), "Rotate Left 90°", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Rotate),
+                "Rotate Left 90°",
+                "",
+                true,
+            ) {
                 act = Some(Act::Rot(std::f64::consts::FRAC_PI_2));
             }
             if ctx_item(ui, None, "Flip Vertical", "", true) {
@@ -1894,7 +2273,12 @@ impl App {
         // re-anchors through central()'s handler.
         let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
         if let Some(ir) = &popup {
-            if outside_primary && !ir.response.rect.contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
                 self.ctx_menu = None;
             }
         }
@@ -1928,7 +2312,10 @@ impl App {
             Act::Rot(delta) => {
                 let cur = self.selected_cell(shape_id, "Angle").unwrap_or(0.0);
                 self.apply(SetCell::new(
-                    Scope::Shape { page: page_id, shape: shape_id },
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
                     "Angle",
                     vsdx::Cell::value(format!("{:.10}", cur + delta)),
                 ));
@@ -1937,7 +2324,10 @@ impl App {
                 let name = if a == Act::FlipV { "FlipY" } else { "FlipX" };
                 let cur = self.selected_cell(shape_id, name).unwrap_or(0.0);
                 self.apply(SetCell::new(
-                    Scope::Shape { page: page_id, shape: shape_id },
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
                     name,
                     vsdx::Cell::value(if cur != 0.0 { "0" } else { "1" }),
                 ));
@@ -1952,9 +2342,13 @@ impl App {
 
     /// Deep-clone the selected shape into the in-app clipboard.
     fn copy_selection(&mut self) {
-        let Some((page_id, shape_id)) = self.sel else { return };
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
         let Some(ed) = self.ed.as_ref() else { return };
-        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) {
             self.clipboard = Some(s.clone());
         }
@@ -1963,7 +2357,9 @@ impl App {
     /// Paste the clipboard shape as a fresh instance (new id, nudged pin),
     /// top of the z-order, and select it.
     fn paste_clipboard(&mut self, page_id: i64) {
-        let Some(clip) = self.clipboard.clone() else { return };
+        let Some(clip) = self.clipboard.clone() else {
+            return;
+        };
         let Some(ed) = self.ed.as_ref() else { return };
         let mut pasted = clip;
         pasted.id = dc_core::commands::next_shape_id(&ed.doc, page_id);
@@ -1974,10 +2370,16 @@ impl App {
                 .and_then(|c| c.numeric())
                 .unwrap_or(1.0)
                 + dv;
-            pasted.sheet.set_cell(name, vsdx::Cell::value(format!("{v}")));
+            pasted
+                .sheet
+                .set_cell(name, vsdx::Cell::value(format!("{v}")));
         }
         let new_id = pasted.id;
-        self.apply(AddShape { page: page_id, parent: None, shape: pasted });
+        self.apply(AddShape {
+            page: page_id,
+            parent: None,
+            shape: pasted,
+        });
         self.set_selection(Some((page_id, new_id)));
     }
 
@@ -1988,7 +2390,9 @@ impl App {
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let s = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
         let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
-        ed.doc.resolve_cell(s, &chain, name).and_then(|c| c.numeric())
+        ed.doc
+            .resolve_cell(s, &chain, name)
+            .and_then(|c| c.numeric())
     }
 
     /// Current text of a shape (draft seed for the Edit Text dialog).
@@ -2037,11 +2441,15 @@ impl App {
     }
     #[doc(hidden)]
     pub fn debug_sel_width(&self) -> f64 {
-        self.sel_page_rect().map(|r| r.width() as f64).unwrap_or(0.0)
+        self.sel_page_rect()
+            .map(|r| r.width() as f64)
+            .unwrap_or(0.0)
     }
     #[doc(hidden)]
     pub fn debug_sel_height(&self) -> f64 {
-        self.sel_page_rect().map(|r| r.height() as f64).unwrap_or(0.0)
+        self.sel_page_rect()
+            .map(|r| r.height() as f64)
+            .unwrap_or(0.0)
     }
     #[doc(hidden)]
     pub fn debug_sel_tl_corner(&self) -> Option<egui::Pos2> {
@@ -2076,10 +2484,17 @@ impl App {
     pub fn debug_zoom(&self) -> f32 {
         self.view.zoom
     }
+    /// A shape's current text (double-click edit tests).
+    #[doc(hidden)]
+    pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
+        self.selected_text(shape_id)
+    }
 
     /// The inline text editor opened by Edit Text… (Visio F2).
     fn text_edit_window(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, mut draft)) = self.text_edit.take() else { return };
+        let Some((shape_id, mut draft)) = self.text_edit.take() else {
+            return;
+        };
         let mut apply = false;
         let mut cancel = false;
         let mut open = true;
@@ -2090,6 +2505,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut draft)
+                        .hint_text("Shape text")
                         .desired_rows(5)
                         .desired_width(f32::INFINITY),
                 );
@@ -2106,7 +2522,13 @@ impl App {
         let _ = win;
         if apply {
             if let Some(page_id) = self.page_id() {
-                self.apply(SetText::new(Scope::Shape { page: page_id, shape: shape_id }, draft));
+                self.apply(SetText::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
+                    draft,
+                ));
             }
         } else if cancel || !open {
             // discarded
@@ -2117,7 +2539,9 @@ impl App {
 
     /// The Visio theme palette shown by the ribbon Fill/Line buttons.
     fn color_palette_window(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.color_pick else { return };
+        let Some(target) = self.color_pick else {
+            return;
+        };
         let mut open = true;
         egui::Window::new(match target {
             ColorTarget::Fill => "Fill Color",
@@ -2127,27 +2551,35 @@ impl App {
         .open(&mut open)
         .show(ctx, |ui| {
             let theme_colors = [
-                "#000000", "#FFFFFF", "#EEEEEE", "#969696",
-                "#4472C4", "#5B9BD5", "#70AD47", "#ED7D31",
-                "#FFC000", "#FF0000", "#7030A0", "#00B0F0",
-                "#FFF2CC", "#DEEAF6", "#E2EFDA", "#FCE4D6",
+                "#000000", "#FFFFFF", "#EEEEEE", "#969696", "#4472C4", "#5B9BD5", "#70AD47",
+                "#ED7D31", "#FFC000", "#FF0000", "#7030A0", "#00B0F0", "#FFF2CC", "#DEEAF6",
+                "#E2EFDA", "#FCE4D6",
             ];
-            egui::Grid::new("theme-palette").num_columns(8).spacing([6.0, 6.0]).show(ui, |ui| {
-                for (i, c) in theme_colors.iter().enumerate() {
-                    // from_hex requires the leading '#'.
-                    let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
-                    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
-                    ui.painter().rect_filled(r, 2.0, color);
-                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Middle);
-                    if resp.clicked() {
-                        self.apply_color(target, c);
-                        self.color_pick = None;
+            egui::Grid::new("theme-palette")
+                .num_columns(8)
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    for (i, c) in theme_colors.iter().enumerate() {
+                        // from_hex requires the leading '#'.
+                        let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
+                        let (r, resp) =
+                            ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                        ui.painter().rect_filled(r, 2.0, color);
+                        ui.painter().rect_stroke(
+                            r,
+                            2.0,
+                            Stroke::new(1.0, Color32::from_gray(120)),
+                            egui::StrokeKind::Middle,
+                        );
+                        if resp.clicked() {
+                            self.apply_color(target, c);
+                            self.color_pick = None;
+                        }
+                        if i % 8 == 7 {
+                            ui.end_row();
+                        }
                     }
-                    if i % 8 == 7 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
         });
         if !open {
             self.color_pick = None;
@@ -2160,7 +2592,9 @@ impl App {
     /// place an instance there. Click-to-arm then click-to-place still
     /// works alongside this.
     fn stencil_carry(&mut self, ctx: &Context) {
-        let Some(master) = self.stencil.carry else { return };
+        let Some(master) = self.stencil.carry else {
+            return;
+        };
         let (down, released, pos) = ctx.input(|i| {
             (
                 i.pointer.primary_down(),
@@ -2183,7 +2617,8 @@ impl App {
                 let (w, h) = master_size(&ed.doc, master);
                 let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
                 let r = Rect::from_center_size(p, size);
-                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
+                let layer =
+                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
                 let painter = ctx.layer_painter(layer);
                 let tex = stencil.texture(ctx, ed, master);
                 painter.image(
@@ -2239,17 +2674,37 @@ impl App {
         self.title_band(ui);
         self.tab_strip(ui);
         egui::Panel::top("ribbon_content")
-            .frame(egui::Frame::new().fill(theme::RIBBON_BG).inner_margin(egui::Margin::symmetric(4, 3)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::RIBBON_BG)
+                    .inner_margin(egui::Margin::symmetric(4, 3)),
+            )
             .show(ui, |ui| self.ribbon_content(ui));
         egui::Panel::bottom("status")
-            .frame(egui::Frame::new().fill(theme::STATUS_BG).inner_margin(egui::Margin::symmetric(10, 3)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::STATUS_BG)
+                    .inner_margin(egui::Margin::symmetric(10, 3)),
+            )
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::bottom("page_tabs")
-            .frame(egui::Frame::new().fill(theme::TABS_BG).inner_margin(egui::Margin::same(2)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::TABS_BG)
+                    .inner_margin(egui::Margin::same(2)),
+            )
             .show(ui, |ui| self.page_tabs(ui));
-        if self.ed().map(|ed| !ed.doc.masters.is_empty()).unwrap_or(false) {
+        if self
+            .ed()
+            .map(|ed| !ed.doc.masters.is_empty())
+            .unwrap_or(false)
+        {
             egui::Panel::left("stencil")
-                .frame(egui::Frame::new().fill(theme::STENCIL_BG).inner_margin(egui::Margin::same(6)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::STENCIL_BG)
+                        .inner_margin(egui::Margin::same(6)),
+                )
                 .default_size(160.0)
                 .resizable(true)
                 .show(ui, |ui| {
@@ -2264,9 +2719,11 @@ impl App {
                             }
                         }
                         if let Some(id) = armed {
-                            self.status = format!("master {} armed — click the canvas to place", id);
+                            self.status =
+                                format!("master {} armed — click the canvas to place", id);
                         }
-                        if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked() {
+                        if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked()
+                        {
                             self.stencil.armed = None;
                         }
                     });
@@ -2337,14 +2794,20 @@ impl App {
         let mut close_backstage = false;
         let mut action: Option<BackAction> = None;
         egui::Panel::left("backstage_rail")
-            .frame(egui::Frame::new().fill(theme::ACCENT).inner_margin(egui::Margin::same(10)))
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::ACCENT)
+                    .inner_margin(egui::Margin::same(10)),
+            )
             .default_size(190.0)
             .resizable(false)
             .show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 ui.vertical(|ui| {
                     let back = egui::Button::new(
-                        egui::RichText::new("<  Back").color(Color32::WHITE).strong(),
+                        egui::RichText::new("<  Back")
+                            .color(Color32::WHITE)
+                            .strong(),
                     )
                     .frame(false);
                     if ui.add(back).clicked() {
@@ -2358,9 +2821,11 @@ impl App {
                                     act: Option<BackAction>|
                      -> egui::Response {
                         let selected = page == Some(self.backstage_page) && act.is_none();
-                        let txt = egui::RichText::new(label)
-                            .size(14.0)
-                            .color(if enabled { Color32::WHITE } else { Color32::from_gray(160) });
+                        let txt = egui::RichText::new(label).size(14.0).color(if enabled {
+                            Color32::WHITE
+                        } else {
+                            Color32::from_gray(160)
+                        });
                         let mut b = egui::Button::new(txt).frame(false);
                         if selected {
                             b = b.fill(Color32::from_rgb(0x2c, 0x91, 0x5b));
@@ -2378,14 +2843,24 @@ impl App {
                     rail(ui, "New", true, Some(BackPage::New), None);
                     rail(ui, "Open", true, Some(BackPage::Open), None);
                     rail(ui, "Save", self.ed.is_some(), None, Some(BackAction::Save));
-                    rail(ui, "Save As", self.ed.is_some(), None, Some(BackAction::SaveAs));
-                    rail(ui, "Print", false, None, None)
-                        .on_hover_text("Printing arrives with M6");
-                    rail(ui, "Share", false, None, None)
-                        .on_hover_text("Sharing arrives with M6");
+                    rail(
+                        ui,
+                        "Save As",
+                        self.ed.is_some(),
+                        None,
+                        Some(BackAction::SaveAs),
+                    );
+                    rail(ui, "Print", false, None, None).on_hover_text("Printing arrives with M6");
+                    rail(ui, "Share", false, None, None).on_hover_text("Sharing arrives with M6");
                     rail(ui, "Export", false, None, None)
                         .on_hover_text("Export filters arrive with M6");
-                    rail(ui, "Close", self.ed.is_some(), None, Some(BackAction::CloseDoc));
+                    rail(
+                        ui,
+                        "Close",
+                        self.ed.is_some(),
+                        None,
+                        Some(BackAction::CloseDoc),
+                    );
                 });
             });
         // Page content.
@@ -2418,15 +2893,26 @@ impl App {
                 ui.horizontal(|ui| {
                     let (r, resp) = ui.allocate_exact_size(Vec2::new(120.0, 120.0), Sense::click());
                     let hot = resp.hovered();
-                    ui.painter()
-                        .rect_filled(r, 3.0, if hot { theme::RIBBON_BG } else { Color32::WHITE });
+                    ui.painter().rect_filled(
+                        r,
+                        3.0,
+                        if hot {
+                            theme::RIBBON_BG
+                        } else {
+                            Color32::WHITE
+                        },
+                    );
                     ui.painter().rect_stroke(
                         r,
                         3.0,
                         Stroke::new(1.0, theme::RIBBON_GROUP),
                         egui::StrokeKind::Middle,
                     );
-                    Icon::New.paint(ui, Rect::from_center_size(r.center(), Vec2::splat(56.0)), true);
+                    Icon::New.paint(
+                        ui,
+                        Rect::from_center_size(r.center(), Vec2::splat(56.0)),
+                        true,
+                    );
                     let gal = ui.painter().layout_no_wrap(
                         "Blank drawing".to_string(),
                         egui::FontId::proportional(12.0),
@@ -2521,10 +3007,7 @@ fn ctx_item(
         job.append(
             &format!("   {hint}"),
             0.0,
-            egui::TextFormat::simple(
-                egui::FontId::proportional(11.0),
-                Color32::from_gray(140),
-            ),
+            egui::TextFormat::simple(egui::FontId::proportional(11.0), Color32::from_gray(140)),
         );
     }
     let resp = ui.add_enabled(
@@ -2547,26 +3030,28 @@ fn write_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<(
     for p in &img.pixels {
         rgba.extend_from_slice(p.to_srgba_unmultiplied().as_slice());
     }
-    let pm = resvg::tiny_skia::Pixmap::from_vec(rgba, resvg::tiny_skia::IntSize::from_wh(w as u32, h as u32).unwrap())
-        .ok_or_else(|| anyhow::anyhow!("pixmap from frame"))?;
+    let pm = resvg::tiny_skia::Pixmap::from_vec(
+        rgba,
+        resvg::tiny_skia::IntSize::from_wh(w as u32, h as u32).unwrap(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("pixmap from frame"))?;
     std::fs::write(path, pm.encode_png()?)?;
     Ok(())
 }
 
-fn qat_button(
-    ui: &mut Ui,
-    icon: Icon,
-    tip: &str,
-    action: impl FnOnce() -> Action,
-    app: &mut App,
-) {
+fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::click());
     let resp = resp.on_hover_text(tip);
     let hover = resp.hovered();
     if hover {
-        ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(46));
+        ui.painter()
+            .rect_filled(r, 3.0, Color32::from_white_alpha(46));
     }
-    icon.paint(ui, Rect::from_center_size(r.center(), Vec2::splat(18.0)), true);
+    icon.paint(
+        ui,
+        Rect::from_center_size(r.center(), Vec2::splat(18.0)),
+        true,
+    );
     if resp.clicked() {
         let a = action();
         app.dispatch(a);
@@ -2590,10 +3075,12 @@ fn t_title(t: Tab) -> &'static str {
 /// A master's root-shape size in inches (for the drag ghost).
 fn master_size(doc: &Document, id: i64) -> (f64, f64) {
     doc.master(id)
-        .and_then(|m| m.shapes.first().map(|s| {
-            let g = |n: &str| s.sheet.cell(n).and_then(|c| c.numeric()).unwrap_or(1.0);
-            (g("Width"), g("Height"))
-        }))
+        .and_then(|m| {
+            m.shapes.first().map(|s| {
+                let g = |n: &str| s.sheet.cell(n).and_then(|c| c.numeric()).unwrap_or(1.0);
+                (g("Width"), g("Height"))
+            })
+        })
         .unwrap_or((1.0, 1.0))
 }
 
@@ -2623,7 +3110,11 @@ mod tests {
         app.dialog = Some(PendingDialog::Open(rx));
         app.poll_dialog(&ctx);
         assert!(app.dialog.is_none(), "answered dialog is consumed");
-        assert!(app.status.starts_with("open failed"), "status = {}", app.status);
+        assert!(
+            app.status.starts_with("open failed"),
+            "status = {}",
+            app.status
+        );
     }
 
     #[test]
@@ -2707,6 +3198,183 @@ mod tests {
             "successful save-as records the path"
         );
         assert!(!app.dirty, "save clears the dirty flag");
+    }
+
+    // EventDblClick classification (GitHub #20): OPENTEXTWIN and
+    // DEFAULTEVENT open the text editor, no formula / No Formula keeps
+    // Visio's default (edit text), everything else defers.
+
+    #[test]
+    fn dbl_click_classifier_opens_text_for_default_formulas() {
+        for f in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("No Formula"),
+            Some("  no formula "),
+            Some("OPENTEXTWIN()"),
+            Some("opentextwin()"),
+            Some("DEFAULTEVENT()"),
+        ] {
+            assert_eq!(
+                classify_dbl_click(f),
+                DblClick::OpenText,
+                "formula {f:?} must open the text editor"
+            );
+        }
+    }
+
+    #[test]
+    fn dbl_click_classifier_defers_other_formulas() {
+        for f in [
+            Some("RUNADDON(\"MyMacro\")"),
+            Some("RUNMACRO(\"ThisDocument.m\")"),
+            Some("GOTOPAGE(\"Page-2\")"),
+            Some("DONOTHING()"),
+            Some("OPENSHEETWINDOW()"),
+        ] {
+            match classify_dbl_click(f) {
+                DblClick::Deferred(msg) => assert!(
+                    msg.contains(f.unwrap()),
+                    "deferral message names the formula: {msg}"
+                ),
+                other => panic!("formula {f:?} must defer, got {other:?}"),
+            }
+        }
+    }
+
+    /// A shape with `EventDblClick = RUNADDON(…)`: double-click reports
+    /// the deferral and opens no editor; with no formula the editor opens.
+    #[test]
+    fn dbl_click_honors_the_event_cell() {
+        fn app_with_event_formula(f: Option<&str>) -> (App, i64) {
+            let mut app = App::with_blank();
+            let page_id = app.page_id().unwrap();
+            let mut sh = vsdx::model::Shape {
+                id: 42,
+                ..Default::default()
+            };
+            for (n, v) in [
+                ("PinX", "4.0"),
+                ("PinY", "5.5"),
+                ("Width", "2.0"),
+                ("Height", "1.0"),
+            ] {
+                sh.sheet.set_cell(n, vsdx::Cell::value(v));
+            }
+            if let Some(f) = f {
+                sh.sheet.set_cell(
+                    "EventDblClick",
+                    vsdx::Cell {
+                        f: Some(f.into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            app.apply(dc_core::commands::AddShape {
+                page: page_id,
+                parent: None,
+                shape: sh,
+            });
+            (app, 42)
+        }
+
+        // No EventDblClick cell: Visio's default — open the editor.
+        let (mut app, sid) = app_with_event_formula(None);
+        app.on_canvas_dbl_click((4.0, 5.5));
+        assert_eq!(
+            app.text_edit,
+            Some((sid, String::new())),
+            "default opens the editor"
+        );
+
+        // RUNADDON: deferral status, no editor.
+        let (mut app, _) = app_with_event_formula(Some("RUNADDON(\"x\")"));
+        app.on_canvas_dbl_click((4.0, 5.5));
+        assert!(app.text_edit.is_none(), "RUNADDON must not open the editor");
+        assert!(
+            app.status.contains("EventDblClick") && app.status.contains("RUNADDON"),
+            "status explains the deferral: {}",
+            app.status
+        );
+
+        // Double-click on empty page: nothing happens.
+        let (mut app, _) = app_with_event_formula(None);
+        app.on_canvas_dbl_click((0.1, 0.1));
+        assert!(
+            app.text_edit.is_none(),
+            "empty page double-click is a no-op"
+        );
+    }
+
+    /// A stencil placement consumes its click pair: the double-click
+    /// completing it must not open an editor over the placed shape,
+    /// while a later, separate double-click works normally.
+    #[test]
+    fn dbl_click_after_stencil_placement_defers_to_the_placement() {
+        let mut app = App::with_blank();
+        let master = app
+            .ed
+            .as_ref()
+            .unwrap()
+            .doc
+            .masters
+            .first()
+            .map(|m| m.id)
+            .unwrap();
+        app.stencil.armed = Some(master);
+        app.on_canvas_click((4.0, 5.0), false);
+        assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
+        assert!(app.placed_last_click);
+
+        app.on_canvas_dbl_click((4.0, 5.0));
+        assert!(
+            app.text_edit.is_none(),
+            "the placement's click pair must not open an editor"
+        );
+        assert_eq!(app.debug_shape_count(), 1, "exactly one placement");
+
+        app.on_canvas_dbl_click((4.0, 5.0));
+        assert!(
+            app.text_edit.is_some(),
+            "a later double-click on the placed shape opens the editor"
+        );
+    }
+}
+
+/// What double-clicking a shape should do, from its `EventDblClick`
+/// formula (`F` attribute, resolved instance → master).
+#[derive(Debug, PartialEq)]
+enum DblClick {
+    /// Open the shape's text window: `OPENTEXTWIN()`, `DEFAULTEVENT()`
+    /// (Visio's default action for a shape with text is editing it), or
+    /// no formula / `No Formula`.
+    OpenText,
+    /// A formula whose action belongs to a later milestone (`RUNADDON`,
+    /// `RUNMACRO`, `GOTOPAGE`, `DONOTHING`, …): report, open nothing.
+    Deferred(String),
+}
+
+/// Classify an `EventDblClick` formula string.
+fn classify_dbl_click(formula: Option<&str>) -> DblClick {
+    let f = formula.unwrap_or("").trim();
+    // Compare the function head (everything before the argument list).
+    let head = f
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    if f.is_empty()
+        || f.eq_ignore_ascii_case("No Formula")
+        || head == "OPENTEXTWIN"
+        || head == "DEFAULTEVENT"
+    {
+        DblClick::OpenText
+    } else {
+        DblClick::Deferred(format!(
+            "EventDblClick '{f}' — macro and navigation actions arrive with a later milestone"
+        ))
     }
 }
 

@@ -10,8 +10,8 @@ use crate::units::{tick_step, Unit};
 /// View state for the active page.
 #[derive(Debug, Clone)]
 pub struct View {
-    pub zoom: f32,        // 1.0 = 96 px/in
-    pub pan: Vec2,        // screen offset of the page's top-left corner
+    pub zoom: f32, // 1.0 = 96 px/in
+    pub pan: Vec2, // screen offset of the page's top-left corner
     pub show_grid: bool,
     pub show_rulers: bool,
     pub unit: Unit,
@@ -84,6 +84,11 @@ pub struct CanvasOut {
     pub clicked_empty: bool,
     /// Selected shape id from a click (hit test done by the app).
     pub click_page_pos: Option<(f64, f64)>,
+    /// Double-click position in page inches (y-up); the app hit-tests
+    /// and opens the shape's text editor per `EventDblClick`. Fires on
+    /// the second click of the pair, which then does not also report a
+    /// plain click.
+    pub dbl_click_page_pos: Option<(f64, f64)>,
     /// Right-click position in page inches (y-up); the app hit-tests and
     /// opens the shape context menu.
     pub right_click_page_pos: Option<(f64, f64)>,
@@ -130,19 +135,20 @@ pub fn show(
     view: &mut View,
     page: &PageGeom,
     page_tex: Option<&egui::TextureHandle>,
-    sel_rect: Option<Rect>,          // primary selection (page-inches, y-down)
-    extra_sel_rects: &[Rect],        // other multi-selection members
-    drag_rect: Option<Rect>,         // preview while dragging (screen already applied)
+    sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
+    extra_sel_rects: &[Rect], // other multi-selection members
+    drag_rect: Option<Rect>,  // preview while dragging (screen already applied)
     drag_active: bool,
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
-    mouse_page: &mut Option<(f64, f64)>, // y-up inches, for the status bar
+    mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
 ) -> CanvasOut {
     let mut out = CanvasOut {
         page_rect: Rect::NOTHING,
         canvas_rect: Rect::NOTHING,
         clicked_empty: false,
         click_page_pos: None,
+        dbl_click_page_pos: None,
         right_click_page_pos: None,
         drag_done: None,
         drop_pos: None,
@@ -201,7 +207,10 @@ pub fn show(
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(r.width() as f32 * view.px_per_in(), r.height() as f32 * view.px_per_in()),
+            Vec2::new(
+                r.width() as f32 * view.px_per_in(),
+                r.height() as f32 * view.px_per_in(),
+            ),
         )
     });
 
@@ -238,11 +247,13 @@ pub fn show(
     let press_origin = ui.input(|i| i.pointer.press_origin());
     if resp.drag_started_by(egui::PointerButton::Primary) {
         if let Some(start) = press_origin {
-            ui.ctx().memory_mut(|m| m.data.insert_temp(mem_start, start));
+            ui.ctx()
+                .memory_mut(|m| m.data.insert_temp(mem_start, start));
         }
         if let (Some(sr), Some(start)) = (sel_rect_screen, press_origin) {
             if let Some(corner) = corner_at(start, sr) {
-                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_resize, corner));
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_resize, corner));
                 out.resize_started = Some(corner);
             }
         }
@@ -251,7 +262,11 @@ pub fn show(
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
     #[cfg(debug_assertions)]
     if resp.drag_stopped() || primary_released {
-        eprintln!("release frame: resizing={resizing:?} drag_stopped={} primary_released={}", resp.drag_stopped(), primary_released);
+        eprintln!(
+            "release frame: resizing={resizing:?} drag_stopped={} primary_released={}",
+            resp.drag_stopped(),
+            primary_released
+        );
     }
     if let (Some(corner), true) = (resizing, resp.drag_stopped() && primary_released) {
         ui.ctx().memory_mut(|m| m.data.remove::<Corner>(mem_resize));
@@ -269,15 +284,19 @@ pub fn show(
     // handle, no stencil placement).
     if resp.drag_started_by(egui::PointerButton::Primary)
         && resizing.is_none()
-        && press_origin.map(|s| !hit_shape(screen_to_page(s, view, page))).unwrap_or(false)
+        && press_origin
+            .map(|s| !hit_shape(screen_to_page(s, view, page)))
+            .unwrap_or(false)
     {
-        ui.ctx().memory_mut(|m| m.data.insert_temp(mem_marquee, true));
+        ui.ctx()
+            .memory_mut(|m| m.data.insert_temp(mem_marquee, true));
     }
-    let marqueeing = ui.ctx().memory(|m| m.data.get_temp::<bool>(mem_marquee)).unwrap_or(false);
+    let marqueeing = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<bool>(mem_marquee))
+        .unwrap_or(false);
     if marqueeing {
-        if (resp.drag_stopped() && primary_released)
-            || !ui.input(|i| i.pointer.primary_down())
-        {
+        if (resp.drag_stopped() && primary_released) || !ui.input(|i| i.pointer.primary_down()) {
             ui.ctx().memory_mut(|m| m.data.remove::<bool>(mem_marquee));
             let start = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start));
             if let (Some(start), Some(end)) = (start, ui.input(|i| i.pointer.interact_pos())) {
@@ -295,9 +314,11 @@ pub fn show(
     // Handle cursors.
     if let (Some(sr), Some(hp)) = (sel_rect_screen, resp.hover_pos()) {
         if let Some(c) = corner_at(hp, sr) {
-            ui.output_mut(|o| o.cursor_icon = match c {
-                Corner::TopLeft | Corner::BottomRight => egui::CursorIcon::ResizeNwSe,
-                Corner::TopRight | Corner::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            ui.output_mut(|o| {
+                o.cursor_icon = match c {
+                    Corner::TopLeft | Corner::BottomRight => egui::CursorIcon::ResizeNwSe,
+                    Corner::TopRight | Corner::BottomLeft => egui::CursorIcon::ResizeNeSw,
+                }
             });
         }
     }
@@ -319,7 +340,12 @@ pub fn show(
         Color32::from_black_alpha(28),
     );
     p.rect_filled(out.page_rect, 0.0, Color32::WHITE);
-    p.rect_stroke(out.page_rect, 0.0, Stroke::new(1.0, theme::PAGE_EDGE), egui::StrokeKind::Middle);
+    p.rect_stroke(
+        out.page_rect,
+        0.0,
+        Stroke::new(1.0, theme::PAGE_EDGE),
+        egui::StrokeKind::Middle,
+    );
     if let Some(tex) = page_tex {
         let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
         p.image(tex.id(), out.page_rect, uv, Color32::WHITE);
@@ -333,7 +359,10 @@ pub fn show(
             let mut x = out.page_rect.left() + step_px;
             while x < out.page_rect.right() {
                 p.line_segment(
-                    [Pos2::new(x, out.page_rect.top()), Pos2::new(x, out.page_rect.bottom())],
+                    [
+                        Pos2::new(x, out.page_rect.top()),
+                        Pos2::new(x, out.page_rect.bottom()),
+                    ],
                     Stroke::new(0.5, Color32::from_gray(216)),
                 );
                 x += step_px;
@@ -341,7 +370,10 @@ pub fn show(
             let mut y = out.page_rect.top() + step_px;
             while y < out.page_rect.bottom() {
                 p.line_segment(
-                    [Pos2::new(out.page_rect.left(), y), Pos2::new(out.page_rect.right(), y)],
+                    [
+                        Pos2::new(out.page_rect.left(), y),
+                        Pos2::new(out.page_rect.right(), y),
+                    ],
                     Stroke::new(0.5, Color32::from_gray(216)),
                 );
                 y += step_px;
@@ -357,15 +389,33 @@ pub fn show(
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(r.width() as f32 * view.px_per_in(), r.height() as f32 * view.px_per_in()),
+            Vec2::new(
+                r.width() as f32 * view.px_per_in(),
+                r.height() as f32 * view.px_per_in(),
+            ),
         )
     };
     for er in extra_sel_rects.iter().map(|r| to_screen(*r)) {
-        p.rect_stroke(er, 0.0, Stroke::new(1.0, theme::SELECTION), egui::StrokeKind::Middle);
+        p.rect_stroke(
+            er,
+            0.0,
+            Stroke::new(1.0, theme::SELECTION),
+            egui::StrokeKind::Middle,
+        );
     }
     if let Some(sr) = sel_rect.map(to_screen) {
-        p.rect_stroke(sr, 0.0, Stroke::new(1.2, theme::SELECTION), egui::StrokeKind::Middle);
-        for corner in [sr.left_top(), sr.right_top(), sr.left_bottom(), sr.right_bottom()] {
+        p.rect_stroke(
+            sr,
+            0.0,
+            Stroke::new(1.2, theme::SELECTION),
+            egui::StrokeKind::Middle,
+        );
+        for corner in [
+            sr.left_top(),
+            sr.right_top(),
+            sr.left_bottom(),
+            sr.right_bottom(),
+        ] {
             p.rect_filled(
                 Rect::from_center_size(corner, Vec2::splat(7.0)),
                 1.0,
@@ -388,7 +438,12 @@ pub fn show(
 
     // Marquee (live rubber band while selecting on empty page).
     if let Some(mr) = out.marquee_live {
-        p.rect_stroke(mr, 0.0, Stroke::new(1.0, theme::SELECTION), egui::StrokeKind::Middle);
+        p.rect_stroke(
+            mr,
+            0.0,
+            Stroke::new(1.0, theme::SELECTION),
+            egui::StrokeKind::Middle,
+        );
         p.rect_filled(mr, 0.0, Color32::from_rgba_premultiplied(30, 120, 200, 24));
     }
 
@@ -424,6 +479,11 @@ pub fn show(
             out.right_click_page_pos = Some((x_in, y_up));
         }
     }
+    if resp.double_clicked() {
+        if let Some(mp) = resp.interact_pointer_pos() {
+            out.dbl_click_page_pos = Some(screen_to_page(mp, view, page));
+        }
+    }
     if stencil_hover {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
         if resp.clicked() {
@@ -438,13 +498,7 @@ pub fn show(
     out
 }
 
-fn draw_rulers(
-    p: &egui::Painter,
-    canvas_r: Rect,
-    view: &View,
-    page: &PageGeom,
-    page_rect: Rect,
-) {
+fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, page_rect: Rect) {
     // Corner square + bands.
     p.rect_filled(
         Rect::from_min_size(canvas_r.left_top(), Vec2::splat(RULER)),
@@ -461,8 +515,18 @@ fn draw_rulers(
     );
     p.rect_filled(top, 0.0, theme::RULER_BG);
     p.rect_filled(left, 0.0, theme::RULER_BG);
-    p.rect_stroke(top, 0.0, Stroke::new(0.5, theme::RIBBON_GROUP), egui::StrokeKind::Middle);
-    p.rect_stroke(left, 0.0, Stroke::new(0.5, theme::RIBBON_GROUP), egui::StrokeKind::Middle);
+    p.rect_stroke(
+        top,
+        0.0,
+        Stroke::new(0.5, theme::RIBBON_GROUP),
+        egui::StrokeKind::Middle,
+    );
+    p.rect_stroke(
+        left,
+        0.0,
+        Stroke::new(0.5, theme::RIBBON_GROUP),
+        egui::StrokeKind::Middle,
+    );
 
     let font = egui::FontId::proportional(9.0);
     let ppi = view.px_per_in();
@@ -478,7 +542,10 @@ fn draw_rulers(
         let major = (v / step).fract().abs() < 1e-6;
         let len = if major { 7.0 } else { 4.0 };
         p.line_segment(
-            [Pos2::new(sx, top.bottom() - len), Pos2::new(sx, top.bottom())],
+            [
+                Pos2::new(sx, top.bottom() - len),
+                Pos2::new(sx, top.bottom()),
+            ],
             Stroke::new(0.8, theme::RULER_TICK),
         );
         if major && v > 0.0 {
@@ -504,7 +571,10 @@ fn draw_rulers(
         let major = (v / step).fract().abs() < 1e-6;
         let len = if major { 7.0 } else { 4.0 };
         p.line_segment(
-            [Pos2::new(left.right() - len, sy_top), Pos2::new(left.right(), sy_top)],
+            [
+                Pos2::new(left.right() - len, sy_top),
+                Pos2::new(left.right(), sy_top),
+            ],
             Stroke::new(0.8, theme::RULER_TICK),
         );
         if major && disp > 0.0 {
@@ -539,7 +609,10 @@ mod tests {
             pan: Vec2::new(100.0, 50.0),
             ..Default::default()
         };
-        let page = PageGeom { w_in: 8.5, h_in: 11.0 };
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
         // 1 in from the page's left, 1 in from its top → y-up 10 in.
         let (x, y) = screen_to_page(Pos2::new(100.0 + 96.0, 50.0 + 96.0), &view, &page);
         assert!((x - 1.0).abs() < 1e-9);
@@ -549,7 +622,10 @@ mod tests {
     #[test]
     fn apply_fit_fits_and_centers_the_page() {
         let mut view = View::default();
-        let page = PageGeom { w_in: 8.5, h_in: 11.0 };
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
         view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
         assert!(view.fit_mode, "a fit enters fit mode");
         // Height-constrained: 600 px / (11 in × 96 px/in).
@@ -574,16 +650,25 @@ mod tests {
     #[test]
     fn refit_follows_content_changes_until_manual_intervention() {
         let mut view = View::default();
-        let page = PageGeom { w_in: 8.5, h_in: 11.0 };
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
         view.apply_fit(Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
         let z0 = view.zoom;
         // A resize re-fits (taller content → larger fit zoom).
-        assert!(view.wants_refit(Vec2::new(800.0, 900.0)), "resize triggers refit");
+        assert!(
+            view.wants_refit(Vec2::new(800.0, 900.0)),
+            "resize triggers refit"
+        );
         view.apply_fit(Vec2::new(800.0, 900.0), Vec2::ZERO, &page);
         assert!(view.zoom > z0, "zoom grew: {z0} → {}", view.zoom);
         // Same size — and sub-pixel jitter — must not re-fit every frame.
         assert!(!view.wants_refit(Vec2::new(800.0, 900.0)));
-        assert!(!view.wants_refit(Vec2::new(800.2, 900.3)), "jitter is ignored");
+        assert!(
+            !view.wants_refit(Vec2::new(800.2, 900.3)),
+            "jitter is ignored"
+        );
         // Manual zoom/pan clears fit mode: resizes stop re-fitting.
         view.fit_mode = false;
         assert!(
@@ -592,9 +677,15 @@ mod tests {
         );
         // Fit Page re-arms: the pending fit re-enters fit mode.
         view.fit_pending = true;
-        assert!(!view.wants_refit(Vec2::new(300.0, 200.0)), "pending alone doesn't refit");
+        assert!(
+            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            "pending alone doesn't refit"
+        );
         view.apply_fit(Vec2::new(300.0, 200.0), Vec2::ZERO, &page);
         assert!(view.fit_mode, "apply_fit re-enters fit mode");
-        assert!(view.wants_refit(Vec2::new(800.0, 900.0)), "and follows again");
+        assert!(
+            view.wants_refit(Vec2::new(800.0, 900.0)),
+            "and follows again"
+        );
     }
 }
