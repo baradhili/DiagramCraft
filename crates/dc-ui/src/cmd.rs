@@ -351,22 +351,6 @@ fn walk(
             if is_root && !name.starts_with("Txt") {
                 continue;
             }
-            // LocPin follows the shape's own size: scale it only when
-            // the size cell itself is proportional.
-            if name.starts_with("LocPin") || name.starts_with("TxtLocPin") {
-                let size = if axis == "Width" { "Width" } else { "Height" };
-                let tsize = if name.starts_with("Txt") {
-                    format!("Txt{size}")
-                } else {
-                    size.to_string()
-                };
-                let size_scales = source
-                    .and_then(|src| scales_with(src.sheet.cell(&tsize), axis))
-                    .unwrap_or(true);
-                if !size_scales {
-                    continue;
-                }
-            }
             let Some(cell) = sh.sheet.cell(name) else {
                 continue;
             };
@@ -392,6 +376,22 @@ fn walk(
             }
             // Fallback: ratio scaling, gated by the axis mention in the
             // master's formula (a fixed formula keeps its value).
+            // LocPin follows the shape's own size: evaluation already
+            // handled indirect size formulas here, so this gate only
+            // keeps ratio scaling off a fixed-size shape's LocPin.
+            if name.starts_with("LocPin") || name.starts_with("TxtLocPin") {
+                let tsize = if name.starts_with("Txt") {
+                    format!("Txt{axis}")
+                } else {
+                    axis.to_string()
+                };
+                let size_scales = source
+                    .and_then(|src| scales_with(src.sheet.cell(&tsize), axis))
+                    .unwrap_or(true);
+                if !size_scales {
+                    continue;
+                }
+            }
             let proportional = source
                 .and_then(|src| scales_with(src.sheet.cell(name), axis))
                 .unwrap_or(true);
