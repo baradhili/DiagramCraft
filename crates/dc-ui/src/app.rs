@@ -33,6 +33,9 @@ pub struct App {
     sel_set: Vec<(i64, i64)>,
     drag: Option<DragState>,
     stencil: Stencil,
+    /// Stencil panel content rect from the last frame (resize-handle
+    /// target for the kittest re-wrap tests).
+    stencil_panel_inner: Rect,
     tex: TextureCache,
     mouse_page: Option<(f64, f64)>,
     status: String,
@@ -177,6 +180,7 @@ impl App {
             sel_set: Vec::new(),
             drag: None,
             stencil: Stencil::default(),
+            stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
             mouse_page: None,
             status: String::new(),
@@ -2575,6 +2579,35 @@ impl App {
     pub fn debug_master_cells(&self) -> Vec<(i64, Rect)> {
         self.stencil.cell_rects.clone()
     }
+    /// Column count of the last stencil layout, re-derived from the
+    /// actual cell rects (distinct column x positions) so tests check
+    /// the rendered layout, not a stored number (GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_cols(&self) -> usize {
+        let mut xs: Vec<f32> = self
+            .stencil
+            .cell_rects
+            .iter()
+            .map(|(_, r)| r.left())
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        xs.len()
+    }
+    /// Width the last stencil layout wrapped into (pane content width
+    /// minus the scrollbar allowance) — the input tests use to
+    /// re-derive the expected column count (GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_wrap_width(&self) -> f32 {
+        self.stencil.last_wrap_width
+    }
+    /// Stencil panel content rect from the last frame; its right edge
+    /// plus the 6px frame margin is the panel's resize handle (the
+    /// kittest re-wrap tests drag it, GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_panel_inner_rect(&self) -> Rect {
+        self.stencil_panel_inner
+    }
     #[doc(hidden)]
     pub fn debug_canvas_rect(&self) -> Rect {
         self.canvas_rect
@@ -2934,12 +2967,15 @@ impl App {
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
-                        ui.strong("Shapes");
-                        ui.separator();
+                        // The pane draws its own Visio header ("Shapes"
+                        // + More Shapes), search box, stencil list and
+                        // master grid (crates/dc-ui/src/stencil.rs).
+                        self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
+                        let title = stencil_title(&self.path);
                         let App { ed, stencil, .. } = self;
                         if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed) {
+                            if let Some(id) = stencil.show(ui, ed, &title) {
                                 armed = Some(id);
                             }
                         }
@@ -3541,6 +3577,15 @@ fn master_size(doc: &Document, id: i64) -> (f64, f64) {
             })
         })
         .unwrap_or((1.0, 1.0))
+}
+
+/// Title of the stencil list entry: the open file's stem (a .vssx
+/// stencil is the whole document), else the document's own master set
+/// (GitHub #53: the pane lists its stencil like Visio does).
+fn stencil_title(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Document Masters".into())
 }
 
 #[cfg(test)]

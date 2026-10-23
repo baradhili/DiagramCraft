@@ -588,6 +588,191 @@ fn ctx_menu_snapshot(h: &mut Harness<'_, App>, name: &str) {
     );
 }
 
+// ------------------------------------------------------------------
+// GitHub #53: the stencil grid re-wraps to the live pane width.
+
+/// The wrap formula, mirroring `columns_for` in stencil.rs: C columns
+/// occupy C*64 + (C-1)*6 px of wrapped width.
+fn cols_for(w: f32) -> usize {
+    (((w + 6.0) / 70.0).floor() as usize).max(1)
+}
+
+/// Drag the stencil panel's resize handle so the panel's outer width
+/// becomes `target_x`, moving through intermediate widths with a
+/// layout pass at each (the live-resize path, not a jump).
+fn drag_stencil_edge_to(h: &mut Harness<'_, App>, target_x: f32) {
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    // The handle's sense zone is the panel's outer edge (inner right +
+    // the 6px frame margin) ±3px. Press 1.5px INSIDE the edge: at the
+    // edge itself the canvas (shown after the panel, so on top) wins
+    // the pointer and the drag becomes a canvas marquee.
+    let start = egui::pos2(inner.right() + 6.0 - 1.5, inner.center().y);
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(start);
+    h.event(b(start, true));
+    for t in [0.34, 0.67, 1.0] {
+        let x = start.x + (target_x - start.x) * t;
+        h.hover_at(egui::pos2(x, start.y));
+        h.run();
+    }
+    h.event(b(egui::pos2(target_x, start.y), false));
+    h.run();
+}
+
+/// All cells lie inside the pane content rect (nothing clips) and
+/// every master has a cell.
+fn assert_grid_fits(h: &Harness<'_, App>) {
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    let cells = h.state().debug_master_cells();
+    assert_eq!(cells.len(), 7, "blank template exposes 7 starter masters");
+    for (id, r) in &cells {
+        assert!(
+            r.right() <= inner.right() + 0.5,
+            "master {id} cell {r:?} exceeds pane content {inner:?}"
+        );
+        assert!(
+            r.left() >= inner.left() - 0.5,
+            "master {id} clipped at the left edge"
+        );
+    }
+}
+
+#[test]
+fn stencil_rewraps_to_pane_width_during_resize() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // settle
+    let cols0 = h.state().debug_stencil_cols();
+    assert_eq!(cols0, 2, "default 160px pane starts as 2 columns");
+
+    // Widen to ~380px in one live drag; the layout passes at the
+    // intermediate widths must already show the wider wraps (masters
+    // re-arrange during the drag itself — no settle step).
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    let start = egui::pos2(inner.right() + 6.0 - 1.5, inner.center().y);
+    let target = 380.0f32;
+    let mid = start.x + (target - start.x) * 0.5;
+    h.hover_at(start);
+    h.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(egui::pos2(mid, start.y));
+    h.run();
+    let cols_mid = h.state().debug_stencil_cols();
+    assert!(
+        cols_mid > cols0,
+        "mid-drag (≈{mid:.0}px pane) still wraps at {cols0} columns"
+    );
+    h.event(egui::Event::PointerButton {
+        pos: egui::pos2(target, start.y),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.run();
+
+    // The rendered column count matches the computed optimum for the
+    // width the grid actually wrapped into, at every stop.
+    let mut cols_380 = 0;
+    for _ in 0..3 {
+        let expect = cols_for(h.state().debug_stencil_wrap_width());
+        cols_380 = h.state().debug_stencil_cols();
+        assert_eq!(cols_380, expect, "column count matches the wrap optimum");
+        assert_grid_fits(&h);
+        h.run();
+    }
+
+    // And back down through the issue's other stops: 260px, then 160.
+    drag_stencil_edge_to(&mut h, 260.0);
+    let cols_260 = h.state().debug_stencil_cols();
+    assert_eq!(
+        cols_260,
+        cols_for(h.state().debug_stencil_wrap_width()),
+        "260px pane matches the wrap optimum"
+    );
+    assert!(cols_260 < cols_380, "narrowing reduces the column count");
+    drag_stencil_edge_to(&mut h, 160.0);
+    assert_eq!(
+        h.state().debug_stencil_cols(),
+        cols_for(h.state().debug_stencil_wrap_width()),
+        "back at 160px the wrap optimum holds"
+    );
+    assert_grid_fits(&h);
+}
+
+/// The drag-to-place flow reads cell rects from the live layout: right
+/// after a resize, dragging a master still places a shape (GitHub #53
+/// verification: the drag ghost originates from the new cell).
+#[test]
+fn stencil_drag_works_right_after_resize() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    drag_stencil_edge_to(&mut h, 380.0);
+    h.run();
+
+    let cells = h.state().debug_master_cells();
+    assert!(
+        h.state().debug_stencil_cols() >= 4,
+        "the 380px pane re-wrapped to 4+ columns"
+    );
+    let from = cells[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    h.hover_at(from);
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(from + (to - from) * 0.25);
+    h.run();
+    for t in [0.5, 0.75, 1.0] {
+        h.hover_at(from + (to - from) * t);
+        h.run();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "drag from the re-wrapped stencil placed a shape"
+    );
+}
+
+/// The pane aligned with the Visio 2016 reference (GitHub #53 review):
+/// the stencil list entry sits above the grid, and the pane at two
+/// widths shows the re-wrapped arrangement.
+#[test]
+fn stencil_pane_snapshots_two_widths() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    ctx_menu_snapshot(&mut h, "dc_ui_stencil_default_width");
+    drag_stencil_edge_to(&mut h, 380.0);
+    h.run();
+    h.run();
+    assert!(
+        h.state().debug_stencil_cols() >= 4,
+        "wide pane shows 4+ columns"
+    );
+    ctx_menu_snapshot(&mut h, "dc_ui_stencil_wide");
+}
+
 #[test]
 fn context_menu_snapshot_light_visuals() {
     let mut h = open_menu_harness(false);
