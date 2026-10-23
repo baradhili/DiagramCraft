@@ -397,6 +397,343 @@ fn corner_drag_resizes_shape() {
     );
 }
 
+// ------------------------------------------------------------------
+// GitHub #59: reliable handles, shapesheet guards, 1D line handles.
+
+/// The id of the blank template's 1D Line master (stencil cells expose
+/// (id, rect) pairs; see blank.vsdx).
+const LINE_MASTER: i64 = 9;
+
+/// One numeric cell of a shape, parsed (avoids closure-borrow fights
+/// with the harness in the line tests).
+fn cell_of(h: &Harness<'_, App>, page: i64, shape: i64, n: &str) -> f64 {
+    h.state()
+        .debug_cell(page, shape, n)
+        .unwrap()
+        .0
+        .parse::<f64>()
+        .unwrap()
+}
+
+/// A natural mouse gesture — press, several small movements across
+/// frames, release — exactly the shape of drag that egui's
+/// click-vs-drag disambiguation used to swallow (GitHub #59).
+fn drag_naturally(h: &mut Harness<'_, App>, from: Pos2, by: egui::Vec2) {
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(b(from, true));
+    h.run(); // the press frame arms the drag
+    for t in [0.25, 0.5, 0.75, 1.0] {
+        h.hover_at(from + by * t);
+        h.run();
+    }
+    h.event(b(from + by, false));
+    h.run();
+}
+
+/// Place a master through the stencil's click-to-arm, click-to-place
+/// path and return the (page, shape) of the placed instance.
+fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
+    let cell = h
+        .state()
+        .debug_master_cells()
+        .into_iter()
+        .find(|(id, _)| *id == master)
+        .map(|(_, r)| r)
+        .unwrap_or_else(|| panic!("master {master} in the stencil"));
+    let from = cell.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(h, from, egui::PointerButton::Primary);
+    click_at(h, to, egui::PointerButton::Primary);
+    h.run();
+    h.state().debug_sel().expect("placed shape is selected")
+}
+
+/// The core #59 regression: a natural press-drag-release on a shape's
+/// body MOVES it. The old plumbing armed the move on the click
+/// (release) and dropped it the next frame, so real gestures no-opped.
+#[test]
+fn shape_drag_moves_shape_natural_gesture() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, 2); // Rectangle
+    assert_eq!(h.state().debug_shape_count(), 1);
+
+    let (pin0x, pin0y) = {
+        let c = h.state().debug_cell(page, shape, "PinX").unwrap();
+        let d = h.state().debug_cell(page, shape, "PinY").unwrap();
+        (c.0.parse::<f64>().unwrap(), d.0.parse::<f64>().unwrap())
+    };
+    // Press inside the shape (center), drag like a mouse: small moves
+    // across frames, release.
+    let center = h.state().debug_shape_screen_rect(shape).unwrap().center();
+    drag_naturally(&mut h, center, egui::vec2(60.0, 40.0));
+
+    let (pin1x, pin1y) = {
+        let c = h.state().debug_cell(page, shape, "PinX").unwrap();
+        let d = h.state().debug_cell(page, shape, "PinY").unwrap();
+        (c.0.parse::<f64>().unwrap(), d.0.parse::<f64>().unwrap())
+    };
+    let zoom = h.state().debug_zoom();
+    let ppi = 96.0 * zoom;
+    assert!(
+        (pin1x - pin0x - 60.0 / ppi as f64).abs() < 0.05,
+        "pin moved right by the drag: {pin0x:.3} → {pin1x:.3}"
+    );
+    assert!(
+        (pin1y - (pin0y - 40.0 / ppi as f64)).abs() < 0.05,
+        "pin moved down (y-up decreases) by the drag: {pin0y:.3} → {pin1y:.3}"
+    );
+
+    // One undo step returns the shape.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let back = h.state().debug_cell(page, shape, "PinX").unwrap();
+    assert!(
+        (back.0.parse::<f64>().unwrap() - pin0x).abs() < 1e-6,
+        "undo restored the move"
+    );
+}
+
+/// Every one of the four corners grabs and resizes outward, anchoring
+/// the opposite corner (#59: handles were unreliable/no-op).
+#[test]
+fn all_four_corner_drags_resize() {
+    for (i, delta) in [
+        egui::vec2(-40.0, -30.0), // TL outward (up-left)
+        egui::vec2(40.0, -30.0),  // TR outward (up-right)
+        egui::vec2(-40.0, 30.0),  // BL outward (down-left)
+        egui::vec2(40.0, 30.0),   // BR outward (down-right)
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut h = harness_with_blank();
+        h.run();
+        place_master(&mut h, 2);
+        let corners = h.state().debug_sel_corners().expect("selection");
+        let (w0, h0) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+        // Corner order is [tl, tr, bl, br]: the opposite corner is the
+        // mirror index (0↔3, 1↔2).
+        let opposite = 3 - i;
+        let opposite_before = corners[opposite];
+        drag_naturally(&mut h, corners[i], delta);
+        let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+        assert!(
+            w1 > w0 + 0.1 && h1 > h0 + 0.08,
+            "corner {i} drag grew the shape: {w0:.3}×{h0:.3} → {w1:.3}×{h1:.3}"
+        );
+        let opposite_after = h.state().debug_sel_corners().expect("selection")[opposite];
+        assert!(
+            (opposite_after.x - opposite_before.x).abs() <= 1.0
+                && (opposite_after.y - opposite_before.y).abs() <= 1.0,
+            "corner {i}: opposite corner must anchor: {opposite_before:?} → {opposite_after:?}"
+        );
+    }
+}
+
+/// A `GUARD(...)`-driven Width is never silently overwritten: the drag
+/// refuses that axis with a status note and the cell is untouched
+/// (#59). The height axis (unguarded) still resizes.
+#[test]
+fn guarded_width_refuses_that_axis() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, 2);
+    h.state_mut()
+        .set_cell_for_test(page, shape, "Width", "1.5", Some("GUARD(1.5 in)"));
+    h.run();
+
+    let br = h.state().debug_sel_br_corner().expect("selection");
+    let (h0,) = (h.state().debug_sel_height(),);
+    drag_naturally(&mut h, br, egui::vec2(50.0, 40.0));
+
+    let width = h.state().debug_cell(page, shape, "Width").unwrap();
+    assert_eq!(
+        width,
+        ("1.5".to_string(), "GUARD(1.5 in)".to_string()),
+        "guarded Width cell untouched"
+    );
+    assert!(
+        h.state().debug_sel_width() < 1.6,
+        "visible width did not grow"
+    );
+    assert!(
+        h.state().debug_sel_height() > h0 + 0.1,
+        "free axis (height) still resized"
+    );
+    let status = h.state().debug_status();
+    assert!(
+        status.contains("width not resized") && status.contains("GUARD"),
+        "status explains the refusal, got: {status}"
+    );
+}
+
+/// LockWidth in the Protection section guards the axis exactly like a
+/// formula (#59); locking BOTH axes refuses the whole resize.
+#[test]
+fn protection_locks_refuse_resize() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, 2);
+    h.state_mut()
+        .set_protection_for_test(page, shape, "LockWidth", true);
+    h.run();
+
+    let br = h.state().debug_sel_br_corner().expect("selection");
+    let (w0, h0) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    drag_naturally(&mut h, br, egui::vec2(50.0, 40.0));
+    assert!(
+        (h.state().debug_sel_width() - w0).abs() < 1e-6,
+        "LockWidth kept the width"
+    );
+    assert!(
+        h.state().debug_sel_height() > h0 + 0.1,
+        "height still resized"
+    );
+    assert!(
+        h.state().debug_status().contains("LockWidth"),
+        "status names the lock, got: {}",
+        h.state().debug_status()
+    );
+
+    // Both axes locked → the whole resize is refused, nothing changes.
+    h.state_mut()
+        .set_protection_for_test(page, shape, "LockHeight", true);
+    h.run();
+    let br = h.state().debug_sel_br_corner().expect("selection");
+    let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    drag_naturally(&mut h, br, egui::vec2(60.0, 50.0));
+    assert!(
+        (h.state().debug_sel_width() - w1).abs() < 1e-6
+            && (h.state().debug_sel_height() - h1).abs() < 1e-6,
+        "fully locked shape does not resize"
+    );
+    assert!(
+        h.state().debug_status().contains("resize refused"),
+        "status refuses, got: {}",
+        h.state().debug_status()
+    );
+}
+
+/// Dropping the 1D Line master snapshots XForm1D cells on the instance
+/// (a horizontal 1-inch line centered on the drop), and dragging one
+/// endpoint moves only that end, re-deriving Width/Angle/Pin (#59).
+#[test]
+fn line_endpoint_drag_moves_only_that_end() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, LINE_MASTER);
+
+    // Instance snapshot: horizontal 1-inch line centered on the drop.
+    let beg = h.state().debug_cell(page, shape, "BeginX").unwrap();
+    let end = h.state().debug_cell(page, shape, "EndX").unwrap();
+    let (bx0, ex0) = (beg.0.parse::<f64>().unwrap(), end.0.parse::<f64>().unwrap());
+    let by0 = cell_of(&h, page, shape, "BeginY");
+    let ey0 = cell_of(&h, page, shape, "EndY");
+    assert!(
+        (ex0 - bx0 - 1.0).abs() < 1e-6,
+        "drop snapshots a 1in line: {bx0:.3} → {ex0:.3}"
+    );
+    assert_eq!(beg.1, "", "BeginX is a literal, not a formula");
+
+    // Selection handles switch to the 1D set: endpoints + midpoint.
+    let end_handle = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("line endpoint handle");
+
+    drag_naturally(&mut h, end_handle, egui::vec2(50.0, -35.0));
+
+    let (bx1, by1, ex1, ey1) = (
+        cell_of(&h, page, shape, "BeginX"),
+        cell_of(&h, page, shape, "BeginY"),
+        cell_of(&h, page, shape, "EndX"),
+        cell_of(&h, page, shape, "EndY"),
+    );
+    // Begin anchored.
+    assert!(
+        (bx1 - bx0).abs() < 1e-6,
+        "begin x anchored: {bx0:.3} → {bx1:.3}"
+    );
+    // End moved by the drag (page inches; screen +50x is +x, screen
+    // -35y is +y in page terms).
+    let zoom = h.state().debug_zoom();
+    let ppi = 96.0 * zoom;
+    assert!(
+        (ex1 - ex0 - 50.0 / ppi as f64).abs() < 0.05,
+        "end x moved by the drag: {ex0:.3} → {ex1:.3}"
+    );
+    assert!(
+        (ey1 - ey0 - 35.0 / ppi as f64).abs() < 0.05,
+        "end y moved up by the drag: {ey0:.3} → {ey1:.3}"
+    );
+    // Derived cells follow: Width is the new length, not the stale 1.0.
+    let w = cell_of(&h, page, shape, "Width");
+    let expected = ((ex1 - bx1).hypot(ey1 - by1) * 1e6).round() / 1e6;
+    assert!(
+        (w - expected).abs() < 2e-3,
+        "Width re-derived as the endpoint distance: {w} vs {expected}"
+    );
+}
+
+/// The 1D midpoint handle translates the whole line — both endpoints
+/// move by the same delta, their separation untouched (#59).
+#[test]
+fn line_midpoint_drag_translates_both_ends() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, LINE_MASTER);
+    let (bx0, by0, ex0, ey0) = (
+        cell_of(&h, page, shape, "BeginX"),
+        cell_of(&h, page, shape, "BeginY"),
+        cell_of(&h, page, shape, "EndX"),
+        cell_of(&h, page, shape, "EndY"),
+    );
+
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("line midpoint handle");
+    drag_naturally(&mut h, mid, egui::vec2(40.0, 25.0));
+
+    let zoom = h.state().debug_zoom();
+    let ppi = 96.0 * zoom;
+    let (bx1, by1, ex1, ey1) = (
+        cell_of(&h, page, shape, "BeginX"),
+        cell_of(&h, page, shape, "BeginY"),
+        cell_of(&h, page, shape, "EndX"),
+        cell_of(&h, page, shape, "EndY"),
+    );
+    assert!(
+        (bx1 - bx0 - 40.0 / ppi as f64).abs() < 0.05,
+        "begin moved with the midpoint drag: {bx0:.3} → {bx1:.3}"
+    );
+    assert!(
+        (ex1 - ex0 - 40.0 / ppi as f64).abs() < 0.05,
+        "end moved with the midpoint drag: {ex0:.3} → {ex1:.3}"
+    );
+    // Separation preserved.
+    assert!(
+        ((ex1 - bx1) - (ex0 - bx0)).abs() < 1e-6 && ((ey1 - by1) - (ey0 - by0)).abs() < 1e-6,
+        "midpoint drag translated, did not stretch"
+    );
+
+    // One undo returns the whole translation.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "BeginX") - bx0).abs() < 1e-6
+            && (cell_of(&h, page, shape, "EndX") - ex0).abs() < 1e-6,
+        "undo restored both endpoints"
+    );
+}
+
 /// Fit-mode zoom (GitHub #18): the document opens fit-to-window and the
 /// fit follows window resizes; once the user zooms manually, resizes
 /// must not clobber the chosen view. Fit Page re-arms it.
@@ -629,7 +966,11 @@ fn drag_stencil_edge_to(h: &mut Harness<'_, App>, target_x: f32) {
 fn assert_grid_fits(h: &Harness<'_, App>) {
     let inner = h.state().debug_stencil_panel_inner_rect();
     let cells = h.state().debug_master_cells();
-    assert_eq!(cells.len(), 7, "blank template exposes 7 starter masters");
+    assert_eq!(
+        cells.len(),
+        8,
+        "blank template exposes 8 starter masters (incl. the 1D Line, #59)"
+    );
     for (id, r) in &cells {
         assert!(
             r.right() <= inner.right() + 0.5,

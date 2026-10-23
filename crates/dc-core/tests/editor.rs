@@ -858,13 +858,19 @@ fn scopes_parse_and_resolve() {
 fn new_blank_roundtrips() {
     let mut ed = Editor::new_blank();
     assert_eq!(ed.doc.pages.len(), 1);
-    // Starter masters ship with the blank drawing (Basic Shapes set).
-    assert_eq!(ed.doc.masters.len(), 7);
+    // Starter masters ship with the blank drawing (Basic Shapes set,
+    // plus the 1D Line master — GitHub #59).
+    assert_eq!(ed.doc.masters.len(), 8);
     assert!(ed
         .doc
         .masters
         .iter()
         .any(|m| m.name_u.as_deref() == Some("Rectangle")));
+    assert!(ed
+        .doc
+        .masters
+        .iter()
+        .any(|m| m.name_u.as_deref() == Some("Line")));
     let page = &ed.doc.pages[0];
     assert_eq!(page.name, "Page-1");
     let w = page

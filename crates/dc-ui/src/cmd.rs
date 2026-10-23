@@ -87,6 +87,33 @@ impl Command for AddMasterInstance {
         let mut sheet = vsdx::model::Sheet::default();
         sheet.set_cell("PinX", Cell::value(format!("{:.6}", self.pin.0)));
         sheet.set_cell("PinY", Cell::value(format!("{:.6}", self.pin.1)));
+        // A 1D master (line/connector: root shape carries Begin/End
+        // cells) gets XForm1D snapshots on the instance — a horizontal
+        // 1-inch line centered on the drop point — plus the derived
+        // XForm literals the renderer reads, exactly like Visio's
+        // instancing caches (GitHub #59).
+        let one_d = doc.master(self.master).is_some_and(|m| {
+            m.shapes
+                .iter()
+                .any(|s| s.sheet.cell("BeginX").is_some() && s.sheet.cell("EndX").is_some())
+        });
+        if one_d {
+            let (bx, ex) = (self.pin.0 - 0.5, self.pin.0 + 0.5);
+            let by = self.pin.1;
+            for (n, v) in [
+                ("BeginX", bx),
+                ("BeginY", by),
+                ("EndX", ex),
+                ("EndY", by),
+                ("Width", 1.0),
+                ("Height", 0.0),
+                ("LocPinX", 0.5),
+                ("LocPinY", 0.0),
+                ("Angle", 0.0),
+            ] {
+                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
+            }
+        }
         let shape = Shape {
             id,
             type_: Some("Shape".to_string()),

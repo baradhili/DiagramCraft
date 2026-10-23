@@ -613,6 +613,19 @@ pub fn find_shape_by_id(shapes: &[Shape], id: i64) -> Option<&Shape> {
     None
 }
 
+/// Mutable counterpart of [`find_shape_by_id`].
+pub fn find_shape_by_id_mut(shapes: &mut [Shape], id: i64) -> Option<&mut Shape> {
+    for s in shapes {
+        if s.id == id {
+            return Some(s);
+        }
+        if let Some(found) = find_shape_by_id_mut(&mut s.sub_shapes, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// Depth-first `NameU` lookup within a shape tree (used for matching inline
 /// copies to their master originals).
 pub fn find_shape_by_name_u<'a>(shapes: &'a [Shape], name: &str) -> Option<&'a Shape> {
