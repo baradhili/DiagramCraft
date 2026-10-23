@@ -1299,7 +1299,7 @@ const LABEL_H: f32 = 18.0;
 fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
     match col {
         Col::Big(b) => {
-            if b.clone().show_big(ui) {
+            if (*b).show_big(ui) {
                 on_action(b.action);
             }
         }
@@ -1308,7 +1308,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.vertical(|ui| {
                     for b in v {
-                        if b.clone().show_small(ui) {
+                        if (*b).show_small(ui) {
                             on_action(b.action);
                         }
                     }
@@ -1322,7 +1322,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                     for row in rows {
                         ui.horizontal(|ui| {
                             for b in row {
-                                if b.clone().show_small(ui) {
+                                if (*b).show_small(ui) {
                                     on_action(b.action);
                                 }
                             }

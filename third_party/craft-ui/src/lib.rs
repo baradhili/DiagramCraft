@@ -1,10 +1,18 @@
-#![deny(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::unimplemented,
-    clippy::todo,
-    clippy::unreachable
+// Strict for shipped code; tests may unwrap/expect/panic freely
+// (DiagramCraft #61: the unconditional deny made
+// `cargo clippy --workspace --all-targets` abort on 111 test-module
+// lints — path deps are auto workspace members, so the workspace
+// gate compiles this crate's cfg(test) code too).
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unimplemented,
+        clippy::todo,
+        clippy::unreachable
+    )
 )]
 
 //! Small, reusable egui components for the Craft frontends.

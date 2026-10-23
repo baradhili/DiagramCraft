@@ -233,7 +233,7 @@ fn history_undo_redo_and_labels() {
     )
     .unwrap();
     assert_eq!(h.undo_labels().len(), 2);
-    assert!(h.can_redo() == false);
+    assert!(!h.can_redo());
 
     let label = h.undo(&mut doc).unwrap().unwrap();
     assert!(label.contains("PinX"));
@@ -849,7 +849,7 @@ fn scopes_parse_and_resolve() {
     let chain = dc_core::scope::shape_chain(&ed.doc, 0, 2).unwrap();
     let cell = ed
         .doc
-        .resolve_cell(&chain[chain.len() - 1], &chain, "LineWeight")
+        .resolve_cell(chain[chain.len() - 1], &chain, "LineWeight")
         .unwrap();
     assert_eq!(cell.v.as_deref(), Some("0.015625"));
 }
@@ -950,8 +950,10 @@ fn duplicate_shape_clones_offsets_and_undoes() {
         page,
         parent: None,
         shape: {
-            let mut s = vsdx::model::Shape::default();
-            s.id = first;
+            let mut s = vsdx::model::Shape {
+                id: first,
+                ..Default::default()
+            };
             s.sheet.set_cell("PinX", vsdx::model::Cell::value("2"));
             s.sheet.set_cell("PinY", vsdx::model::Cell::value("3"));
             s
@@ -983,10 +985,12 @@ fn reorder_shape_moves_zorder_and_restores() {
     let mut ed = Editor::new_blank();
     let page = ed.doc.pages[0].id;
     let mut ids = [0i64; 3];
-    for i in 0..3 {
-        ids[i] = dc_core::commands::next_shape_id(&ed.doc, page);
-        let mut s = vsdx::model::Shape::default();
-        s.id = ids[i];
+    for id in &mut ids {
+        *id = dc_core::commands::next_shape_id(&ed.doc, page);
+        let s = vsdx::model::Shape {
+            id: *id,
+            ..Default::default()
+        };
         ed.apply(dc_core::AddShape {
             page,
             parent: None,
@@ -1026,9 +1030,11 @@ fn set_row_cell_materializes_missing_character_section_with_undo() {
     let sid = dc_core::commands::next_shape_id(&ed.doc, page);
     // A master-backed instance whose sheet carries NO local Character
     // section (the common case for placed shapes).
-    let mut s = vsdx::model::Shape::default();
-    s.id = sid;
-    s.master = Some(7); // blank template master with Character rows
+    let s = vsdx::model::Shape {
+        id: sid,
+        master: Some(7), // blank template master with Character rows
+        ..Default::default()
+    };
     ed.apply(dc_core::AddShape {
         page,
         parent: None,
@@ -1083,8 +1089,10 @@ fn macro_rolls_back_applied_children_on_failure() {
     let mut ed = Editor::new_blank();
     let page = ed.doc.pages[0].id;
     let a = dc_core::commands::next_shape_id(&ed.doc, page);
-    let mut sa = vsdx::model::Shape::default();
-    sa.id = a;
+    let sa = vsdx::model::Shape {
+        id: a,
+        ..Default::default()
+    };
     ed.apply(dc_core::AddShape {
         page,
         parent: None,
@@ -1092,8 +1100,10 @@ fn macro_rolls_back_applied_children_on_failure() {
     })
     .unwrap();
 
-    let mut sb = vsdx::model::Shape::default();
-    sb.id = a + 1;
+    let sb = vsdx::model::Shape {
+        id: a + 1,
+        ..Default::default()
+    };
     let cmds: Vec<Box<dyn dc_core::Command>> = vec![
         Box::new(dc_core::RemoveShape::new(page, a)),
         Box::new(dc_core::AddShape {

@@ -490,9 +490,7 @@ fn mirror_child_transform(
     // child-cell references fail to resolve and fall back.)
     let mut env: vsdx::formula::Env = vsdx::model::qualified_env(root_env);
     let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
-        let Some(c) = sub.sheet.cell(name) else {
-            return None;
-        };
+        let c = sub.sheet.cell(name)?;
         if let Some(f) = c.f.as_deref() {
             if f != "Inh" && f != "No Formula" {
                 if let Some(v) = vsdx::formula::eval(f, env)
@@ -616,6 +614,10 @@ impl Mat {
 /// `TxtAngle = IF(BITXOR(FlipX,FlipY),1,-1)*Angle` against exactly that,
 /// so the page-space net is `Angle + sx*sy*TxtAngle` (0 = horizontal
 /// labels, issue #19).
+// The eight parameters are the full text-emission context; grouping
+// them would just move the long call sites into a struct nobody else
+// shares.
+#[allow(clippy::too_many_arguments)]
 fn emit_text(
     doc: &Document,
     s: &Shape,
@@ -648,7 +650,7 @@ fn emit_text(
     // Char.Size lives in the Character section's first row, stored in
     // inches (0.13889 in = 10 pt); the viewBox unit is inches, so the
     // value is the SVG font-size directly.
-    let size = char_size(doc, s, &chain).unwrap_or(0.13888).max(0.02);
+    let size = char_size(doc, s, chain).unwrap_or(0.13888).max(0.02);
     // First Character row extras: color (palette/theme aware) and the
     // Style bitmask (1 = bold, 2 = italic). Both resolve per-cell through
     // `char_cell`, so a LangID-only instance row picks them up from the
@@ -783,19 +785,11 @@ fn emit_text(
     let mut body = String::new();
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
-        if i == 0 {
-            let _ = write!(
-                body,
-                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-                escape_text(line)
-            );
-        } else {
-            let _ = write!(
-                body,
-                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-                escape_text(line)
-            );
-        }
+        let _ = write!(
+            body,
+            r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+            escape_text(line)
+        );
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
     // glyphs un-mirrored inside the caller's flipped frame, and the
@@ -1071,7 +1065,7 @@ fn render_all_geometry(
         for geo in &merged {
             // Instance frame: formulas and cached values are both in
             // instance units.
-            render_geometry(doc, s, &chain, geo, (1.0, 1.0), Frame::Instance, out);
+            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, out);
         }
         return;
     }
@@ -1096,7 +1090,7 @@ fn render_all_geometry(
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, &chain, geo, scale, Frame::Master(src), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(src), out);
     }
 }
 
@@ -2048,7 +2042,7 @@ mod tests {
     /// ones (`GUARD(4MM)`), driven by User cells whose formulas reference
     /// the group Height.
     fn role_master_fixture() -> (Shape, Shape) {
-        let mut set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
+        let set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
             sheet.set_cell(
                 n,
                 Cell {

@@ -105,7 +105,7 @@ pub struct CanvasOut {
     /// A selection-handle drag finished: (handle, press position,
     /// release position), both in page inches y-up. The app applies the
     /// resize / endpoint move / line move.
-    pub handle_drag_done: Option<(HandleId, (f64, f64), (f64, f64))>,
+    pub handle_drag_done: Option<HandleDragDone>,
     /// Primary press (this frame) on a shape, NOT consumed by a handle:
     /// page inches y-up. The app arms its move-drag from this (the
     /// press, not the click — see the module note).
@@ -139,6 +139,10 @@ pub enum HandleId {
     LineEnd,
     LineMid,
 }
+
+/// A finished handle drag (GitHub #59): (handle, press position,
+/// release position), both in page inches y-up.
+pub type HandleDragDone = (HandleId, (f64, f64), (f64, f64));
 
 /// A handle and its position on the page (inches, y-up).
 #[derive(Debug, Clone, Copy)]
@@ -427,15 +431,12 @@ pub fn show(
     // Selection frame (page-inch rect → screen).
     let to_screen = |r: Rect| {
         let tl = Pos2::new(
-            view.pan.x + r.left() as f32 * view.px_per_in(),
-            view.pan.y + r.top() as f32 * view.px_per_in(),
+            view.pan.x + r.left() * view.px_per_in(),
+            view.pan.y + r.top() * view.px_per_in(),
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(
-                r.width() as f32 * view.px_per_in(),
-                r.height() as f32 * view.px_per_in(),
-            ),
+            Vec2::new(r.width() * view.px_per_in(), r.height() * view.px_per_in()),
         )
     };
     for er in extra_sel_rects.iter().map(|r| to_screen(*r)) {
@@ -619,7 +620,7 @@ fn draw_rulers(
     let step = tick_step(dupx as f64, 45.0);
     let x0_in = ((page_rect.left() - view.pan.x) / ppi).max(0.0) as f64;
     let x1_in = ((page_rect.right() - view.pan.x) / ppi).min(page.w_in as f32) as f64;
-    let mut v = (x0_in * view.unit.from_in(1.0) / step as f64).floor() * step as f64;
+    let mut v = (x0_in * view.unit.from_in(1.0) / step).floor() * step;
     while v <= x1_in * view.unit.from_in(1.0) {
         let sx = view.pan.x + (view.unit.to_in(v) as f32) * ppi;
         let major = (v / step).fract().abs() < 1e-6;
@@ -640,13 +641,13 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step as f64;
+        v += step;
     }
 
     // Vertical ruler: values count upward from the page bottom (Visio).
     let y0_in = ((page_rect.top() - view.pan.y) / ppi).max(0.0) as f64;
     let y1_in = ((page_rect.bottom() - view.pan.y) / ppi).min(page.h_in as f32) as f64;
-    let mut v = (y0_in * view.unit.from_in(1.0) / step as f64).floor() * step as f64;
+    let mut v = (y0_in * view.unit.from_in(1.0) / step).floor() * step;
     while v <= y1_in * view.unit.from_in(1.0) {
         let sy_top = view.pan.y + (view.unit.to_in(v) as f32) * ppi;
         let val_up = page.h_in - view.unit.to_in(v); // label in y-up units
@@ -669,7 +670,7 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step as f64;
+        v += step;
     }
 }
 

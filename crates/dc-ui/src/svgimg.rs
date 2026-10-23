@@ -152,20 +152,22 @@ fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> Strin
 
 pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
     let db = font_db();
-    let mut opts = resvg::usvg::Options::default();
-    opts.fontdb = db.clone();
-    // No-font-family text defaults to the embedded face: usvg's own
-    // default family is "Times New Roman", which rendered default text
-    // in a serif on machines with the MS core fonts installed
-    // (GitHub #17).
-    opts.font_family = "Carlito".to_string();
+    let opts = resvg::usvg::Options {
+        fontdb: db.clone(),
+        // No-font-family text defaults to the embedded face: usvg's own
+        // default family is "Times New Roman", which rendered default text
+        // in a serif on machines with the MS core fonts installed
+        // (GitHub #17).
+        font_family: "Carlito".to_string(),
+        ..Default::default()
+    };
     let resolved = resolve_font_families(svg, &db);
     let tree = resvg::usvg::Tree::from_str(&resolved, &opts)
         .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
     let size = tree.size();
     let aspect = size.height().max(1e-3) / size.width().max(1e-3);
     let w = target_width.ceil().clamp(1.0, MAX_TEX as f32) as u32;
-    let h = ((target_width * aspect as f32).ceil().max(1.0)) as u32;
+    let h = ((target_width * aspect).ceil().max(1.0)) as u32;
     let (w, h) = (w, h.min(MAX_TEX));
     let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
         .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;

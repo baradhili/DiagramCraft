@@ -1222,7 +1222,7 @@ fn backstage_landing_rule() {
     // with_blank carries a document (starter masters in the pane).
     let mut with_doc = App::with_blank();
     with_doc.open_backstage_for_test();
-    let mut h = backstage_harness(with_doc);
+    let h = backstage_harness(with_doc);
     assert!(
         h.query_all_by_label_contains("Protect Drawing").count() > 0,
         "with a document the backstage lands on Info"
@@ -1230,7 +1230,7 @@ fn backstage_landing_rule() {
 
     let mut no_doc = App::with_doc_opt(None);
     no_doc.open_backstage_for_test();
-    let mut h = backstage_harness(no_doc);
+    let h = backstage_harness(no_doc);
     assert!(
         h.query_all_by_label_contains("New blank drawing").count() > 0,
         "no document + no recents shows the Recent welcome state"

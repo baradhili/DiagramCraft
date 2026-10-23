@@ -2296,7 +2296,7 @@ impl App {
                 if let Some((_, sid)) = self.sel {
                     if let Some(page) = ed.doc.pages.get(self.page_idx) {
                         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, sid) {
-                            if let Some(chain) = shape_chain(&ed.doc, page.id, sid).ok() {
+                            if let Ok(chain) = shape_chain(&ed.doc, page.id, sid) {
                                 let g = |n: &str| {
                                     ed.doc
                                         .resolve_cell(s, &chain, n)
@@ -2732,7 +2732,7 @@ impl App {
                 .and_then(|r| r.cell("Size"))
                 .and_then(|c| c.numeric())
                 .unwrap_or(0.13888);
-            let next = ((cur * 72.0 + delta_pt).max(4.0).min(200.0)) / 72.0;
+            let next = (cur * 72.0 + delta_pt).clamp(4.0, 200.0) / 72.0;
             cmds.push(Box::new(SetRowCell::new(
                 Scope::Shape {
                     page: page_id,
@@ -3183,8 +3183,8 @@ impl App {
         let r = self.sel_page_rect()?;
         let ppi = self.view.px_per_in();
         Some(egui::pos2(
-            self.view.pan.x + r.right() as f32 * ppi,
-            self.view.pan.y + r.bottom() as f32 * ppi,
+            self.view.pan.x + r.right() * ppi,
+            self.view.pan.y + r.bottom() * ppi,
         ))
     }
     #[doc(hidden)]
@@ -3204,8 +3204,8 @@ impl App {
         let r = self.sel_page_rect()?;
         let ppi = self.view.px_per_in();
         Some(egui::pos2(
-            self.view.pan.x + r.left() as f32 * ppi,
-            self.view.pan.y + r.top() as f32 * ppi,
+            self.view.pan.x + r.left() * ppi,
+            self.view.pan.y + r.top() * ppi,
         ))
     }
     /// One shape's bbox in SCREEN coords (context-menu placement tests).
@@ -4524,7 +4524,7 @@ mod tests {
         app.load(p.clone());
         assert_eq!(
             app.debug_recent(),
-            &[p.clone()],
+            std::slice::from_ref(&p),
             "successful open records the path"
         );
         // Re-opening moves it to the (single) front.
