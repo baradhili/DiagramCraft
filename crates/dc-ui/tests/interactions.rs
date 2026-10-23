@@ -1,6 +1,7 @@
 //! kittest coverage for the Visio 2016 shape paradigm: drag a master from
 //! the stencil onto the page, right-click a shape for its context menu,
-//! and act on it (delete / duplicate).
+//! act on it (delete / duplicate), and double-click into text editing
+//! (EventDblClick, GitHub #20).
 
 use dc_ui::app::App;
 use egui::Pos2;
@@ -8,8 +9,31 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn harness_with_blank() -> Harness<'static, App> {
+    // Goldens/steps must be machine-independent: pin text to the
+    // embedded Carlito rather than this machine's installed fonts.
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        )
+}
+
+/// egui groups a click pair only when the two releases land inside its
+/// double-click window (0.3 s of input time), and each kittest step
+/// advances that clock by `step_dt` — the default 0.25 s pushes the
+/// pair's releases 0.5 s apart, so these tests step at 0.05 s (and may
+/// then need more steps to settle the same frames).
+fn dblclick_harness_with_blank() -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .with_step_dt(0.05)
+        .with_max_steps(30)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -29,6 +53,24 @@ fn click_at(h: &mut Harness<'_, App>, pos: Pos2, button: egui::PointerButton) {
         modifiers: egui::Modifiers::NONE,
     };
     h.hover_at(pos);
+    h.event(b(true));
+    h.event(b(false));
+    h.run();
+}
+
+/// Double-click: both press/release pairs queued back-to-back so the
+/// releases stay inside egui's double-click window (see the harness
+/// builder above for the step timing that makes this deterministic).
+fn dbl_click_at(h: &mut Harness<'_, App>, pos: Pos2) {
+    let b = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(pos);
+    h.event(b(true));
+    h.event(b(false));
     h.event(b(true));
     h.event(b(false));
     h.run();
@@ -66,7 +108,11 @@ fn stencil_drag_places_shape() {
     });
     h.run();
 
-    assert_eq!(h.state().debug_shape_count(), 1, "drag from stencil placed a shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "drag from stencil placed a shape"
+    );
 }
 
 #[test]
@@ -83,7 +129,10 @@ fn right_click_menu_delete_removes_shape() {
     // Right-click the placed shape.
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
-    assert!(h.state().debug_sel().is_some(), "right-click selects the shape");
+    assert!(
+        h.state().debug_sel().is_some(),
+        "right-click selects the shape"
+    );
 
     // The Visio context menu shows Delete; the row is the short node
     // (the menu container's aggregated label also contains the word).
@@ -94,7 +143,11 @@ fn right_click_menu_delete_removes_shape() {
         .expect("Delete menu row");
     row.click();
     h.run();
-    assert_eq!(h.state().debug_shape_count(), 0, "menu Delete removed the shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        0,
+        "menu Delete removed the shape"
+    );
 }
 
 #[test]
@@ -112,11 +165,92 @@ fn right_click_menu_duplicate_creates_shape() {
 
     h.get_by_label_contains("Duplicate").click();
     h.run();
-    assert_eq!(h.state().debug_shape_count(), 2, "menu Duplicate cloned the shape");
+    assert_eq!(
+        h.state().debug_shape_count(),
+        2,
+        "menu Duplicate cloned the shape"
+    );
     // And it is undoable like every command-layer action.
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
     assert_eq!(h.state().debug_shape_count(), 1, "duplicate undoes");
+}
+
+// Visio anchors the context menu just outside the shape's top-right
+// corner (menu growing right/down); near the right screen edge it
+// mirrors to just outside the top-left corner (GitHub #49).
+#[test]
+fn right_click_menu_opens_beside_shape() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    // High on the canvas so the tall menu fits below the shape (egui
+    // clamps popups into the viewport; tops stay level when it fits).
+    let canvas = h.state().debug_canvas_rect();
+    let to = egui::pos2(canvas.center().x, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+
+    let (_, shape) = h.state().debug_sel().expect("right-click selects");
+    let s = h
+        .state()
+        .debug_shape_screen_rect(shape)
+        .expect("shape rect");
+    let m = h.state().debug_ctx_menu_rect().expect("menu shown");
+    // Menu's top-left sits ~2 px right of the shape's top-right corner,
+    // tops level: the menu never covers the shape.
+    assert!(
+        (m.left() - (s.right() + 2.0)).abs() <= 0.5,
+        "menu left {} should sit 2px right of shape right {}",
+        m.left(),
+        s.right()
+    );
+    assert!(
+        (m.top() - s.top()).abs() <= 0.5,
+        "menu top {} should align with shape top {}",
+        m.top(),
+        s.top()
+    );
+}
+
+#[test]
+fn right_click_menu_flips_near_right_edge() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    // The flip decision compares against the window's right edge; the
+    // canvas must reach it for this placement to force the mirror. High
+    // on the canvas so the menu fits below (see test above).
+    assert!(canvas.right() >= 1270.0, "canvas reaches window edge");
+    let to = egui::pos2(canvas.right() - 6.0, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+
+    let (_, shape) = h.state().debug_sel().expect("right-click selects");
+    let s = h
+        .state()
+        .debug_shape_screen_rect(shape)
+        .expect("shape rect");
+    let m = h.state().debug_ctx_menu_rect().expect("menu shown");
+    // Mirrored: the menu's top-right sits ~2 px LEFT of the shape's
+    // top-left corner, tops still level.
+    assert!(
+        (m.right() - (s.left() - 2.0)).abs() <= 0.5,
+        "menu right {} should sit 2px left of shape left {}",
+        m.right(),
+        s.left()
+    );
+    assert!(
+        (m.top() - s.top()).abs() <= 0.5,
+        "menu top {} should align with shape top {}",
+        m.top(),
+        s.top()
+    );
 }
 
 #[test]
@@ -193,7 +327,11 @@ fn marquee_selects_multiple_and_delete_removes_all() {
     // Clicking a member keeps the multi-selection alive (Visio: dragging
     // a selected shape moves the whole selection).
     let c = canvas.center();
-    click_at(&mut h, c + egui::vec2(40.0, -40.0), egui::PointerButton::Primary);
+    click_at(
+        &mut h,
+        c + egui::vec2(40.0, -40.0),
+        egui::PointerButton::Primary,
+    );
     assert_eq!(
         h.state().debug_sel_set().len(),
         2,
@@ -256,5 +394,499 @@ fn corner_drag_resizes_shape() {
     assert!(
         (tl_after.x - tl_before.x).abs() <= 1.0 && (tl_after.y - tl_before.y).abs() <= 1.0,
         "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
+    );
+}
+
+/// Fit-mode zoom (GitHub #18): the document opens fit-to-window and the
+/// fit follows window resizes; once the user zooms manually, resizes
+/// must not clobber the chosen view. Fit Page re-arms it.
+#[test]
+fn zoom_follows_window_resize_in_fit_mode() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    let z_fit = h.state().debug_zoom();
+
+    // Make the window taller: still in fit mode → the page re-fits
+    // (bigger zoom — the fit is height-limited in this window shape).
+    // This is the opening bug — nothing watched the content rect, so
+    // the view stayed frozen at the old size.
+    h.set_size(egui::vec2(1280.0, 1200.0));
+    h.run();
+    let z_tall = h.state().debug_zoom();
+    assert!(
+        z_tall > z_fit * 1.05,
+        "resize while in fit mode must re-fit: {z_fit} → {z_tall}"
+    );
+
+    // Manual zoom (ribbon View → Zoom In) leaves fit mode.
+    h.get_by_label_contains("View").click();
+    h.run();
+    h.get_by_label_contains("Zoom In").click();
+    h.run();
+    let z_manual = h.state().debug_zoom();
+    assert!(
+        (z_manual - (z_tall * 1.25)).abs() < 0.01,
+        "manual zoom: {z_tall} × 1.25 expected, got {z_manual}"
+    );
+
+    // Resize again: the manual view survives untouched.
+    h.set_size(egui::vec2(1280.0, 700.0));
+    h.run();
+    assert_eq!(
+        h.state().debug_zoom(),
+        z_manual,
+        "a resize must not clobber the user's manual zoom"
+    );
+
+    // Fit Window re-arms fit mode: the view fits the (now shorter)
+    // window again.
+    h.get_by_label_contains("Fit Window").click();
+    h.run();
+    let z_refit = h.state().debug_zoom();
+    assert!(
+        (z_refit - z_manual).abs() / z_manual > 0.05,
+        "Fit Page should re-fit away from the manual zoom: {z_manual} → {z_refit}"
+    );
+    // And following resumes.
+    h.set_size(egui::vec2(1280.0, 1200.0));
+    h.run();
+    assert!(
+        h.state().debug_zoom() > z_refit * 1.05,
+        "fit mode follows resizes again after Fit Page"
+    );
+}
+
+/// GitHub #20: double-clicking a shape opens its linked text for
+/// editing (the F2 window reached by mouse, honoring EventDblClick — a
+/// placed shape has no formula, so Visio's default: open the editor).
+#[test]
+fn double_click_opens_text_editor_and_edits_shape_text() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "a fresh master instance carries no text"
+    );
+
+    dbl_click_at(&mut h, to);
+    assert!(
+        h.query_all_by_label_contains("Edit Text").count() > 0,
+        "double-click opened the Edit Text window"
+    );
+
+    // Set the field's value the accesskit way (the stencil pane's
+    // search box is another TextInput, so scope the query to the
+    // window), then OK: the text lands through SetText (one undo step).
+    h.get_by_label_contains("Edit Text")
+        .get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Server");
+    h.run();
+    assert_eq!(
+        h.get_by_label_contains("Edit Text")
+            .get_by_role(egui::Role::MultilineTextInput)
+            .value()
+            .as_deref(),
+        Some("Server"),
+        "typed text visible in the field"
+    );
+    h.get_by_label_contains("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Server"),
+        "OK committed the typed text"
+    );
+
+    // Ctrl+Z restores the shape's original (empty) text.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "undo restores the pre-edit text"
+    );
+}
+
+/// GitHub #20: a double-click on empty page area opens nothing.
+#[test]
+fn double_click_on_empty_page_is_a_no_op() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1);
+
+    // Well off the placed shape (~3 in at fit zoom), still on the page.
+    dbl_click_at(&mut h, to + egui::vec2(200.0, 200.0));
+    assert!(
+        h.query_all_by_label_contains("Edit Text").count() == 0,
+        "double-click on empty page must not open an editor"
+    );
+    assert_eq!(h.state().debug_shape_count(), 1);
+}
+
+/// GitHub #48: the context menu must derive every color it paints from
+/// the theme mapping over the live visuals — hover fill, label,
+/// disabled label, shortcut hint, separators and icon tints — so the
+/// menu stays readable when the shell runs under dark visuals, not
+/// just the installed Visio-light ones.
+fn open_menu_harness(dark: bool) -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            move |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                if dark {
+                    // install() pins Light (the app is a light app; see
+                    // the #48 review — eframe on Linux reports no system
+                    // theme and egui falls back to Dark). The dark test
+                    // re-switches AFTER it, per frame, to keep the menu's
+                    // dark token path exercised.
+                    ui.ctx().set_theme(egui::ThemePreference::Dark);
+                }
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    // High on the canvas so the tall menu fits beside the shape.
+    let to = egui::pos2(canvas.center().x, canvas.top() + 80.0);
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    assert!(
+        h.state().debug_ctx_menu_rect().is_some(),
+        "context menu opened{}",
+        if dark { " (dark visuals)" } else { "" }
+    );
+    h
+}
+
+fn ctx_menu_snapshot(h: &mut Harness<'_, App>, name: &str) {
+    // Tolerances mirror shell.rs: anti-aliasing differs per GPU/driver.
+    h.snapshot_options(
+        name,
+        &egui_kittest::SnapshotOptions::new()
+            .threshold(3.0)
+            .max_failed_pixels(10_000),
+    );
+}
+
+// ------------------------------------------------------------------
+// GitHub #53: the stencil grid re-wraps to the live pane width.
+
+/// The wrap formula, mirroring `columns_for` in stencil.rs: C columns
+/// occupy C*64 + (C-1)*6 px of wrapped width.
+fn cols_for(w: f32) -> usize {
+    (((w + 6.0) / 70.0).floor() as usize).max(1)
+}
+
+/// Drag the stencil panel's resize handle so the panel's outer width
+/// becomes `target_x`, moving through intermediate widths with a
+/// layout pass at each (the live-resize path, not a jump).
+fn drag_stencil_edge_to(h: &mut Harness<'_, App>, target_x: f32) {
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    // The handle's sense zone is the panel's outer edge (inner right +
+    // the 6px frame margin) ±3px. Press 1.5px INSIDE the edge: at the
+    // edge itself the canvas (shown after the panel, so on top) wins
+    // the pointer and the drag becomes a canvas marquee.
+    let start = egui::pos2(inner.right() + 6.0 - 1.5, inner.center().y);
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(start);
+    h.event(b(start, true));
+    for t in [0.34, 0.67, 1.0] {
+        let x = start.x + (target_x - start.x) * t;
+        h.hover_at(egui::pos2(x, start.y));
+        h.run();
+    }
+    h.event(b(egui::pos2(target_x, start.y), false));
+    h.run();
+}
+
+/// All cells lie inside the pane content rect (nothing clips) and
+/// every master has a cell.
+fn assert_grid_fits(h: &Harness<'_, App>) {
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    let cells = h.state().debug_master_cells();
+    assert_eq!(cells.len(), 7, "blank template exposes 7 starter masters");
+    for (id, r) in &cells {
+        assert!(
+            r.right() <= inner.right() + 0.5,
+            "master {id} cell {r:?} exceeds pane content {inner:?}"
+        );
+        assert!(
+            r.left() >= inner.left() - 0.5,
+            "master {id} clipped at the left edge"
+        );
+    }
+}
+
+#[test]
+fn stencil_rewraps_to_pane_width_during_resize() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // settle
+    let cols0 = h.state().debug_stencil_cols();
+    assert_eq!(cols0, 2, "default 160px pane starts as 2 columns");
+
+    // Widen to ~380px in one live drag; the layout passes at the
+    // intermediate widths must already show the wider wraps (masters
+    // re-arrange during the drag itself — no settle step).
+    let inner = h.state().debug_stencil_panel_inner_rect();
+    let start = egui::pos2(inner.right() + 6.0 - 1.5, inner.center().y);
+    let target = 380.0f32;
+    let mid = start.x + (target - start.x) * 0.5;
+    h.hover_at(start);
+    h.event(egui::Event::PointerButton {
+        pos: start,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(egui::pos2(mid, start.y));
+    h.run();
+    let cols_mid = h.state().debug_stencil_cols();
+    assert!(
+        cols_mid > cols0,
+        "mid-drag (≈{mid:.0}px pane) still wraps at {cols0} columns"
+    );
+    h.event(egui::Event::PointerButton {
+        pos: egui::pos2(target, start.y),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.run();
+
+    // The rendered column count matches the computed optimum for the
+    // width the grid actually wrapped into, at every stop.
+    let mut cols_380 = 0;
+    for _ in 0..3 {
+        let expect = cols_for(h.state().debug_stencil_wrap_width());
+        cols_380 = h.state().debug_stencil_cols();
+        assert_eq!(cols_380, expect, "column count matches the wrap optimum");
+        assert_grid_fits(&h);
+        h.run();
+    }
+
+    // And back down through the issue's other stops: 260px, then 160.
+    drag_stencil_edge_to(&mut h, 260.0);
+    let cols_260 = h.state().debug_stencil_cols();
+    assert_eq!(
+        cols_260,
+        cols_for(h.state().debug_stencil_wrap_width()),
+        "260px pane matches the wrap optimum"
+    );
+    assert!(cols_260 < cols_380, "narrowing reduces the column count");
+    drag_stencil_edge_to(&mut h, 160.0);
+    assert_eq!(
+        h.state().debug_stencil_cols(),
+        cols_for(h.state().debug_stencil_wrap_width()),
+        "back at 160px the wrap optimum holds"
+    );
+    assert_grid_fits(&h);
+}
+
+/// The drag-to-place flow reads cell rects from the live layout: right
+/// after a resize, dragging a master still places a shape (GitHub #53
+/// verification: the drag ghost originates from the new cell).
+#[test]
+fn stencil_drag_works_right_after_resize() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    drag_stencil_edge_to(&mut h, 380.0);
+    h.run();
+
+    let cells = h.state().debug_master_cells();
+    assert!(
+        h.state().debug_stencil_cols() >= 4,
+        "the 380px pane re-wrapped to 4+ columns"
+    );
+    let from = cells[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    h.hover_at(from);
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(from + (to - from) * 0.25);
+    h.run();
+    for t in [0.5, 0.75, 1.0] {
+        h.hover_at(from + (to - from) * t);
+        h.run();
+    }
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "drag from the re-wrapped stencil placed a shape"
+    );
+}
+
+/// The pane aligned with the Visio 2016 reference (GitHub #53 review):
+/// the stencil list entry sits above the grid, and the pane at two
+/// widths shows the re-wrapped arrangement.
+#[test]
+fn stencil_pane_snapshots_two_widths() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    ctx_menu_snapshot(&mut h, "dc_ui_stencil_default_width");
+    drag_stencil_edge_to(&mut h, 380.0);
+    h.run();
+    h.run();
+    assert!(
+        h.state().debug_stencil_cols() >= 4,
+        "wide pane shows 4+ columns"
+    );
+    ctx_menu_snapshot(&mut h, "dc_ui_stencil_wide");
+}
+
+#[test]
+fn context_menu_snapshot_light_visuals() {
+    let mut h = open_menu_harness(false);
+    ctx_menu_snapshot(&mut h, "dc_ui_ctx_menu_light");
+}
+
+#[test]
+fn context_menu_snapshot_dark_visuals() {
+    let mut h = open_menu_harness(true);
+    ctx_menu_snapshot(&mut h, "dc_ui_ctx_menu_dark");
+}
+
+/// Harness for the File backstage (#55): same shell builder, app state
+/// supplied by the caller.
+fn backstage_harness(app: App) -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    h.run();
+    h
+}
+
+/// #55 landing rule: File with a document opens Info; without one (and
+/// no recents) it opens the Recent page's welcome state.
+#[test]
+fn backstage_landing_rule() {
+    use egui_kittest::kittest::Queryable;
+    // with_blank carries a document (starter masters in the pane).
+    let mut with_doc = App::with_blank();
+    with_doc.open_backstage_for_test();
+    let mut h = backstage_harness(with_doc);
+    assert!(
+        h.query_all_by_label_contains("Protect Drawing").count() > 0,
+        "with a document the backstage lands on Info"
+    );
+
+    let mut no_doc = App::with_doc_opt(None);
+    no_doc.open_backstage_for_test();
+    let mut h = backstage_harness(no_doc);
+    assert!(
+        h.query_all_by_label_contains("New blank drawing").count() > 0,
+        "no document + no recents shows the Recent welcome state"
+    );
+    assert_eq!(
+        h.query_all_by_label_contains("Protect Drawing").count(),
+        0,
+        "Info-only content must not show without a document"
+    );
+}
+
+/// #55: Esc always returns from the File screen to the document.
+#[test]
+fn backstage_esc_returns_to_document() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    let mut h = backstage_harness(app);
+    assert!(h.state().debug_backstage(), "backstage is open");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(
+        !h.state().debug_backstage(),
+        "Esc closed the backstage back to the document"
+    );
+    assert!(
+        h.query_all_by_label_contains("Developer").count() > 0,
+        "the shell (tab strip) is back after Esc"
+    );
+}
+
+/// #55: the New page's search filters the template gallery instantly
+/// (elementary/Apple: results as you type).
+#[test]
+fn backstage_search_filters_templates() {
+    use egui_kittest::kittest::Queryable;
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("new");
+    let mut h = backstage_harness(app);
+    assert!(
+        h.query_all_by_label_contains("Network Diagram").count() > 0,
+        "gallery shows the placeholder templates unfiltered"
+    );
+
+    let edit = h.get_by_role(egui::Role::TextInput);
+    edit.set_text_value_accesskit("flow");
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Flowchart").count() > 0,
+        "flowchart survives the “flow” query"
+    );
+    assert_eq!(
+        h.query_all_by_label_contains("Network Diagram").count(),
+        0,
+        "network is filtered out by “flow”"
+    );
+
+    h.get_by_role(egui::Role::TextInput)
+        .set_text_value_accesskit("net");
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("Flowchart").count(),
+        0,
+        "flowchart is filtered out by “net”"
+    );
+    assert!(
+        h.query_all_by_label_contains("Network Diagram").count() > 0,
+        "network survives the “net” query"
     );
 }

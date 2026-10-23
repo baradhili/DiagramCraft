@@ -27,7 +27,12 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { printer: String::new(), copies: 1, duplex: None, grayscale: false }
+        Self {
+            printer: String::new(),
+            copies: 1,
+            duplex: None,
+            grayscale: false,
+        }
     }
 }
 
@@ -83,7 +88,12 @@ impl State {
     /// A refresh invalidates the old list until discovery completes: a removed queue must
     /// not remain selectable while the host is checking it.
     pub fn ready(&self) -> bool {
-        !self.busy() && !self.discovering() && self.printers.iter().any(|p| p.name == self.settings.printer)
+        !self.busy()
+            && !self.discovering()
+            && self
+                .printers
+                .iter()
+                .any(|p| p.name == self.settings.printer)
     }
 
     /// Refuse replacing an active job's receiver. The caller still owns the refused receiver;
@@ -113,9 +123,18 @@ impl State {
             match receiver.try_recv() {
                 Ok(printers) => {
                     self.printers = printers;
-                    if !self.printers.iter().any(|p| p.name == self.settings.printer) {
-                        self.settings.printer =
-                            self.printers.iter().find(|p| p.default).or(self.printers.first()).map(|p| p.name.clone()).unwrap_or_default();
+                    if !self
+                        .printers
+                        .iter()
+                        .any(|p| p.name == self.settings.printer)
+                    {
+                        self.settings.printer = self
+                            .printers
+                            .iter()
+                            .find(|p| p.default)
+                            .or(self.printers.first())
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default();
                     }
                     self.message = self.printers.is_empty().then_some(Feedback::NoPrinters);
                     self.discovery = None;
@@ -151,7 +170,13 @@ impl State {
 
     /// Draw just the controls. Apps render feedback, their preview and the submit/export
     /// buttons around this component, using their own command and document state.
-    pub fn show(&mut self, ui: &mut egui::Ui, id: egui::Id, discover: &Discover, labels: &Labels<'_>) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        discover: &Discover,
+        labels: &Labels<'_>,
+    ) {
         if !self.loaded {
             self.refresh(discover);
         }
@@ -163,20 +188,32 @@ impl State {
                 egui::ComboBox::from_id_salt("printer")
                     .width(width)
                     .wrap_mode(egui::TextWrapMode::Truncate)
-                    .selected_text(if self.settings.printer.is_empty() { labels.select_printer } else { &self.settings.printer })
+                    .selected_text(if self.settings.printer.is_empty() {
+                        labels.select_printer
+                    } else {
+                        &self.settings.printer
+                    })
                     .show_ui(ui, |ui| {
                         for printer in &self.printers {
-                            ui.selectable_value(&mut self.settings.printer, printer.name.clone(), &printer.name);
+                            ui.selectable_value(
+                                &mut self.settings.printer,
+                                printer.name.clone(),
+                                &printer.name,
+                            );
                         }
                     })
                     .response
                     .labelled_by(printer_label.id);
-                if ui.add_enabled(!self.discovering(), egui::Button::new(labels.refresh)).clicked() {
+                if ui
+                    .add_enabled(!self.discovering(), egui::Button::new(labels.refresh))
+                    .clicked()
+                {
                     self.refresh(discover);
                 }
                 ui.horizontal(|ui| {
                     let label = ui.label(labels.copies);
-                    ui.add(egui::DragValue::new(&mut self.settings.copies).range(1..=999)).labelled_by(label.id);
+                    ui.add(egui::DragValue::new(&mut self.settings.copies).range(1..=999))
+                        .labelled_by(label.id);
                 });
                 let choices = [
                     (None, labels.printer_default),
@@ -189,7 +226,11 @@ impl State {
                     .width(width)
                     .wrap_mode(egui::TextWrapMode::Truncate)
                     .selected_text(
-                        choices.iter().find(|(value, _)| *value == self.settings.duplex).map(|(_, text)| *text).unwrap_or(labels.printer_default),
+                        choices
+                            .iter()
+                            .find(|(value, _)| *value == self.settings.duplex)
+                            .map(|(_, text)| *text)
+                            .unwrap_or(labels.printer_default),
                     )
                     .show_ui(ui, |ui| {
                         for (value, text) in choices {

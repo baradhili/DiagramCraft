@@ -19,7 +19,10 @@ fn main() -> anyhow::Result<()> {
         let stem = format!(
             "{:03}-{}",
             m.id,
-            m.name_u.as_deref().unwrap_or("-").replace(['/', '\\', ' '], "_")
+            m.name_u
+                .as_deref()
+                .unwrap_or("-")
+                .replace(['/', '\\', ' '], "_")
         );
         std::fs::write(outdir.join(format!("{stem}.svg")), &svg)?;
         let img = dc_ui::svgimg::rasterize(&svg, 128.0)?;

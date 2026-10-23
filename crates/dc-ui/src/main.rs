@@ -12,8 +12,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "DiagramCraft",
         options,
-        Box::new(|cc| {
-            Ok(Box::new(dc_ui::app::App::new(cc, path)))
-        }),
+        Box::new(|cc| Ok(Box::new(dc_ui::app::App::new(cc, path)))),
     )
 }

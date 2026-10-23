@@ -46,6 +46,7 @@ dc-core = { version = "0.1.0", path = "../dc-core" }
 eframe = "0.37.0"
 egui = "0.37"
 resvg = "0.48.1"
+serde_json = "1"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 vsdx = { version = "0.1.0", path = "../vsdx" }
 

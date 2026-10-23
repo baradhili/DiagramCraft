@@ -39,8 +39,23 @@ pub struct ResizeHandle<'a> {
 }
 
 impl<'a> ResizeHandle<'a> {
-    pub fn new(id: Id, axis: SplitAxis, rect: Rect, label: &'a str, style: ResizeHandleStyle) -> Self {
-        Self { id, axis, rect, label, style, hit_margin: 3.0, step: 8.0, value: None }
+    pub fn new(
+        id: Id,
+        axis: SplitAxis,
+        rect: Rect,
+        label: &'a str,
+        style: ResizeHandleStyle,
+    ) -> Self {
+        Self {
+            id,
+            axis,
+            rect,
+            label,
+            style,
+            hit_margin: 3.0,
+            step: 8.0,
+            value: None,
+        }
     }
 
     /// Expand the hit rectangle along the movement axis, in logical points. Default: 3.
@@ -76,10 +91,17 @@ impl<'a> ResizeHandle<'a> {
             && self.step.is_finite()
             && self.step > 0.0
             && self.value.as_ref().is_none_or(|(value, range)| {
-                value.is_finite() && range.start().is_finite() && range.end().is_finite() && range.start() <= range.end()
+                value.is_finite()
+                    && range.start().is_finite()
+                    && range.end().is_finite()
+                    && range.start() <= range.end()
             });
         let inert = Rect::from_min_size(ui.min_rect().min, Vec2::ZERO);
-        let mut response = ui.interact(if valid { hit } else { inert }, self.id, if valid { Sense::drag() } else { Sense::hover() });
+        let mut response = ui.interact(
+            if valid { hit } else { inert },
+            self.id,
+            if valid { Sense::drag() } else { Sense::hover() },
+        );
         let enabled = valid && response.enabled();
         let mut delta = 0.0;
         if enabled {
@@ -118,24 +140,32 @@ impl<'a> ResizeHandle<'a> {
                 });
             }
             ui.input_mut(|input| {
-                input.consume_accesskit_action_requests(response.id, |request| match request.action {
-                    accesskit::Action::Increment => {
-                        delta += self.step;
-                        true
-                    }
-                    accesskit::Action::Decrement => {
-                        delta -= self.step;
-                        true
-                    }
-                    accesskit::Action::SetValue => {
-                        if let (Some((value, range)), Some(accesskit::ActionData::NumericValue(new_value))) = (&self.value, &request.data)
-                            && new_value.is_finite()
-                        {
-                            delta = (new_value.clamp(f64::from(*range.start()), f64::from(*range.end())) - f64::from(*value)) as f32;
+                input.consume_accesskit_action_requests(response.id, |request| {
+                    match request.action {
+                        accesskit::Action::Increment => {
+                            delta += self.step;
+                            true
                         }
-                        true
+                        accesskit::Action::Decrement => {
+                            delta -= self.step;
+                            true
+                        }
+                        accesskit::Action::SetValue => {
+                            if let (
+                                Some((value, range)),
+                                Some(accesskit::ActionData::NumericValue(new_value)),
+                            ) = (&self.value, &request.data)
+                                && new_value.is_finite()
+                            {
+                                delta = (new_value
+                                    .clamp(f64::from(*range.start()), f64::from(*range.end()))
+                                    - f64::from(*value))
+                                    as f32;
+                            }
+                            true
+                        }
+                        _ => false,
                     }
-                    _ => false,
                 });
             });
         }

@@ -117,19 +117,36 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn run_shell(name: &str, app: App) {
+    run_shell_mode(name, app, false);
+}
+
+/// Snapshot the shell in one visual mode. Light keeps the exact
+/// existing goldens; dark installs the same both-slot theme and
+/// selects Dark, exercising the OS-dark path end-to-end (GitHub #52).
+fn run_shell_mode(name: &str, app: App, dark: bool) {
     let mut app = app;
+    // Goldens must render identically on every machine: pin text to
+    // the embedded Carlito rather than this machine's installed fonts.
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui(move |ui| {
-            dc_ui::theme::install(ui.ctx());
+            dc_ui::theme::install_for(
+                ui.ctx(),
+                if dark {
+                    egui::ThemePreference::Dark
+                } else {
+                    egui::ThemePreference::Light
+                },
+            );
             app.draw(ui);
         });
     harness.run();
     harness.run(); // second pass: textures and fit settle
-    // Tolerances: anti-aliasing differs per GPU/driver (CI runners use
-    // software adapters), which kittest's own README calls out — accept
-    // small per-pixel deltas and a small budget of failed pixels while
-    // still catching real layout regressions.
+                   // Tolerances: anti-aliasing differs per GPU/driver (CI runners use
+                   // software adapters), which kittest's own README calls out — accept
+                   // small per-pixel deltas and a small budget of failed pixels while
+                   // still catching real layout regressions.
     harness.snapshot_options(
         name,
         &egui_kittest::SnapshotOptions::new()
@@ -142,6 +159,26 @@ fn run_shell(name: &str, app: App) {
 fn shell_snapshot_home() {
     let tmp = tempfile::tempdir().unwrap();
     run_shell("dc_ui_shell_home", App::with_doc(&fixture(tmp.path())));
+}
+
+/// GitHub #52: the same home shell under the dark mode the OS watcher
+/// selects when the desktop is dark — dark chrome (ribbon, rulers,
+/// desk, tabs, status), white page paper, brand-green bands.
+#[test]
+fn shell_snapshot_home_dark() {
+    let tmp = tempfile::tempdir().unwrap();
+    run_shell_mode(
+        "dc_ui_shell_home_dark",
+        App::with_doc(&fixture(tmp.path())),
+        true,
+    );
+}
+
+/// GitHub #52: the blank drawing (stencil pane + empty page) in dark
+/// mode — covers the stencil pane and page-tab strip counterparts.
+#[test]
+fn shell_snapshot_blank_dark() {
+    run_shell_mode("dc_ui_shell_blank_dark", App::with_blank(), true);
 }
 
 #[test]
@@ -165,12 +202,82 @@ fn shell_snapshot_selected_shapesheet() {
 fn shell_snapshot_backstage() {
     let tmp = tempfile::tempdir().unwrap();
     let mut app = App::with_doc(&fixture(tmp.path()));
-    app.backstage = true;
+    // The #55 landing rule: with a document the File screen opens on
+    // Info (2010 three-band rail: commands, destinations, Options).
+    // The path is pinned: the Info page shows the file's Location and
+    // goldens must not embed this run's random tempdir (that made the
+    // snapshot differ per OS/runner — the Windows/macOS CI failures).
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
+    app.open_backstage_for_test();
     run_shell("dc_ui_shell_backstage", app);
+}
+
+#[test]
+fn shell_snapshot_backstage_recent() {
+    // No document → the Recent page, with its recents list.
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let ghost = tmp.path().join("moved-away.vsdx");
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc, ghost]);
+    app.open_backstage_for_test();
+    run_shell("dc_ui_shell_backstage_recent", app);
+}
+
+#[test]
+fn shell_snapshot_backstage_new() {
+    // The search-first New page (gallery + search box, #55).
+    let mut app = App::with_blank();
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("new");
+    run_shell("dc_ui_shell_backstage_new", app);
 }
 
 #[test]
 fn shell_snapshot_blank_drawing() {
     // File → New: empty page with the starter shape masters in the pane.
     run_shell("dc_ui_shell_blank", App::with_blank());
+}
+
+#[test]
+fn shell_snapshot_start_recent() {
+    // Start screen with a populated MRU: one live entry, one ghosted
+    // (its file is gone — Visio keeps it listed, grayed).
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let ghost = tmp.path().join("moved-away.vsdx");
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc, ghost]);
+    run_shell("dc_ui_shell_start_recent", app);
+}
+
+#[test]
+fn recent_entry_click_reopens() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let mut app = App::with_doc_opt(None);
+    app.set_recent_for_test(vec![doc.clone()]);
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    harness.run();
+    assert_eq!(harness.state().debug_shape_count(), 0, "no document yet");
+    // Click the MRU entry (labeled with the file name) on the start
+    // screen; the document opens.
+    harness.get_by_label_contains("shell.vssx").click();
+    harness.run();
+    assert_eq!(
+        harness.state().debug_shape_count(),
+        1,
+        "clicking a recent entry reopened the document"
+    );
+    assert_eq!(harness.state().debug_recent(), &[doc]);
 }

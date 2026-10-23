@@ -13,8 +13,8 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use crate::model::{
-    Attrs, Cell, DocItem, Document, IndexChild, Master, Page, RawEl, Row, Section, Shape, ShapeFlow,
-    Sheet, SheetChild, StyleSheet,
+    Attrs, Cell, DocItem, Document, IndexChild, Master, Page, RawEl, Row, Section, Shape,
+    ShapeFlow, Sheet, SheetChild, StyleSheet,
 };
 use crate::opc::{unescape, Package};
 
@@ -88,7 +88,10 @@ fn parse_package(pkg: Package) -> Result<Document> {
     let pages_part = pkg
         .rel_target(&doc_part, "pages")
         .context("package has no pages relationship")?;
-    let xml = pkg.part(&pages_part).context("reading pages index")?.to_vec();
+    let xml = pkg
+        .part(&pages_part)
+        .context("reading pages index")?
+        .to_vec();
     let xml = String::from_utf8_lossy(&xml).into_owned();
     let rels = pkg.relationships(&pages_part);
     let (root_attrs, entries) = parse_index_entries(&xml, "Page")?;
@@ -179,7 +182,9 @@ fn next(r: &mut quick_xml::Reader<&[u8]>) -> Result<Ev> {
             Ok(quick_xml::events::Event::Text(_))
             | Ok(quick_xml::events::Event::CData(_))
             | Ok(quick_xml::events::Event::GeneralRef(_)) => return Ok(Ev::Text),
-            Ok(quick_xml::events::Event::End(e)) => return Ok(Ev::End(e.name().as_ref().to_string())),
+            Ok(quick_xml::events::Event::End(e)) => {
+                return Ok(Ev::End(e.name().as_ref().to_string()))
+            }
             Ok(quick_xml::events::Event::Eof) => return Ok(Ev::Eof),
             // Text/CData (handled by raw capture), Decl, comments, PIs,
             // doctypes: transparent.
@@ -195,7 +200,9 @@ fn attrs_of(e: &quick_xml::events::BytesStart<'_>) -> Attrs {
         .map(|a| {
             (
                 a.key.as_ref().to_string(),
-                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    .unwrap_or_default()
+                    .into_owned(),
             )
         })
         .collect()
@@ -313,9 +320,7 @@ fn plain_text_of(raw: &str) -> String {
                 ent.push(';');
                 out.push_str(&unescape(ent.as_bytes()));
             }
-            Ok(quick_xml::events::Event::CData(t)) => {
-                out.push_str(t.as_ref())
-            }
+            Ok(quick_xml::events::Event::CData(t)) => out.push_str(t.as_ref()),
             Ok(quick_xml::events::Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -340,9 +345,7 @@ fn parse_contents(xml: &str) -> Result<(Attrs, Sheet, Vec<Shape>, Vec<RawEl>)> {
     let (root_attrs, root_name): (Attrs, String) = loop {
         match next(&mut r)? {
             Ev::Start(name, attrs) => break (attrs, name),
-            Ev::Empty(_, attrs) => {
-                return Ok((attrs, Sheet::default(), Vec::new(), Vec::new()))
-            }
+            Ev::Empty(_, attrs) => return Ok((attrs, Sheet::default(), Vec::new(), Vec::new())),
             Ev::Eof => return Ok(Default::default()),
             _ => {}
         }
@@ -435,19 +438,17 @@ fn parse_document_xml(xml: &str, doc: &mut Document) -> Result<()> {
                     loop {
                         match next(&mut r)? {
                             Ev::Start(n2, a2) if n2 == "ColorEntry" => {
-                                if let (Some(ix), Some(rgb)) = (
-                                    attr_i64(&a2, "IX"),
-                                    attr(&a2, "RGB").map(str::to_owned),
-                                ) {
+                                if let (Some(ix), Some(rgb)) =
+                                    (attr_i64(&a2, "IX"), attr(&a2, "RGB").map(str::to_owned))
+                                {
                                     doc.colors.push((ix, rgb));
                                 }
                                 skip_element(&mut r)?;
                             }
                             Ev::Empty(n2, a2) if n2 == "ColorEntry" => {
-                                if let (Some(ix), Some(rgb)) = (
-                                    attr_i64(&a2, "IX"),
-                                    attr(&a2, "RGB").map(str::to_owned),
-                                ) {
+                                if let (Some(ix), Some(rgb)) =
+                                    (attr_i64(&a2, "IX"), attr(&a2, "RGB").map(str::to_owned))
+                                {
                                     doc.colors.push((ix, rgb));
                                 }
                             }
@@ -518,9 +519,7 @@ fn parse_index_entries(xml: &str, entry: &str) -> Result<(Attrs, Vec<IndexEntry>
                 };
                 loop {
                     match next(&mut r)? {
-                        Ev::Start(n2, a2) if n2 == "PageSheet"
-                            || n2 == "MasterSheet" =>
-                        {
+                        Ev::Start(n2, a2) if n2 == "PageSheet" || n2 == "MasterSheet" => {
                             let tag = n2.clone();
                             let sheet = parse_sheet_body(&mut r, a2)?;
                             e.children.push(IndexChild::Sheet { tag, sheet });

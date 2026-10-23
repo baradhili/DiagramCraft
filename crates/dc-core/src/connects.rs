@@ -87,7 +87,10 @@ impl Connects {
     }
 
     pub fn parse_inner(attrs: &Attrs, inner: &str) -> Connects {
-        let mut out = Connects { attrs: attrs.to_vec(), list: Vec::new() };
+        let mut out = Connects {
+            attrs: attrs.to_vec(),
+            list: Vec::new(),
+        };
         let mut r = quick_xml::Reader::from_str(inner);
         let mut buf = Vec::new();
         loop {
@@ -100,7 +103,9 @@ impl Connects {
                         .map(|a| {
                             (
                                 a.key.as_ref().to_string(),
-                                a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned(),
+                                a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .unwrap_or_default()
+                                    .into_owned(),
                             )
                         })
                         .collect();
@@ -129,7 +134,12 @@ impl Connects {
                             pairs.retain(|(k, _)| {
                                 !matches!(
                                     k.as_str(),
-                                    "FromSheet" | "FromCell" | "FromPart" | "ToSheet" | "ToCell" | "ToPart"
+                                    "FromSheet"
+                                        | "FromCell"
+                                        | "FromPart"
+                                        | "ToSheet"
+                                        | "ToCell"
+                                        | "ToPart"
                                 )
                             });
                             pairs

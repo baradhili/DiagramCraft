@@ -53,7 +53,11 @@ impl Package {
             .get("[Content_Types].xml")
             .ok_or_else(|| OpcError::MissingPart("[Content_Types].xml".into()))?;
         let (defaults, overrides) = parse_content_types(&String::from_utf8_lossy(ct))?;
-        Ok(Self { parts, defaults, overrides })
+        Ok(Self {
+            parts,
+            defaults,
+            overrides,
+        })
     }
 
     pub fn part_names(&self) -> Vec<&str> {
@@ -73,7 +77,9 @@ impl Package {
         if let Some(t) = self.overrides.get(part) {
             return Some(t.clone());
         }
-        part.rsplit('.').next().and_then(|ext| self.defaults.get(ext).cloned())
+        part.rsplit('.')
+            .next()
+            .and_then(|ext| self.defaults.get(ext).cloned())
     }
 
     /// Relationships declared for `part` (looks up `<dir>/_rels/<name>.rels`).
@@ -143,9 +149,27 @@ fn parse_content_types(xml: &str) -> Result<TypeMaps, OpcError> {
                     let mut pn = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            "Extension" => ext = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
-                            "ContentType" => ct = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
-                            "PartName" => pn = Some(a.normalized_value(quick_xml::XmlVersion::Implicit1_0).unwrap_or_default().into_owned()),
+                            "Extension" => {
+                                ext = Some(
+                                    a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                        .unwrap_or_default()
+                                        .into_owned(),
+                                )
+                            }
+                            "ContentType" => {
+                                ct = Some(
+                                    a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                        .unwrap_or_default()
+                                        .into_owned(),
+                                )
+                            }
+                            "PartName" => {
+                                pn = Some(
+                                    a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                        .unwrap_or_default()
+                                        .into_owned(),
+                                )
+                            }
                             _ => {}
                         }
                     }
@@ -184,18 +208,24 @@ fn parse_relationships(xml: &str, base_dir: &str) -> Vec<(String, String, String
                     let mut target = None;
                     for a in e.attributes().flatten() {
                         match a.key.as_ref() {
-                            "Id" => id = a
-                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                .ok()
-                                .map(|v| v.into_owned()),
-                            "Type" => ty = a
-                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                .ok()
-                                .map(|v| v.into_owned()),
-                            "Target" => target = a
-                                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                                .ok()
-                                .map(|v| v.into_owned()),
+                            "Id" => {
+                                id = a
+                                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            }
+                            "Type" => {
+                                ty = a
+                                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            }
+                            "Target" => {
+                                target = a
+                                    .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            }
                             _ => {}
                         }
                     }

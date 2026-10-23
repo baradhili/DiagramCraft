@@ -1,10 +1,13 @@
 //! Minimal ShapeSheet formula evaluator.
 //!
 //! Supports the subset needed for geometry/size evaluation (Analysis doc 06):
-//! numeric literals, cell references (`Width`, `Geometry1.X1`), `+ - * / ^`,
-//! parentheses, unary minus, string literals with `&` concatenation, and
-//! `&<n>` number-to-string coercion. Function calls (`IF`, `THEMEVAL`, …)
-//! are not evaluated; callers should fall back to the cached `V` value.
+//! numeric literals, cell references (`Width`, `Geometry1.X1`,
+//! `Sheet.5!Width` cross-sheet refs), `+ - * / ^`, comparison operators
+//! (`= <> < <= > >=`), parentheses, unary minus, string literals with `&`
+//! concatenation, `&<n>` number-to-string coercion, and the control
+//! functions master XForms lean on (`IF`, `OR`, `AND`, `NOT`, `GUARD`,
+//! `THEMEGUARD`). Other functions (`THEMEVAL`, `SETF`, …) are not
+//! evaluated; callers should fall back to the cached `V` value.
 
 use std::collections::HashMap;
 
@@ -23,6 +26,13 @@ enum Tok {
     Amp,
     LParen,
     RParen,
+    Comma,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -58,7 +68,11 @@ fn format_num(n: f64) -> String {
 /// can fall back to the cached value.
 pub fn eval(expr: &str, env: &Env) -> Result<Value, String> {
     let toks = tokenize(expr)?;
-    let mut p = Parser { toks: &toks, pos: 0, env };
+    let mut p = Parser {
+        toks: &toks,
+        pos: 0,
+        env,
+    };
     let v = p.expr()?;
     if p.pos != toks.len() {
         return Err(format!("trailing tokens at {}", p.pos));
@@ -131,6 +145,43 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 toks.push(Tok::RParen);
                 i += 1;
             }
+            ',' => {
+                toks.push(Tok::Comma);
+                i += 1;
+            }
+            '=' => {
+                toks.push(Tok::Eq);
+                i += 1;
+            }
+            '<' => {
+                // `<>` is Visio's not-equal; `<=` less-or-equal.
+                if i + 1 < b.len() {
+                    match b[i + 1] as char {
+                        '>' => {
+                            toks.push(Tok::Ne);
+                            i += 2;
+                            continue;
+                        }
+                        '=' => {
+                            toks.push(Tok::Le);
+                            i += 2;
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+                toks.push(Tok::Lt);
+                i += 1;
+            }
+            '>' => {
+                if i + 1 < b.len() && b[i + 1] as char == '=' {
+                    toks.push(Tok::Ge);
+                    i += 2;
+                } else {
+                    toks.push(Tok::Gt);
+                    i += 1;
+                }
+            }
             '"' => {
                 let mut out = String::new();
                 i += 1;
@@ -155,7 +206,25 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 while i < b.len() && ((b[i] as char).is_ascii_digit() || b[i] as char == '.') {
                     i += 1;
                 }
-                let digits_end = i;
+                let mut digits_end = i;
+                // Scientific notation: `E`/`e` followed by an optional
+                // sign and digits is an exponent, not a unit suffix —
+                // shipped masters carry cells like `Height*9.2184E-5`
+                // whose misparse as `Height*9.218-5` throws geometry
+                // inches off the shape (issue #15).
+                if i < b.len() && matches!(b[i] as char, 'E' | 'e') {
+                    let mut j = i + 1;
+                    if j < b.len() && matches!(b[j] as char, '+' | '-') {
+                        j += 1;
+                    }
+                    if j < b.len() && (b[j] as char).is_ascii_digit() {
+                        while j < b.len() && (b[j] as char).is_ascii_digit() {
+                            j += 1;
+                        }
+                        digits_end = j;
+                        i = j;
+                    }
+                }
                 // A directly-attached unit suffix (0.24PT, 90DEG) is
                 // converted to internal units (inches / radians) per
                 // [MS-VSDX] §2.5.7–2.5.8.
@@ -172,7 +241,9 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                 let start = i;
                 while i < b.len() {
                     let ch = b[i] as char;
-                    if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                    // `!` keeps `Sheet.5!Width` / `Sheet.5!User.X` refs one
+                    // token (Visio has no other use of `!`; not-equal is `<>`).
+                    if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' || ch == '!' {
                         i += 1;
                     } else {
                         break;
@@ -183,8 +254,6 @@ fn tokenize(s: &str) -> Result<Vec<Tok>, String> {
                     toks.push(Tok::Num(1.0));
                 } else if word == "FALSE" {
                     toks.push(Tok::Num(0.0));
-                } else if i < b.len() && (b[i] as char) == '(' {
-                    return Err(format!("function call '{word}' not supported"));
                 } else {
                     toks.push(Tok::Ident(word.to_string()));
                 }
@@ -214,7 +283,49 @@ impl<'a> Parser<'a> {
     }
 
     fn expr(&mut self) -> Result<Value, String> {
-        self.concat()
+        self.comparison()
+    }
+
+    /// Comparisons are Visio's lowest-precedence operators and yield
+    /// 1/0 (ShapeSheet booleans are numbers).
+    fn comparison(&mut self) -> Result<Value, String> {
+        let mut lhs = self.concat()?;
+        loop {
+            let which = match self.peek() {
+                Some(Tok::Eq) => 0,
+                Some(Tok::Ne) => 1,
+                Some(Tok::Lt) => 2,
+                Some(Tok::Le) => 3,
+                Some(Tok::Gt) => 4,
+                Some(Tok::Ge) => 5,
+                _ => return Ok(lhs),
+            };
+            self.bump();
+            let rhs = self.concat()?;
+            lhs = match (lhs.as_f64(), rhs.as_f64()) {
+                (Some(a), Some(b)) => {
+                    let r = match which {
+                        0 => a == b,
+                        1 => a != b,
+                        2 => a < b,
+                        3 => a <= b,
+                        4 => a > b,
+                        _ => a >= b,
+                    };
+                    Value::Num(f64::from(r as i32))
+                }
+                // Non-numeric operands: only (in)equality is meaningful.
+                _ => match which {
+                    0 => Value::Num(f64::from(
+                        (lhs.clone().coerce_str() == rhs.clone().coerce_str()) as i32,
+                    )),
+                    1 => Value::Num(f64::from(
+                        (lhs.clone().coerce_str() != rhs.clone().coerce_str()) as i32,
+                    )),
+                    _ => return Err("ordering comparison on strings".into()),
+                },
+            };
+        }
     }
 
     fn concat(&mut self) -> Result<Value, String> {
@@ -295,6 +406,9 @@ impl<'a> Parser<'a> {
             Some(Tok::Num(n)) => Ok(Value::Num(n)),
             Some(Tok::Str(s)) => Ok(Value::Str(s)),
             Some(Tok::Ident(name)) => {
+                if matches!(self.peek(), Some(Tok::LParen)) {
+                    return self.call(&name);
+                }
                 // Unit-suffixed idents like `0.5DL` arrive as Num + Ident;
                 // bare idents resolve from the environment.
                 self.env
@@ -310,6 +424,78 @@ impl<'a> Parser<'a> {
                 }
             }
             other => Err(format!("unexpected token {other:?}")),
+        }
+    }
+
+    /// The function subset master XForms use (issue #15): `GUARD(x)` /
+    /// `THEMEGUARD(x)` protect an expression and evaluate to it; `IF` /
+    /// `OR` / `AND` / `NOT` are the control flow behind layout switches
+    /// like `User.IconY`. Unknown functions error so callers fall back
+    /// to the cached `V`.
+    fn call(&mut self, name: &str) -> Result<Value, String> {
+        self.bump(); // '('
+        let mut args = Vec::new();
+        if !matches!(self.peek(), Some(Tok::RParen)) {
+            loop {
+                args.push(self.expr()?);
+                match self.bump() {
+                    Some(Tok::Comma) => continue,
+                    Some(Tok::RParen) => break,
+                    _ => return Err(format!("expected ',' or ')' in {name}(...)")),
+                }
+            }
+        } else {
+            self.bump(); // ')'
+        }
+        let arg = |args: &[Value], i: usize| -> Result<f64, String> {
+            args.get(i)
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| format!("{name}: arg {} not numeric", i + 1))
+        };
+        match name.to_ascii_uppercase().as_str() {
+            "GUARD" | "THEMEGUARD" => match args.len() {
+                1 => Ok(args.pop().unwrap()),
+                _ => Err(format!("{name} takes one argument")),
+            },
+            "IF" => {
+                if args.len() != 3 {
+                    return Err("IF takes three arguments".into());
+                }
+                // IF(cond, then, else): branches are already evaluated
+                // (this evaluator has no AST); pick by the condition.
+                let cond = arg(&args, 0)?;
+                Ok(if cond != 0.0 {
+                    args.into_iter().nth(1).unwrap()
+                } else {
+                    args.into_iter().nth(2).unwrap()
+                })
+            }
+            "OR" => {
+                if args.is_empty() {
+                    return Err("OR needs arguments".into());
+                }
+                let r: bool = (0..args.len())
+                    .try_fold(false, |acc, i| -> Result<bool, String> {
+                        Ok(acc || arg(&args, i)? != 0.0)
+                    })?;
+                Ok(Value::Num(f64::from(r as i32)))
+            }
+            "AND" => {
+                if args.is_empty() {
+                    return Err("AND needs arguments".into());
+                }
+                let r: bool = (0..args.len()).try_fold(true, |acc, i| -> Result<bool, String> {
+                    Ok(acc && arg(&args, i)? != 0.0)
+                })?;
+                Ok(Value::Num(f64::from(r as i32)))
+            }
+            "NOT" => {
+                if args.len() != 1 {
+                    return Err("NOT takes one argument".into());
+                }
+                Ok(Value::Num(f64::from((arg(&args, 0)? == 0.0) as i32)))
+            }
+            other => Err(format!("function '{other}' not supported")),
         }
     }
 }
@@ -364,8 +550,120 @@ mod tests {
     }
 
     #[test]
+    fn scientific_notation_literals() {
+        // The Role-callout specimen (issue #15): `Height*9.2184490821108E-5`
+        // misparsed as `Height*9.2184-5` and threw an arc control point
+        // four inches below a 0.1-inch shape.
+        let e = env(); // Height = 1
+        assert_eq!(
+            eval("Height*9.2184490821108E-5", &e).unwrap().as_f64(),
+            Some(9.2184490821108E-5)
+        );
+        assert_eq!(eval("1E2", &e).unwrap().as_f64(), Some(100.0));
+        assert_eq!(eval("2.5e+3", &e).unwrap().as_f64(), Some(2500.0));
+        assert_eq!(eval("1E-2PT", &e).unwrap().as_f64(), Some(0.01 / 72.0));
+        // A trailing `E` that is not an exponent still falls back to the
+        // (unknown → 1.0) unit factor rather than breaking the number.
+        assert_eq!(eval("1.5", &e).unwrap().as_f64(), Some(1.5));
+    }
+
+    #[test]
     fn unsupported_falls_back_to_err() {
         assert!(eval("THEMEVAL(\"LineWeight\",0.24PT)", &env()).is_err());
         assert!(eval("Inh", &env()).is_err());
+    }
+
+    #[test]
+    fn comparisons_yield_one_or_zero() {
+        let e = env();
+        assert_eq!(eval("Width=2", &e).unwrap().as_f64(), Some(1.0));
+        assert_eq!(eval("Width<>2", &e).unwrap().as_f64(), Some(0.0));
+        assert_eq!(eval("Height<Width", &e).unwrap().as_f64(), Some(1.0));
+        assert_eq!(eval("Width<=2", &e).unwrap().as_f64(), Some(1.0));
+        assert_eq!(eval("Width>2", &e).unwrap().as_f64(), Some(0.0));
+        assert_eq!(eval("Width>=Height*2", &e).unwrap().as_f64(), Some(1.0));
+    }
+
+    #[test]
+    fn control_functions() {
+        let e = env();
+        assert_eq!(
+            eval("IF(Width=2, 10, 20)", &e).unwrap().as_f64(),
+            Some(10.0)
+        );
+        assert_eq!(
+            eval("IF(Width=3, 10, 20)", &e).unwrap().as_f64(),
+            Some(20.0)
+        );
+        assert_eq!(
+            eval("OR(Width=3, Height=1)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(
+            eval("OR(Width=3, Height=2)", &e).unwrap().as_f64(),
+            Some(0.0)
+        );
+        assert_eq!(
+            eval("AND(Width=2, Height=1)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
+        assert_eq!(eval("NOT(Width=3)", &e).unwrap().as_f64(), Some(1.0));
+        // GUARD transparently yields its protected expression.
+        assert_eq!(
+            eval("GUARD(4MM)", &e).unwrap().as_f64(),
+            Some(4.0 * 0.03937007874015748)
+        );
+        assert_eq!(
+            eval("THEMEGUARD(Width*0.5)", &e).unwrap().as_f64(),
+            Some(1.0)
+        );
+        // Unknown functions still error (callers fall back to cached V).
+        assert!(eval("SETF(GetRef(Width), 1)", &e).is_err());
+    }
+
+    #[test]
+    fn cross_sheet_references_resolve_from_env() {
+        // The Role-callout specimen (issue #15): a child stretched with its
+        // group evaluates `Sheet.5!Width*1` against the instance width.
+        let mut e = env();
+        e.insert("Sheet.5!Width".into(), 2.657480296178819);
+        e.insert("Sheet.5!User.InfoPanelHeight".into(), 0.2362204724409449);
+        assert_eq!(
+            eval("Sheet.5!Width*1", &e).unwrap().as_f64(),
+            Some(2.657480296178819)
+        );
+        assert_eq!(
+            eval("GUARD(Sheet.5!User.InfoPanelHeight)", &e)
+                .unwrap()
+                .as_f64(),
+            Some(0.2362204724409449)
+        );
+    }
+
+    #[test]
+    fn role_icon_y_specimen() {
+        // User.IconY from master5.xml, verbatim shape:
+        // IF(OR(User.ShapeLayout<>1), Height-User.InfoPanelHeight/2, User.InfoPanelHeight/2)
+        let mut e = env();
+        e.insert("User.ShapeLayout".into(), 0.0);
+        e.insert("User.InfoPanelHeight".into(), 0.2362204724409449);
+        // Height=1 from env(): 1 - 0.1181…
+        let v = eval(
+            "IF(OR(User.ShapeLayout<>1), Height-User.InfoPanelHeight/2, User.InfoPanelHeight/2)",
+            &e,
+        )
+        .unwrap()
+        .as_f64()
+        .unwrap();
+        assert!((v - (1.0 - 0.2362204724409449 / 2.0)).abs() < 1e-12);
+        e.insert("User.ShapeLayout".into(), 1.0);
+        let v = eval(
+            "IF(OR(User.ShapeLayout<>1), Height-User.InfoPanelHeight/2, User.InfoPanelHeight/2)",
+            &e,
+        )
+        .unwrap()
+        .as_f64()
+        .unwrap();
+        assert!((v - 0.2362204724409449 / 2.0).abs() < 1e-12);
     }
 }

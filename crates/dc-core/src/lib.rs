@@ -20,8 +20,8 @@ pub mod layers;
 pub mod scope;
 
 pub use commands::{
-    AddConnect, AddLayer, AddPage, AddShape, DuplicateShape, Macro, MovePage, ReorderShape,
-    RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, SetCell,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicateShape, Macro, MovePage, RemoveConnect,
+    RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, ReorderShape, SetCell,
     SetRowCell, SetText,
 };
 pub use connects::{Connect, Connects, ConnectsOwner};
@@ -52,7 +52,11 @@ pub struct History {
 
 impl History {
     pub fn new(limit: usize) -> History {
-        History { undo_stack: Vec::new(), redo_stack: Vec::new(), limit }
+        History {
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            limit,
+        }
     }
 
     /// Execute `cmd` against `doc`, push it on the undo stack, and clear
@@ -128,7 +132,10 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(doc: Document) -> Editor {
-        Editor { doc, history: History::new(100) }
+        Editor {
+            doc,
+            history: History::new(100),
+        }
     }
 
     /// Parse a package from disk.

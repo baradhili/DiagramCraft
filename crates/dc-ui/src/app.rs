@@ -8,12 +8,13 @@ use std::time::Duration;
 
 use dc_core::commands::{AddPage, AddShape, DuplicateShape, RemoveShape, ReorderShape};
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
-use dc_core::{Macro, SetCell, SetRowCell, SetText, Editor};
+use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
 use crate::canvas::{self, PageGeom, View};
 use crate::cmd::{AddMasterInstance, MoveShape};
+use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
@@ -32,6 +33,9 @@ pub struct App {
     sel_set: Vec<(i64, i64)>,
     drag: Option<DragState>,
     stencil: Stencil,
+    /// Stencil panel content rect from the last frame (resize-handle
+    /// target for the kittest re-wrap tests).
+    stencil_panel_inner: Rect,
     tex: TextureCache,
     mouse_page: Option<(f64, f64)>,
     status: String,
@@ -45,9 +49,11 @@ pub struct App {
     dialog: Option<PendingDialog>,
     /// Canvas area from the last frame (stencil drop target).
     canvas_rect: Rect,
-    /// File backstage view is open (green rail, Visio 2016).
+    /// File backstage view is open (green rail; 2010 three-band IA, #55).
     pub backstage: bool,
     backstage_page: BackPage,
+    /// Live query for the backstage New page's template search (#55).
+    backstage_search: String,
     /// "Save changes?" prompt before File → New discards a dirty doc.
     confirm_new: bool,
     /// Continue into a new blank drawing once the save-as dialog
@@ -56,13 +62,26 @@ pub struct App {
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
+    /// Last frame's context-menu rect in screen coords; None while the
+    /// menu is closed (kept for the placement tests, issue #49).
+    ctx_menu_rect: Option<egui::Rect>,
     /// In-app shape clipboard (Cut/Copy/Paste within DiagramCraft; rich
     /// OS-clipboard formats arrive with a later milestone).
     clipboard: Option<Shape>,
     /// Inline text editor target: (shape id, draft text).
     text_edit: Option<(i64, String)>,
+    /// The last canvas click placed a stencil master — a double-click
+    /// completing that click pair must not open a text editor.
+    placed_last_click: bool,
     /// Fill/Line color palette target (opened from the ribbon).
     color_pick: Option<ColorTarget>,
+    /// Most-recently-used files (start screen + backstage Open page).
+    /// Ephemeral in the headless constructors; `App::new` swaps in the
+    /// persistent on-disk list.
+    recent: RecentFiles,
+    /// OS light/dark watcher (GitHub #52). Production only — the
+    /// headless constructors leave it off so goldens are deterministic.
+    os_theme: Option<crate::os_theme::OsThemeWatcher>,
 }
 
 /// Which cell a ribbon palette click targets.
@@ -86,17 +105,37 @@ enum PendingKind {
 /// Backstage rail command.
 #[derive(Clone, Copy)]
 enum BackAction {
-    Close,
     Save,
     SaveAs,
     CloseDoc,
 }
 
-/// Backstage content page.
+/// Backstage content page (GitHub #55: 2010 three-band rail — commands
+/// above, destinations Info/Recent/New/Print/Share/Export, Options
+/// pinned below; 2016 functions folded in).
 #[derive(Clone, Copy, PartialEq)]
 enum BackPage {
+    Info,
+    Recent,
     New,
-    Open,
+    Print,
+    Share,
+    Export,
+}
+
+impl BackPage {
+    /// Rail label for tests (`set_backstage_page_for_test`).
+    fn from_test_name(name: &str) -> Option<BackPage> {
+        Some(match name {
+            "info" => BackPage::Info,
+            "recent" => BackPage::Recent,
+            "new" => BackPage::New,
+            "print" => BackPage::Print,
+            "share" => BackPage::Share,
+            "export" => BackPage::Export,
+            _ => return None,
+        })
+    }
 }
 
 struct DragState {
@@ -109,8 +148,26 @@ struct DragState {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
-        crate::theme::install(&cc.egui_ctx);
-        App::with_doc_opt(path)
+        // OS light/dark (GitHub #52): detect the opening mode (gsettings
+        // with the XDG portal as fallback; `detect` debug-prints the
+        // source), install BOTH style slots and select it — then follow
+        // runtime flips via a watcher thread. Linux only: elsewhere
+        // `detect` yields System and eframe tracks the OS natively.
+        let pref = crate::os_theme::detect();
+        crate::theme::install_for(&cc.egui_ctx, pref);
+        let mut app = App::with_doc_opt(None);
+        #[cfg(target_os = "linux")]
+        {
+            app.os_theme = Some(crate::os_theme::OsThemeWatcher::spawn());
+        }
+        // Production entry only: adopt the persistent on-disk MRU
+        // (tests and kittest constructors stay ephemeral so they never
+        // touch the user's real config dir).
+        app.recent = RecentFiles::open();
+        if let Some(p) = path {
+            app.load(p);
+        }
+        app
     }
 
     /// Headless-friendly constructor (theme applied by the host UI loop).
@@ -127,6 +184,7 @@ impl App {
             sel_set: Vec::new(),
             drag: None,
             stencil: Stencil::default(),
+            stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
             mouse_page: None,
             status: String::new(),
@@ -135,13 +193,18 @@ impl App {
             dialog: None,
             canvas_rect: Rect::NOTHING,
             backstage: false,
-            backstage_page: BackPage::New,
+            backstage_page: BackPage::Info,
+            backstage_search: String::new(),
             confirm_new: false,
             new_after_save: false,
             ctx_menu: None,
+            ctx_menu_rect: None,
             clipboard: None,
             text_edit: None,
+            placed_last_click: false,
             color_pick: None,
+            recent: RecentFiles::ephemeral(),
+            os_theme: None,
         };
         if let Some(p) = path {
             app.load(p);
@@ -176,6 +239,7 @@ impl App {
         match Editor::open(&path) {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
+                self.recent.record(&path);
                 self.ed = Some(ed);
                 self.path = path;
                 self.dirty = false;
@@ -208,9 +272,15 @@ impl App {
                         .and_then(|c| c.numeric())
                         .unwrap_or(0.0)
                 };
-                PageGeom { w_in: n("PageWidth").max(0.1), h_in: n("PageHeight").max(0.1) }
+                PageGeom {
+                    w_in: n("PageWidth").max(0.1),
+                    h_in: n("PageHeight").max(0.1),
+                }
             }
-            None => PageGeom { w_in: 8.5, h_in: 11.0 },
+            None => PageGeom {
+                w_in: 8.5,
+                h_in: 11.0,
+            },
         }
     }
 
@@ -331,7 +401,9 @@ impl App {
     /// while one is still open so the UI loop (and the window's event
     /// processing) never stalls behind it.
     fn poll_dialog(&mut self, ctx: &Context) {
-        let Some(dialog) = self.dialog.take() else { return };
+        let Some(dialog) = self.dialog.take() else {
+            return;
+        };
         let (path, again) = match &dialog {
             PendingDialog::Open(rx) | PendingDialog::SaveAs(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
@@ -372,6 +444,7 @@ impl App {
                 self.status = format!("saved {}", path.display());
                 self.dirty = false;
                 self.path = path.to_path_buf();
+                self.recent.record(path);
             }
             Err(e) => self.status = format!("save failed: {e:#}"),
         }
@@ -412,8 +485,12 @@ impl App {
 
     /// Selection frame in canvas rect space (inches, y-down origin).
     fn sel_extra_page_rects(&self) -> Vec<Rect> {
-        let Some(ed) = self.ed.as_ref() else { return Vec::new() };
-        let Some((page_id, primary)) = self.sel else { return Vec::new() };
+        let Some(ed) = self.ed.as_ref() else {
+            return Vec::new();
+        };
+        let Some((page_id, primary)) = self.sel else {
+            return Vec::new();
+        };
         let page_h = self.page_geom().h_in;
         self.sel_set
             .iter()
@@ -440,6 +517,26 @@ impl App {
         Some(Rect::from_min_size(
             Pos2::new(x as f32, (geom.h_in - y - h) as f32),
             Vec2::new(w as f32, h as f32),
+        ))
+    }
+
+    /// One shape's bbox in SCREEN coords (y-down), for anchoring the
+    /// context menu beside the shape (issue #49).
+    fn shape_screen_rect(&self, shape_id: i64) -> Option<egui::Rect> {
+        let ed = self.ed()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
+        let geom = self.page_geom();
+        let ppi = self.view.px_per_in();
+        let min = Pos2::new(
+            self.view.pan.x + x as f32 * ppi,
+            self.view.pan.y + (geom.h_in - y - h) as f32 * ppi,
+        );
+        Some(egui::Rect::from_min_size(
+            min,
+            Vec2::new(w as f32 * ppi, h as f32 * ppi),
         ))
     }
 
@@ -494,8 +591,7 @@ impl App {
             if ctrl && i.key_pressed(egui::Key::Y) {
                 self.do_redo();
             }
-            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned
-            {
+            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
             // Shape clipboard / duplicate / text edit (Visio keys). Not
@@ -566,7 +662,9 @@ impl App {
     /// shape whose bbox intersects joins the selection set.
     fn apply_marquee(&mut self, x0: f64, y0: f64, x1: f64, y1: f64) {
         let Some(ed) = self.ed() else { return };
-        let Some(page_id) = self.page_id() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         let mut picked = Vec::new();
         for shape in page.shapes.iter() {
@@ -586,16 +684,20 @@ impl App {
     /// page-inch delta (y-down); the opposite corner stays anchored and
     /// LocPin stays proportional (Visio's `Width*0.5` semantics).
     fn apply_resize(&mut self, corner: canvas::Corner, dx: f64, dy: f64) {
-        let Some((page_id, shape_id)) = self.sel else { return };
-        let Some(ed) = self.ed.as_ref() else { return };
-        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return };
-        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else { return };
-        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else { return };
-        let get = |n: &str| {
-            ed.doc
-                .resolve_cell(sh, &chain, n)
-                .and_then(|c| c.numeric())
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
         };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(px), Some(py), Some(w), Some(h), Some(lx), Some(ly)) = (
             get("PinX"),
             get("PinY"),
@@ -620,7 +722,7 @@ impl App {
         // position, selected by the dragged (screen-oriented) corner.
         // LocPin stays proportional (Visio's Width*0.5 semantics).
         let (ax, ay) = match corner {
-            canvas::Corner::TopLeft => (1.0, 0.0), // anchor bottom-right
+            canvas::Corner::TopLeft => (1.0, 0.0),  // anchor bottom-right
             canvas::Corner::TopRight => (0.0, 0.0), // anchor bottom-left
             canvas::Corner::BottomLeft => (1.0, 1.0), // anchor top-right
             canvas::Corner::BottomRight => (0.0, 1.0), // anchor top-left
@@ -630,7 +732,10 @@ impl App {
         let nly = ly * nh / h;
         let npx = anchor.0 - ax * nw + nlx;
         let npy = anchor.1 - ay * nh + nly;
-        let scope = Scope::Shape { page: page_id, shape: shape_id };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
         let cmds: Vec<Box<dyn dc_core::Command>> = vec![
             Box::new(SetCell::new(scope.clone(), "Width", cell(nw))),
@@ -655,7 +760,8 @@ impl App {
         if pressed {
             if let (Some(p), Some(d)) = (pointer, self.drag.as_mut()) {
                 let x_in = (p.x - self.view.pan.x) as f64 / self.view.px_per_in() as f64;
-                let y_up = geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
+                let y_up =
+                    geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
                 let new_pin = (x_in + d.grab_off.0, y_up + d.grab_off.1);
                 if (new_pin.0 - d.last_pin.0).abs() * self.view.px_per_in() as f64 > 0.5
                     || (new_pin.1 - d.last_pin.1).abs() * self.view.px_per_in() as f64 > 0.5
@@ -685,11 +791,12 @@ impl App {
                             vec![Box::new(MoveShape::new(page_id, d.shape, d.last_pin))];
                         for sid in others {
                             let page = &ed.doc.pages[self.page_idx];
-                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid)
-                            else {
+                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
                                 continue;
                             };
-                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                                continue;
+                            };
                             let get = |n: &str| {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
@@ -723,6 +830,7 @@ impl App {
     }
 
     fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool) {
+        self.placed_last_click = false;
         // Stencil placement takes priority.
         if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
             let new_id = self
@@ -732,6 +840,7 @@ impl App {
             self.apply(AddMasterInstance::new(page_id, master, page_pos));
             self.stencil.armed = None;
             self.ctx_menu = None;
+            self.placed_last_click = true;
             if let Some(nid) = new_id {
                 self.set_selection(Some((page_id, nid)));
                 self.sel_set = vec![(page_id, nid)];
@@ -796,6 +905,44 @@ impl App {
         }
     }
 
+    /// Double-click on the canvas (page inches, y-up): Visio's route into
+    /// a shape's linked text. The shape's `EventDblClick` formula,
+    /// resolved through the inheritance chain (instance → master, like
+    /// the Paragraph/Character handling), decides what happens.
+    fn on_canvas_dbl_click(&mut self, page_pos: (f64, f64)) {
+        // A stencil placement wins the click pair: its first click
+        // placed the master, and the pair must not also open an editor.
+        if self.stencil.armed.is_some() || self.placed_last_click {
+            self.placed_last_click = false;
+            return;
+        }
+        let Some(shape_id) = self.shape_hit(page_pos) else {
+            return;
+        };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        self.set_selection(Some((page_id, shape_id)));
+        let formula = self.ed.as_ref().and_then(|ed| {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+            let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+            ed.doc
+                .resolve_cell(sh, &chain, "EventDblClick")
+                .and_then(|c| c.f)
+        });
+        match classify_dbl_click(formula.as_deref()) {
+            DblClick::OpenText => {
+                // The F2 path reached by mouse: seed the draft and let
+                // `text_edit_window` run it.
+                let draft = self.selected_text(shape_id).unwrap_or_default();
+                self.text_edit = Some((shape_id, draft));
+                self.status = format!("editing text of shape {shape_id}");
+            }
+            DblClick::Deferred(msg) => self.status = msg,
+        }
+    }
+
     fn dispatch(&mut self, a: Action) {
         match a {
             Action::NewDoc => self.do_new(),
@@ -808,20 +955,30 @@ impl App {
                 if let Some(page_id) = self.page_id() {
                     let _ = page_id;
                 }
-                self.apply(AddPage::new(format!("Page-{}", self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1))));
+                self.apply(AddPage::new(format!(
+                    "Page-{}",
+                    self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1)
+                )));
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
                 }
             }
             Action::Delete => self.delete_selection(),
+            // Manual zooms leave fit mode: window resizes must not
+            // clobber the user's chosen view (Fit Page re-arms it).
             Action::ZoomIn => {
                 self.view.zoom = (self.view.zoom * 1.25).clamp(0.1, 8.0);
+                self.view.fit_mode = false;
             }
             Action::ZoomOut => {
                 self.view.zoom = (self.view.zoom / 1.25).clamp(0.1, 8.0);
+                self.view.fit_mode = false;
             }
-            Action::Zoom100 => self.view.zoom = 1.0,
+            Action::Zoom100 => {
+                self.view.zoom = 1.0;
+                self.view.fit_mode = false;
+            }
             Action::FitPage => self.view.fit_pending = true,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
@@ -833,9 +990,7 @@ impl App {
                 };
             }
             Action::ShowShapeSheet => self.show_shapesheet = !self.show_shapesheet,
-            Action::Macros => {
-                self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into()
-            }
+            Action::Macros => self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into(),
             Action::FillMenu | Action::LineMenu => {
                 self.color_pick = Some(if a == Action::FillMenu {
                     ColorTarget::Fill
@@ -854,18 +1009,27 @@ impl App {
 
     fn title_band(&mut self, ui: &mut Ui) {
         // Visio 2016: green band, tiny QAT (Save/Undo/Redo + chevron) at
-        // the far left, document title centered.
+        // the far left, document title centered. The brand green band
+        // stays green in dark mode (GitHub #52).
+        let t = theme::shell_tokens(ui.visuals());
         let name = self
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Drawing1".into());
-        let title = format!("{name} - DiagramCraft{}", if self.dirty { " *" } else { "" });
+        let title = format!(
+            "{name} - DiagramCraft{}",
+            if self.dirty { " *" } else { "" }
+        );
         egui::Panel::top("title_band")
-            .frame(egui::Frame::new().fill(theme::ACCENT).inner_margin(egui::Margin::symmetric(8, 2)))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.accent_band)
+                    .inner_margin(egui::Margin::symmetric(8, 2)),
+            )
             .show(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.set_height(26.0);
+                    ui.set_height(30.0);
                     qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
                     qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
                     qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
@@ -896,30 +1060,68 @@ impl App {
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {
-        // Visio 2016: File is a solid green block slightly taller than
-        // the strip; other tabs are plain text with an accent underline
-        // on the active one.
+        // Visio 2016 "Colorful" shell: a white strip where the File tab
+        // is a green block running flush up into the green title band
+        // (square top, rounded bottom corners — taller than the text
+        // tabs), the active tab carries the accent underline, and
+        // Office's "Tell me" search box sits at the strip's right end.
+        const STRIP_H: f32 = 28.0;
+        // `tk`: the for-loop below binds `t` for each Tab.
+        let tk = theme::shell_tokens(ui.visuals());
         egui::Panel::top("tab_strip")
-            .frame(egui::Frame::new().fill(theme::RIBBON_BG))
+            .frame(
+                egui::Frame::new()
+                    .fill(tk.ribbon_content)
+                    .inner_margin(egui::Margin::same(0)),
+            )
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add_space(6.0);
+                ui.horizontal_centered(|ui| {
+                    ui.set_min_height(STRIP_H);
+                    // File: a green block spanning the full strip height
+                    // — the green title band above makes it read as one
+                    // tall tab, like the Office File tab.
+                    let (fr, fresp) =
+                        ui.allocate_exact_size(Vec2::new(54.0, STRIP_H), Sense::click());
+                    ui.painter().rect_filled(
+                        fr,
+                        egui::CornerRadius {
+                            nw: 0,
+                            ne: 0,
+                            se: 2,
+                            sw: 2,
+                        },
+                        tk.accent_band,
+                    );
+                    ui.painter().text(
+                        fr.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "File",
+                        egui::FontId::proportional(12.5),
+                        Color32::WHITE,
+                    );
+                    if fresp.clicked() {
+                        self.backstage = true;
+                        // #55 landing rule (2010): Info with a document
+                        // open, Recent (welcome state) without one.
+                        self.backstage_page = if self.ed.is_some() {
+                            BackPage::Info
+                        } else {
+                            BackPage::Recent
+                        };
+                    }
+                    ui.add_space(8.0);
                     for t in TABS {
-                        let active = *t == self.tab;
                         if *t == Tab::File {
-                            let txt = egui::RichText::new("File").size(12.5).color(Color32::WHITE).strong();
-                            let b = egui::Button::new(txt).small().fill(theme::ACCENT).frame(true);
-                            if ui.add(b).clicked() {
-                                self.backstage = true;
-                            }
-                            ui.add_space(8.0);
                             continue;
                         }
-                        let txt = egui::RichText::new(t_title(*t)).size(12.0).color(if active {
-                            theme::ACCENT_DARK
-                        } else {
-                            Color32::from_rgb(70, 70, 70)
-                        });
+                        let active = *t == self.tab;
+                        let txt = egui::RichText::new(t_title(*t))
+                            .size(12.0)
+                            .color(if active {
+                                tk.accent_dark
+                            } else {
+                                tk.tab_strip_text
+                            });
                         let b = egui::Button::new(txt).small().frame(false);
                         let resp = ui.add_enabled(true, b);
                         if resp.clicked() {
@@ -927,10 +1129,47 @@ impl App {
                         }
                         let r = resp.rect;
                         if active {
-                            ui.painter().hline(r.left() + 2.0..=r.right() - 2.0, r.bottom(), Stroke::new(2.0, theme::ACCENT));
+                            ui.painter().hline(
+                                r.left() + 2.0..=r.right() - 2.0,
+                                r.bottom(),
+                                Stroke::new(2.0, tk.accent),
+                            );
                         }
                         ui.add_space(6.0);
                     }
+                    // Office's "Tell me what you want to do" search box.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_space(6.0);
+                        let (pr, presp) =
+                            ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
+                        let hot = presp.hovered();
+                        ui.painter().rect_filled(pr, 2, tk.tellme_bg);
+                        ui.painter().rect_stroke(
+                            pr,
+                            2,
+                            Stroke::new(1.0, if hot { tk.ruler_tick } else { tk.ribbon_edge }),
+                            egui::StrokeKind::Middle,
+                        );
+                        Icon::TellMe.paint(
+                            ui,
+                            Rect::from_min_size(
+                                pr.left_top() + Vec2::new(5.0, 3.0),
+                                Vec2::splat(14.0),
+                            ),
+                            true,
+                        );
+                        ui.painter().text(
+                            Pos2::new(pr.left() + 24.0, pr.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            "Tell me what you want to do",
+                            egui::FontId::proportional(11.0),
+                            tk.hint_text,
+                        );
+                        let presp = presp.on_hover_text("Tell Me — planned for a later milestone");
+                        if presp.clicked() {
+                            self.status = "Tell Me search arrives with a later milestone".into();
+                        }
+                    });
                 });
             });
     }
@@ -956,12 +1195,20 @@ impl App {
                             .tip("Clipboard — planned for a later milestone")),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Cut, "Cut", Action::Macros).enabled(false).tip("Clipboard — planned"),
-                                RibbonButton::new(Icon::Copy, "Copy", Action::Macros).enabled(false).tip("Clipboard — planned"),
+                                RibbonButton::new(Icon::Cut, "Cut", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Clipboard — planned"),
+                                RibbonButton::new(Icon::Copy, "Copy", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Clipboard — planned"),
                             ],
-                            vec![
-                                RibbonButton::new(Icon::Painter, "Format Painter", Action::Macros).enabled(false).tip("Format Painter — planned"),
-                            ],
+                            vec![RibbonButton::new(
+                                Icon::Painter,
+                                "Format Painter",
+                                Action::Macros,
+                            )
+                            .enabled(false)
+                            .tip("Format Painter — planned")],
                         ]),
                     ],
                 ),
@@ -969,70 +1216,140 @@ impl App {
                     "Font",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::FontA, "Calibri", Action::Macros).combo().width(128.0).enabled(false).tip("Font family — planned"),
-                            RibbonButton::new(Icon::FontA, "11", Action::Macros).combo().width(46.0).enabled(false).tip("Font size — planned"),
-                            RibbonButton::new(Icon::Grow, "", Action::FontGrow).enabled(has_sel).tip("Increase font size"),
-                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink).enabled(has_sel).tip("Decrease font size"),
-                            RibbonButton::new(Icon::ClearAll, "", Action::Macros).enabled(false).tip("Clear all formatting — planned"),
+                            RibbonButton::new(Icon::FontA, "Calibri", Action::Macros)
+                                .combo()
+                                .width(128.0)
+                                .enabled(false)
+                                .tip("Font family — planned"),
+                            RibbonButton::new(Icon::FontA, "11", Action::Macros)
+                                .combo()
+                                .width(46.0)
+                                .enabled(false)
+                                .tip("Font size — planned"),
+                            RibbonButton::new(Icon::Grow, "", Action::FontGrow)
+                                .enabled(has_sel)
+                                .tip("Increase font size"),
+                            RibbonButton::new(Icon::Shrink, "", Action::FontShrink)
+                                .enabled(has_sel)
+                                .tip("Decrease font size"),
+                            RibbonButton::new(Icon::ClearAll, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Clear all formatting — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Bold, "", Action::Macros).enabled(false).tip("Bold — planned"),
-                            RibbonButton::new(Icon::Italic, "", Action::Macros).enabled(false).tip("Italic — planned"),
-                            RibbonButton::new(Icon::Underline, "", Action::Macros).enabled(false).tip("Underline — planned"),
-                            RibbonButton::new(Icon::Strike, "", Action::Macros).enabled(false).tip("Strikethrough — planned"),
-                            RibbonButton::new(Icon::Subscript, "", Action::Macros).enabled(false).tip("Subscript — planned"),
-                            RibbonButton::new(Icon::Superscript, "", Action::Macros).enabled(false).tip("Superscript — planned"),
-                            RibbonButton::new(Icon::TextColor, "", Action::Macros).enabled(false).tip("Text color — planned"),
+                            RibbonButton::new(Icon::Bold, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Bold — planned"),
+                            RibbonButton::new(Icon::Italic, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Italic — planned"),
+                            RibbonButton::new(Icon::Underline, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Underline — planned"),
+                            RibbonButton::new(Icon::Strike, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Strikethrough — planned"),
+                            RibbonButton::new(Icon::Subscript, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Subscript — planned"),
+                            RibbonButton::new(Icon::Superscript, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Superscript — planned"),
+                            RibbonButton::new(Icon::TextColor, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Text color — planned"),
                         ],
                     ])],
-                ),
+                )
+                .with_launcher(),
                 crate::ribbon::Group::new(
                     "Paragraph",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Align, "", Action::Macros).enabled(false).tip("Align left — planned"),
-                            RibbonButton::new(Icon::AlignCenter, "", Action::Macros).enabled(false).tip("Align center — planned"),
-                            RibbonButton::new(Icon::AlignRight, "", Action::Macros).enabled(false).tip("Align right — planned"),
-                            RibbonButton::new(Icon::LineSpacing, "", Action::Macros).enabled(false).tip("Line spacing — planned"),
+                            RibbonButton::new(Icon::Align, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align left — planned"),
+                            RibbonButton::new(Icon::AlignCenter, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align center — planned"),
+                            RibbonButton::new(Icon::AlignRight, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Align right — planned"),
+                            RibbonButton::new(Icon::LineSpacing, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Line spacing — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Bullets, "", Action::Macros).enabled(false).tip("Bullets — planned"),
-                            RibbonButton::new(Icon::Numbering, "", Action::Macros).enabled(false).tip("Numbering — planned"),
-                            RibbonButton::new(Icon::IndentLess, "", Action::Macros).enabled(false).tip("Decrease indent — planned"),
-                            RibbonButton::new(Icon::IndentMore, "", Action::Macros).enabled(false).tip("Increase indent — planned"),
+                            RibbonButton::new(Icon::Bullets, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Bullets — planned"),
+                            RibbonButton::new(Icon::Numbering, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Numbering — planned"),
+                            RibbonButton::new(Icon::IndentLess, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Decrease indent — planned"),
+                            RibbonButton::new(Icon::IndentMore, "", Action::Macros)
+                                .enabled(false)
+                                .tip("Increase indent — planned"),
                         ],
                     ])],
-                ),
+                )
+                .with_launcher(),
                 crate::ribbon::Group::new(
                     "Shape Styles",
                     vec![
-                        big(RibbonButton::new(Icon::Theme, "Quick Styles", Action::Macros)
-                            .enabled(false)
-                            .tip("Style gallery — planned")),
+                        big(
+                            RibbonButton::new(Icon::Theme, "Quick Styles", Action::Macros)
+                                .enabled(false)
+                                .tip("Style gallery — planned"),
+                        ),
                         stack(vec![
-                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu).enabled(has_sel).tip("Shape fill color"),
-                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu).enabled(has_sel).tip("Line color"),
-                            RibbonButton::new(Icon::Effects, "Effects", Action::Macros).enabled(false).tip("Shape effects — planned"),
+                            RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu)
+                                .enabled(has_sel)
+                                .tip("Shape fill color"),
+                            RibbonButton::new(Icon::Pen, "Line", Action::LineMenu)
+                                .enabled(has_sel)
+                                .tip("Line color"),
+                            RibbonButton::new(Icon::Effects, "Effects", Action::Macros)
+                                .enabled(false)
+                                .tip("Shape effects — planned"),
                         ]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Arrange",
                     vec![
-                        big(RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
-                            .enabled(false)
-                            .tip("Z-order — planned")),
-                        big(RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
-                            .enabled(false)
-                            .tip("Z-order — planned")),
+                        big(
+                            RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
+                                .enabled(false)
+                                .tip("Z-order — planned"),
+                        ),
+                        big(
+                            RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
+                                .enabled(false)
+                                .tip("Z-order — planned"),
+                        ),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Align, "Align", Action::Macros).enabled(false).tip("Alignment — planned"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Right", Action::RotateRight).enabled(has_sel).tip("Rotate selection 90° clockwise"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft).enabled(has_sel).tip("Rotate selection 90° counter-clockwise"),
+                                RibbonButton::new(Icon::Align, "Align", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Alignment — planned"),
+                                RibbonButton::new(
+                                    Icon::Rotate,
+                                    "Rotate Right",
+                                    Action::RotateRight,
+                                )
+                                .enabled(has_sel)
+                                .tip("Rotate selection 90° clockwise"),
+                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft)
+                                    .enabled(has_sel)
+                                    .tip("Rotate selection 90° counter-clockwise"),
                             ],
                             vec![
-                                RibbonButton::new(Icon::Group, "Group", Action::Macros).enabled(false).tip("Grouping — planned"),
+                                RibbonButton::new(Icon::Group, "Group", Action::Macros)
+                                    .enabled(false)
+                                    .tip("Grouping — planned"),
                                 RibbonButton::new(Icon::Delete, "Delete", Action::Delete)
                                     .enabled(sel_active)
                                     .tip("Delete the selected shape (Del)"),
@@ -1045,17 +1362,29 @@ impl App {
                 crate::ribbon::Group::new(
                     "Blocks",
                     vec![
-                        big(RibbonButton::new(Icon::Container, "Container", Action::Macros).enabled(false).tip("Containers — planned")),
-                        big(RibbonButton::new(Icon::Callout, "Callout", Action::Macros).enabled(false).tip("Callouts — planned")),
+                        big(
+                            RibbonButton::new(Icon::Container, "Container", Action::Macros)
+                                .enabled(false)
+                                .tip("Containers — planned"),
+                        ),
+                        big(RibbonButton::new(Icon::Callout, "Callout", Action::Macros)
+                            .enabled(false)
+                            .tip("Callouts — planned")),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Illustrations",
                     vec![
-                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros).enabled(false).tip("Picture shapes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::OnlinePic, "Online Pictures", Action::Macros).enabled(false).tip("Picture shapes — planned"),
-                        ]),
+                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros)
+                            .enabled(false)
+                            .tip("Picture shapes — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::OnlinePic,
+                            "Online Pictures",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Picture shapes — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -1064,50 +1393,79 @@ impl App {
                         big(RibbonButton::new(Icon::TextBox, "Text Box", Action::Macros)
                             .enabled(false)
                             .tip("Text shapes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Field, "Field", Action::Macros).enabled(false).tip("Fields — planned"),
-                        ]),
+                        stack(vec![RibbonButton::new(
+                            Icon::Field,
+                            "Field",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Fields — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Pages",
-                    vec![big(RibbonButton::new(Icon::NewPage, "New Page", Action::NewPage).enabled(has_doc))],
+                    vec![big(RibbonButton::new(
+                        Icon::NewPage,
+                        "New Page",
+                        Action::NewPage,
+                    )
+                    .enabled(has_doc))],
                 ),
                 crate::ribbon::Group::new(
                     "Comments",
-                    vec![big(RibbonButton::new(Icon::Comment, "New Comment", Action::Macros).enabled(false).tip("Comments — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Comment,
+                        "New Comment",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Comments — planned"))],
                 ),
             ],
             Tab::Design => vec![
                 crate::ribbon::Group::new(
                     "Themes",
                     vec![
-                        big(RibbonButton::new(Icon::Theme, "Themes", Action::Macros).enabled(false).tip("Themes — planned")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Theme, "Variants", Action::Macros).enabled(false).tip("Theme variants — planned"),
-                        ]),
+                        big(RibbonButton::new(Icon::Theme, "Themes", Action::Macros)
+                            .enabled(false)
+                            .tip("Themes — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::Theme,
+                            "Variants",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Theme variants — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Page Setup",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros).enabled(false).tip("Page orientation — planned"),
-                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros).enabled(false).tip("Page size — planned"),
+                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros)
+                                .enabled(false)
+                                .tip("Page orientation — planned"),
+                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros)
+                                .enabled(false)
+                                .tip("Page size — planned"),
                         ],
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros).enabled(false).tip("Auto page size — planned"),
-                        ],
+                        vec![RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros)
+                            .enabled(false)
+                            .tip("Auto page size — planned")],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Backgrounds",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros).enabled(false).tip("Page backgrounds — planned"),
+                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros)
+                                .enabled(false)
+                                .tip("Page backgrounds — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros).enabled(false).tip("Borders & titles — planned"),
+                            RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros)
+                                .enabled(false)
+                                .tip("Borders & titles — planned"),
                         ],
                     ])],
                 ),
@@ -1116,53 +1474,91 @@ impl App {
                 crate::ribbon::Group::new(
                     "Display Data",
                     vec![
-                        big(RibbonButton::new(Icon::DataGraphic, "Data Graphic", Action::Macros).enabled(false).tip("Data graphics (M6)")),
-                        stack(vec![
-                            RibbonButton::new(Icon::Shapes, "Legend", Action::Macros).enabled(false).tip("Legends (M6)"),
-                        ]),
+                        big(
+                            RibbonButton::new(Icon::DataGraphic, "Data Graphic", Action::Macros)
+                                .enabled(false)
+                                .tip("Data graphics (M6)"),
+                        ),
+                        stack(vec![RibbonButton::new(
+                            Icon::Shapes,
+                            "Legend",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Legends (M6)")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "External Data",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Link, "Link Data to Shapes", Action::Macros).enabled(false).tip("Data linking (M6)"),
-                            RibbonButton::new(Icon::Refresh, "Refresh Data", Action::Macros).enabled(false).tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Link, "Link Data to Shapes", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Refresh, "Refresh Data", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros).enabled(false).tip("Data linking (M6)"),
+                            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros)
+                                .enabled(false)
+                                .tip("Data linking (M6)"),
                         ],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Show/Hide",
                     vec![stack(vec![
-                        RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros).enabled(false).tip("Shape data window (M6)"),
-                        RibbonButton::new(Icon::Units, "External Data Window", Action::Macros).enabled(false).tip("External data window (M6)"),
+                        RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros)
+                            .enabled(false)
+                            .tip("Shape data window (M6)"),
+                        RibbonButton::new(Icon::Units, "External Data Window", Action::Macros)
+                            .enabled(false)
+                            .tip("External data window (M6)"),
                     ])],
                 ),
             ],
             Tab::Process => vec![
                 crate::ribbon::Group::new(
                     "Cross-Functional Flowchart",
-                    vec![big(RibbonButton::new(Icon::Swimlane, "Swimlane", Action::Macros).enabled(false).tip("Swimlanes — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Swimlane,
+                        "Swimlane",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Swimlanes — planned"))],
                 ),
                 crate::ribbon::Group::new(
                     "Diagram Layout",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Re-layout Page", Action::Macros).enabled(false).tip("Auto layout — planned"),
+                            RibbonButton::new(Icon::Shapes, "Re-layout Page", Action::Macros)
+                                .enabled(false)
+                                .tip("Auto layout — planned"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Align, "Align & Space", Action::Macros).enabled(false).tip("Auto alignment — planned"),
+                            RibbonButton::new(Icon::Align, "Align & Space", Action::Macros)
+                                .enabled(false)
+                                .tip("Auto alignment — planned"),
                         ],
                     ])],
                 ),
                 crate::ribbon::Group::new(
                     "Validate",
                     vec![
-                        big(RibbonButton::new(Icon::Check, "Check Diagram", Action::Macros).enabled(false).tip("Diagram validation — planned")),
-                        stack(vec![RibbonButton::new(Icon::Open, "Import Flowchart Data", Action::Macros).enabled(false).tip("Flowchart data import — planned")]),
+                        big(
+                            RibbonButton::new(Icon::Check, "Check Diagram", Action::Macros)
+                                .enabled(false)
+                                .tip("Diagram validation — planned"),
+                        ),
+                        stack(vec![RibbonButton::new(
+                            Icon::Open,
+                            "Import Flowchart Data",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Flowchart data import — planned")]),
                     ],
                 ),
             ],
@@ -1170,13 +1566,27 @@ impl App {
                 crate::ribbon::Group::new(
                     "Proofing",
                     vec![
-                        big(RibbonButton::new(Icon::Spell, "Spelling", Action::Macros).enabled(false).tip("Spell check — planned")),
-                        stack(vec![RibbonButton::new(Icon::FontA, "Language", Action::Macros).enabled(false).tip("Language settings — planned")]),
+                        big(RibbonButton::new(Icon::Spell, "Spelling", Action::Macros)
+                            .enabled(false)
+                            .tip("Spell check — planned")),
+                        stack(vec![RibbonButton::new(
+                            Icon::FontA,
+                            "Language",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Language settings — planned")]),
                     ],
                 ),
                 crate::ribbon::Group::new(
                     "Comments",
-                    vec![big(RibbonButton::new(Icon::Comment, "New Comment", Action::Macros).enabled(false).tip("Comments — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Comment,
+                        "New Comment",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Comments — planned"))],
                 ),
             ],
             Tab::View => vec![
@@ -1184,12 +1594,18 @@ impl App {
                     "Show",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Rulers, "Rulers", Action::ToggleRulers).selected(self.view.show_rulers),
-                            RibbonButton::new(Icon::Grid, "Grid", Action::ToggleGrid).selected(self.view.show_grid),
+                            RibbonButton::new(Icon::Rulers, "Rulers", Action::ToggleRulers)
+                                .selected(self.view.show_rulers),
+                            RibbonButton::new(Icon::Grid, "Grid", Action::ToggleGrid)
+                                .selected(self.view.show_grid),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros).enabled(false).tip("Connection points — planned"),
-                            RibbonButton::new(Icon::Shapes, "Guides", Action::Macros).enabled(false).tip("Guides — planned"),
+                            RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros)
+                                .enabled(false)
+                                .tip("Connection points — planned"),
+                            RibbonButton::new(Icon::Shapes, "Guides", Action::Macros)
+                                .enabled(false)
+                                .tip("Guides — planned"),
                         ],
                     ])],
                 ),
@@ -1206,11 +1622,21 @@ impl App {
                 ),
                 crate::ribbon::Group::new(
                     "Visual Aids",
-                    vec![big(RibbonButton::new(Icon::Check, "Visual Aids", Action::Macros).enabled(false).tip("Snap & glue settings — planned"))],
+                    vec![big(RibbonButton::new(
+                        Icon::Check,
+                        "Visual Aids",
+                        Action::Macros,
+                    )
+                    .enabled(false)
+                    .tip("Snap & glue settings — planned"))],
                 ),
                 crate::ribbon::Group::new(
                     "Macros",
-                    vec![big(RibbonButton::new(Icon::Macro, "Macros", Action::Macros))],
+                    vec![big(RibbonButton::new(
+                        Icon::Macro,
+                        "Macros",
+                        Action::Macros,
+                    ))],
                 ),
             ],
             Tab::Developer => vec![
@@ -1218,14 +1644,20 @@ impl App {
                     "Show/Hide",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::ShapeSheet, "ShapeSheet", Action::ShowShapeSheet)
-                                .selected(self.show_shapesheet)
-                                .tip("Inspect the selected shape's cells"),
+                            RibbonButton::new(
+                                Icon::ShapeSheet,
+                                "ShapeSheet",
+                                Action::ShowShapeSheet,
+                            )
+                            .selected(self.show_shapesheet)
+                            .tip("Inspect the selected shape's cells"),
                             RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
                                 .tip("Toggle display units (model stays inches)"),
                         ],
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros).enabled(false).tip("Drawing explorer — planned"),
+                            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros)
+                                .enabled(false)
+                                .tip("Drawing explorer — planned"),
                         ],
                     ])],
                 ),
@@ -1233,12 +1665,16 @@ impl App {
                     "Shape Design",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros).enabled(false).tip("Boolean shape operations — planned"),
-                            RibbonButton::new(Icon::Group, "Behavior", Action::Macros).enabled(false).tip("Shape behavior — planned"),
+                            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros)
+                                .enabled(false)
+                                .tip("Boolean shape operations — planned"),
+                            RibbonButton::new(Icon::Group, "Behavior", Action::Macros)
+                                .enabled(false)
+                                .tip("Shape behavior — planned"),
                         ],
-                        vec![
-                            RibbonButton::new(Icon::Check, "Protection", Action::Macros).enabled(false).tip("Shape protection — planned"),
-                        ],
+                        vec![RibbonButton::new(Icon::Check, "Protection", Action::Macros)
+                            .enabled(false)
+                            .tip("Shape protection — planned")],
                     ])],
                 ),
                 crate::ribbon::Group::new(
@@ -1247,20 +1683,21 @@ impl App {
                         big(RibbonButton::new(Icon::Macro, "Macros", Action::Macros)
                             .enabled(false)
                             .tip("VBA macros arrive with M7 (.vsdm)")),
-                        stack(vec![RibbonButton::new(Icon::Link, "Add-ins", Action::Macros)
-                            .enabled(false)
-                            .tip("Real Visio add-in hosting arrives with M8")]),
+                        stack(vec![RibbonButton::new(
+                            Icon::Link,
+                            "Add-ins",
+                            Action::Macros,
+                        )
+                        .enabled(false)
+                        .tip("Real Visio add-in hosting arrives with M8")]),
                     ],
                 ),
             ],
         };
         let mut launcher: Option<&'static str> = None;
-        crate::ribbon::content_row(
-            ui,
-            &groups,
-            &mut |a| dispatch(a, &mut act),
-            &mut |label| launcher = Some(label),
-        );
+        crate::ribbon::content_row(ui, &groups, &mut |a| dispatch(a, &mut act), &mut |label| {
+            launcher = Some(label)
+        });
         if let Some(label) = launcher {
             self.status = format!("{label} dialog — planned for a later milestone");
         }
@@ -1271,26 +1708,35 @@ impl App {
     }
 
     fn page_tabs(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             let tabs: Vec<(String, i64)> = self
                 .ed
                 .as_ref()
-                .map(|ed| ed.doc.pages.iter().map(|p| (p.name.clone(), p.id)).collect())
+                .map(|ed| {
+                    ed.doc
+                        .pages
+                        .iter()
+                        .map(|p| (p.name.clone(), p.id))
+                        .collect()
+                })
                 .unwrap_or_default();
             if !tabs.is_empty() {
                 for (i, (name, _id)) in tabs.iter().enumerate() {
                     let active = i == self.page_idx;
                     let txt = egui::RichText::new(name).size(11.5).color(if active {
-                        Color32::from_rgb(30, 30, 30)
+                        t.tab_text_active
                     } else {
-                        Color32::from_rgb(90, 90, 90)
+                        t.tab_text_inactive
                     });
                     let b = egui::Button::new(txt)
                         .small()
-                        .fill(if active { theme::TAB_ACTIVE } else { theme::TABS_BG })
+                        .fill(if active { t.tab_active } else { t.tabs_bg })
                         .frame(true);
-                    let resp = ui.add(b).on_hover_text(format!("page {} (id {})", i + 1, _id));
+                    let resp = ui
+                        .add(b)
+                        .on_hover_text(format!("page {} (id {})", i + 1, _id));
                     if resp.clicked() {
                         self.page_idx = i;
                         self.set_selection(None);
@@ -1305,6 +1751,7 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
         ui.horizontal_centered(|ui| {
             let mut left;
             if let Some(ed) = self.ed() {
@@ -1313,7 +1760,16 @@ impl App {
                     "Page {} of {}    {}",
                     self.page_idx + 1,
                     ed.doc.pages.len(),
-                    self.view.unit.fmt(geom.w_in) + " × " + &self.view.unit.fmt(geom.h_in).replace(" mm", "").replace(" in", "") + " " + self.view.unit.suffix(),
+                    self.view.unit.fmt(geom.w_in)
+                        + " × "
+                        + &self
+                            .view
+                            .unit
+                            .fmt(geom.h_in)
+                            .replace(" mm", "")
+                            .replace(" in", "")
+                        + " "
+                        + self.view.unit.suffix(),
                 );
                 if let Some((_, sid)) = self.sel {
                     if let Some(page) = ed.doc.pages.get(self.page_idx) {
@@ -1339,14 +1795,14 @@ impl App {
             } else {
                 left = "no document".into();
             }
-            ui.label(egui::RichText::new(left).color(theme::STATUS_TEXT).size(11.0));
+            ui.label(egui::RichText::new(left).color(t.status_text).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Visio status bar right end: − [zoom slider] + N%
                 if self.ed.is_some() {
                     let pct = (self.view.zoom * 100.0).round() as u32;
                     ui.label(
                         egui::RichText::new(format!("{pct}%"))
-                            .color(theme::STATUS_TEXT)
+                            .color(t.status_text)
                             .size(11.0)
                             .strong(),
                     );
@@ -1355,6 +1811,7 @@ impl App {
                     let sresp = ui.add_sized([110.0, 14.0], slider).on_hover_text("Zoom");
                     if sresp.changed() {
                         self.view.zoom = z.clamp(0.1, 8.0);
+                        self.view.fit_mode = false;
                     }
                     if ui.button("−").on_hover_text("Zoom Out").clicked() {
                         self.dispatch(Action::ZoomOut);
@@ -1367,7 +1824,7 @@ impl App {
                 if let Some((x, y)) = self.mouse_page {
                     ui.label(
                         egui::RichText::new(self.view.unit.fmt_pt(x, y))
-                            .color(theme::STATUS_TEXT)
+                            .color(t.status_text)
                             .size(11.0),
                     );
                 } else {
@@ -1386,7 +1843,13 @@ impl App {
                 return;
             };
             let Some(ed) = self.ed() else { return };
-            let Ok(sheet) = scope_sheet(&ed.doc, &Scope::Shape { page: page_id, shape: shape_id }) else {
+            let Ok(sheet) = scope_sheet(
+                &ed.doc,
+                &Scope::Shape {
+                    page: page_id,
+                    shape: shape_id,
+                },
+            ) else {
                 ui.label("shape not found");
                 return;
             };
@@ -1474,6 +1937,42 @@ impl App {
         });
     }
 
+    /// The Recent list shared by the start screen and the backstage
+    /// Open page: one row per MRU entry, click to reopen. Files that no
+    /// longer exist stay listed but ghosted (Visio-style) rather than
+    /// being silently dropped. Returns the clicked path, if any.
+    fn recent_list_ui(&self, ui: &mut Ui) -> Option<PathBuf> {
+        if self.recent.entries().is_empty() {
+            ui.weak("Files you open will appear here.");
+            return None;
+        }
+        let mut clicked = None;
+        for p in self.recent.entries() {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| p.display().to_string());
+            let missing = !p.exists();
+            // Theme-aware: the start screen's central area follows the
+            // egui visuals (dark by default), so live entries take the
+            // normal text color and ghosts the weak one — the same
+            // pairing the empty-list placeholder uses.
+            let txt = if missing {
+                egui::RichText::new(name).color(ui.visuals().weak_text_color())
+            } else {
+                egui::RichText::new(name)
+            };
+            if ui
+                .button(txt)
+                .on_hover_text(p.display().to_string())
+                .clicked()
+            {
+                clicked = Some(p.clone());
+            }
+        }
+        clicked
+    }
+
     fn central(&mut self, ui: &mut Ui) {
         if self.ed.is_none() {
             // Visio 2016 start screen shape: Recent on the left,
@@ -1484,7 +1983,9 @@ impl App {
                     ui.add_space(24.0);
                     ui.heading("Recent");
                     ui.add_space(6.0);
-                    ui.weak("Files you open will appear here.");
+                    if let Some(p) = self.recent_list_ui(ui) {
+                        self.load(p);
+                    }
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     ui.vertical(|ui| {
@@ -1545,7 +2046,9 @@ impl App {
             }
         };
         let mut mouse = self.mouse_page;
-        let App { view, ed, page_idx, .. } = self;
+        let App {
+            view, ed, page_idx, ..
+        } = self;
         let ed = ed.as_ref();
         let page = ed.map(|e| &e.doc.pages[(*page_idx).min(e.doc.pages.len().saturating_sub(1))]);
         let hit = |pos: (f64, f64)| -> bool {
@@ -1575,7 +2078,12 @@ impl App {
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
-        if let Some(pos) = out.click_page_pos {
+        if let Some(pos) = out.dbl_click_page_pos {
+            // The second click of the pair completes a double-click
+            // instead of a plain click: the first click already ran its
+            // select (and possible drag-start) semantics on its frame.
+            self.on_canvas_dbl_click(pos);
+        } else if let Some(pos) = out.click_page_pos {
             self.on_canvas_click(pos, out.shift_click);
         }
         if let Some((x0, y0, x1, y1)) = out.marquee_done {
@@ -1613,28 +2121,28 @@ impl App {
     /// menu with these.
     fn master_actions(&self, shape_id: i64) -> Vec<(String, bool)> {
         fn collect(self_: &App, shape_id: i64) -> Option<Vec<(String, bool)>> {
-        fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
-            for sec in sh.sheet.sections_named("Actions") {
-                for row in &sec.rows {
-                    let Some(menu) = row
-                        .cell("Menu")
-                        .and_then(|c| c.v.clone())
-                        .map(|t| t.trim().to_owned())
-                        .filter(|t| !t.is_empty())
-                    else {
-                        continue;
-                    };
-                    if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
-                        continue;
+            fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
+                for sec in sh.sheet.sections_named("Actions") {
+                    for row in &sec.rows {
+                        let Some(menu) = row
+                            .cell("Menu")
+                            .and_then(|c| c.v.clone())
+                            .map(|t| t.trim().to_owned())
+                            .filter(|t| !t.is_empty())
+                        else {
+                            continue;
+                        };
+                        if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
+                            continue;
+                        }
+                        let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
+                        out.push((menu, child));
                     }
-                    let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
-                    out.push((menu, child));
+                }
+                for sub in &sh.sub_shapes {
+                    walk(sub, out);
                 }
             }
-            for sub in &sh.sub_shapes {
-                walk(sub, out);
-            }
-        }
             let ed = self_.ed.as_ref()?;
             let page = ed.doc.pages.get(self_.page_idx)?;
             let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
@@ -1654,9 +2162,15 @@ impl App {
         let Some(ed) = self.ed.as_ref() else { return };
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
-            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
-            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
-            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+                continue;
+            };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                continue;
+            };
             let sheet = ed.doc.effective_sheet(sh, &chain);
             let cur = sheet
                 .sections_named("Character")
@@ -1667,7 +2181,10 @@ impl App {
                 .unwrap_or(0.13888);
             let next = ((cur * 72.0 + delta_pt).max(4.0).min(200.0)) / 72.0;
             cmds.push(Box::new(SetRowCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 "Character",
                 0,
                 dc_core::commands::RowSel::Ix(0),
@@ -1686,9 +2203,15 @@ impl App {
         let Some(ed) = self.ed.as_ref() else { return };
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
-            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { continue };
-            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else { continue };
-            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else { continue };
+            let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+                continue;
+            };
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                continue;
+            };
             let cur = ed
                 .doc
                 .resolve_cell(sh, &chain, "Angle")
@@ -1696,7 +2219,10 @@ impl App {
                 .unwrap_or(0.0);
             let next = cur + deg.to_radians();
             cmds.push(Box::new(SetCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 "Angle",
                 vsdx::Cell::value(format!("{next:.8}")),
             )));
@@ -1716,7 +2242,10 @@ impl App {
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         for (page_id, sid) in targets {
             cmds.push(Box::new(SetCell::new(
-                Scope::Shape { page: page_id, shape: sid },
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
                 cell_name,
                 vsdx::Cell::value(color.to_owned()),
             )));
@@ -1728,7 +2257,10 @@ impl App {
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
     fn shape_context_menu(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, anchor, _page_pos)) = self.ctx_menu else { return };
+        let Some((shape_id, pointer_anchor, _page_pos)) = self.ctx_menu else {
+            self.ctx_menu_rect = None;
+            return;
+        };
         let has_clip = self.clipboard.is_some();
         // Master-defined actions (the ShapeSheet Actions section) head the
         // menu in Visio — e.g. the Capability master's "Shape Layout"
@@ -1752,18 +2284,56 @@ impl App {
             ShapeSheet,
         }
         let mut act: Option<Act> = None;
-        let popup = egui::Popup::new(
+        // Min menu width incl. frame, until the popup reports its own
+        // measured size (used only for the right-edge flip decision).
+        const MENU_MIN_W: f32 = 244.0;
+        let mut menu = egui::Popup::new(
             egui::Id::new("dc-shape-ctx-menu"), // stable per-menu id is intended
             ctx.clone(),
-            anchor,
+            pointer_anchor,
             egui::LayerId::background(),
         )
         .kind(egui::PopupKind::Menu)
         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
+        // Cap the sizing pass: menu rows stretch to available width, so
+        // without this the first frame balloons the menu to the viewport
+        // width and it covers the page (the pre-#49 symptom).
+        .width(232.0);
+        // Visio anchors the menu just outside the shape's top-right
+        // corner, mirroring to the top-left corner when the right screen
+        // edge is too close (issue #49). Anchoring to the shape's live
+        // rect keeps the menu glued to it through zoom/pan; if the rect
+        // cannot be resolved, fall back to the pointer position like a
+        // classic context menu (egui defaults). Alternatives stay empty
+        // so the corner anchor is deterministic.
+        if let Some(r) = self.shape_screen_rect(shape_id) {
+            let menu_w = menu
+                .get_expected_size()
+                .map_or(MENU_MIN_W, |s| s.x.max(MENU_MIN_W));
+            // The popup Area is constrained into the content rect, so
+            // measure room against the same rect.
+            let room_right = ctx.content_rect().right() - r.right() >= menu_w;
+            menu = menu
+                .anchor(r)
+                .gap(2.0)
+                .align(if room_right {
+                    egui::RectAlign::RIGHT_START
+                } else {
+                    egui::RectAlign::LEFT_START
+                })
+                .align_alternatives(&[]);
+        }
+        let popup = menu.show(|ui| {
             ui.set_min_width(232.0);
+            // Menu colors resolve from the live visuals via the theme
+            // mapping, so the popup follows a light/dark switch (GitHub
+            // #48) instead of assuming Visio-light surroundings.
+            let tokens = theme::menu_tokens(ui.visuals());
             ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
-            ui.visuals_mut().widgets.hovered.bg_fill = egui::Color32::from_rgb(206, 227, 212);
+            ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
+            // separators ride the token too (egui's dark default is too
+            // faint on the dark menu fill)
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
             for (menu, child) in &actions {
@@ -1777,7 +2347,13 @@ impl App {
             if !actions.is_empty() {
                 ui.separator();
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::ShapeSheet), "Show ShapeSheet", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::ShapeSheet),
+                "Show ShapeSheet",
+                "",
+                true,
+            ) {
                 act = Some(Act::ShapeSheet);
             }
             ui.separator();
@@ -1787,7 +2363,13 @@ impl App {
             if ctx_item(ui, Some(crate::ribbon::Icon::Copy), "Copy", "Ctrl+C", true) {
                 act = Some(Act::Copy);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Paste), "Paste", "Ctrl+V", has_clip) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Paste),
+                "Paste",
+                "Ctrl+V",
+                has_clip,
+            ) {
                 act = Some(Act::Paste);
             }
             if ctx_item(ui, None, "Duplicate", "Ctrl+D", true) {
@@ -1797,17 +2379,41 @@ impl App {
                 act = Some(Act::Delete);
             }
             ui.separator();
-            if ctx_item(ui, Some(crate::ribbon::Icon::BringFront), "Bring to Front", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::BringFront),
+                "Bring to Front",
+                "",
+                true,
+            ) {
                 act = Some(Act::Front);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::SendBack), "Send to Back", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::SendBack),
+                "Send to Back",
+                "",
+                true,
+            ) {
                 act = Some(Act::Back);
             }
             ui.separator();
-            if ctx_item(ui, Some(crate::ribbon::Icon::Rotate), "Rotate Right 90°", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Rotate),
+                "Rotate Right 90°",
+                "",
+                true,
+            ) {
                 act = Some(Act::Rot(-std::f64::consts::FRAC_PI_2));
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Rotate), "Rotate Left 90°", "", true) {
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Rotate),
+                "Rotate Left 90°",
+                "",
+                true,
+            ) {
                 act = Some(Act::Rot(std::f64::consts::FRAC_PI_2));
             }
             if ctx_item(ui, None, "Flip Vertical", "", true) {
@@ -1828,11 +2434,17 @@ impl App {
                 act = Some(Act::EditText);
             }
         });
+        self.ctx_menu_rect = popup.as_ref().map(|ir| ir.response.rect);
         // Close on an outside primary click; a right-click elsewhere
         // re-anchors through central()'s handler.
         let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
         if let Some(ir) = &popup {
-            if outside_primary && !ir.response.rect.contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default()) {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
                 self.ctx_menu = None;
             }
         }
@@ -1866,7 +2478,10 @@ impl App {
             Act::Rot(delta) => {
                 let cur = self.selected_cell(shape_id, "Angle").unwrap_or(0.0);
                 self.apply(SetCell::new(
-                    Scope::Shape { page: page_id, shape: shape_id },
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
                     "Angle",
                     vsdx::Cell::value(format!("{:.10}", cur + delta)),
                 ));
@@ -1875,7 +2490,10 @@ impl App {
                 let name = if a == Act::FlipV { "FlipY" } else { "FlipX" };
                 let cur = self.selected_cell(shape_id, name).unwrap_or(0.0);
                 self.apply(SetCell::new(
-                    Scope::Shape { page: page_id, shape: shape_id },
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
                     name,
                     vsdx::Cell::value(if cur != 0.0 { "0" } else { "1" }),
                 ));
@@ -1890,9 +2508,13 @@ impl App {
 
     /// Deep-clone the selected shape into the in-app clipboard.
     fn copy_selection(&mut self) {
-        let Some((page_id, shape_id)) = self.sel else { return };
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
         let Some(ed) = self.ed.as_ref() else { return };
-        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) {
             self.clipboard = Some(s.clone());
         }
@@ -1901,7 +2523,9 @@ impl App {
     /// Paste the clipboard shape as a fresh instance (new id, nudged pin),
     /// top of the z-order, and select it.
     fn paste_clipboard(&mut self, page_id: i64) {
-        let Some(clip) = self.clipboard.clone() else { return };
+        let Some(clip) = self.clipboard.clone() else {
+            return;
+        };
         let Some(ed) = self.ed.as_ref() else { return };
         let mut pasted = clip;
         pasted.id = dc_core::commands::next_shape_id(&ed.doc, page_id);
@@ -1912,10 +2536,16 @@ impl App {
                 .and_then(|c| c.numeric())
                 .unwrap_or(1.0)
                 + dv;
-            pasted.sheet.set_cell(name, vsdx::Cell::value(format!("{v}")));
+            pasted
+                .sheet
+                .set_cell(name, vsdx::Cell::value(format!("{v}")));
         }
         let new_id = pasted.id;
-        self.apply(AddShape { page: page_id, parent: None, shape: pasted });
+        self.apply(AddShape {
+            page: page_id,
+            parent: None,
+            shape: pasted,
+        });
         self.set_selection(Some((page_id, new_id)));
     }
 
@@ -1926,7 +2556,9 @@ impl App {
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let s = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
         let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
-        ed.doc.resolve_cell(s, &chain, name).and_then(|c| c.numeric())
+        ed.doc
+            .resolve_cell(s, &chain, name)
+            .and_then(|c| c.numeric())
     }
 
     /// Current text of a shape (draft seed for the Edit Text dialog).
@@ -1950,6 +2582,35 @@ impl App {
     #[doc(hidden)]
     pub fn debug_master_cells(&self) -> Vec<(i64, Rect)> {
         self.stencil.cell_rects.clone()
+    }
+    /// Column count of the last stencil layout, re-derived from the
+    /// actual cell rects (distinct column x positions) so tests check
+    /// the rendered layout, not a stored number (GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_cols(&self) -> usize {
+        let mut xs: Vec<f32> = self
+            .stencil
+            .cell_rects
+            .iter()
+            .map(|(_, r)| r.left())
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs.dedup_by(|a, b| (*a - *b).abs() < 0.5);
+        xs.len()
+    }
+    /// Width the last stencil layout wrapped into (pane content width
+    /// minus the scrollbar allowance) — the input tests use to
+    /// re-derive the expected column count (GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_wrap_width(&self) -> f32 {
+        self.stencil.last_wrap_width
+    }
+    /// Stencil panel content rect from the last frame; its right edge
+    /// plus the 6px frame margin is the panel's resize handle (the
+    /// kittest re-wrap tests drag it, GitHub #53).
+    #[doc(hidden)]
+    pub fn debug_stencil_panel_inner_rect(&self) -> Rect {
+        self.stencil_panel_inner
     }
     #[doc(hidden)]
     pub fn debug_canvas_rect(&self) -> Rect {
@@ -1975,11 +2636,15 @@ impl App {
     }
     #[doc(hidden)]
     pub fn debug_sel_width(&self) -> f64 {
-        self.sel_page_rect().map(|r| r.width() as f64).unwrap_or(0.0)
+        self.sel_page_rect()
+            .map(|r| r.width() as f64)
+            .unwrap_or(0.0)
     }
     #[doc(hidden)]
     pub fn debug_sel_height(&self) -> f64 {
-        self.sel_page_rect().map(|r| r.height() as f64).unwrap_or(0.0)
+        self.sel_page_rect()
+            .map(|r| r.height() as f64)
+            .unwrap_or(0.0)
     }
     #[doc(hidden)]
     pub fn debug_sel_tl_corner(&self) -> Option<egui::Pos2> {
@@ -1990,6 +2655,17 @@ impl App {
             self.view.pan.y + r.top() as f32 * ppi,
         ))
     }
+    /// One shape's bbox in SCREEN coords (context-menu placement tests).
+    #[doc(hidden)]
+    pub fn debug_shape_screen_rect(&self, shape_id: i64) -> Option<egui::Rect> {
+        self.shape_screen_rect(shape_id)
+    }
+    /// Context-menu rect from the last frame; None while closed
+    /// (placement tests, issue #49).
+    #[doc(hidden)]
+    pub fn debug_ctx_menu_rect(&self) -> Option<egui::Rect> {
+        self.ctx_menu_rect
+    }
     #[doc(hidden)]
     pub fn debug_armed(&self) -> Option<i64> {
         self.stencil.armed
@@ -1998,10 +2674,65 @@ impl App {
     pub fn debug_carry(&self) -> Option<i64> {
         self.stencil.carry
     }
+    /// MRU entries, most recent first (recent-files tests).
+    #[doc(hidden)]
+    pub fn debug_recent(&self) -> &[PathBuf] {
+        self.recent.entries()
+    }
+    /// Adopt an MRU verbatim, never persisted (kittest snapshot of the
+    /// populated Recent panes).
+    #[doc(hidden)]
+    pub fn set_recent_for_test(&mut self, files: Vec<PathBuf>) {
+        self.recent.set_entries_for_test(files);
+    }
+    /// kittest: pin the displayed document path so the backstage Info
+    /// page renders a fixed Location instead of the test's random
+    /// tempdir (goldens must be identical on every OS/runner).
+    #[doc(hidden)]
+    pub fn set_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
+    }
+    /// kittest: enter the backstage exactly like the File tab does —
+    /// the #55 landing rule included (Info with a document, Recent
+    /// without one).
+    #[doc(hidden)]
+    pub fn open_backstage_for_test(&mut self) {
+        self.backstage = true;
+        self.backstage_page = if self.ed.is_some() {
+            BackPage::Info
+        } else {
+            BackPage::Recent
+        };
+    }
+    /// kittest: jump straight to one backstage page ("info" | "recent"
+    /// | "new" | "print" | "share" | "export").
+    #[doc(hidden)]
+    pub fn set_backstage_page_for_test(&mut self, name: &str) {
+        if let Some(p) = BackPage::from_test_name(name) {
+            self.backstage_page = p;
+        }
+    }
+    /// kittest: whether the File backstage is showing.
+    #[doc(hidden)]
+    pub fn debug_backstage(&self) -> bool {
+        self.backstage
+    }
+    /// Current canvas zoom (fit-mode interaction tests).
+    #[doc(hidden)]
+    pub fn debug_zoom(&self) -> f32 {
+        self.view.zoom
+    }
+    /// A shape's current text (double-click edit tests).
+    #[doc(hidden)]
+    pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
+        self.selected_text(shape_id)
+    }
 
     /// The inline text editor opened by Edit Text… (Visio F2).
     fn text_edit_window(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, mut draft)) = self.text_edit.take() else { return };
+        let Some((shape_id, mut draft)) = self.text_edit.take() else {
+            return;
+        };
         let mut apply = false;
         let mut cancel = false;
         let mut open = true;
@@ -2012,6 +2743,7 @@ impl App {
             .show(ctx, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut draft)
+                        .hint_text("Shape text")
                         .desired_rows(5)
                         .desired_width(f32::INFINITY),
                 );
@@ -2028,7 +2760,13 @@ impl App {
         let _ = win;
         if apply {
             if let Some(page_id) = self.page_id() {
-                self.apply(SetText::new(Scope::Shape { page: page_id, shape: shape_id }, draft));
+                self.apply(SetText::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: shape_id,
+                    },
+                    draft,
+                ));
             }
         } else if cancel || !open {
             // discarded
@@ -2039,7 +2777,9 @@ impl App {
 
     /// The Visio theme palette shown by the ribbon Fill/Line buttons.
     fn color_palette_window(&mut self, ctx: &egui::Context) {
-        let Some(target) = self.color_pick else { return };
+        let Some(target) = self.color_pick else {
+            return;
+        };
         let mut open = true;
         egui::Window::new(match target {
             ColorTarget::Fill => "Fill Color",
@@ -2049,27 +2789,35 @@ impl App {
         .open(&mut open)
         .show(ctx, |ui| {
             let theme_colors = [
-                "#000000", "#FFFFFF", "#EEEEEE", "#969696",
-                "#4472C4", "#5B9BD5", "#70AD47", "#ED7D31",
-                "#FFC000", "#FF0000", "#7030A0", "#00B0F0",
-                "#FFF2CC", "#DEEAF6", "#E2EFDA", "#FCE4D6",
+                "#000000", "#FFFFFF", "#EEEEEE", "#969696", "#4472C4", "#5B9BD5", "#70AD47",
+                "#ED7D31", "#FFC000", "#FF0000", "#7030A0", "#00B0F0", "#FFF2CC", "#DEEAF6",
+                "#E2EFDA", "#FCE4D6",
             ];
-            egui::Grid::new("theme-palette").num_columns(8).spacing([6.0, 6.0]).show(ui, |ui| {
-                for (i, c) in theme_colors.iter().enumerate() {
-                    // from_hex requires the leading '#'.
-                    let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
-                    let (r, resp) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
-                    ui.painter().rect_filled(r, 2.0, color);
-                    ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, Color32::from_gray(120)), egui::StrokeKind::Middle);
-                    if resp.clicked() {
-                        self.apply_color(target, c);
-                        self.color_pick = None;
+            egui::Grid::new("theme-palette")
+                .num_columns(8)
+                .spacing([6.0, 6.0])
+                .show(ui, |ui| {
+                    for (i, c) in theme_colors.iter().enumerate() {
+                        // from_hex requires the leading '#'.
+                        let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
+                        let (r, resp) =
+                            ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                        ui.painter().rect_filled(r, 2.0, color);
+                        ui.painter().rect_stroke(
+                            r,
+                            2.0,
+                            Stroke::new(1.0, Color32::from_gray(120)),
+                            egui::StrokeKind::Middle,
+                        );
+                        if resp.clicked() {
+                            self.apply_color(target, c);
+                            self.color_pick = None;
+                        }
+                        if i % 8 == 7 {
+                            ui.end_row();
+                        }
                     }
-                    if i % 8 == 7 {
-                        ui.end_row();
-                    }
-                }
-            });
+                });
         });
         if !open {
             self.color_pick = None;
@@ -2082,7 +2830,9 @@ impl App {
     /// place an instance there. Click-to-arm then click-to-place still
     /// works alongside this.
     fn stencil_carry(&mut self, ctx: &Context) {
-        let Some(master) = self.stencil.carry else { return };
+        let Some(master) = self.stencil.carry else {
+            return;
+        };
         let (down, released, pos) = ctx.input(|i| {
             (
                 i.pointer.primary_down(),
@@ -2105,7 +2855,8 @@ impl App {
                 let (w, h) = master_size(&ed.doc, master);
                 let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
                 let r = Rect::from_center_size(p, size);
-                let layer = egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
+                let layer =
+                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
                 let painter = ctx.layer_painter(layer);
                 let tex = stencil.texture(ctx, ed, master);
                 painter.image(
@@ -2114,10 +2865,11 @@ impl App {
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::from_white_alpha(150),
                 );
+                let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
                 painter.rect_stroke(
                     r,
                     1.0,
-                    Stroke::new(1.0, theme::SELECTION),
+                    Stroke::new(1.0, t.selection),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -2145,11 +2897,35 @@ impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // OS theme flips (GitHub #52): the watcher thread re-probes the
+        // OS preference on its period; switch the active style slot when
+        // it reports a change, and ask for a repaint on the same period
+        // so an idle app still wakes to pick a flip up.
+        if let Some(watcher) = &self.os_theme {
+            if let Some(pref) = watcher.poll() {
+                eprintln!("os_theme: OS preference changed → {pref:?}");
+                ctx.set_theme(pref);
+            }
+            ctx.request_repaint_after(Duration::from_secs(2));
+        }
         self.handle_shortcuts(&ctx);
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.text_edit_window(&ctx);
         self.color_palette_window(&ctx);
+
+        // The eframe root Ui paints no background and eframe's clear
+        // color is near-black, so the shell must own one: the panel
+        // fill (kittest synthesizes exactly this behind the root Ui,
+        // which is why the goldens never caught the black production
+        // canvas) covers the start screen, the File backstage, and any
+        // margin the panels leave. The canvas paints the desk over its
+        // own area on top (GitHub #52).
+        ui.painter().rect_filled(
+            ui.max_rect(),
+            0.0,
+            theme::shell_tokens(ui.visuals()).ribbon_bg,
+        );
 
         if self.backstage {
             self.backstage_view(ui);
@@ -2158,37 +2934,68 @@ impl App {
         }
 
         // Shell order: top bands, bottom bands, side panels, canvas.
+        let t = theme::shell_tokens(ui.visuals());
         self.title_band(ui);
         self.tab_strip(ui);
         egui::Panel::top("ribbon_content")
-            .frame(egui::Frame::new().fill(theme::RIBBON_BG).inner_margin(egui::Margin::symmetric(4, 3)))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.ribbon_content)
+                    .inner_margin(egui::Margin::symmetric(4, 3)),
+            )
             .show(ui, |ui| self.ribbon_content(ui));
+        // Visio: a hairline rule closes the ribbon off from the canvas.
+        egui::Panel::top("ribbon_rule")
+            .exact_size(1.0)
+            .frame(egui::Frame::new().fill(t.ribbon_edge))
+            .show(ui, |_| {});
         egui::Panel::bottom("status")
-            .frame(egui::Frame::new().fill(theme::STATUS_BG).inner_margin(egui::Margin::symmetric(10, 3)))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.status_bg)
+                    .inner_margin(egui::Margin::symmetric(10, 3)),
+            )
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::bottom("page_tabs")
-            .frame(egui::Frame::new().fill(theme::TABS_BG).inner_margin(egui::Margin::same(2)))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.tabs_bg)
+                    .inner_margin(egui::Margin::same(2)),
+            )
             .show(ui, |ui| self.page_tabs(ui));
-        if self.ed().map(|ed| !ed.doc.masters.is_empty()).unwrap_or(false) {
+        if self
+            .ed()
+            .map(|ed| !ed.doc.masters.is_empty())
+            .unwrap_or(false)
+        {
             egui::Panel::left("stencil")
-                .frame(egui::Frame::new().fill(theme::STENCIL_BG).inner_margin(egui::Margin::same(6)))
+                .frame(
+                    egui::Frame::new()
+                        .fill(t.stencil_bg)
+                        .inner_margin(egui::Margin::same(6)),
+                )
                 .default_size(160.0)
                 .resizable(true)
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
-                        ui.strong("Shapes");
-                        ui.separator();
+                        // The pane draws its own Visio header ("Shapes"
+                        // + More Shapes), search box, stencil list and
+                        // master grid (crates/dc-ui/src/stencil.rs).
+                        self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
+                        let title = stencil_title(&self.path);
                         let App { ed, stencil, .. } = self;
                         if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed) {
+                            if let Some(id) = stencil.show(ui, ed, &title) {
                                 armed = Some(id);
                             }
                         }
                         if let Some(id) = armed {
-                            self.status = format!("master {} armed — click the canvas to place", id);
+                            self.status =
+                                format!("master {} armed — click the canvas to place", id);
                         }
-                        if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked() {
+                        if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked()
+                        {
                             self.stencil.armed = None;
                         }
                     });
@@ -2255,37 +3062,59 @@ impl App {
 
     /// The File backstage (Visio 2016): green command rail on the left,
     /// page content on the right. Replaces the whole shell while open.
+    /// The File backstage (GitHub #55): the 2010 three-band rail —
+    /// commands (Save/Save As/Close) above the destinations (Info,
+    /// Recent, New, Print, Share, Export), Options pinned below — with
+    /// 2016's functions folded in (Share/Export split, Close-document,
+    /// search-first New). Every color rides theme tokens; Esc and the
+    /// back control return to the document.
     fn backstage_view(&mut self, ui: &mut Ui) {
         let mut close_backstage = false;
         let mut action: Option<BackAction> = None;
+        // Esc always returns to the document — unless the unsaved-
+        // changes prompt owns the screen.
+        if !self.confirm_new && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+            close_backstage = true;
+        }
+        let has_doc = self.ed.is_some();
+        let t = theme::shell_tokens(ui.visuals());
         egui::Panel::left("backstage_rail")
-            .frame(egui::Frame::new().fill(theme::ACCENT).inner_margin(egui::Margin::same(10)))
+            .frame(
+                egui::Frame::new()
+                    .fill(t.accent_band)
+                    .inner_margin(egui::Margin::same(10)),
+            )
             .default_size(190.0)
             .resizable(false)
             .show(ui, |ui| {
                 ui.set_min_height(ui.available_height());
                 ui.vertical(|ui| {
                     let back = egui::Button::new(
-                        egui::RichText::new("<  Back").color(Color32::WHITE).strong(),
+                        egui::RichText::new("<  Back")
+                            .color(Color32::WHITE)
+                            .strong(),
                     )
                     .frame(false);
                     if ui.add(back).clicked() {
                         close_backstage = true;
                     }
                     ui.add_space(10.0);
+                    // One row builder for both bands: a command runs an
+                    // action immediately; a destination switches pages.
                     let mut rail = |ui: &mut Ui,
                                     label: &str,
                                     enabled: bool,
                                     page: Option<BackPage>,
-                                    act: Option<BackAction>|
-                     -> egui::Response {
-                        let selected = page == Some(self.backstage_page) && act.is_none();
-                        let txt = egui::RichText::new(label)
-                            .size(14.0)
-                            .color(if enabled { Color32::WHITE } else { Color32::from_gray(160) });
+                                    act: Option<BackAction>| {
+                        let selected = page.is_some() && page == Some(self.backstage_page);
+                        let txt = egui::RichText::new(label).size(14.0).color(if enabled {
+                            Color32::WHITE
+                        } else {
+                            t.rail_disabled
+                        });
                         let mut b = egui::Button::new(txt).frame(false);
                         if selected {
-                            b = b.fill(Color32::from_rgb(0x2c, 0x91, 0x5b));
+                            b = b.fill(t.rail_selected);
                         }
                         let resp = ui.add_enabled(enabled, b);
                         if resp.clicked() {
@@ -2296,76 +3125,220 @@ impl App {
                         }
                         resp
                     };
-                    rail(ui, "Home", true, None, Some(BackAction::Close));
+                    // Band 1 — the command cluster above the destinations
+                    // (2010's separation of actions from navigation, the
+                    // structure Apple's and Material's rail guidance ask
+                    // for).
+                    rail(ui, "Save", has_doc, None, Some(BackAction::Save));
+                    rail(ui, "Save As", has_doc, None, Some(BackAction::SaveAs));
+                    rail(ui, "Close", has_doc, None, Some(BackAction::CloseDoc));
+                    // Band divider.
+                    let (sep, _) = ui
+                        .allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
+                    ui.painter().hline(
+                        sep.left()..=sep.right(),
+                        sep.center().y,
+                        Stroke::new(1.0, Color32::from_white_alpha(60)),
+                    );
+                    ui.add_space(4.0);
+                    // Band 2 — destinations (six, inside M3's 3–7 window;
+                    // 2016's Share/Export split replaces 2010's
+                    // "Save & Send").
+                    rail(ui, "Info", true, Some(BackPage::Info), None);
+                    rail(ui, "Recent", true, Some(BackPage::Recent), None);
                     rail(ui, "New", true, Some(BackPage::New), None);
-                    rail(ui, "Open", true, Some(BackPage::Open), None);
-                    rail(ui, "Save", self.ed.is_some(), None, Some(BackAction::Save));
-                    rail(ui, "Save As", self.ed.is_some(), None, Some(BackAction::SaveAs));
-                    rail(ui, "Print", false, None, None)
-                        .on_hover_text("Printing arrives with M6");
-                    rail(ui, "Share", false, None, None)
-                        .on_hover_text("Sharing arrives with M6");
-                    rail(ui, "Export", false, None, None)
-                        .on_hover_text("Export filters arrive with M6");
-                    rail(ui, "Close", self.ed.is_some(), None, Some(BackAction::CloseDoc));
+                    rail(ui, "Print", true, Some(BackPage::Print), None)
+                        .on_hover_text("Print the current drawing");
+                    rail(ui, "Share", true, Some(BackPage::Share), None)
+                        .on_hover_text("Share a copy of the drawing");
+                    rail(ui, "Export", true, Some(BackPage::Export), None)
+                        .on_hover_text("Save the drawing in another format");
+                });
+                // Band 3 — pinned footer, non-critical items only (Apple:
+                // "avoid putting critical information or actions at the
+                // bottom of a sidebar").
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    ui.add_enabled(
+                        false,
+                        egui::Button::new(
+                            egui::RichText::new("Options")
+                                .size(14.0)
+                                .color(t.rail_disabled),
+                        )
+                        .frame(false),
+                    )
+                    .on_disabled_hover_text("Options arrive with a later milestone");
                 });
             });
-        // Page content.
+        // Page content (the 2010 white backstage surface).
         let mut open_browse = false;
+        let mut open_recent: Option<PathBuf> = None;
         let mut new_blank = false;
         let page = self.backstage_page;
-        if page == BackPage::Open {
-            ui.vertical(|ui| {
-                ui.add_space(24.0);
-                ui.add_space(24.0);
-                ui.heading("Open");
-                ui.add_space(8.0);
-                if ui.button("Browse for a Visio file...").clicked() {
-                    open_browse = true;
-                }
-                ui.add_space(16.0);
-                ui.heading("Recent");
-                ui.weak("Files you open will appear here.");
-            });
-        } else {
-            ui.vertical(|ui| {
-                ui.add_space(24.0);
-                ui.add_space(24.0);
-                ui.heading("New");
-                ui.add_space(10.0);
-                ui.horizontal(|ui| {
-                    let (r, resp) = ui.allocate_exact_size(Vec2::new(120.0, 120.0), Sense::click());
-                    let hot = resp.hovered();
-                    ui.painter()
-                        .rect_filled(r, 3.0, if hot { theme::RIBBON_BG } else { Color32::WHITE });
-                    ui.painter().rect_stroke(
-                        r,
-                        3.0,
-                        Stroke::new(1.0, theme::RIBBON_GROUP),
-                        egui::StrokeKind::Middle,
-                    );
-                    Icon::New.paint(ui, Rect::from_center_size(r.center(), Vec2::splat(56.0)), true);
-                    let gal = ui.painter().layout_no_wrap(
-                        "Blank drawing".to_string(),
-                        egui::FontId::proportional(12.0),
-                        Color32::from_rgb(50, 50, 50),
-                    );
-                    ui.painter().galley(
-                        Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 26.0),
-                        gal,
-                        Color32::WHITE,
-                    );
-                    if resp.clicked() {
-                        new_blank = true;
-                    }
-                });
+        let mut search_text = self.backstage_search.clone();
+        egui::Frame::new()
+            .fill(t.ribbon_content)
+            .inner_margin(egui::Margin::same(28))
+            .show(ui, |ui| {
                 ui.add_space(12.0);
-                ui.weak("Templates (.vstx) arrive with the M5 template flow.");
+                match page {
+                    BackPage::Info => {
+                        if has_doc {
+                            let name = self
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| "Untitled".into());
+                            let dir = self
+                                .path
+                                .parent()
+                                .map(|p| p.display().to_string())
+                                .filter(|s| !s.is_empty())
+                                .unwrap_or_else(|| "Not saved yet".into());
+                            let status = if self.dirty {
+                                "Unsaved changes"
+                            } else {
+                                "All changes saved"
+                            };
+                            ui.heading(&name);
+                            ui.add_space(8.0);
+                            egui::Grid::new("backstage_info")
+                                .num_columns(2)
+                                .spacing(Vec2::new(18.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.weak("Name");
+                                    ui.label(&name);
+                                    ui.end_row();
+                                    ui.weak("Location");
+                                    ui.label(&dir);
+                                    ui.end_row();
+                                    ui.weak("Status");
+                                    ui.label(status);
+                                    ui.end_row();
+                                });
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                ui.add_enabled(false, egui::Button::new("Protect Drawing…"))
+                                    .on_disabled_hover_text(
+                                        "Document protection arrives with a later milestone",
+                                    );
+                                ui.add_enabled(false, egui::Button::new("Inspect Drawing…"))
+                                    .on_disabled_hover_text(
+                                        "Document inspection arrives with a later milestone",
+                                    );
+                            });
+                        } else {
+                            ui.heading("No document open");
+                            ui.add_space(8.0);
+                            if ui.button("Open a file…").clicked() {
+                                open_browse = true;
+                            }
+                        }
+                    }
+                    BackPage::Recent => {
+                        ui.horizontal(|ui| {
+                            ui.heading("Recent");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                if ui.button("Browse…").clicked() {
+                                    open_browse = true;
+                                }
+                            });
+                        });
+                        ui.add_space(8.0);
+                        if self.recent.entries().is_empty() {
+                            // elementary Welcome Screen: context plus
+                            // named actions instead of an empty list.
+                            ui.weak("Drawings you open will appear here.");
+                            ui.add_space(12.0);
+                            if welcome_action(
+                                ui,
+                                Icon::New,
+                                "New blank drawing",
+                                "Start an empty drawing on a letter-size page.",
+                            ) {
+                                new_blank = true;
+                            }
+                            if welcome_action(
+                                ui,
+                                Icon::Open,
+                                "Open a file",
+                                "Browse for an existing Visio package.",
+                            ) {
+                                open_browse = true;
+                            }
+                        } else if let Some(p) = self.recent_list_ui(ui) {
+                            open_recent = Some(p);
+                        }
+                    }
+                    BackPage::New => {
+                        ui.horizontal(|ui| {
+                            ui.heading("New");
+                            // 2016's search-first New page; elementary/
+                            // Apple: trailing toolbar position, instant
+                            // type-to-filter.
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut search_text)
+                                        .hint_text("Search Templates")
+                                        .desired_width(200.0),
+                                );
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.weak("Suggested: flowchart · network · floor plan");
+                        ui.add_space(12.0);
+                        let q = search_text.trim().to_lowercase();
+                        let mut card_click = false;
+                        ui.horizontal_wrapped(|ui| {
+                            if backstage_card(ui, Icon::New, "Blank drawing", q.is_empty()) {
+                                card_click = true;
+                            }
+                            for (name, icon) in NEW_TEMPLATE_ENTRIES {
+                                if !q.is_empty() && !name.to_lowercase().contains(&q) {
+                                    continue;
+                                }
+                                backstage_card(ui, *icon, name, false);
+                            }
+                        });
+                        if card_click {
+                            new_blank = true;
+                        }
+                        if !q.is_empty()
+                            && !"blank drawing".contains(&q)
+                            && NEW_TEMPLATE_ENTRIES
+                                .iter()
+                                .all(|(n, _)| !n.to_lowercase().contains(&q))
+                        {
+                            ui.add_space(8.0);
+                            ui.weak(format!("No templates match “{}”.", search_text.trim()));
+                        }
+                    }
+                    BackPage::Print => backstage_stub(
+                        ui,
+                        "Print",
+                        "Send the drawing to a printer or save it as a PDF.",
+                        "Print…",
+                        "Printing arrives with M6",
+                    ),
+                    BackPage::Share => backstage_stub(
+                        ui,
+                        "Share",
+                        "Share a copy of the drawing with other people.",
+                        "Share a Copy…",
+                        "Sharing arrives with M6",
+                    ),
+                    BackPage::Export => backstage_stub(
+                        ui,
+                        "Export",
+                        "Save the drawing in another format.",
+                        "Export…",
+                        "Export filters arrive with M6",
+                    ),
+                }
             });
-        }
+        self.backstage_search = search_text;
         if let Some(a) = action {
             match a {
-                BackAction::Close => close_backstage = true,
                 BackAction::Save => {
                     self.do_save(false);
                     close_backstage = true;
@@ -2390,6 +3363,10 @@ impl App {
             close_backstage = true;
             self.do_open();
         }
+        if let Some(p) = open_recent {
+            close_backstage = true;
+            self.load(p);
+        }
         if new_blank {
             self.do_new();
             if !self.confirm_new {
@@ -2402,10 +3379,107 @@ impl App {
     }
 }
 
+/// Placeholder template names on the backstage New page (generic
+/// diagram-type names, ours — template bodies arrive with the M5 flow).
+const NEW_TEMPLATE_ENTRIES: &[(&str, Icon)] = &[
+    ("Flowchart", Icon::Swimlane),
+    ("Cross-functional", Icon::Container),
+    ("Network Diagram", Icon::Link),
+    ("Org Chart", Icon::Group),
+    ("Floor Plan", Icon::Grid),
+];
+
+/// One New-page gallery card: icon over the caption, 2010 tile metrics.
+/// The caption is a real Label so the card stays in the accessibility
+/// tree (kittest queries it); all colors ride theme tokens (#55).
+fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
+    let t = theme::shell_tokens(ui.visuals());
+    ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+        let (tile, _) = ui.allocate_exact_size(Vec2::new(120.0, 96.0), Sense::hover());
+        ui.painter().rect_filled(tile, 3.0, t.card_bg);
+        ui.painter().rect_stroke(
+            tile,
+            3.0,
+            Stroke::new(1.0, t.ribbon_group),
+            egui::StrokeKind::Middle,
+        );
+        icon.paint(
+            ui,
+            Rect::from_center_size(tile.center(), Vec2::splat(44.0)),
+            enabled,
+        );
+        let tip = if enabled {
+            "Start an empty drawing"
+        } else {
+            "Template gallery arrives with the M5 template flow"
+        };
+        let caption = ui
+            .add(
+                egui::Label::new(egui::RichText::new(name).size(12.0).color(t.back_title))
+                    .selectable(false),
+            )
+            .on_hover_text(tip);
+        let card = tile.union(caption.rect);
+        let resp = ui.interact(
+            card,
+            ui.scope_id().with(("backstage_card", name)),
+            Sense::click(),
+        );
+        if resp.hovered() && enabled {
+            ui.painter().rect_stroke(
+                card.shrink(1.0),
+                3.0,
+                Stroke::new(1.5, t.ribbon_hover_edge),
+                egui::StrokeKind::Middle,
+            );
+        }
+        enabled && resp.clicked()
+    })
+    .inner
+}
+
+/// elementary-style welcome action: icon beside a bold title with a
+/// one-line description — one button keeps it one accessible widget.
+fn welcome_action(ui: &mut Ui, icon: Icon, title: &str, desc: &str) -> bool {
+    let t = theme::shell_tokens(ui.visuals());
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        &format!("    {title}"),
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(13.0), t.back_title),
+    );
+    job.append(
+        &format!("\n    {desc}"),
+        0.0,
+        egui::TextFormat::simple(egui::FontId::proportional(10.5), t.ribbon_label),
+    );
+    let resp = ui.add(egui::Button::new(job).min_size(Vec2::new(280.0, 44.0)));
+    let r = resp.rect;
+    icon.paint(
+        ui,
+        Rect::from_center_size(Pos2::new(r.left() + 16.0, r.center().y), Vec2::splat(20.0)),
+        true,
+    );
+    resp.clicked()
+}
+
+/// A labelled placeholder page: context sentence plus a clearly-named
+/// disabled action — no dead ends (elementary), no vague labels.
+fn backstage_stub(ui: &mut Ui, title: &str, context: &str, action: &str, tip: &str) {
+    ui.heading(title);
+    ui.add_space(6.0);
+    ui.weak(context);
+    ui.add_space(10.0);
+    ui.add_enabled(false, egui::Button::new(action))
+        .on_disabled_hover_text(tip);
+}
+
 /// Encode an egui ColorImage as PNG (via the raster stack we already ship).
 /// One context-menu row: full-width flat button, optional MDI icon on the
 /// left, a gray shortcut hint after the label (Visio shows it right-
 /// aligned; a single text run keeps the row one accessible widget).
+/// Label and hint colors come from the theme mapping over the live
+/// visuals, so rows stay readable in dark mode (GitHub #48).
 fn ctx_item(
     ui: &mut Ui,
     icon: Option<crate::ribbon::Icon>,
@@ -2413,6 +3487,7 @@ fn ctx_item(
     hint: &str,
     enabled: bool,
 ) -> bool {
+    let tokens = theme::menu_tokens(ui.visuals());
     let mut job = egui::text::LayoutJob::default();
     let text = if icon.is_some() {
         format!("      {label}")
@@ -2425,9 +3500,9 @@ fn ctx_item(
         egui::TextFormat::simple(
             egui::FontId::proportional(12.5),
             if enabled {
-                Color32::from_rgb(30, 30, 30)
+                tokens.label
             } else {
-                Color32::from_gray(160)
+                tokens.label_disabled
             },
         ),
     );
@@ -2435,10 +3510,7 @@ fn ctx_item(
         job.append(
             &format!("   {hint}"),
             0.0,
-            egui::TextFormat::simple(
-                egui::FontId::proportional(11.0),
-                Color32::from_gray(140),
-            ),
+            egui::TextFormat::simple(egui::FontId::proportional(11.0), tokens.hint),
         );
     }
     let resp = ui.add_enabled(
@@ -2450,7 +3522,10 @@ fn ctx_item(
             Pos2::new(resp.rect.left() + 7.0, resp.rect.center().y - 8.0),
             Vec2::splat(16.0),
         );
-        ic.paint(ui, r, enabled);
+        // icons take the theme-derived tint: the light Office palette
+        // (the gray ShapeSheet glyph included) vanishes on a dark menu
+        // (GitHub #48 review).
+        ic.paint_tinted(ui, r, tokens.icon_tint(ic.office_color(), enabled));
     }
     resp.clicked()
 }
@@ -2461,26 +3536,28 @@ fn write_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<(
     for p in &img.pixels {
         rgba.extend_from_slice(p.to_srgba_unmultiplied().as_slice());
     }
-    let pm = resvg::tiny_skia::Pixmap::from_vec(rgba, resvg::tiny_skia::IntSize::from_wh(w as u32, h as u32).unwrap())
-        .ok_or_else(|| anyhow::anyhow!("pixmap from frame"))?;
+    let pm = resvg::tiny_skia::Pixmap::from_vec(
+        rgba,
+        resvg::tiny_skia::IntSize::from_wh(w as u32, h as u32).unwrap(),
+    )
+    .ok_or_else(|| anyhow::anyhow!("pixmap from frame"))?;
     std::fs::write(path, pm.encode_png()?)?;
     Ok(())
 }
 
-fn qat_button(
-    ui: &mut Ui,
-    icon: Icon,
-    tip: &str,
-    action: impl FnOnce() -> Action,
-    app: &mut App,
-) {
+fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::click());
     let resp = resp.on_hover_text(tip);
     let hover = resp.hovered();
     if hover {
-        ui.painter().rect_filled(r, 3.0, Color32::from_white_alpha(46));
+        ui.painter()
+            .rect_filled(r, 3.0, Color32::from_white_alpha(46));
     }
-    icon.paint(ui, Rect::from_center_size(r.center(), Vec2::splat(18.0)), true);
+    icon.paint(
+        ui,
+        Rect::from_center_size(r.center(), Vec2::splat(18.0)),
+        true,
+    );
     if resp.clicked() {
         let a = action();
         app.dispatch(a);
@@ -2504,11 +3581,22 @@ fn t_title(t: Tab) -> &'static str {
 /// A master's root-shape size in inches (for the drag ghost).
 fn master_size(doc: &Document, id: i64) -> (f64, f64) {
     doc.master(id)
-        .and_then(|m| m.shapes.first().map(|s| {
-            let g = |n: &str| s.sheet.cell(n).and_then(|c| c.numeric()).unwrap_or(1.0);
-            (g("Width"), g("Height"))
-        }))
+        .and_then(|m| {
+            m.shapes.first().map(|s| {
+                let g = |n: &str| s.sheet.cell(n).and_then(|c| c.numeric()).unwrap_or(1.0);
+                (g("Width"), g("Height"))
+            })
+        })
         .unwrap_or((1.0, 1.0))
+}
+
+/// Title of the stencil list entry: the open file's stem (a .vssx
+/// stencil is the whole document), else the document's own master set
+/// (GitHub #53: the pane lists its stencil like Visio does).
+fn stencil_title(path: &Path) -> String {
+    path.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Document Masters".into())
 }
 
 #[cfg(test)]
@@ -2537,7 +3625,11 @@ mod tests {
         app.dialog = Some(PendingDialog::Open(rx));
         app.poll_dialog(&ctx);
         assert!(app.dialog.is_none(), "answered dialog is consumed");
-        assert!(app.status.starts_with("open failed"), "status = {}", app.status);
+        assert!(
+            app.status.starts_with("open failed"),
+            "status = {}",
+            app.status
+        );
     }
 
     #[test]
@@ -2577,6 +3669,227 @@ mod tests {
         app.start_new();
         assert!(!app.confirm_new);
         assert!(!app.dirty);
+    }
+
+    // Recent-files (MRU) wiring: successful loads/saves record, failed
+    // ones must not (GitHub #16).
+
+    #[test]
+    fn opening_a_file_records_it_in_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("recent-src.vsdx");
+        Editor::new_blank().save_as(&p).unwrap();
+        let mut app = App::with_doc_opt(None);
+        app.load(p.clone());
+        assert_eq!(
+            app.debug_recent(),
+            &[p.clone()],
+            "successful open records the path"
+        );
+        // Re-opening moves it to the (single) front.
+        app.load(p.clone());
+        assert_eq!(app.debug_recent(), &[p]);
+    }
+
+    #[test]
+    fn failed_open_does_not_record() {
+        let mut app = App::with_doc_opt(None);
+        app.load(PathBuf::from("/nonexistent/missing.vsdx"));
+        assert!(
+            app.debug_recent().is_empty(),
+            "a failed open must not record anything"
+        );
+    }
+
+    #[test]
+    fn saving_records_the_saved_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = App::with_blank();
+        let p = tmp.path().join("saved.vsdx");
+        app.save_to(&p);
+        assert_eq!(
+            app.debug_recent(),
+            &[p],
+            "successful save-as records the path"
+        );
+        assert!(!app.dirty, "save clears the dirty flag");
+    }
+
+    // EventDblClick classification (GitHub #20): OPENTEXTWIN and
+    // DEFAULTEVENT open the text editor, no formula / No Formula keeps
+    // Visio's default (edit text), everything else defers.
+
+    #[test]
+    fn dbl_click_classifier_opens_text_for_default_formulas() {
+        for f in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("No Formula"),
+            Some("  no formula "),
+            Some("OPENTEXTWIN()"),
+            Some("opentextwin()"),
+            Some("DEFAULTEVENT()"),
+        ] {
+            assert_eq!(
+                classify_dbl_click(f),
+                DblClick::OpenText,
+                "formula {f:?} must open the text editor"
+            );
+        }
+    }
+
+    #[test]
+    fn dbl_click_classifier_defers_other_formulas() {
+        for f in [
+            Some("RUNADDON(\"MyMacro\")"),
+            Some("RUNMACRO(\"ThisDocument.m\")"),
+            Some("GOTOPAGE(\"Page-2\")"),
+            Some("DONOTHING()"),
+            Some("OPENSHEETWINDOW()"),
+        ] {
+            match classify_dbl_click(f) {
+                DblClick::Deferred(msg) => assert!(
+                    msg.contains(f.unwrap()),
+                    "deferral message names the formula: {msg}"
+                ),
+                other => panic!("formula {f:?} must defer, got {other:?}"),
+            }
+        }
+    }
+
+    /// A shape with `EventDblClick = RUNADDON(…)`: double-click reports
+    /// the deferral and opens no editor; with no formula the editor opens.
+    #[test]
+    fn dbl_click_honors_the_event_cell() {
+        fn app_with_event_formula(f: Option<&str>) -> (App, i64) {
+            let mut app = App::with_blank();
+            let page_id = app.page_id().unwrap();
+            let mut sh = vsdx::model::Shape {
+                id: 42,
+                ..Default::default()
+            };
+            for (n, v) in [
+                ("PinX", "4.0"),
+                ("PinY", "5.5"),
+                ("Width", "2.0"),
+                ("Height", "1.0"),
+            ] {
+                sh.sheet.set_cell(n, vsdx::Cell::value(v));
+            }
+            if let Some(f) = f {
+                sh.sheet.set_cell(
+                    "EventDblClick",
+                    vsdx::Cell {
+                        f: Some(f.into()),
+                        ..Default::default()
+                    },
+                );
+            }
+            app.apply(dc_core::commands::AddShape {
+                page: page_id,
+                parent: None,
+                shape: sh,
+            });
+            (app, 42)
+        }
+
+        // No EventDblClick cell: Visio's default — open the editor.
+        let (mut app, sid) = app_with_event_formula(None);
+        app.on_canvas_dbl_click((4.0, 5.5));
+        assert_eq!(
+            app.text_edit,
+            Some((sid, String::new())),
+            "default opens the editor"
+        );
+
+        // RUNADDON: deferral status, no editor.
+        let (mut app, _) = app_with_event_formula(Some("RUNADDON(\"x\")"));
+        app.on_canvas_dbl_click((4.0, 5.5));
+        assert!(app.text_edit.is_none(), "RUNADDON must not open the editor");
+        assert!(
+            app.status.contains("EventDblClick") && app.status.contains("RUNADDON"),
+            "status explains the deferral: {}",
+            app.status
+        );
+
+        // Double-click on empty page: nothing happens.
+        let (mut app, _) = app_with_event_formula(None);
+        app.on_canvas_dbl_click((0.1, 0.1));
+        assert!(
+            app.text_edit.is_none(),
+            "empty page double-click is a no-op"
+        );
+    }
+
+    /// A stencil placement consumes its click pair: the double-click
+    /// completing it must not open an editor over the placed shape,
+    /// while a later, separate double-click works normally.
+    #[test]
+    fn dbl_click_after_stencil_placement_defers_to_the_placement() {
+        let mut app = App::with_blank();
+        let master = app
+            .ed
+            .as_ref()
+            .unwrap()
+            .doc
+            .masters
+            .first()
+            .map(|m| m.id)
+            .unwrap();
+        app.stencil.armed = Some(master);
+        app.on_canvas_click((4.0, 5.0), false);
+        assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
+        assert!(app.placed_last_click);
+
+        app.on_canvas_dbl_click((4.0, 5.0));
+        assert!(
+            app.text_edit.is_none(),
+            "the placement's click pair must not open an editor"
+        );
+        assert_eq!(app.debug_shape_count(), 1, "exactly one placement");
+
+        app.on_canvas_dbl_click((4.0, 5.0));
+        assert!(
+            app.text_edit.is_some(),
+            "a later double-click on the placed shape opens the editor"
+        );
+    }
+}
+
+/// What double-clicking a shape should do, from its `EventDblClick`
+/// formula (`F` attribute, resolved instance → master).
+#[derive(Debug, PartialEq)]
+enum DblClick {
+    /// Open the shape's text window: `OPENTEXTWIN()`, `DEFAULTEVENT()`
+    /// (Visio's default action for a shape with text is editing it), or
+    /// no formula / `No Formula`.
+    OpenText,
+    /// A formula whose action belongs to a later milestone (`RUNADDON`,
+    /// `RUNMACRO`, `GOTOPAGE`, `DONOTHING`, …): report, open nothing.
+    Deferred(String),
+}
+
+/// Classify an `EventDblClick` formula string.
+fn classify_dbl_click(formula: Option<&str>) -> DblClick {
+    let f = formula.unwrap_or("").trim();
+    // Compare the function head (everything before the argument list).
+    let head = f
+        .split('(')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_uppercase();
+    if f.is_empty()
+        || f.eq_ignore_ascii_case("No Formula")
+        || head == "OPENTEXTWIN"
+        || head == "DEFAULTEVENT"
+    {
+        DblClick::OpenText
+    } else {
+        DblClick::Deferred(format!(
+            "EventDblClick '{f}' — macro and navigation actions arrive with a later milestone"
+        ))
     }
 }
 

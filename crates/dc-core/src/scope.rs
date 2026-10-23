@@ -11,7 +11,7 @@
 //! - `master:7/shape:2` — shape 2 of master 7's shape tree
 
 use anyhow::{bail, Result};
-use vsdx::model::{Document, IndexChild, Sheet, Shape};
+use vsdx::model::{Document, IndexChild, Shape, Sheet};
 
 /// One addressed sheet.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,7 +26,9 @@ pub enum Scope {
 impl Scope {
     pub fn parse(s: &str) -> Result<Scope> {
         let s = s.trim();
-        let bad = || anyhow::anyhow!("unrecognized target {s:?} — use doc | page:N | page:N/shape:M | style:N | master:N[/shape:M]");
+        let bad = || {
+            anyhow::anyhow!("unrecognized target {s:?} — use doc | page:N | page:N/shape:M | style:N | master:N[/shape:M]")
+        };
         let (head, tail) = match s.split_once('/') {
             Some((h, t)) => (h, Some(t)),
             None => (s, None),
@@ -52,11 +54,20 @@ impl Scope {
             v.parse::<i64>().map_err(|_| bad())
         };
         match (kind, tail) {
-            ("page", Some(t)) => Ok(Scope::Shape { page: id, shape: shape_of(t)? }),
+            ("page", Some(t)) => Ok(Scope::Shape {
+                page: id,
+                shape: shape_of(t)?,
+            }),
             ("page", None) => Ok(Scope::PageSheet { page: id }),
             ("style", None) => Ok(Scope::StyleSheet { id }),
-            ("master", Some(t)) => Ok(Scope::Master { master: id, shape: Some(shape_of(t)?) }),
-            ("master", None) => Ok(Scope::Master { master: id, shape: None }),
+            ("master", Some(t)) => Ok(Scope::Master {
+                master: id,
+                shape: Some(shape_of(t)?),
+            }),
+            ("master", None) => Ok(Scope::Master {
+                master: id,
+                shape: None,
+            }),
             _ => Err(bad()),
         }
     }
@@ -69,8 +80,14 @@ impl std::fmt::Display for Scope {
             Scope::PageSheet { page } => write!(f, "page:{page}"),
             Scope::Shape { page, shape } => write!(f, "page:{page}/shape:{shape}"),
             Scope::StyleSheet { id } => write!(f, "style:{id}"),
-            Scope::Master { master, shape: None } => write!(f, "master:{master}"),
-            Scope::Master { master, shape: Some(s) } => write!(f, "master:{master}/shape:{s}"),
+            Scope::Master {
+                master,
+                shape: None,
+            } => write!(f, "master:{master}"),
+            Scope::Master {
+                master,
+                shape: Some(s),
+            } => write!(f, "master:{master}/shape:{s}"),
         }
     }
 }
@@ -81,7 +98,8 @@ pub fn sheet<'a>(doc: &'a Document, scope: &Scope) -> Result<&'a Sheet> {
         Scope::Document => Ok(&doc.sheet),
         Scope::PageSheet { page } => {
             let p = page_by_id(doc, *page)?;
-            p.sheet().ok_or_else(|| anyhow::anyhow!("page {page} has no PageSheet"))
+            p.sheet()
+                .ok_or_else(|| anyhow::anyhow!("page {page} has no PageSheet"))
         }
         Scope::Shape { page, shape } => {
             let p = page_by_id(doc, *page)?;
@@ -91,13 +109,18 @@ pub fn sheet<'a>(doc: &'a Document, scope: &Scope) -> Result<&'a Sheet> {
                 None => bail!("shape {shape} not found on page {page}"),
             }
         }
-        Scope::StyleSheet { id } => {
-            doc.stylesheet(*id).map(|s| &s.sheet).ok_or_else(|| anyhow::anyhow!("stylesheet {id} not found"))
-        }
+        Scope::StyleSheet { id } => doc
+            .stylesheet(*id)
+            .map(|s| &s.sheet)
+            .ok_or_else(|| anyhow::anyhow!("stylesheet {id} not found")),
         Scope::Master { master, shape } => {
-            let m = doc.master(*master).ok_or_else(|| anyhow::anyhow!("master {master} not found"))?;
+            let m = doc
+                .master(*master)
+                .ok_or_else(|| anyhow::anyhow!("master {master} not found"))?;
             match shape {
-                None => m.sheet().ok_or_else(|| anyhow::anyhow!("master {master} has no index sheet")),
+                None => m
+                    .sheet()
+                    .ok_or_else(|| anyhow::anyhow!("master {master} has no index sheet")),
                 Some(sid) => match vsdx::model::find_shape_by_id(&m.shapes, *sid) {
                     Some(s) => Ok(&s.sheet),
                     None => bail!("shape {sid} not found in master {master}"),
@@ -110,10 +133,16 @@ pub fn sheet<'a>(doc: &'a Document, scope: &Scope) -> Result<&'a Sheet> {
 /// Mutably borrow the sheet a scope addresses.
 pub fn sheet_mut<'a>(doc: &'a mut Document, scope: &Scope) -> Result<&'a mut Sheet> {
     let page_idx = |doc: &Document, id: i64| -> Result<usize> {
-        doc.pages.iter().position(|p| p.id == id).ok_or_else(|| anyhow::anyhow!("page {id} not found"))
+        doc.pages
+            .iter()
+            .position(|p| p.id == id)
+            .ok_or_else(|| anyhow::anyhow!("page {id} not found"))
     };
     let master_idx = |doc: &Document, id: i64| -> Result<usize> {
-        doc.masters.iter().position(|m| m.id == id).ok_or_else(|| anyhow::anyhow!("master {id} not found"))
+        doc.masters
+            .iter()
+            .position(|m| m.id == id)
+            .ok_or_else(|| anyhow::anyhow!("master {id} not found"))
     };
     match scope {
         Scope::Document => Ok(&mut doc.sheet),
@@ -187,7 +216,10 @@ fn collect_chain<'a>(shapes: &'a [Shape], id: i64, out: &mut Vec<&'a Shape>) -> 
 }
 
 pub fn page_by_id<'a>(doc: &'a Document, id: i64) -> Result<&'a vsdx::Page> {
-    doc.pages.iter().find(|p| p.id == id).ok_or_else(|| anyhow::anyhow!("page {id} not found"))
+    doc.pages
+        .iter()
+        .find(|p| p.id == id)
+        .ok_or_else(|| anyhow::anyhow!("page {id} not found"))
 }
 
 /// Find a shape by ID anywhere in a nested tree, mutably.

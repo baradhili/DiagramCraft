@@ -33,7 +33,10 @@ pub fn restore_cell(sheet: &mut vsdx::model::Sheet, name: &str, cell: Cell) {
 
 /// Remove a cell by name; returns the removed `(name, cell)` when present.
 pub fn remove_cell(sheet: &mut vsdx::model::Sheet, name: &str) -> Option<(String, Cell)> {
-    let idx = sheet.children.iter().position(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == name))?;
+    let idx = sheet
+        .children
+        .iter()
+        .position(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == name))?;
     match sheet.children.remove(idx) {
         vsdx::model::SheetChild::Cell(n, c) => Some((n, c)),
         _ => None,
@@ -68,7 +71,9 @@ pub fn set_row_cell(
         .children
         .iter_mut()
         .find_map(|c| match c {
-            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => Some(s),
+            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => {
+                Some(s)
+            }
             _ => None,
         })
         .with_context(|| format!("section {section}:{section_ix} not found"))?;
@@ -94,7 +99,9 @@ pub fn row_cell<'a>(
         .children
         .iter()
         .find_map(|c| match c {
-            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => Some(s),
+            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => {
+                Some(s)
+            }
             _ => None,
         })
         .with_context(|| format!("section {section}:{section_ix} not found"))?;
@@ -117,7 +124,9 @@ pub fn restore_row_cell(
         .children
         .iter_mut()
         .find_map(|c| match c {
-            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => Some(s),
+            vsdx::model::SheetChild::Section(s) if s.name == section && s.ix == section_ix => {
+                Some(s)
+            }
             _ => None,
         })
         .with_context(|| format!("section {section}:{section_ix} not found"))?;
@@ -154,7 +163,12 @@ pub struct SetCell {
 
 impl SetCell {
     pub fn new(scope: Scope, name: impl Into<String>, new: Cell) -> SetCell {
-        SetCell { scope, name: name.into(), new, old: None }
+        SetCell {
+            scope,
+            name: name.into(),
+            new,
+            old: None,
+        }
     }
 }
 
@@ -233,7 +247,11 @@ impl crate::Command for SetRowCell {
         // the inherited cells (effective sheet) so untouched values keep
         // their master's appearance.
         let inherited_sec: Option<vsdx::model::Section> = (|| {
-            let Scope::Shape { page: page_id, shape: shape_id } = &self.scope else {
+            let Scope::Shape {
+                page: page_id,
+                shape: shape_id,
+            } = &self.scope
+            else {
                 return None;
             };
             let page = doc.pages.iter().find(|p| p.id == *page_id)?;
@@ -302,7 +320,14 @@ impl crate::Command for SetRowCell {
             }
         }
         self.old = row_cell(s, &self.section, self.section_ix, &self.row, &self.name)?.cloned();
-        set_row_cell(s, &self.section, self.section_ix, &self.row, &self.name, self.new.clone())?;
+        set_row_cell(
+            s,
+            &self.section,
+            self.section_ix,
+            &self.row,
+            &self.name,
+            self.new.clone(),
+        )?;
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
@@ -327,9 +352,10 @@ impl crate::Command for SetRowCell {
             }) {
                 let ri = match &self.row {
                     RowSel::Ix(ix) => sec.rows.iter().position(|r| r.ix == *ix),
-                    RowSel::Named(n) => {
-                        sec.rows.iter().position(|r| r.n.as_deref() == Some(n.as_str()))
-                    }
+                    RowSel::Named(n) => sec
+                        .rows
+                        .iter()
+                        .position(|r| r.n.as_deref() == Some(n.as_str())),
                 };
                 if let Some(i) = ri {
                     sec.rows.remove(i);
@@ -351,7 +377,6 @@ impl crate::Command for SetRowCell {
     }
 }
 
-
 /// Set a sheet's text (plain text; markup is escaped on store). Text
 /// belongs to shape sheets — page and master sub-shape scopes.
 #[derive(Debug, Clone)]
@@ -363,7 +388,11 @@ pub struct SetText {
 
 impl SetText {
     pub fn new(scope: Scope, text: impl Into<String>) -> SetText {
-        SetText { scope, text: text.into(), old: None }
+        SetText {
+            scope,
+            text: text.into(),
+            old: None,
+        }
     }
 }
 
@@ -456,7 +485,9 @@ impl crate::Command for AddShape {
             "add shape {} to page:{}{}",
             self.shape.id,
             self.page,
-            self.parent.map(|p| format!(" group:{p}")).unwrap_or_default()
+            self.parent
+                .map(|p| format!(" group:{p}"))
+                .unwrap_or_default()
         )
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
@@ -469,8 +500,9 @@ impl crate::Command for AddShape {
         match self.parent {
             None => page.shapes.push(self.shape.clone()),
             Some(pid) => {
-                let group = find_shape_mut(&mut page.shapes, pid)
-                    .ok_or_else(|| anyhow::anyhow!("group shape {pid} not found on page {}", self.page))?;
+                let group = find_shape_mut(&mut page.shapes, pid).ok_or_else(|| {
+                    anyhow::anyhow!("group shape {pid} not found on page {}", self.page)
+                })?;
                 group.sub_shapes.push(self.shape.clone());
             }
         }
@@ -509,7 +541,11 @@ pub struct RemoveShape {
 
 impl RemoveShape {
     pub fn new(page: i64, shape: i64) -> RemoveShape {
-        RemoveShape { page, shape, removed: None }
+        RemoveShape {
+            page,
+            shape,
+            removed: None,
+        }
     }
 }
 
@@ -572,7 +608,12 @@ pub struct DuplicateShape {
 
 impl DuplicateShape {
     pub fn new(page: i64, shape: i64, offset: (f64, f64)) -> DuplicateShape {
-        DuplicateShape { page, shape, offset, clone: None }
+        DuplicateShape {
+            page,
+            shape,
+            offset,
+            clone: None,
+        }
     }
 }
 
@@ -650,7 +691,12 @@ pub struct ReorderShape {
 
 impl ReorderShape {
     pub fn new(page: i64, shape: i64, to_front: bool) -> ReorderShape {
-        ReorderShape { page, shape, to_front, old_index: None }
+        ReorderShape {
+            page,
+            shape,
+            to_front,
+            old_index: None,
+        }
     }
 }
 
@@ -658,7 +704,11 @@ impl crate::Command for ReorderShape {
     fn label(&self) -> String {
         format!(
             "{} shape {} on page:{}",
-            if self.to_front { "bring to front" } else { "send to back" },
+            if self.to_front {
+                "bring to front"
+            } else {
+                "send to back"
+            },
             self.shape,
             self.page
         )
@@ -673,7 +723,9 @@ impl crate::Command for ReorderShape {
         let idx = shapes
             .iter()
             .position(|s| s.id == self.shape)
-            .ok_or_else(|| anyhow::anyhow!("shape {} not found on page {}", self.shape, self.page))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("shape {} not found on page {}", self.shape, self.page)
+            })?;
         self.old_index = Some(idx);
         let s = shapes.remove(idx);
         if self.to_front {
@@ -710,7 +762,12 @@ impl crate::Command for ReorderShape {
 
 /// Next free page ID (max existing + 1; Visio page IDs start at 0).
 pub fn next_page_id(doc: &Document) -> i64 {
-    doc.pages.iter().map(|p| p.id).max().map(|m| m + 1).unwrap_or(0)
+    doc.pages
+        .iter()
+        .map(|p| p.id)
+        .max()
+        .map(|m| m + 1)
+        .unwrap_or(0)
 }
 
 /// Next free page part name (`visio/pages/pageN.xml`), considering both
@@ -736,7 +793,8 @@ pub fn next_page_part(doc: &Document) -> String {
     }
     if let Some(pkg) = &doc.package {
         for name in pkg.part_names() {
-            if name.starts_with("visio/pages/") && name.ends_with(".xml") && !name.contains("_rels") {
+            if name.starts_with("visio/pages/") && name.ends_with(".xml") && !name.contains("_rels")
+            {
                 consider(name, &mut max);
             }
         }
@@ -863,10 +921,7 @@ pub fn new_page(doc: &Document, name: &str) -> Page {
                     ..vsdx::model::Sheet::default()
                 },
             },
-            IndexChild::Rel(vec![(
-                "r:id".to_string(),
-                next_page_rid(doc),
-            )]),
+            IndexChild::Rel(vec![("r:id".to_string(), next_page_rid(doc))]),
         ],
         part: next_page_part(doc),
         ..Page::default()
@@ -883,7 +938,10 @@ pub struct AddPage {
 
 impl AddPage {
     pub fn new(name: impl Into<String>) -> AddPage {
-        AddPage { name: name.into(), id: None }
+        AddPage {
+            name: name.into(),
+            id: None,
+        }
     }
 }
 
@@ -901,7 +959,9 @@ impl crate::Command for AddPage {
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
-        let id = self.id.ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
+        let id = self
+            .id
+            .ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
         let pos = doc.pages.iter().position(|p| p.id == id);
         match pos {
             Some(pos) => {
@@ -922,7 +982,10 @@ pub struct RemovePage {
 
 impl RemovePage {
     pub fn new(page: i64) -> RemovePage {
-        RemovePage { page, removed: None }
+        RemovePage {
+            page,
+            removed: None,
+        }
     }
 }
 
@@ -960,7 +1023,11 @@ pub struct RenamePage {
 
 impl RenamePage {
     pub fn new(page: i64, new_name: impl Into<String>) -> RenamePage {
-        RenamePage { page, new_name: new_name.into(), old: None }
+        RenamePage {
+            page,
+            new_name: new_name.into(),
+            old: None,
+        }
     }
 }
 
@@ -985,7 +1052,10 @@ impl crate::Command for RenamePage {
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
-        let (name, attrs) = self.old.clone().ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
+        let (name, attrs) = self
+            .old
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
         let p = doc
             .pages
             .iter_mut()
@@ -1080,7 +1150,11 @@ pub struct RemoveConnect {
 
 impl RemoveConnect {
     pub fn new(owner: ConnectsOwner, index: usize) -> RemoveConnect {
-        RemoveConnect { owner, index, removed: None }
+        RemoveConnect {
+            owner,
+            index,
+            removed: None,
+        }
     }
 }
 
@@ -1102,7 +1176,10 @@ impl crate::Command for RemoveConnect {
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
-        let removed = self.removed.clone().ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let removed = self
+            .removed
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
         let mut list = self.owner.read_connects_editable(doc)?;
         let at = self.index.min(list.list.len());
         list.list.insert(at, removed);
@@ -1131,7 +1208,10 @@ pub struct Macro {
 
 impl Macro {
     pub fn new(label: impl Into<String>, cmds: Vec<Box<dyn crate::Command>>) -> Macro {
-        Macro { label: label.into(), cmds }
+        Macro {
+            label: label.into(),
+            cmds,
+        }
     }
 }
 

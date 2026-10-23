@@ -1,14 +1,30 @@
 # DiagramCraft
 
-A Linux-native reimplementation of the Visio 2016 drawing experience in
-Rust: read and write `.vsdx`/`.vstx`/`.vssx` packages losslessly, render
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](LICENSE-MIT)
+[![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
+[![CI](https://img.shields.io/github/actions/workflow/status/baradhili/DiagramCraft/ci.yml?style=flat-square&label=CI)](https://github.com/baradhili/DiagramCraft/actions/workflows/ci.yml)
+[![Powered by Z.ai GLM](https://img.shields.io/badge/Powered_by-Z.ai_GLM_5.x-0066FF?style=flat-square)](https://z.ai)
+[![AI harness: ZCode](https://img.shields.io/badge/AI_harness-ZCode-000000?style=flat-square)](https://z.ai)
+[![RE tooling: morluto/rea](https://img.shields.io/badge/RE_tooling-morluto/rea-555555?style=flat-square)](https://github.com/morluto/rea)
+
+A Linux/Windows/MacOS-native reimplementation of the Visio 2016 drawing experience in Rust: read and write `.vsdx`/`.vstx`/`.vssx` packages losslessly, render
 them to SVG/PNG, edit them through an undoable command layer, and work in
 a native desktop GUI with the Visio shell (ribbon, stencils, ShapeSheet).
 
 Built clean-room: from recorded file-format and application-behavior
 observations. No Microsoft code, content, or assets.
 
-Using: [GitHub - morluto/rea: Reverse engineer anything with agents, from app behavior down to native binaries. · GitHub](https://github.com/morluto/rea) and zcode
+## Powered by
+
+DiagramCraft is built in public using **[Z.ai GLM-5.x](https://z.ai)** for long-horizon agentic coding on a 1M-token context window, with deep binary-format reverse engineering supported by **[morluto/rea](https://github.com/morluto/rea)**.
+
+The workload — multi-file refactors across a real binary format reverse-engineering effort — is exactly the long-running software-engineering task that GLM-5.x was designed for. The project would not be moving at this pace without Z.ai's Coding Plan. Hint Hint - sponsorship?..
+
+If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or [inquire about Z.ai open source sponsorships](https://z.ai/contact).
+
+## Current screenshots
+
+![Screenshot.png](Screenshot.png)
 
 ## Helping
 

@@ -9,6 +9,9 @@
 
 use std::fmt::Write as _;
 
+use vsdx::model::Sheet;
+#[cfg(test)]
+use vsdx::model::{Section, SheetChild};
 use vsdx::{Cell, Document, Row, Shape};
 
 const PX_PER_IN: f64 = 96.0;
@@ -102,7 +105,8 @@ fn master_bbox(doc: &Document, m: &vsdx::Master, master_h: f64) -> Option<(f64, 
         let chain: Vec<&Shape> = std::iter::once(s).collect();
         let env = shape_env(doc, s, &chain);
         let get = |n: &str| -> Option<f64> {
-            doc.resolve_cell(s, &chain, n).and_then(|c| cell_num(&c, &env))
+            doc.resolve_cell(s, &chain, n)
+                .and_then(|c| cell_num(&c, &env))
         };
         let (pin_x, pin_y) = (get("PinX")?, get("PinY")?);
         let (w, h) = (get("Width").unwrap_or(1.0), get("Height").unwrap_or(1.0));
@@ -242,14 +246,16 @@ fn render_shape<'a>(
     let angle = get("Angle").unwrap_or(0.0);
     let flip_x = get("FlipX").unwrap_or(0.0) != 0.0;
     let flip_y = get("FlipY").unwrap_or(0.0) != 0.0;
+    let (sx, sy) = (
+        if flip_x { -1.0 } else { 1.0 },
+        if flip_y { -1.0 } else { 1.0 },
+    );
 
     let transform = format!(
         "translate({px:.6},{py:.6}) rotate({deg:.6}) scale({sx},{sy}) translate({lx:.6},{ly:.6})",
         px = pin_x,
         py = page_h - pin_y,
         deg = -angle.to_degrees(),
-        sx = if flip_x { -1.0 } else { 1.0 },
-        sy = if flip_y { -1.0 } else { 1.0 },
         lx = -loc_x,
         ly = loc_y,
     );
@@ -281,7 +287,7 @@ fn render_shape<'a>(
     }
     mirror_master(doc, s, &chain, width, height, out);
 
-    emit_text(doc, s, &chain, width, height, out);
+    emit_text(doc, s, &chain, width, height, sx, sy, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -331,7 +337,9 @@ fn render_shape_local<'a>(
         render_shape_local(doc, sub, &chain, part, out);
     }
     mirror_master(doc, s, &chain, width, height, out);
-    emit_text(doc, s, &chain, width, height, out);
+    // Group-local rendering applies no flip scale of its own, so the text
+    // needs no flip compensation here.
+    emit_text(doc, s, &chain, width, height, 1.0, 1.0, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -340,8 +348,7 @@ fn render_shape_local<'a>(
 /// mirrored into the instance rect.
 fn multi_root_master(doc: &Document, s: &Shape) -> bool {
     s.sub_shapes.is_empty()
-        && s
-            .master
+        && s.master
             .and_then(|id| doc.master(id))
             .map(|m| m.shapes.len() > 1)
             .unwrap_or(false)
@@ -352,8 +359,13 @@ fn multi_root_master(doc: &Document, s: &Shape) -> bool {
 ///   master-canvas Xform, with the union bbox mapped into the instance
 ///   rect (Visio draws the master's whole canvas).
 /// - single-root master: the instance/effective sheet already draws the
-///   root's own shape; mirror only the root's sub-shape tree, scaled by
-///   the instance/master size ratio.
+///   root's own shape; mirror the root's sub-shape tree. Each sub-shape's
+///   XForm is re-evaluated against the *instance* group size (Visio
+///   semantics: cells whose formulas reference the parent stretch with
+///   it; `GUARD(4MM)`-style absolute cells keep their size — issue #15),
+///   emitting a corrective transform per child. Cells we cannot
+///   evaluate fall back to the uniform instance/master scale, so masters
+///   without authored formulas keep their historical rendering.
 fn mirror_master(
     doc: &Document,
     s: &Shape,
@@ -365,7 +377,9 @@ fn mirror_master(
     if !s.sub_shapes.is_empty() {
         return;
     }
-    let Some(m) = s.master.and_then(|id| doc.master(id)) else { return };
+    let Some(m) = s.master.and_then(|id| doc.master(id)) else {
+        return;
+    };
     let mpart = &m.part;
     if m.shapes.len() > 1 {
         // Union bbox (y-up master canvas) over all roots.
@@ -409,28 +423,284 @@ fn mirror_master(
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
-        let mw = root.sheet.cell("Width").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
-        let mh = root.sheet.cell("Height").and_then(|c| c.numeric()).filter(|v| v.abs() > 1e-9);
-        let (kx, ky) = (mw.map_or(1.0, |mw| width / mw), mh.map_or(1.0, |mh| height / mh));
-        if (kx - 1.0).abs() > 1e-9 || (ky - 1.0).abs() > 1e-9 {
-            let _ = writeln!(out, r#"<g transform="scale({kx:.6},{ky:.6})">"#);
-        }
+        let mw = root
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric())
+            .filter(|v| v.abs() > 1e-9);
+        let mh = root
+            .sheet
+            .cell("Height")
+            .and_then(|c| c.numeric())
+            .filter(|v| v.abs() > 1e-9);
+        let (kx, ky) = (
+            mw.map_or(1.0, |mw| width / mw),
+            mh.map_or(1.0, |mh| height / mh),
+        );
+        let env = mirror_env(root, s, width, height);
         for sub in &root.sub_shapes {
+            let wrapper = mirror_child_transform(sub, &env, (kx, ky));
+            if let Some(t) = &wrapper {
+                let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
+            }
             render_shape_local(doc, sub, chain, mpart, out);
-        }
-        if (kx - 1.0).abs() > 1e-9 || (ky - 1.0).abs() > 1e-9 {
-            let _ = writeln!(out, "</g>");
+            if wrapper.is_some() {
+                let _ = writeln!(out, "</g>");
+            }
         }
     }
 }
 
-/// Text: laid out inside the TxtPin/TxtWidth/TxtHeight block — word-
-/// wrapped to the block width, horizontally aligned per the Paragraph
+/// Evaluation environment for re-evaluating a master root's sub-shape
+/// XForms at instance size (issue #15): the group's effective Width /
+/// Height under both the bare and the `Sheet.N!` spellings master
+/// formulas use, plus the root's User cells — their formulas re-evaluate
+/// too, because layout cells like `User.IconY` reference the (instance)
+/// `Height`. Instance-local User rows override the master's.
+fn mirror_env(root: &Shape, instance: &Shape, width: f64, height: f64) -> vsdx::formula::Env {
+    let mut env = vsdx::formula::Env::new();
+    env.insert("Width".into(), width);
+    env.insert("Height".into(), height);
+    env.insert(format!("Sheet.{}!Width", root.id), width);
+    env.insert(format!("Sheet.{}!Height", root.id), height);
+    // User rows: master root's, overridden by the instance's own (an
+    // instance can override editable User rows such as ShapeLayout).
+    let mut users: Vec<(String, &Cell)> = Vec::new();
+    for user in root.sheet.sections_named("User") {
+        for row in user.rows.iter().filter(|r| r.n.is_some()) {
+            if let Some(c) = row.cell("Value") {
+                users.push((row.n.clone().unwrap(), c));
+            }
+        }
+    }
+    for user in instance.sheet.sections_named("User") {
+        for row in user.rows.iter().filter(|r| r.n.is_some()) {
+            if let Some(c) = row.cell("Value") {
+                if let Some(slot) = users
+                    .iter_mut()
+                    .find(|(n, _)| n == row.n.as_deref().unwrap())
+                {
+                    slot.1 = c;
+                } else {
+                    users.push((row.n.clone().unwrap(), c));
+                }
+            }
+        }
+    }
+    let set = |env: &mut vsdx::formula::Env, name: &str, v: f64| {
+        env.insert(format!("User.{name}"), v);
+        env.insert(format!("Sheet.{}!User.{name}", root.id), v);
+    };
+    for (name, c) in &users {
+        if let Some(v) = c.numeric().filter(|v| v.is_finite()) {
+            set(&mut env, name, v);
+        }
+    }
+    // User formulas re-evaluate against the instance dims (e.g. IconY =
+    // IF(OR(User.ShapeLayout<>1), Height - User.InfoPanelHeight/2, …)).
+    // Two passes let a User formula reference another User formula.
+    for _ in 0..2 {
+        let mut changed = false;
+        for (name, c) in &users {
+            let Some(f) = c.f.as_deref() else { continue };
+            if f == "Inh" || f == "No Formula" {
+                continue;
+            }
+            if let Some(v) = vsdx::formula::eval(f, &env)
+                .ok()
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+            {
+                let cur = env.get(&format!("User.{name}")).copied();
+                if cur != Some(v) {
+                    set(&mut env, name, v);
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    env
+}
+
+/// Corrective transform for one mirrored sub-shape: maps where
+/// [`render_shape_local`] places it from its master XForm (`M`) to where
+/// Visio places it at the instance's group size (`E`, from re-evaluated
+/// formulas, falling back to uniform `k`·master per axis). Result:
+/// `Some("identity-like scale")` / `Some(matrix)` / `None` when no
+/// correction is needed.
+fn mirror_child_transform(
+    sub: &Shape,
+    root_env: &vsdx::formula::Env,
+    (kx, ky): (f64, f64),
+) -> Option<String> {
+    let num = |n: &str| sub.sheet.cell(n).and_then(|c| c.numeric());
+    let m_w = num("Width").filter(|v| *v > 1e-9).unwrap_or(1.0);
+    let m_h = num("Height").filter(|v| *v > 1e-9).unwrap_or(1.0);
+    let m = |n: &str, d: f64| num(n).unwrap_or(d);
+    let (m_px, m_py) = (m("PinX", 0.0), m("PinY", 0.0));
+    let (m_lx, m_ly) = (m("LocPinX", m_w / 2.0), m("LocPinY", m_h / 2.0));
+    let ang = m("Angle", 0.0);
+
+    // Effective values: formula first (Visio re-evaluates against the
+    // instance group), then the uniform-scale fallback.
+    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings:
+    // a bare name in a child formula means the child's own cell, so the
+    // root's unqualified Width/Height/User.* must not leak in — without
+    // the filter a bare reference silently reads the group's value and
+    // skips the per-axis fallback below. (Child sheets are not in this
+    // env; bare child-cell references fail to resolve and fall back.)
+    let mut env: vsdx::formula::Env = root_env
+        .iter()
+        .filter(|(k, _)| k.contains('!'))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
+        let Some(c) = sub.sheet.cell(name) else {
+            return None;
+        };
+        if let Some(f) = c.f.as_deref() {
+            if f != "Inh" && f != "No Formula" {
+                if let Some(v) = vsdx::formula::eval(f, env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                {
+                    return Some(v);
+                }
+            }
+        }
+        c.numeric().map(|v| v * axis)
+    };
+    let e_w = eff("Width", kx, &env).unwrap_or(kx * m_w);
+    let e_h = eff("Height", ky, &env).unwrap_or(ky * m_h);
+    // Pin/LocPin formulas may reference the shape's own effective size.
+    env.insert("Width".into(), e_w);
+    env.insert("Height".into(), e_h);
+    let e_px = eff("PinX", kx, &env).unwrap_or(0.0);
+    let e_py = eff("PinY", ky, &env).unwrap_or(0.0);
+    let e_lx = eff("LocPinX", kx, &env).unwrap_or(e_w / 2.0);
+    let e_ly = eff("LocPinY", ky, &env).unwrap_or(e_h / 2.0);
+
+    // Matrices in SVG space (y-down), row-vector convention:
+    // (a b c d e f) ≡ x' = a·x + c·y + e ; y' = b·x + d·y + f.
+    let ident = Mat::identity();
+    let rot = Mat::rotation(-ang);
+    // Where render_shape_local places the shape from master values.
+    let placed = Mat::translate(m_px, -m_py)
+        .mul(&rot)
+        .mul(&Mat::translate(-m_lx, m_ly));
+    // Where Visio places it at instance size: same pin convention, the
+    // effective LocPin, and the local frame scaled to the effective size.
+    let wanted = Mat::translate(e_px, -e_py)
+        .mul(&rot)
+        .mul(&Mat::translate(-e_lx, e_ly))
+        .mul(&Mat::scale(e_w / m_w, e_h / m_h));
+    let w = wanted.mul(&placed.inv()?);
+    const EPS: f64 = 1e-9;
+    if w.near(&ident, EPS) {
+        return None;
+    }
+    if w.0[1].abs() < EPS && w.0[2].abs() < EPS && w.0[4].abs() < EPS && w.0[5].abs() < EPS {
+        return Some(format!("scale({:.6},{:.6})", w.0[0], w.0[3]));
+    }
+    Some(format!(
+        "matrix({:.6},{:.6},{:.6},{:.6},{:.6},{:.6})",
+        w.0[0], w.0[1], w.0[2], w.0[3], w.0[4], w.0[5]
+    ))
+}
+
+/// 2D affine transform as SVG `matrix(a,b,c,d,e,f)`.
+#[derive(Debug, Clone)]
+struct Mat([f64; 6]);
+
+impl Mat {
+    fn identity() -> Mat {
+        Mat([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
+    }
+    fn translate(tx: f64, ty: f64) -> Mat {
+        Mat([1.0, 0.0, 0.0, 1.0, tx, ty])
+    }
+    fn scale(sx: f64, sy: f64) -> Mat {
+        Mat([sx, 0.0, 0.0, sy, 0.0, 0.0])
+    }
+    fn rotation(rad: f64) -> Mat {
+        let (s, c) = rad.sin_cos();
+        Mat([c, s, -s, c, 0.0, 0.0])
+    }
+    /// self ∘ other (apply `other` first).
+    fn mul(&self, other: &Mat) -> Mat {
+        let a = &self.0;
+        let b = &other.0;
+        Mat([
+            a[0] * b[0] + a[2] * b[1],
+            a[1] * b[0] + a[3] * b[1],
+            a[0] * b[2] + a[2] * b[3],
+            a[1] * b[2] + a[3] * b[3],
+            a[0] * b[4] + a[2] * b[5] + a[4],
+            a[1] * b[4] + a[3] * b[5] + a[5],
+        ])
+    }
+    fn inv(&self) -> Option<Mat> {
+        let m = &self.0;
+        let det = m[0] * m[3] - m[1] * m[2];
+        if det.abs() < 1e-12 {
+            return None;
+        }
+        let inv00 = m[3] / det;
+        let inv01 = -m[1] / det;
+        let inv10 = -m[2] / det;
+        let inv11 = m[0] / det;
+        Some(Mat([
+            inv00,
+            inv01,
+            inv10,
+            inv11,
+            -(inv00 * m[4] + inv10 * m[5]),
+            -(inv01 * m[4] + inv11 * m[5]),
+        ]))
+    }
+    fn near(&self, other: &Mat, eps: f64) -> bool {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .all(|(a, b)| (a - b).abs() <= eps)
+    }
+}
+
+/// Text: laid out inside the TxtPin/TxtLocPin/TxtWidth/TxtHeight block —
+/// word-wrapped to the block width, horizontally aligned per the Paragraph
 /// row's HorizAlign, vertically per VertAlign, with the first Character
 /// row's size/color/bold. Rotated by TxtAngle around the pin (Visio
 /// vertical sidebars use TxtAngle 90).
-fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f64, out: &mut String) {
-    let Some(text) = s.sheet.text.as_deref().map(str::trim).filter(|t| !t.is_empty()) else {
+///
+/// `sx`/`sy` are the flip factors the caller's shape transform applied
+/// (±1). Visio flips mirror geometry but never the text block: the block
+/// keeps its TxtPin placement inside the flipped frame, yet the glyphs
+/// must stay un-mirrored, and a TxtAngle rotation inside a mirrored frame
+/// inverts its page-space sense — the connector masters author
+/// `TxtAngle = IF(BITXOR(FlipX,FlipY),1,-1)*Angle` against exactly that,
+/// so the page-space net is `Angle + sx*sy*TxtAngle` (0 = horizontal
+/// labels, issue #19).
+fn emit_text(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    width: f64,
+    height: f64,
+    sx: f64,
+    sy: f64,
+    out: &mut String,
+) {
+    let Some(text) = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
         return;
     };
     let env = shape_env(doc, s, chain);
@@ -448,49 +718,62 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     // value is the SVG font-size directly.
     let size = char_size(doc, s, &chain).unwrap_or(0.13888).max(0.02);
     // First Character row extras: color (palette/theme aware) and the
-    // Style bitmask (1 = bold, 2 = italic).
-    let (color, style_bits) = {
-        let sheet = doc.effective_sheet(s, chain);
-        let row = sheet
-            .sections_named("Character")
-            .first()
-            .and_then(|sec| sec.rows.first());
-        let color = row
-            .and_then(|r| r.cell("Color"))
-            .and_then(|c| c.v.clone())
-            .map(|v| match v.trim() {
-                v if v.starts_with('#') => v.to_string(),
-                v => v
-                    .parse::<i64>()
-                    .ok()
-                    .map(|idx| doc.color(idx).cloned().unwrap_or_else(|| palette(idx)))
-                    .unwrap_or_else(|| "#000000".into()),
-            })
-            .unwrap_or_else(|| "#000000".into());
-        let bits = row
-            .and_then(|r| r.cell("Style"))
-            .and_then(|c| c.numeric())
-            .unwrap_or(0.0) as u32;
-        (color, bits)
-    };
+    // Style bitmask (1 = bold, 2 = italic). Both resolve per-cell through
+    // `char_cell`, so a LangID-only instance row picks them up from the
+    // master/style rows instead of silently taking the built-in defaults.
+    let color = char_cell(doc, s, chain, "Color")
+        .and_then(|c| c.v.clone())
+        .map(|v| match v.trim() {
+            v if v.starts_with('#') => v.to_string(),
+            v => v
+                .parse::<i64>()
+                .ok()
+                .map(|idx| doc.color(idx).cloned().unwrap_or_else(|| palette(idx)))
+                .unwrap_or_else(|| "#000000".into()),
+        })
+        .unwrap_or_else(|| "#000000".into());
+    let style_bits = char_cell(doc, s, chain, "Style")
+        .and_then(|c| c.numeric())
+        .unwrap_or(0.0) as u32;
     let font_attrs = format!(
-        r#"font-size="{s:.4}" fill="{c}"{b}{i}"#,
+        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
         s = size,
-        c = color,
-        b = if style_bits & 1 != 0 { r#" font-weight="bold""# } else { "" },
-        i = if style_bits & 2 != 0 { r#" font-style="italic""# } else { "" },
+        ff = font_family_attr(char_font(doc, s, chain).as_deref()),
+        // Document-supplied color text (e.g. a `#…` value) is attribute
+        // content — escape it like every other attribute.
+        c = escape_attr(&color),
+        b = if style_bits & 1 != 0 {
+            r#" font-weight="bold""#
+        } else {
+            ""
+        },
+        i = if style_bits & 2 != 0 {
+            r#" font-style="italic""#
+        } else {
+            ""
+        },
     );
 
-    // Paragraph alignment: 1 left, 2 center, 3 right (Visio default center
-    // for shape text blocks). Vertical: 1 top, 2 middle, 3 bottom.
-    let halign = doc
-        .effective_sheet(s, chain)
+    // Paragraph alignment: Visio HorzAlign 0 = left, 1 = center, 2 = right,
+    // 3 = justify (rendered as left). Absent cell → Visio default 1 (center).
+    // Sections inherit separately from cells: a sub-shape that carries e.g.
+    // Character but no Paragraph still takes Paragraph from its master shape
+    // (`MasterShape` link) — effective_sheet stops at the instance sheet
+    // once it has any sections, so consult the source explicitly.
+    let para_row = s
+        .sheet
         .sections_named("Paragraph")
-        .first()
-        .and_then(|sec| sec.rows.first())
-        .and_then(|r| r.cell("HorizAlign"))
+        .into_iter()
+        .next()
+        .or_else(|| {
+            doc.instance_source(s, chain)
+                .and_then(|src| src.sheet.sections_named("Paragraph").into_iter().next())
+        })
+        .and_then(|sec| sec.rows.first());
+    let halign = para_row
+        .and_then(|r| r.cell("HorzAlign"))
         .and_then(|c| c.numeric())
-        .unwrap_or(2.0) as i32;
+        .unwrap_or(1.0) as i32;
     let valign = get("VertAlign").unwrap_or(2.0) as i32;
 
     // Text-block insets (Visio defaults: 0.1 in left/right, 0.0555 in
@@ -508,7 +791,10 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     // mixed case is ~0.5 em; Calibri runs slightly narrower.
     let max_chars = (((tw - ins_l - ins_r) / (size * 0.5)).floor() as usize).max(1);
     let mut lines: Vec<String> = Vec::new();
-    for para in text.split(|c| c == '\n' || c == '\r') {
+    // Visio stores line breaks as CRLF: breaking on each of \r and \n
+    // separately would insert an empty paragraph between every pair of
+    // lines, so normalize CRLF (and lone CR) to one break first.
+    for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
         if para.trim().is_empty() {
             lines.push(String::new());
             continue;
@@ -541,39 +827,66 @@ fn emit_text(doc: &Document, s: &Shape, chain: &[&Shape], width: f64, height: f6
     let n_lines = lines.len() as f64;
     let total_h = n_lines * line_h;
 
-    // Block top edge (y-up local coords): ty + th/2 is the top in Visio's
-    // frame; in the emitted (y-negated) path frame it becomes -(ty - th/2).
-    let top_y = -(ty - th / 2.0);
+    // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
+    // sits TxtLocPinX/TxtLocPinY from the block's lower-left corner, so that
+    // corner is (tx - lpx, ty - lpy) — masters can pin off-center, so no
+    // centered-pin assumption. In the emitted y-negated frame the top edge
+    // is -(ty - lpy + th).
+    let lpx = get("TxtLocPinX").unwrap_or(tw / 2.0);
+    let lpy = get("TxtLocPinY").unwrap_or(th / 2.0);
+    let top_edge = -(ty - lpy + th);
     let first_baseline = match valign {
-        3 => top_y - th + ins_b + total_h - line_h + size * 0.8, // bottom
-        1 => top_y + ins_t + size * 0.8,                          // top
-        _ => top_y - (th - total_h) / 2.0 + size * 0.8,           // middle
+        1 => top_edge + ins_t + size * 0.8,                // top
+        3 => top_edge + th - ins_b - total_h + size * 0.8, // bottom
+        _ => top_edge + (th - total_h) / 2.0 + size * 0.8, // middle
     };
     // Line x per alignment: left edge of the text area, center, or right.
-    let left_x = tx - tw / 2.0 + ins_l;
+    let left_x = tx - lpx + ins_l;
     let (anchor, x) = match halign {
-        1 => ("start", left_x),
-        3 => ("end", left_x + (tw - ins_l - ins_r)),
-        _ => ("middle", tx),
+        0 | 3 => ("start", left_x),
+        2 => ("end", left_x + (tw - ins_l - ins_r)),
+        _ => ("middle", left_x + (tw - ins_l - ins_r) / 2.0),
     };
 
     let mut body = String::new();
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
         if i == 0 {
-            let _ = write!(body, r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#, escape_text(line));
+            let _ = write!(
+                body,
+                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+                escape_text(line)
+            );
         } else {
-            let _ = write!(body, r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#, escape_text(line));
+            let _ = write!(
+                body,
+                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+                escape_text(line)
+            );
         }
     }
-    if angle.abs() > 1e-6 {
-        let _ = writeln!(
-            out,
-            r#"<g transform="translate({x:.5},{y:.5}) rotate({deg:.5})">"#,
-            x = tx,
-            y = -ty,
-            deg = -angle.to_degrees()
-        );
+    // Flip-aware block rotation (issue #19): the counter-scale keeps the
+    // glyphs un-mirrored inside the caller's flipped frame, and the
+    // rotation composes with flip parity so the page-space net is
+    // Angle + sx*sy*TxtAngle.
+    let flipped = sx < 0.0 || sy < 0.0;
+    let net_txt_deg = -(sx * sy) * angle.to_degrees();
+    // The block's tspan coordinates are pin-absolute (TxtPin-anchored),
+    // so the counter-scale/rotation must pivot AT the pin: the inverse
+    // translate after them keeps the text anchor fixed there. Without
+    // it they would swing the whole block around the local origin.
+    let mut transform = format!("translate({x:.5},{y:.5})", x = tx, y = -ty);
+    if flipped {
+        let _ = write!(transform, " scale({sx:.0},{sy:.0})", sx = sx, sy = sy);
+    }
+    if net_txt_deg.abs() > 1e-6 {
+        let _ = write!(transform, " rotate({deg:.5})", deg = net_txt_deg);
+    }
+    if flipped || net_txt_deg.abs() > 1e-6 {
+        let _ = write!(transform, " translate({x:.5},{y:.5})", x = -tx, y = ty);
+    }
+    if flipped || net_txt_deg.abs() > 1e-6 {
+        let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
             out,
             r#"<text text-anchor="{a}" {f}>{b}</text>"#,
@@ -656,8 +969,16 @@ fn base64(data: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -760,9 +1081,8 @@ fn render_all_geometry(
                 }
                 for row in m.rows.iter_mut() {
                     let Some(t) = row.t.clone() else { continue };
-                    let by_ix = src_geo.and_then(|sg| {
-                        sg.rows.iter().find(|r| r.ix == row.ix && r.ix > 0)
-                    });
+                    let by_ix =
+                        src_geo.and_then(|sg| sg.rows.iter().find(|r| r.ix == row.ix && r.ix > 0));
                     let occ = {
                         let c = src_occ.entry(t.clone()).or_insert(0);
                         *c += 1;
@@ -792,13 +1112,16 @@ fn render_all_geometry(
                             .map(|f| f.contains("Width") || f.contains("Height"))
                             .unwrap_or(true);
                         let placed = |v: f64| if proportional { scaled(cname, v) } else { v };
-                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound)
-                        else {
+                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound) else {
                             continue;
                         };
                         let patched = Cell::value(format!("{}", placed(sv)));
                         match row.cells.iter_mut().find(|(n, _)| n == cname) {
                             Some((_, cell)) => {
+                                // A local numeric V wins even under F='Inh':
+                                // Visio refreshes cached values at save, so
+                                // e.g. a legend member's flattened arc B=0 is
+                                // the live evaluation, not a stale snapshot.
                                 if cell.v.is_none()
                                     || (cell.is_inherited() && cell.numeric().is_none())
                                 {
@@ -820,7 +1143,9 @@ fn render_all_geometry(
         }
         return;
     }
-    let Some(src) = doc.instance_source(s, chain) else { return };
+    let Some(src) = doc.instance_source(s, chain) else {
+        return;
+    };
     let mw = src
         .sheet
         .cell("Width")
@@ -867,7 +1192,6 @@ fn render_geometry(
             .unwrap_or(false)
     };
     let no_fill = flag("NoFill");
-    let no_line = flag("NoLine");
     let no_show = flag("NoShow");
     if no_show {
         return;
@@ -884,6 +1208,13 @@ fn render_geometry(
         Frame::Instance => shape_env_for(doc, s, chain, rows),
         Frame::Master(src) => shape_env_for(doc, src, &[], rows),
     };
+    // Visio hides the outline when LinePattern = 0 (e.g. legend label
+    // boxes carry THEMEGUARD(0)); the geometry still exists for hit
+    // testing but must not stroke.
+    let line_pattern = doc
+        .resolve_cell(s, chain, "LinePattern")
+        .and_then(|c| cell_num(&c, &env));
+    let no_line = flag("NoLine") || line_pattern.is_some_and(|p| p == 0.0);
     let row_num = |r: &Row, c: &str| -> Option<f64> {
         r.cell(c).and_then(|cell| {
             // Geometry rows: the formula is authoritative (Visio evaluates
@@ -936,7 +1267,10 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .map(|rad| rad.to_degrees())
             .unwrap_or(90.0);
-        let id = format!("dc-grad{:x}", fnv(&format!("{fill_color}|{fill_bkgnd}|{angle_deg:.0}")));
+        let id = format!(
+            "dc-grad{:x}",
+            fnv(&format!("{fill_color}|{fill_bkgnd}|{angle_deg:.0}"))
+        );
         if !out.contains(&format!(r#"id="{id}""#)) {
             // Angle from north, clockwise → SVG gradient vector.
             let rad = angle_deg.to_radians();
@@ -955,7 +1289,15 @@ fn render_geometry(
     } else {
         fill_color.clone()
     };
-    let style = style_attr(no_fill, no_line, &fill, &line_color, line_weight);
+    let dash = line_pattern.and_then(|p| line_dasharray(p, line_weight));
+    let style = style_attr(
+        no_fill,
+        no_line,
+        &fill,
+        &line_color,
+        line_weight,
+        dash.as_deref(),
+    );
 
     // Master-space (unscaled) path state: geometry rows are authored in the
     // master's local units and scaled to the instance afterwards.
@@ -970,7 +1312,10 @@ fn render_geometry(
 
     for row in rows.iter().filter(|r| r.t.is_some()) {
         let Some(t) = row.t.as_deref() else { continue };
-        let (mx, my) = (row_num(row, "X").unwrap_or(0.0), row_num(row, "Y").unwrap_or(0.0));
+        let (mx, my) = (
+            row_num(row, "X").unwrap_or(0.0),
+            row_num(row, "Y").unwrap_or(0.0),
+        );
         let (x, y) = rel_adjust(t, mx, my, width, height);
         match t {
             "MoveTo" | "RelMoveTo" => {
@@ -983,7 +1328,10 @@ fn render_geometry(
             }
             "ArcTo" => {
                 // Circular arc: |A| = sagitta (height of arc above the
-                // chord); A > 0 bows to the left of the travel direction.
+                // chord). Positive A bulges RIGHT of the travel direction —
+                // verified against the Process master's rounded rect, which
+                // traverses CCW (y-up, interior on the left) with positive-A
+                // corner arcs bulging outward.
                 let h = row_num(row, "A").unwrap_or(0.0);
                 let (sx, sy) = cur;
                 let chord = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
@@ -993,17 +1341,22 @@ fn render_geometry(
                     // On-arc point from the sagitta.
                     let mid = ((sx + x) / 2.0, (sy + y) / 2.0);
                     let dir = ((x - sx) / chord, (y - sy) / chord);
-                    let left = (-dir.1, dir.0); // rot90: left of travel
-                    let m = (mid.0 + h * left.0, mid.1 + h * left.1);
+                    let right = (dir.1, -dir.0); // rot90 CW: right of travel
+                    let m = (mid.0 + h * right.0, mid.1 + h * right.1);
                     let radius = (chord.powi(2) + 4.0 * h * h) / (8.0 * h.abs());
                     let large = h.abs() > chord / 2.0;
                     // cross > 0 (y-up frame) = CCW; path frame is mirrored → sweep 0.
-                    let cross =
-                        (m.0 - sx) * (y - m.1) - (m.1 - sy) * (x - m.0);
+                    let cross = (m.0 - sx) * (y - m.1) - (m.1 - sy) * (x - m.0);
                     let sweep = if cross > 0.0 { 0 } else { 1 };
                     let r = sc((radius, radius)).0.max(1e-6);
                     let e = emit_pt((x, y));
-                    let _ = write!(d, "A {r:.5} {r:.5} 0 {la} {sw} {e}", la = large as u8, sw = sweep, e = e.trim_end());
+                    let _ = write!(
+                        d,
+                        "A {r:.5} {r:.5} 0 {la} {sw} {e}",
+                        la = large as u8,
+                        sw = sweep,
+                        e = e.trim_end()
+                    );
                 }
                 cur = (x, y);
             }
@@ -1025,7 +1378,9 @@ fn render_geometry(
                 let in_bounds = |v: f64, b: f64| v.abs() <= b;
                 match solve_ellipse_arc(cur, m, (x, y), c_ang, ratio, scale) {
                     Some((rx, ry, rot_deg, large, sweep))
-                        if rx.max(ry) <= 20.0 * ((x - cur.0).powi(2) + (y - cur.1).powi(2)).sqrt().max(1e-9)
+                        if rx.max(ry)
+                            <= 20.0
+                                * ((x - cur.0).powi(2) + (y - cur.1).powi(2)).sqrt().max(1e-9)
                             && in_bounds(ex, bound_x)
                             && in_bounds(ey, bound_y)
                             && in_bounds(mx, bound_x)
@@ -1059,8 +1414,9 @@ fn render_geometry(
                 let rx = ((a - x).powi(2) + (b - y).powi(2)).sqrt().max(1e-6);
                 let ry = ((c2 - x).powi(2) + (d2 - y).powi(2)).sqrt().max(1e-6);
                 let ang = (b - y).atan2(a - x); // major-axis angle, y-up frame
-                // Anisotropic instance scaling of the ellipse.
-                let (rx2, ry2, ang2) = transform_ellipse(rx.max(ry), (rx.min(ry)) / rx.max(ry), ang, scale);
+                                                // Anisotropic instance scaling of the ellipse.
+                let (rx2, ry2, ang2) =
+                    transform_ellipse(rx.max(ry), (rx.min(ry)) / rx.max(ry), ang, scale);
                 let (rx2, ry2) = if rx >= ry { (rx2, ry2) } else { (ry2, rx2) };
                 let p = sc((x, y));
                 let _ = writeln!(
@@ -1078,8 +1434,20 @@ fn render_geometry(
             "CubicBezTo" | "RelCubBezTo" => {
                 // Controls (A,B) and (C,D); end (X,Y) — all possibly
                 // relative fractions of Width/Height.
-                let (a, b) = rel_adjust(t, row_num(row, "A").unwrap_or(cur.0), row_num(row, "B").unwrap_or(cur.1), width, height);
-                let (c2, d2) = rel_adjust(t, row_num(row, "C").unwrap_or(x), row_num(row, "D").unwrap_or(y), width, height);
+                let (a, b) = rel_adjust(
+                    t,
+                    row_num(row, "A").unwrap_or(cur.0),
+                    row_num(row, "B").unwrap_or(cur.1),
+                    width,
+                    height,
+                );
+                let (c2, d2) = rel_adjust(
+                    t,
+                    row_num(row, "C").unwrap_or(x),
+                    row_num(row, "D").unwrap_or(y),
+                    width,
+                    height,
+                );
                 let _ = write!(
                     d,
                     "C {}{}{}",
@@ -1090,8 +1458,19 @@ fn render_geometry(
                 cur = (x, y);
             }
             "QuadBezTo" | "RelQuadBezTo" => {
-                let (a, b) = rel_adjust(t, row_num(row, "A").unwrap_or((cur.0 + x) / 2.0), row_num(row, "B").unwrap_or((cur.1 + y) / 2.0), width, height);
-                let _ = write!(d, "Q {} {}", emit_pt((a, b)).trim_end(), emit_pt((x, y)).trim_end());
+                let (a, b) = rel_adjust(
+                    t,
+                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    width,
+                    height,
+                );
+                let _ = write!(
+                    d,
+                    "Q {} {}",
+                    emit_pt((a, b)).trim_end(),
+                    emit_pt((x, y)).trim_end()
+                );
                 cur = (x, y);
             }
             "SplineStart" | "SplineKnot" | "NURBSTo" | "PolylineTo" | "InfiniteLine" => {
@@ -1136,7 +1515,11 @@ fn render_geometry(
             if !out_all.contains(&format!(r#"id="{id}""#)) {
                 // Triangle along +x for end markers, -x for begin markers
                 // (both orient=auto relative to path direction).
-                let path = if begin { "M10,0 L0,5 L10,10 z" } else { "M0,0 L10,5 L0,10 z" };
+                let path = if begin {
+                    "M10,0 L0,5 L10,10 z"
+                } else {
+                    "M0,0 L10,5 L0,10 z"
+                };
                 let _ = writeln!(
                     out_all,
                     r#"<defs><marker id="{id}" viewBox="0 0 10 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto"><path d="{path}" fill="{line_color}" stroke="{line_color}" stroke-width="0.5"/></marker></defs>"#,
@@ -1190,9 +1573,8 @@ fn solve_ellipse_arc(
 ) -> Option<(f64, f64, f64, bool, u8)> {
     let k = ratio;
     let (cos_c, sin_c) = (c_ang.cos(), c_ang.sin());
-    let rot = |p: (f64, f64)| -> (f64, f64) {
-        (cos_c * p.0 + sin_c * p.1, -sin_c * p.0 + cos_c * p.1)
-    };
+    let rot =
+        |p: (f64, f64)| -> (f64, f64) { (cos_c * p.0 + sin_c * p.1, -sin_c * p.0 + cos_c * p.1) };
     let ps = rot(s);
     let pm = rot(m);
     let pe = rot(e);
@@ -1248,7 +1630,13 @@ fn solve_ellipse_arc(
 
     // Scale the ellipse anisotropically to the instance frame.
     let (rx2, ry2, ang2) = transform_ellipse(rx, k, c_ang, scale);
-    Some((rx2.max(1e-6), ry2.max(1e-6), -ang2.to_degrees(), large, sweep))
+    Some((
+        rx2.max(1e-6),
+        ry2.max(1e-6),
+        -ang2.to_degrees(),
+        large,
+        sweep,
+    ))
 }
 
 /// Transform an ellipse (semi-major `r_major`, ratio `k = minor/major`, axis
@@ -1257,12 +1645,7 @@ fn solve_ellipse_arc(
 ///
 /// The image ellipse's squared semi-axes are the eigenvalues of
 /// `D·R·diag(r², (k·r)²)·Rᵀ·D` with `D = diag(scale)`.
-fn transform_ellipse(
-    r_major: f64,
-    k: f64,
-    ang: f64,
-    scale: (f64, f64),
-) -> (f64, f64, f64) {
+fn transform_ellipse(r_major: f64, k: f64, ang: f64, scale: (f64, f64)) -> (f64, f64, f64) {
     let (c, si) = (ang.cos(), ang.sin());
     let a = r_major * r_major;
     let b = (k * r_major) * (k * r_major);
@@ -1281,7 +1664,7 @@ fn transform_ellipse(
     let disc = ((tr * tr / 4.0) - det).max(0.0).sqrt();
     let lam1 = tr / 2.0 + disc; // major²
     let lam2 = (tr / 2.0 - disc).max(1e-12); // minor²
-    // Eigenvector for lam1: B·(λ-m22, m12) = λ·(λ-m22, m12) for symmetric B.
+                                             // Eigenvector for lam1: B·(λ-m22, m12) = λ·(λ-m22, m12) for symmetric B.
     let (vx, vy) = if m12.abs() > 1e-12 {
         (lam1 - m22, m12)
     } else if m11 >= m22 {
@@ -1313,13 +1696,21 @@ fn style_attr(
     fill: &str,
     line_color: &str,
     line_weight: f64,
+    dash: Option<&str>,
 ) -> String {
-    let fill = if no_fill { "none".to_string() } else { fill.to_string() };
+    let fill = if no_fill {
+        "none".to_string()
+    } else {
+        fill.to_string()
+    };
     let stroke = if no_line {
         r#"stroke="none""#.to_string()
     } else {
+        let dash = dash
+            .map(|d| format!(r#" stroke-dasharray="{d}""#))
+            .unwrap_or_default();
         format!(
-            r#"stroke="{}" stroke-width="{:.5}""#,
+            r#"stroke="{}" stroke-width="{:.5}"{dash}"#,
             escape_attr(line_color),
             line_weight.max(0.001)
         )
@@ -1327,12 +1718,45 @@ fn style_attr(
     format!(r#"fill="{}" {}"#, escape_attr(&fill), stroke)
 }
 
+/// Visio's built-in dash/dot line patterns (LinePattern 2–23) as SVG
+/// `stroke-dasharray` values in LineWeight multiples (patterns scale with
+/// the line weight — the ShapeSheet gallery's defining property). Numbers
+/// follow the ECMA-376 preset-dash primitives (`dash` 4,3 · `lgDash` 8,3 ·
+/// `dot` 1,3), composed per the Visio gallery semantics confirmed against
+/// labeled Visio 2016 reference crops (issue #13): 4 = dash-dot, 5 =
+/// dash-dot-dot, 7 = long dash + normal dash, 8 = long dash + two normal
+/// dashes. The crops' long dash measures ≈12w; the ECMA `lgDash` (8w) is
+/// used per owner decision — flip that constant if 7/8 read too short
+/// against the gold. Patterns outside this set stay solid until a corpus
+/// exercises them.
+fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
+    let spec: &[f64] = match pattern as i64 {
+        2 => &[8.0, 3.0],                     // dashed (lgDash)
+        3 => &[1.0, 3.0],                     // dotted (dot)
+        4 => &[4.0, 3.0, 1.0, 3.0],           // dash-dot (dashDot)
+        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0], // dash-dot-dot (dashDotDot)
+        7 => &[8.0, 3.0, 4.0, 3.0],           // long dash + normal dash
+        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0], // long + 2× normal dashes
+        _ => return None,
+    };
+    Some(
+        spec.iter()
+            .map(|m| format!("{:.5}", (m * weight).max(1e-4)))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
 /// Resolve a color-ish cell to `#rrggbb`.
 /// Variant colors from visio/theme/theme1.xml (DrawingML scheme),
 /// indexed by THEMEVAL("VariantColorN") formulas.
 fn theme_variant_colors(doc: &Document) -> Vec<String> {
-    let Some(pkg) = doc.package.as_ref() else { return Vec::new() };
-    let Some(raw) = pkg.part("visio/theme/theme1.xml") else { return Vec::new() };
+    let Some(pkg) = doc.package.as_ref() else {
+        return Vec::new();
+    };
+    let Some(raw) = pkg.part("visio/theme/theme1.xml") else {
+        return Vec::new();
+    };
     let xml = String::from_utf8_lossy(raw).into_owned();
     let mut out = Vec::new();
     // <vt:varColorN><a:srgbClr val="RRGGBB"/>...</vt:varColorN>
@@ -1388,7 +1812,6 @@ fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) 
     }
 }
 
-
 /// Standard color table for indices 0–23, verbatim from [MS-VSDX]
 /// "Color Table": any integer color value ≤ 23 resolves here; ≥ 24 resolves
 /// through the document `Colors` table.
@@ -1438,16 +1861,150 @@ fn cell_num(cell: &Cell, env: &vsdx::formula::Env) -> Option<f64> {
     vsdx::formula::eval(f, env).ok()?.as_f64()
 }
 
-/// First Character-section row's Size cell (inches), if present on the
-/// effective sheet.
+/// A cell of the first Character row, inherited per-cell the way Visio
+/// resolves character formatting: the instance's own row first (master
+/// instances typically carry a LangID-only row), then the source shape's
+/// row via the master link, then the text-style stylesheet cascade. A row
+/// that omits a cell inherits it — sections inherit separately from
+/// cells, and `effective_sheet` stops at the instance sheet as soon as it
+/// has any section (the same gap the Paragraph lookup in `emit_text`
+/// works around).
+fn char_cell<'a>(
+    doc: &'a Document,
+    s: &'a Shape,
+    chain: &[&'a Shape],
+    name: &str,
+) -> Option<&'a Cell> {
+    let first_row = |sheet: &'a Sheet| {
+        sheet
+            .sections_named("Character")
+            .into_iter()
+            .next()
+            .and_then(|sec| sec.rows.first())
+    };
+    if let Some(c) = first_row(&s.sheet).and_then(|r| r.cell(name)) {
+        return Some(c);
+    }
+    let source = doc.instance_source(s, chain);
+    if let Some(src) = source {
+        if let Some(c) = first_row(&src.sheet).and_then(|r| r.cell(name)) {
+            return Some(c);
+        }
+    }
+    // Text-style stylesheet cascade. The instance usually leaves the
+    // style attributes to its master root; stylesheets reference their
+    // parents through a TextStyle attribute.
+    let style_id = s
+        .text_style
+        .or_else(|| source.and_then(|src| src.text_style))?;
+    let mut cur = doc.stylesheet(style_id)?;
+    for _ in 0..8 {
+        if let Some(c) = first_row(&cur.sheet).and_then(|r| r.cell(name)) {
+            return Some(c);
+        }
+        let next_id = cur
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "TextStyle")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+            .or_else(|| {
+                cur.sheet
+                    .cell("TextStyle")
+                    .and_then(|c| c.numeric())
+                    .map(|v| v as i64)
+            })?;
+        if next_id == cur.id {
+            return None;
+        }
+        cur = doc.stylesheet(next_id)?;
+    }
+    None
+}
+
+/// First Character-section row's Size cell (inches), per-cell inherited
+/// through `char_cell`.
 fn char_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<f64> {
-    let sheet = doc.effective_sheet(s, chain);
-    let row = sheet
-        .sections_named("Character")
-        .first()?
-        .rows
-        .first()?;
-    row.cell("Size").and_then(|c| c.numeric()).filter(|v| *v > 0.0)
+    char_cell(doc, s, chain, "Size")
+        .and_then(|c| c.numeric())
+        .filter(|v| *v > 0.0)
+}
+
+/// First Character-section row's Font cell — the family name as stored
+/// in VSDX (`<Cell N='Font' V='Arial'/>`), inherited per-cell like Size.
+/// Legacy binary-format font indexes (numeric values) and the `Themed`
+/// placeholder (meaning "the theme's font", rendered with Visio's default
+/// family) name no family.
+fn char_font(doc: &Document, s: &Shape, chain: &[&Shape]) -> Option<String> {
+    let name = char_cell(doc, s, chain, "Font").and_then(|c| c.v.clone())?;
+    let name = name.trim();
+    if name.is_empty() || name.parse::<f64>().is_ok() || name.eq_ignore_ascii_case("themed") {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Metric-compatible substitutes for the Microsoft core fonts (the
+/// libre designer-alternative set), with the CSS generic each family
+/// degrades to. Case-insensitive lookup.
+fn font_substitute(name: &str) -> Option<(&'static str, &'static str)> {
+    Some(match name.trim().to_ascii_lowercase().as_str() {
+        "arial" => ("Liberation Sans", "sans-serif"),
+        "calibri" => ("Carlito", "sans-serif"),
+        "cambria" => ("Caladea", "serif"),
+        "segoe ui" => ("Carlito", "sans-serif"),
+        "times new roman" => ("Liberation Serif", "serif"),
+        "courier new" => ("Liberation Mono", "monospace"),
+        _ => return None,
+    })
+}
+
+/// Quote a font-family name for the CSS shorthand (single quotes when
+/// it contains anything but letters, digits and dashes). Inside the
+/// quotes, `'` and `\` are CSS-escaped so a document-supplied family
+/// name can never break out of the quoted string.
+fn quote_family(name: &str) -> String {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        name.to_string()
+    } else {
+        format!(
+            "'{}'",
+            name.replace('\\', "\\\\").replace('\'', "\\'")
+        )
+    }
+}
+
+fn push_family(chain: &mut Vec<String>, family: &str) {
+    if !chain.iter().any(|f| f.eq_ignore_ascii_case(family)) {
+        chain.push(quote_family(family));
+    }
+}
+
+/// `font-family` fallback chain for a document font (GitHub #17):
+/// the document's own family first (the best face on any viewer),
+/// then its metric-compatible substitute if the alias table covers
+/// it, then Carlito (the GUI's embedded face — also a sensible
+/// last-name fallback for viewers), then the CSS generic class.
+/// Text with no Font cell gets Visio's default family — Calibri —
+/// through the same table (Calibri → Carlito). Deduplicated
+/// case-insensitively.
+fn font_family_attr(font: Option<&str>) -> String {
+    let name = match font.map(str::trim) {
+        Some(f) if !f.is_empty() => f,
+        _ => "Calibri",
+    };
+    let (substitute, class) = match font_substitute(name) {
+        Some((s, c)) => (Some(s), c),
+        None => (None, "sans-serif"),
+    };
+    let mut chain = vec![quote_family(name)];
+    if let Some(s) = substitute {
+        push_family(&mut chain, s);
+    }
+    push_family(&mut chain, "Carlito");
+    chain.push(class.to_string());
+    // Document-supplied family names land in an XML attribute — the
+    // joined CSS list is attribute content like any other.
+    format!(" font-family=\"{}\"", escape_attr(&chain.join(", ")))
 }
 
 /// Resolved (Width, Height) for geometry scaling.
@@ -1478,8 +2035,18 @@ fn shape_env_for(doc: &Document, s: &Shape, chain: &[&Shape], rows: &[Row]) -> v
 /// two passes (values first, then formulas against those values).
 pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::Env {
     let names = [
-        "PinX", "PinY", "Width", "Height", "LocPinX", "LocPinY", "Angle",
-        "TxtPinX", "TxtPinY", "TxtWidth", "TxtHeight", "LineWeight",
+        "PinX",
+        "PinY",
+        "Width",
+        "Height",
+        "LocPinX",
+        "LocPinY",
+        "Angle",
+        "TxtPinX",
+        "TxtPinY",
+        "TxtWidth",
+        "TxtHeight",
+        "LineWeight",
         "Char.Size",
     ];
     let mut env = vsdx::formula::Env::new();
@@ -1534,12 +2101,508 @@ fn escape_attr(s: &str) -> String {
 }
 
 fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Synthetic Role-callout-shaped master (issue #15 specimen, values
+    /// recomputed — no Microsoft content): a root group whose children
+    /// mix proportional XForms (`Sheet.5!Width*1`) with GUARDed absolute
+    /// ones (`GUARD(4MM)`), driven by User cells whose formulas reference
+    /// the group Height.
+    fn role_master_fixture() -> (Shape, Shape) {
+        let mut set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
+            sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(format!("{v}")),
+                    f: f.map(str::to_string),
+                    ..Cell::default()
+                },
+            );
+        };
+        // Root: master canvas 1.1811 × 0.7874.
+        let mut root = Shape {
+            id: 5,
+            ..Shape::default()
+        };
+        set(&mut root.sheet, "Width", 1.181102362204724, None);
+        set(&mut root.sheet, "Height", 0.7874015748031495, None);
+        let urow = |n: &str, v: f64, f: Option<&str>| Row {
+            n: Some(n.into()),
+            cells: vec![(
+                "Value".into(),
+                Cell {
+                    v: Some(format!("{v}")),
+                    f: f.map(str::to_string),
+                    ..Cell::default()
+                },
+            )],
+            ..Row::default()
+        };
+        root.sheet.children.push(SheetChild::Section(Section {
+            name: "User".into(),
+            rows: vec![
+                urow("ShapeLayout", 0.0, None),
+                urow("InfoPanelHeight", 0.2362204724409449, None),
+                urow("IconX", 0.1181102362204724, Some("User.InfoPanelHeight/2")),
+                urow(
+                    "IconY",
+                    0.6692913385826771,
+                    Some("IF(OR(User.ShapeLayout<>1), Height-User.InfoPanelHeight/2, User.InfoPanelHeight/2)"),
+                ),
+            ],
+            ..Section::default()
+        }));
+        // Container child: fully proportional.
+        let mut container = Shape {
+            id: 6,
+            ..Shape::default()
+        };
+        set(
+            &mut container.sheet,
+            "Width",
+            1.181102362204721,
+            Some("Sheet.5!Width*1"),
+        );
+        set(
+            &mut container.sheet,
+            "Height",
+            0.7874015748031491,
+            Some("Sheet.5!Height*1"),
+        );
+        set(
+            &mut container.sheet,
+            "PinX",
+            0.5905511811023657,
+            Some("Sheet.5!Width*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "PinY",
+            0.3937007874015748,
+            Some("Sheet.5!Height*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "LocPinX",
+            0.5905511811023605,
+            Some("Width*0.5"),
+        );
+        set(
+            &mut container.sheet,
+            "LocPinY",
+            0.3937007874015746,
+            Some("Height*0.5"),
+        );
+        // Icon child: absolute size, pinned via User cells.
+        let mut icon = Shape {
+            id: 8,
+            ..Shape::default()
+        };
+        set(
+            &mut icon.sheet,
+            "Width",
+            0.1574803149606299,
+            Some("GUARD(4MM)"),
+        );
+        set(
+            &mut icon.sheet,
+            "Height",
+            0.1692913385826771,
+            Some("GUARD(4.3MM)"),
+        );
+        set(
+            &mut icon.sheet,
+            "PinX",
+            0.1181102362204724,
+            Some("GUARD(Sheet.5!User.IconX)"),
+        );
+        set(
+            &mut icon.sheet,
+            "PinY",
+            0.6692913385826771,
+            Some("GUARD(Sheet.5!User.IconY)"),
+        );
+        set(
+            &mut icon.sheet,
+            "LocPinX",
+            0.07874015748031496,
+            Some("Width*0.5"),
+        );
+        set(
+            &mut icon.sheet,
+            "LocPinY",
+            0.08464566929133857,
+            Some("Height*0.5"),
+        );
+        // Literal child (no formulas): uniform-scale fallback.
+        let mut plain = Shape {
+            id: 16,
+            ..Shape::default()
+        };
+        set(&mut plain.sheet, "Width", 0.5, None);
+        set(&mut plain.sheet, "Height", 0.25, None);
+        set(&mut plain.sheet, "PinX", 0.5, None);
+        set(&mut plain.sheet, "PinY", 0.25, None);
+        root.sub_shapes = vec![container, icon, plain];
+
+        // Instance: same master stretched tall (2.25 × 7.02 aspect change).
+        let mut inst = Shape {
+            id: 65,
+            master: Some(7),
+            ..Shape::default()
+        };
+        set(&mut inst.sheet, "Width", 2.657480296178819, None);
+        set(&mut inst.sheet, "Height", 5.528301723437821, None);
+        (root, inst)
+    }
+
+    /// Parse `matrix(a,b,c,d,e,f)` / `scale(sx,sy)` into (a..f).
+    fn parse_tf(t: &str) -> [f64; 6] {
+        let body = t
+            .trim_start_matches("matrix(")
+            .trim_start_matches("scale(")
+            .trim_end_matches(')');
+        let nums: Vec<f64> = body.split(',').map(|n| n.parse().unwrap()).collect();
+        if t.starts_with("scale(") {
+            [nums[0], 0.0, 0.0, nums[1], 0.0, 0.0]
+        } else {
+            nums.try_into().unwrap()
+        }
+    }
+
+    #[test]
+    fn mirrored_proportional_child_keeps_uniform_scale() {
+        let (root, inst) = role_master_fixture();
+        let (iw, ih) = (2.657480296178819, 5.528301723437821);
+        let (mw, mh) = (1.181102362204724, 0.7874015748031495);
+        let (kx, ky) = (iw / mw, ih / mh); // 2.25 × 7.020943
+        let env = mirror_env(&root, &inst, iw, ih);
+        // Container (Sheet.5!Width*1 …): exactly the historical uniform
+        // scale — no regression for proportional children.
+        let t = mirror_child_transform(&root.sub_shapes[0], &env, (kx, ky)).unwrap();
+        assert_eq!(t, "scale(2.250000,7.020943)", "got {t}");
+    }
+
+    #[test]
+    fn mirrored_guarded_child_keeps_absolute_size() {
+        let (root, inst) = role_master_fixture();
+        let (iw, ih) = (2.657480296178819, 5.528301723437821);
+        let env = mirror_env(&root, &inst, iw, ih);
+        // Icon: 4×4.3 mm stays absolute; its pin re-evaluates against the
+        // instance Height (User.IconY = H − InfoPanelHeight/2).
+        let t = mirror_child_transform(&root.sub_shapes[1], &env, (2.25, 7.02)).unwrap();
+        let m = parse_tf(&t);
+        let e_py = ih - 0.2362204724409449 / 2.0; // 5.410191487…
+        let m_py = 0.6692913385826771;
+        let m_h = 0.1692913385826771;
+        // wanted ∘ placed⁻¹ for angle 0, scale 1: pure translate by the
+        // pin delta (effective LocPin = W/2 in both frames).
+        let expected_ty = -((e_py - 0.1692913385826771 / 2.0) - (m_py - m_h / 2.0));
+        assert!((m[0] - 1.0).abs() < 1e-6, "a={}", m[0]);
+        assert!((m[3] - 1.0).abs() < 1e-6, "d={}", m[3]);
+        assert!(m[4].abs() < 1e-6, "e={}", m[4]);
+        assert!(
+            (m[5] - expected_ty).abs() < 1e-5,
+            "f={} expected {expected_ty}",
+            m[5]
+        );
+    }
+
+    #[test]
+    fn mirrored_literal_child_falls_back_to_uniform_scale() {
+        let (root, inst) = role_master_fixture();
+        let env = mirror_env(&root, &inst, 2.657480296178819, 5.528301723437821);
+        // No formulas anywhere: behavior is byte-identical to the old
+        // uniform wrapper.
+        let t = mirror_child_transform(&root.sub_shapes[2], &env, (2.25, 7.020943)).unwrap();
+        assert_eq!(t, "scale(2.250000,7.020943)", "got {t}");
+    }
+
+    #[test]
+    fn mirror_env_resolves_user_formulas_against_instance_height() {
+        let (root, inst) = role_master_fixture();
+        let env = mirror_env(&root, &inst, 2.657480296178819, 5.528301723437821);
+        let v = env.get("User.IconY").copied().unwrap();
+        assert!((v - (5.528301723437821 - 0.2362204724409449 / 2.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn line_pattern_dasharrays_scale_with_weight() {
+        // ECMA-376 preset primitives (issue #13): dash 4,3 · lgDash 8,3 ·
+        // dot 1,3, composed per the Visio gallery semantics.
+        let w = 0.01041666666666667; // 0.75 pt
+        assert_eq!(line_dasharray(2.0, w).as_deref(), Some("0.08333 0.03125"));
+        assert_eq!(line_dasharray(3.0, w).as_deref(), Some("0.01042 0.03125"));
+        assert_eq!(
+            line_dasharray(4.0, w).as_deref(),
+            Some("0.04167 0.03125 0.01042 0.03125")
+        );
+        assert_eq!(
+            line_dasharray(5.0, w).as_deref(),
+            Some("0.04167 0.03125 0.01042 0.03125 0.01042 0.03125")
+        );
+        // 7/8: long dash (lgDash) + normal dash(es).
+        assert_eq!(
+            line_dasharray(7.0, w).as_deref(),
+            Some("0.08333 0.03125 0.04167 0.03125")
+        );
+        assert_eq!(
+            line_dasharray(8.0, w).as_deref(),
+            Some("0.08333 0.03125 0.04167 0.03125 0.04167 0.03125")
+        );
+        // Solid (1), hidden (0, handled elsewhere) and uncalibrated
+        // patterns render solid — no dasharray attribute.
+        assert!(line_dasharray(1.0, w).is_none());
+        assert!(line_dasharray(23.0, w).is_none());
+    }
+
+    /// A Character row with Font/Size/Color cells for char_font tests.
+    fn char_row(font: Option<&str>) -> Row {
+        let mut cells = Vec::new();
+        if let Some(f) = font {
+            cells.push((
+                "Font".to_string(),
+                Cell {
+                    v: Some(f.to_string()),
+                    ..Cell::default()
+                },
+            ));
+        }
+        Row {
+            cells,
+            ..Row::default()
+        }
+    }
+
+    fn shape_with_character(font: Option<&str>) -> Shape {
+        let mut s = Shape::default();
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![char_row(font)],
+            ..Section::default()
+        }));
+        s
+    }
+
+    #[test]
+    fn font_family_chains_follow_the_alias_table() {
+        // Document family first, then the metric-compatible substitute,
+        // then Carlito, then the CSS generic (GitHub #17's example).
+        assert_eq!(
+            font_family_attr(Some("Arial")),
+            " font-family=\"Arial, 'Liberation Sans', Carlito, sans-serif\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Calibri")),
+            " font-family=\"Calibri, Carlito, sans-serif\"",
+            "Calibri's substitute IS Carlito — no duplicate entry"
+        );
+        assert_eq!(
+            font_family_attr(Some("Times New Roman")),
+            " font-family=\"'Times New Roman', 'Liberation Serif', Carlito, serif\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Courier New")),
+            " font-family=\"'Courier New', 'Liberation Mono', Carlito, monospace\""
+        );
+        assert_eq!(
+            font_family_attr(Some("Cambria")),
+            " font-family=\"Cambria, Caladea, Carlito, serif\""
+        );
+        // Unknown families: kept as-is, Carlito + sans-serif tail.
+        assert_eq!(
+            font_family_attr(Some("Wingdings")),
+            " font-family=\"Wingdings, Carlito, sans-serif\""
+        );
+        // Lookup is case-insensitive and trims; no Font cell (or an
+        // empty one) falls back to Visio's default family, Calibri.
+        assert_eq!(
+            font_family_attr(Some("  ARIAL ")),
+            " font-family=\"ARIAL, 'Liberation Sans', Carlito, sans-serif\""
+        );
+        assert_eq!(
+            font_family_attr(None),
+            " font-family=\"Calibri, Carlito, sans-serif\"",
+            "Visio's default family is Calibri"
+        );
+        assert_eq!(
+            font_family_attr(Some("")),
+            " font-family=\"Calibri, Carlito, sans-serif\""
+        );
+    }
+
+    #[test]
+    fn char_font_reads_the_first_character_row() {
+        let doc = Document::default();
+        let s = shape_with_character(Some("Arial"));
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain).as_deref(), Some("Arial"));
+        // Numeric (legacy binary index) values name no family.
+        let s = shape_with_character(Some("4"));
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+        // No Font cell / no section at all.
+        let s = shape_with_character(None);
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+        let s = Shape::default();
+        let chain = [&s];
+        assert_eq!(char_font(&doc, &s, &chain), None);
+    }
+
+    #[test]
+    fn char_font_inherits_from_the_master_sheet() {
+        // The instance's own sheet carries no sections, so the
+        // effective sheet is its master's (the Size/Color path).
+        let mut root = shape_with_character(Some("Segoe UI"));
+        root.id = 1;
+        let doc = Document {
+            masters: vec![vsdx::Master {
+                id: 7,
+                shapes: vec![root],
+                ..Default::default()
+            }],
+            ..Document::default()
+        };
+        let inst = Shape {
+            id: 2,
+            master: Some(7),
+            ..Shape::default()
+        };
+        assert_eq!(char_font(&doc, &inst, &[]).as_deref(), Some("Segoe UI"));
+        // An own Character row wins over the master's.
+        let mut inst = Shape {
+            id: 3,
+            master: Some(7),
+            ..Shape::default()
+        };
+        inst.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![char_row(Some("Cambria"))],
+            ..Section::default()
+        }));
+        assert_eq!(char_font(&doc, &inst, &[]).as_deref(), Some("Cambria"));
+    }
+
+    #[test]
+    fn emitted_text_carries_the_font_family_chain() {
+        let doc = Document::default();
+        let mut s = shape_with_character(Some("Arial"));
+        s.sheet.text = Some("hello".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, &mut out);
+        assert!(
+            out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
+            "emitted text element: {out}"
+        );
+        assert!(out.contains("hello"), "emitted: {out}");
+    }
+
+    /// Compose an SVG transform list (`translate(a,b) scale(c,d)
+    /// rotate(e) …`) into one matrix. SVG applies leftmost-last to the
+    /// point, so composition is left-to-right matrix multiplication.
+    fn compose_tf(list: &str) -> Mat {
+        let mut total = Mat::identity();
+        for cmd in list.split(')').filter(|s| !s.trim().is_empty()) {
+            let body = cmd.trim().split('(').nth(1).unwrap_or("");
+            let n: Vec<f64> = body
+                .split(',')
+                .map(|v| v.trim().parse().unwrap())
+                .collect();
+            let m = if cmd.trim().starts_with("translate") {
+                Mat::translate(n[0], n[1])
+            } else if cmd.trim().starts_with("scale") {
+                Mat::scale(n[0], n[1])
+            } else if cmd.trim().starts_with("rotate") {
+                Mat::rotation(n[0].to_radians())
+            } else {
+                panic!("unhandled transform command: {cmd}");
+            };
+            total = total.mul(&m);
+        }
+        total
+    }
+
+    /// A text block pinned off-origin, for the TxtPin-pivot tests.
+    fn shape_with_pinned_text(txt_angle_deg: f64) -> Shape {
+        let mut s = Shape::default();
+        let set = |s: &mut Shape, n: &str, v: f64| {
+            s.sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(format!("{v}")),
+                    ..Cell::default()
+                },
+            );
+        };
+        set(&mut s, "TxtPinX", 1.5);
+        set(&mut s, "TxtPinY", 0.75);
+        set(&mut s, "TxtWidth", 1.0);
+        set(&mut s, "TxtHeight", 0.5);
+        set(&mut s, "TxtAngle", txt_angle_deg.to_radians());
+        s.sheet.text = Some("label".into());
+        s
+    }
+
+    fn text_wrapper_transform(sx: f64, sy: f64, txt_angle_deg: f64) -> Option<(String, (f64, f64))> {
+        let doc = Document::default();
+        let s = shape_with_pinned_text(txt_angle_deg);
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, &mut out);
+        let t = out
+            .split("transform=\"")
+            .nth(1)?
+            .split('"')
+            .next()
+            .map(str::to_owned)?;
+        Some((t, (1.5, -0.75))) // (list, TxtPin in the emitted y-down frame)
+    }
+
+    #[test]
+    fn rotated_text_block_pivots_at_txtpin() {
+        let Some((t, pin)) = text_wrapper_transform(1.0, 1.0, 30.0) else {
+            panic!("rotation must emit a transform wrapper");
+        };
+        let m = compose_tf(&t);
+        let [a, b, c, d, e, f] = m.0;
+        let (x, y) = (pin.0 * a + pin.1 * c + e, pin.0 * b + pin.1 * d + f);
+        assert!(
+            (x - pin.0).abs() < 1e-6 && (y - pin.1).abs() < 1e-6,
+            "anchor ({x},{y}) must stay at the TxtPin {pin:?} — transform {t}"
+        );
+    }
+
+    #[test]
+    fn flipped_text_block_pivots_at_txtpin() {
+        // FlipX only and both axes: the counter-scale keeps the anchor
+        // fixed at the pin in each case.
+        for (sx, sy) in [(-1.0, 1.0), (-1.0, -1.0)] {
+            let Some((t, pin)) = text_wrapper_transform(sx, sy, 0.0) else {
+                panic!("flip must emit a transform wrapper");
+            };
+            let m = compose_tf(&t);
+            let [a, b, c, d, e, f] = m.0;
+            let (x, y) = (pin.0 * a + pin.1 * c + e, pin.0 * b + pin.1 * d + f);
+            assert!(
+                (x - pin.0).abs() < 1e-6 && (y - pin.1).abs() < 1e-6,
+                "anchor ({x},{y}) must stay at the TxtPin {pin:?} — transform {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn unflipped_unrotated_text_has_no_wrapper() {
+        assert!(text_wrapper_transform(1.0, 1.0, 0.0).is_none());
+    }
 
     #[test]
     fn elliptical_arc_half_circle() {
@@ -1562,17 +2625,32 @@ mod tests {
     fn elliptical_arc_junction_circle() {
         let w = 0.03937007874015748;
         // Row 2: arc from (0, W/2) via on-arc point (W/2, W) to (W, W/2).
-        let (rx, ry, _, large, sweep) =
-            solve_ellipse_arc((0.0, w / 2.0), (w / 2.0, w), (w, w / 2.0), 0.0, 1.0, (1.0, 1.0))
-                .unwrap();
-        assert!((rx - ry).abs() < 1e-9, "ratio 1 ⇒ circle, got rx={rx} ry={ry}");
+        let (rx, ry, _, large, sweep) = solve_ellipse_arc(
+            (0.0, w / 2.0),
+            (w / 2.0, w),
+            (w, w / 2.0),
+            0.0,
+            1.0,
+            (1.0, 1.0),
+        )
+        .unwrap();
+        assert!(
+            (rx - ry).abs() < 1e-9,
+            "ratio 1 ⇒ circle, got rx={rx} ry={ry}"
+        );
         assert!((rx - w / 2.0).abs() < 1e-9, "rx={rx} expected={}", w / 2.0);
         assert!(!large, "exact half arc");
         assert_eq!(sweep, 0);
         // Row 3 closes the circle back to (0, W/2) via (W/2, 0).
-        let (rx2, ry2, _, large2, sweep2) =
-            solve_ellipse_arc((w, w / 2.0), (w / 2.0, 0.0), (0.0, w / 2.0), 0.0, 1.0, (1.0, 1.0))
-                .unwrap();
+        let (rx2, ry2, _, large2, sweep2) = solve_ellipse_arc(
+            (w, w / 2.0),
+            (w / 2.0, 0.0),
+            (0.0, w / 2.0),
+            0.0,
+            1.0,
+            (1.0, 1.0),
+        )
+        .unwrap();
         assert!((rx2 - w / 2.0).abs() < 1e-9);
         assert!((ry2 - w / 2.0).abs() < 1e-9);
         assert!(!large2);

@@ -6,12 +6,23 @@ const ICONS: &[(&str, &[u8])] = &[
 ];
 
 fn set(color: &'static str, width: Option<&'static str>, prefix: &'static str) -> SvgIconSet {
-    SvgIconSet::new(ICONS, SvgStyle { current_color: color, stroke_width: width }, prefix, "box")
+    SvgIconSet::new(
+        ICONS,
+        SvgStyle {
+            current_color: color,
+            stroke_width: width,
+        },
+        prefix,
+        "box",
+    )
 }
 
 fn parts(source: ImageSource<'static>) -> (String, Arc<[u8]>) {
     match source {
-        ImageSource::Bytes { uri, bytes: Bytes::Shared(bytes) } => (uri.to_string(), bytes),
+        ImageSource::Bytes {
+            uri,
+            bytes: Bytes::Shared(bytes),
+        } => (uri.to_string(), bytes),
         _ => panic!("expected shared SVG bytes"),
     }
 }
@@ -35,7 +46,11 @@ fn app_styles_preserve_their_own_strokes_and_white_spelling() {
 #[test]
 fn stroke_replacement_is_optional() {
     let (_, bytes) = parts(set("white", None, "bytes://plain/").source("box"));
-    assert!(std::str::from_utf8(&bytes).unwrap().contains("stroke-width=\"2\""));
+    assert!(
+        std::str::from_utf8(&bytes)
+            .unwrap()
+            .contains("stroke-width=\"2\"")
+    );
 }
 
 #[test]
@@ -53,7 +68,15 @@ fn fallback_shares_bytes_but_preserves_requested_cache_key() {
 
 #[test]
 fn absent_fallback_is_an_empty_source_not_a_panic() {
-    let icons = SvgIconSet::new(&[], SvgStyle { current_color: "white", stroke_width: None }, "bytes://empty/", "absent");
+    let icons = SvgIconSet::new(
+        &[],
+        SvgStyle {
+            current_color: "white",
+            stroke_width: None,
+        },
+        "bytes://empty/",
+        "absent",
+    );
     let (uri, bytes) = parts(icons.source("unknown"));
     assert_eq!(uri, "bytes://empty/unknown.svg");
     assert!(bytes.is_empty());
@@ -61,9 +84,19 @@ fn absent_fallback_is_an_empty_source_not_a_panic() {
 
 #[test]
 fn duplicate_names_keep_the_last_entry_and_invalid_utf8_is_lossy() {
-    let icons =
-        SvgIconSet::new(&[("a", b"first"), ("a", b"last\xff")], SvgStyle { current_color: "white", stroke_width: None }, "bytes://duplicates/", "a");
-    assert_eq!(std::str::from_utf8(&parts(icons.source("a")).1).unwrap(), "last\u{fffd}");
+    let icons = SvgIconSet::new(
+        &[("a", b"first"), ("a", b"last\xff")],
+        SvgStyle {
+            current_color: "white",
+            stroke_width: None,
+        },
+        "bytes://duplicates/",
+        "a",
+    );
+    assert_eq!(
+        std::str::from_utf8(&parts(icons.source("a")).1).unwrap(),
+        "last\u{fffd}"
+    );
 }
 
 #[test]
@@ -75,8 +108,19 @@ fn egui_svg_loader_rasterizes_both_styles_at_multiple_pixel_sizes() {
         for size in [16, 24, 48] {
             let (uri, bytes) = parts(icons.source("box"));
             ctx.include_bytes(uri.clone(), Bytes::Shared(bytes));
-            let result = ctx.try_load_image(&uri, egui::load::SizeHint::Size { width: size, height: size, maintain_aspect_ratio: true }).unwrap();
-            let egui::load::ImagePoll::Ready { image } = result else { panic!("embedded SVG did not load synchronously") };
+            let result = ctx
+                .try_load_image(
+                    &uri,
+                    egui::load::SizeHint::Size {
+                        width: size,
+                        height: size,
+                        maintain_aspect_ratio: true,
+                    },
+                )
+                .unwrap();
+            let egui::load::ImagePoll::Ready { image } = result else {
+                panic!("embedded SVG did not load synchronously")
+            };
             assert_eq!(image.size, [size as usize, size as usize]);
             assert!(image.pixels.iter().any(|pixel| pixel.a() != 0));
         }

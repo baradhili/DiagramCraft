@@ -58,11 +58,19 @@ impl SplitLayout {
     /// cannot fit, each child receives half the available space. Invalid inputs and zero available
     /// space return `None`, so the caller can leave its persisted value unchanged.
     pub fn resized(self, size: SplitSize, delta: f32, minimum: f32) -> Option<SplitSize> {
-        if !size.value().is_finite() || !delta.is_finite() || !valid_nonnegative(minimum) || self.available <= 0.0 {
+        if !size.value().is_finite()
+            || !delta.is_finite()
+            || !valid_nonnegative(minimum)
+            || self.available <= 0.0
+        {
             return None;
         }
         let available = f64::from(self.available);
-        let first = clamp_first(f64::from(self.first_size) + f64::from(delta), available, minimum);
+        let first = clamp_first(
+            f64::from(self.first_size) + f64::from(delta),
+            available,
+            minimum,
+        );
         Some(match size {
             SplitSize::Ratio(_) => SplitSize::Ratio((first / available) as f32),
             SplitSize::FixedFirst(_) => SplitSize::FixedFirst(first as f32),
@@ -78,8 +86,18 @@ impl SplitLayout {
 /// Finite sizing requests outside the available range are clamped. Inverted rectangles,
 /// non-finite coordinates or extents, negative/non-finite gap or minimum, and non-finite sizing
 /// requests return `None`. No state is stored or changed.
-pub fn split_rect(rect: Rect, axis: SplitAxis, size: SplitSize, gap: f32, minimum: f32) -> Option<SplitLayout> {
-    if !valid_rect(rect) || !valid_nonnegative(gap) || !valid_nonnegative(minimum) || !size.value().is_finite() {
+pub fn split_rect(
+    rect: Rect,
+    axis: SplitAxis,
+    size: SplitSize,
+    gap: f32,
+    minimum: f32,
+) -> Option<SplitLayout> {
+    if !valid_rect(rect)
+        || !valid_nonnegative(gap)
+        || !valid_nonnegative(minimum)
+        || !size.value().is_finite()
+    {
         return None;
     }
     let total = match axis {
@@ -113,7 +131,13 @@ pub fn split_rect(rect: Rect, axis: SplitAxis, size: SplitSize, gap: f32, minimu
             second.min.y = divider.max.y;
         }
     }
-    Some(SplitLayout { first, divider, second, first_size, available })
+    Some(SplitLayout {
+        first,
+        divider,
+        second,
+        first_size,
+        available,
+    })
 }
 
 pub(super) fn valid_rect(rect: Rect) -> bool {

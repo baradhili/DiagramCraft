@@ -172,7 +172,10 @@ fn parses_synthetic_package() {
     // Master shape inherits Width/Height and geometry from master 7.
     let s2 = &doc.pages[0].shapes[1];
     assert_eq!(s2.master, Some(7));
-    assert_eq!(doc.resolve_cell(s2, &[], "Width").unwrap().numeric(), Some(1.5));
+    assert_eq!(
+        doc.resolve_cell(s2, &[], "Width").unwrap().numeric(),
+        Some(1.5)
+    );
     // LineWeight overridden on the instance (F=Inh means inherit — the
     // instance value is a pass-through, so resolution goes to the master).
     assert_eq!(
@@ -187,17 +190,30 @@ fn parses_synthetic_package() {
     let s4 = &s2.sub_shapes[0];
     assert_eq!(s4.master, None);
     assert_eq!(s4.master_shape, Some(5));
-    assert_eq!(doc.resolve_cell(s4, &[s2], "PinX").unwrap().numeric(), Some(0.5));
+    assert_eq!(
+        doc.resolve_cell(s4, &[s2], "PinX").unwrap().numeric(),
+        Some(0.5)
+    );
     assert_eq!(
         doc.resolve_cell(s4, &[s2], "Width").unwrap().numeric(),
         Some(1.5)
     );
-    assert_eq!(doc.effective_sheet(s4, &[s2]).sections_named("Geometry").len(), 1);
+    assert_eq!(
+        doc.effective_sheet(s4, &[s2])
+            .sections_named("Geometry")
+            .len(),
+        1
+    );
 
     // Formula evaluation of LocPinX (Width*0.5) via env fallback is
     // exercised in the dc renderer; here check raw formula text survives.
     assert_eq!(
-        doc.pages[0].shapes[0].sheet.cell("LocPinX").unwrap().f.as_deref(),
+        doc.pages[0].shapes[0]
+            .sheet
+            .cell("LocPinX")
+            .unwrap()
+            .f
+            .as_deref(),
         Some("Width*0.5")
     );
 }
