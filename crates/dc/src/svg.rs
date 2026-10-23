@@ -546,7 +546,17 @@ fn mirror_child_transform(
 
     // Effective values: formula first (Visio re-evaluates against the
     // instance group), then the uniform-scale fallback.
-    let mut env = root_env.clone();
+    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings:
+    // a bare name in a child formula means the child's own cell, so the
+    // root's unqualified Width/Height/User.* must not leak in — without
+    // the filter a bare reference silently reads the group's value and
+    // skips the per-axis fallback below. (Child sheets are not in this
+    // env; bare child-cell references fail to resolve and fall back.)
+    let mut env: vsdx::formula::Env = root_env
+        .iter()
+        .filter(|(k, _)| k.contains('!'))
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
     let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
         let Some(c) = sub.sheet.cell(name) else {
             return None;
@@ -729,7 +739,9 @@ fn emit_text(
         r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
         s = size,
         ff = font_family_attr(char_font(doc, s, chain).as_deref()),
-        c = color,
+        // Document-supplied color text (e.g. a `#…` value) is attribute
+        // content — escape it like every other attribute.
+        c = escape_attr(&color),
         b = if style_bits & 1 != 0 {
             r#" font-weight="bold""#
         } else {
@@ -859,12 +871,19 @@ fn emit_text(
     // Angle + sx*sy*TxtAngle.
     let flipped = sx < 0.0 || sy < 0.0;
     let net_txt_deg = -(sx * sy) * angle.to_degrees();
+    // The block's tspan coordinates are pin-absolute (TxtPin-anchored),
+    // so the counter-scale/rotation must pivot AT the pin: the inverse
+    // translate after them keeps the text anchor fixed there. Without
+    // it they would swing the whole block around the local origin.
     let mut transform = format!("translate({x:.5},{y:.5})", x = tx, y = -ty);
     if flipped {
         let _ = write!(transform, " scale({sx:.0},{sy:.0})", sx = sx, sy = sy);
     }
     if net_txt_deg.abs() > 1e-6 {
         let _ = write!(transform, " rotate({deg:.5})", deg = net_txt_deg);
+    }
+    if flipped || net_txt_deg.abs() > 1e-6 {
+        let _ = write!(transform, " translate({x:.5},{y:.5})", x = -tx, y = ty);
     }
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
@@ -1940,12 +1959,17 @@ fn font_substitute(name: &str) -> Option<(&'static str, &'static str)> {
 }
 
 /// Quote a font-family name for the CSS shorthand (single quotes when
-/// it contains anything but letters, digits and dashes).
+/// it contains anything but letters, digits and dashes). Inside the
+/// quotes, `'` and `\` are CSS-escaped so a document-supplied family
+/// name can never break out of the quoted string.
 fn quote_family(name: &str) -> String {
     if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         name.to_string()
     } else {
-        format!("'{name}'")
+        format!(
+            "'{}'",
+            name.replace('\\', "\\\\").replace('\'', "\\'")
+        )
     }
 }
 
@@ -1978,7 +2002,9 @@ fn font_family_attr(font: Option<&str>) -> String {
     }
     push_family(&mut chain, "Carlito");
     chain.push(class.to_string());
-    format!(" font-family=\"{}\"", chain.join(", "))
+    // Document-supplied family names land in an XML attribute — the
+    // joined CSS list is attribute content like any other.
+    format!(" font-family=\"{}\"", escape_attr(&chain.join(", ")))
 }
 
 /// Resolved (Width, Height) for geometry scaling.
@@ -2478,6 +2504,104 @@ mod tests {
             "emitted text element: {out}"
         );
         assert!(out.contains("hello"), "emitted: {out}");
+    }
+
+    /// Compose an SVG transform list (`translate(a,b) scale(c,d)
+    /// rotate(e) …`) into one matrix. SVG applies leftmost-last to the
+    /// point, so composition is left-to-right matrix multiplication.
+    fn compose_tf(list: &str) -> Mat {
+        let mut total = Mat::identity();
+        for cmd in list.split(')').filter(|s| !s.trim().is_empty()) {
+            let body = cmd.trim().split('(').nth(1).unwrap_or("");
+            let n: Vec<f64> = body
+                .split(',')
+                .map(|v| v.trim().parse().unwrap())
+                .collect();
+            let m = if cmd.trim().starts_with("translate") {
+                Mat::translate(n[0], n[1])
+            } else if cmd.trim().starts_with("scale") {
+                Mat::scale(n[0], n[1])
+            } else if cmd.trim().starts_with("rotate") {
+                Mat::rotation(n[0].to_radians())
+            } else {
+                panic!("unhandled transform command: {cmd}");
+            };
+            total = total.mul(&m);
+        }
+        total
+    }
+
+    /// A text block pinned off-origin, for the TxtPin-pivot tests.
+    fn shape_with_pinned_text(txt_angle_deg: f64) -> Shape {
+        let mut s = Shape::default();
+        let set = |s: &mut Shape, n: &str, v: f64| {
+            s.sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(format!("{v}")),
+                    ..Cell::default()
+                },
+            );
+        };
+        set(&mut s, "TxtPinX", 1.5);
+        set(&mut s, "TxtPinY", 0.75);
+        set(&mut s, "TxtWidth", 1.0);
+        set(&mut s, "TxtHeight", 0.5);
+        set(&mut s, "TxtAngle", txt_angle_deg.to_radians());
+        s.sheet.text = Some("label".into());
+        s
+    }
+
+    fn text_wrapper_transform(sx: f64, sy: f64, txt_angle_deg: f64) -> Option<(String, (f64, f64))> {
+        let doc = Document::default();
+        let s = shape_with_pinned_text(txt_angle_deg);
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, &mut out);
+        let t = out
+            .split("transform=\"")
+            .nth(1)?
+            .split('"')
+            .next()
+            .map(str::to_owned)?;
+        Some((t, (1.5, -0.75))) // (list, TxtPin in the emitted y-down frame)
+    }
+
+    #[test]
+    fn rotated_text_block_pivots_at_txtpin() {
+        let Some((t, pin)) = text_wrapper_transform(1.0, 1.0, 30.0) else {
+            panic!("rotation must emit a transform wrapper");
+        };
+        let m = compose_tf(&t);
+        let [a, b, c, d, e, f] = m.0;
+        let (x, y) = (pin.0 * a + pin.1 * c + e, pin.0 * b + pin.1 * d + f);
+        assert!(
+            (x - pin.0).abs() < 1e-6 && (y - pin.1).abs() < 1e-6,
+            "anchor ({x},{y}) must stay at the TxtPin {pin:?} — transform {t}"
+        );
+    }
+
+    #[test]
+    fn flipped_text_block_pivots_at_txtpin() {
+        // FlipX only and both axes: the counter-scale keeps the anchor
+        // fixed at the pin in each case.
+        for (sx, sy) in [(-1.0, 1.0), (-1.0, -1.0)] {
+            let Some((t, pin)) = text_wrapper_transform(sx, sy, 0.0) else {
+                panic!("flip must emit a transform wrapper");
+            };
+            let m = compose_tf(&t);
+            let [a, b, c, d, e, f] = m.0;
+            let (x, y) = (pin.0 * a + pin.1 * c + e, pin.0 * b + pin.1 * d + f);
+            assert!(
+                (x - pin.0).abs() < 1e-6 && (y - pin.1).abs() < 1e-6,
+                "anchor ({x},{y}) must stay at the TxtPin {pin:?} — transform {t}"
+            );
+        }
+    }
+
+    #[test]
+    fn unflipped_unrotated_text_has_no_wrapper() {
+        assert!(text_wrapper_transform(1.0, 1.0, 0.0).is_none());
     }
 
     #[test]
