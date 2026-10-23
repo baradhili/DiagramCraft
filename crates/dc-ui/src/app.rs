@@ -2685,6 +2685,13 @@ impl App {
     pub fn set_recent_for_test(&mut self, files: Vec<PathBuf>) {
         self.recent.set_entries_for_test(files);
     }
+    /// kittest: pin the displayed document path so the backstage Info
+    /// page renders a fixed Location instead of the test's random
+    /// tempdir (goldens must be identical on every OS/runner).
+    #[doc(hidden)]
+    pub fn set_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
+    }
     /// kittest: enter the backstage exactly like the File tab does —
     /// the #55 landing rule included (Info with a document, Recent
     /// without one).

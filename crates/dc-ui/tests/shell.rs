@@ -204,6 +204,10 @@ fn shell_snapshot_backstage() {
     let mut app = App::with_doc(&fixture(tmp.path()));
     // The #55 landing rule: with a document the File screen opens on
     // Info (2010 three-band rail: commands, destinations, Options).
+    // The path is pinned: the Info page shows the file's Location and
+    // goldens must not embed this run's random tempdir (that made the
+    // snapshot differ per OS/runner — the Windows/macOS CI failures).
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
     app.open_backstage_for_test();
     run_shell("dc_ui_shell_backstage", app);
 }
