@@ -102,9 +102,9 @@ const ICON_PX: f32 = 96.0;
 /// The texture for `name` tinted with `color`, building it on first
 /// use in this context. `None` when the icon asset is unknown or the
 /// rasterizer fails (callers fall back to the epaint glyph).
-pub fn texture(ctx: &Context, name: &str, color: Color32) -> Option<TextureHandle> {
-    // the match table gives us the &'static asset stem for the cache key
-    let name: &'static str = svg(name)?;
+pub fn texture(ctx: &Context, name: &'static str, color: Color32) -> Option<TextureHandle> {
+    // one lookup: `source` for the rasterizer, `name` for the cache key
+    let source = svg(name)?;
     let rgba = color.to_srgba_unmultiplied();
     let key = (
         name,
@@ -118,7 +118,6 @@ pub fn texture(ctx: &Context, name: &str, color: Color32) -> Option<TextureHandl
     if let Some(t) = hit {
         return Some(t);
     }
-    let source = svg(name)?;
     let tinted = tint(source, color);
     let img = crate::svgimg::rasterize(&tinted, ICON_PX).ok()?;
     let handle = ctx.load_texture(format!("icon-{name}"), img, egui::TextureOptions::LINEAR);

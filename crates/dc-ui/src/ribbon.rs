@@ -254,7 +254,11 @@ impl Icon {
         } else {
             Color32::from_gray(178)
         };
-        self.paint_tinted(ui, r, tint);
+        if !self.paint_texture(ui, r, tint) {
+            // no texture asset/raster: the glyph fallback keeps the
+            // caller's enabled state (e.g. grayed disabled buttons).
+            self.paint_glyph(ui, r, enabled);
+        }
     }
 
     /// Paint with an explicit tint — for surfaces that follow the theme
@@ -262,14 +266,22 @@ impl Icon {
     /// default [`Self::paint`] keeps the light Office palette, which is
     /// right for the always-light ribbon surface.
     pub fn paint_tinted(self, ui: &Ui, r: Rect, tint: Color32) {
+        if !self.paint_texture(ui, r, tint) {
+            self.paint_glyph(ui, r, true);
+        }
+    }
+
+    /// Paint the tinted MDI texture; `false` when the asset is unknown
+    /// or rasterization fails, so the caller can use its glyph fallback.
+    fn paint_texture(self, ui: &Ui, r: Rect, tint: Color32) -> bool {
         if let Some(name) = self.asset() {
             if let Some(tex) = crate::icontex::texture(ui.ctx(), name, tint) {
                 let uv = Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0));
                 ui.painter().image(tex.id(), r, uv, Color32::WHITE);
-                return;
+                return true;
             }
         }
-        self.paint_glyph(ui, r, true);
+        false
     }
 
     /// The built-in epaint glyph (fallback and baseline for compare).
