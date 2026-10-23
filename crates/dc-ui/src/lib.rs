@@ -7,6 +7,7 @@ pub mod app;
 pub mod canvas;
 pub mod cmd;
 pub mod icontex;
+pub mod os_theme;
 pub mod recent;
 pub mod ribbon;
 pub mod stencil;

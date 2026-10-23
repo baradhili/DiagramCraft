@@ -27,6 +27,9 @@ pub struct Stencil {
 
 impl Stencil {
     pub fn show(&mut self, ui: &mut Ui, ed: &Editor) -> Option<i64> {
+        // Pane chrome follows the active visual mode (GitHub #52);
+        // thumbnails keep their own light raster (paper-like tiles).
+        let t = theme::shell_tokens(ui.visuals());
         // (Re)load thumbnails when the master set changes.
         let fingerprint = {
             use std::collections::hash_map::DefaultHasher;
@@ -100,7 +103,7 @@ impl Stencil {
                         ));
                         let p = ui.painter();
                         let thumb = Rect::from_min_size(r.left_top(), Vec2::new(64.0, 64.0));
-                        p.rect_filled(thumb, 2.0, theme::STENCIL_BG);
+                        p.rect_filled(thumb, 2.0, t.stencil_bg);
                         p.image(
                             tex.id(),
                             thumb.shrink(2.0),
@@ -108,18 +111,18 @@ impl Stencil {
                             Color32::WHITE,
                         );
                         let border = if armed {
-                            egui::Stroke::new(2.0, theme::ACCENT)
+                            egui::Stroke::new(2.0, t.accent)
                         } else if resp.hovered() {
-                            egui::Stroke::new(1.0, theme::SELECTION)
+                            egui::Stroke::new(1.0, t.selection)
                         } else {
-                            egui::Stroke::new(1.0, theme::RIBBON_GROUP)
+                            egui::Stroke::new(1.0, t.ribbon_group)
                         };
                         p.rect_stroke(r, 2.0, border, egui::StrokeKind::Middle);
                         // caption
                         let gal = p.layout_no_wrap(
                             short(m.name_u.as_deref().unwrap_or("-")),
                             egui::FontId::proportional(9.5),
-                            Color32::from_rgb(60, 60, 60),
+                            t.caption,
                         );
                         p.galley(
                             Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 13.0),

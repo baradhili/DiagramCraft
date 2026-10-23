@@ -117,6 +117,13 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn run_shell(name: &str, app: App) {
+    run_shell_mode(name, app, false);
+}
+
+/// Snapshot the shell in one visual mode. Light keeps the exact
+/// existing goldens; dark installs the same both-slot theme and
+/// selects Dark, exercising the OS-dark path end-to-end (GitHub #52).
+fn run_shell_mode(name: &str, app: App, dark: bool) {
     let mut app = app;
     // Goldens must render identically on every machine: pin text to
     // the embedded Carlito rather than this machine's installed fonts.
@@ -124,7 +131,14 @@ fn run_shell(name: &str, app: App) {
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui(move |ui| {
-            dc_ui::theme::install(ui.ctx());
+            dc_ui::theme::install_for(
+                ui.ctx(),
+                if dark {
+                    egui::ThemePreference::Dark
+                } else {
+                    egui::ThemePreference::Light
+                },
+            );
             app.draw(ui);
         });
     harness.run();
@@ -145,6 +159,26 @@ fn run_shell(name: &str, app: App) {
 fn shell_snapshot_home() {
     let tmp = tempfile::tempdir().unwrap();
     run_shell("dc_ui_shell_home", App::with_doc(&fixture(tmp.path())));
+}
+
+/// GitHub #52: the same home shell under the dark mode the OS watcher
+/// selects when the desktop is dark — dark chrome (ribbon, rulers,
+/// desk, tabs, status), white page paper, brand-green bands.
+#[test]
+fn shell_snapshot_home_dark() {
+    let tmp = tempfile::tempdir().unwrap();
+    run_shell_mode(
+        "dc_ui_shell_home_dark",
+        App::with_doc(&fixture(tmp.path())),
+        true,
+    );
+}
+
+/// GitHub #52: the blank drawing (stencil pane + empty page) in dark
+/// mode — covers the stencil pane and page-tab strip counterparts.
+#[test]
+fn shell_snapshot_blank_dark() {
+    run_shell_mode("dc_ui_shell_blank_dark", App::with_blank(), true);
 }
 
 #[test]

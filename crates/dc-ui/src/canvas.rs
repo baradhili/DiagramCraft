@@ -4,7 +4,7 @@
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
-use crate::theme;
+use crate::theme::{self, ShellTokens};
 use crate::units::{tick_step, Unit};
 
 /// View state for the active page.
@@ -331,8 +331,11 @@ pub fn show(
     out.page_rect = Rect::from_min_size(page_tl, page_px);
 
     // Paint order: desk, page shadow+paper, texture, grid, selection.
+    // The desk and rulers follow the visual mode; the page paper stays
+    // white — it is the document, not the shell (GitHub #52).
+    let t = theme::shell_tokens(ui.visuals());
     let p = ui.painter().with_clip_rect(canvas_r);
-    p.rect_filled(canvas_r, 0.0, theme::DESK);
+    p.rect_filled(canvas_r, 0.0, t.desk);
     // shadow
     p.rect_filled(
         Rect::from_min_size(page_tl + Vec2::splat(3.0), page_px),
@@ -343,7 +346,7 @@ pub fn show(
     p.rect_stroke(
         out.page_rect,
         0.0,
-        Stroke::new(1.0, theme::PAGE_EDGE),
+        Stroke::new(1.0, t.page_edge),
         egui::StrokeKind::Middle,
     );
     if let Some(tex) = page_tex {
@@ -399,7 +402,7 @@ pub fn show(
         p.rect_stroke(
             er,
             0.0,
-            Stroke::new(1.0, theme::SELECTION),
+            Stroke::new(1.0, t.selection),
             egui::StrokeKind::Middle,
         );
     }
@@ -407,7 +410,7 @@ pub fn show(
         p.rect_stroke(
             sr,
             0.0,
-            Stroke::new(1.2, theme::SELECTION),
+            Stroke::new(1.2, t.selection),
             egui::StrokeKind::Middle,
         );
         for corner in [
@@ -424,7 +427,7 @@ pub fn show(
             p.rect_stroke(
                 Rect::from_center_size(corner, Vec2::splat(7.0)),
                 1.0,
-                Stroke::new(1.2, theme::SELECTION),
+                Stroke::new(1.2, t.selection),
                 egui::StrokeKind::Middle,
             );
         }
@@ -432,7 +435,7 @@ pub fn show(
 
     // Drag preview.
     if let Some(dr) = drag_rect {
-        let dashed = Stroke::new(1.2, theme::SELECTION);
+        let dashed = Stroke::new(1.2, t.selection);
         p.rect_stroke(dr, 0.0, dashed, egui::StrokeKind::Middle);
     }
 
@@ -441,7 +444,7 @@ pub fn show(
         p.rect_stroke(
             mr,
             0.0,
-            Stroke::new(1.0, theme::SELECTION),
+            Stroke::new(1.0, t.selection),
             egui::StrokeKind::Middle,
         );
         p.rect_filled(mr, 0.0, Color32::from_rgba_premultiplied(30, 120, 200, 24));
@@ -449,7 +452,7 @@ pub fn show(
 
     // Rulers.
     if view.show_rulers {
-        draw_rulers(&p, canvas_r, view, page, out.page_rect);
+        draw_rulers(&p, canvas_r, view, page, out.page_rect, &t);
     }
 
     // Mouse position in page coords (y-up) for the status bar.
@@ -498,12 +501,19 @@ pub fn show(
     out
 }
 
-fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, page_rect: Rect) {
+fn draw_rulers(
+    p: &egui::Painter,
+    canvas_r: Rect,
+    view: &View,
+    page: &PageGeom,
+    page_rect: Rect,
+    t: &ShellTokens,
+) {
     // Corner square + bands.
     p.rect_filled(
         Rect::from_min_size(canvas_r.left_top(), Vec2::splat(RULER)),
         0.0,
-        theme::RULER_BG,
+        t.ruler_bg,
     );
     let top = Rect::from_min_size(
         canvas_r.left_top() + Vec2::new(RULER, 0.0),
@@ -513,18 +523,18 @@ fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, 
         canvas_r.left_top() + Vec2::new(0.0, RULER),
         Vec2::new(RULER, canvas_r.height() - RULER),
     );
-    p.rect_filled(top, 0.0, theme::RULER_BG);
-    p.rect_filled(left, 0.0, theme::RULER_BG);
+    p.rect_filled(top, 0.0, t.ruler_bg);
+    p.rect_filled(left, 0.0, t.ruler_bg);
     p.rect_stroke(
         top,
         0.0,
-        Stroke::new(0.5, theme::RIBBON_GROUP),
+        Stroke::new(0.5, t.ribbon_group),
         egui::StrokeKind::Middle,
     );
     p.rect_stroke(
         left,
         0.0,
-        Stroke::new(0.5, theme::RIBBON_GROUP),
+        Stroke::new(0.5, t.ribbon_group),
         egui::StrokeKind::Middle,
     );
 
@@ -546,7 +556,7 @@ fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, 
                 Pos2::new(sx, top.bottom() - len),
                 Pos2::new(sx, top.bottom()),
             ],
-            Stroke::new(0.8, theme::RULER_TICK),
+            Stroke::new(0.8, t.ruler_tick),
         );
         if major && v > 0.0 {
             p.text(
@@ -554,7 +564,7 @@ fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, 
                 egui::Align2::LEFT_TOP,
                 format_num(v),
                 font.clone(),
-                theme::RULER_TEXT,
+                t.ruler_text,
             );
         }
         v += step as f64;
@@ -575,7 +585,7 @@ fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, 
                 Pos2::new(left.right() - len, sy_top),
                 Pos2::new(left.right(), sy_top),
             ],
-            Stroke::new(0.8, theme::RULER_TICK),
+            Stroke::new(0.8, t.ruler_tick),
         );
         if major && disp > 0.0 {
             p.text(
@@ -583,7 +593,7 @@ fn draw_rulers(p: &egui::Painter, canvas_r: Rect, view: &View, page: &PageGeom, 
                 egui::Align2::LEFT_TOP,
                 format_num(disp),
                 font.clone(),
-                theme::RULER_TEXT,
+                t.ruler_text,
             );
         }
         v += step as f64;

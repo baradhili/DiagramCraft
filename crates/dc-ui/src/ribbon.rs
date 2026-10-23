@@ -241,8 +241,16 @@ impl Icon {
     }
 
     pub fn paint(self, ui: &Ui, r: Rect, enabled: bool) {
+        // GitHub #52: on dark surfaces the light Office palette is
+        // lifted the same way the context menu tints its icons (#48);
+        // light keeps the observed Office colors untouched.
+        let office = self.office_color();
         let tint = if enabled {
-            self.office_color()
+            if ui.visuals().dark_mode {
+                crate::theme::lift_for_dark(office)
+            } else {
+                office
+            }
         } else {
             Color32::from_gray(178)
         };
@@ -268,8 +276,18 @@ impl Icon {
     fn paint_glyph(self, ui: &Ui, r: Rect, enabled: bool) {
         let p = ui.painter();
         let c = r.center();
+        let dark = ui.visuals().dark_mode;
         let dim = Color32::from_gray(178);
-        let lit = |col: Color32| if enabled { col } else { dim };
+        // Dark surfaces lift the accent tones like the texture path
+        // does (GitHub #52); light keeps the observed Office palette.
+        let lift = |col: Color32| {
+            if dark {
+                crate::theme::lift_for_dark(col)
+            } else {
+                col
+            }
+        };
+        let lit = |col: Color32| if enabled { lift(col) } else { dim };
         let blue = lit(Color32::from_rgb(0x2a, 0x6f, 0xb5));
         let green = lit(theme::ACCENT);
         let orange = lit(Color32::from_rgb(0xd8, 0x7b, 0x0b));
@@ -1020,7 +1038,7 @@ impl Icon {
                     Align2::CENTER_CENTER,
                     "mm",
                     egui::FontId::monospace(12.0),
-                    theme::ACCENT,
+                    green,
                 );
             }
             Icon::Delete => {
@@ -1107,10 +1125,11 @@ impl RibbonButton {
         if !self.enabled {
             return;
         }
+        let t = theme::shell_tokens(ui.visuals());
         let (fill, edge) = if self.selected {
-            (theme::RIBBON_SELECTED, theme::RIBBON_SELECTED_EDGE)
+            (t.ribbon_selected, t.ribbon_selected_edge)
         } else if resp.hovered() {
-            (theme::RIBBON_HOVER, theme::RIBBON_HOVER_EDGE)
+            (t.ribbon_hover, t.ribbon_hover_edge)
         } else {
             return;
         };
@@ -1119,11 +1138,13 @@ impl RibbonButton {
             .rect_stroke(r, 2, Stroke::new(1.0, edge), egui::StrokeKind::Middle);
     }
 
-    fn label_color(self) -> Color32 {
+    /// Button label color for the active visual mode (GitHub #52).
+    fn label_color(self, ui: &Ui) -> Color32 {
+        let t = theme::shell_tokens(ui.visuals());
         if self.enabled {
-            Color32::from_rgb(50, 50, 50)
+            t.label
         } else {
-            Color32::from_rgb(160, 160, 160)
+            t.label_disabled
         }
     }
 
@@ -1145,7 +1166,7 @@ impl RibbonButton {
         let gal = ui.painter().layout_no_wrap(
             self.label.to_string(),
             egui::FontId::proportional(11.5),
-            self.label_color(),
+            self.label_color(ui),
         );
         ui.painter().galley(
             Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 15.0),
@@ -1162,7 +1183,7 @@ impl RibbonButton {
         let gal = ui.painter().layout_no_wrap(
             self.label.to_string(),
             egui::FontId::proportional(11.5),
-            self.label_color(),
+            self.label_color(ui),
         );
         let w = self
             .width
@@ -1178,11 +1199,12 @@ impl RibbonButton {
             egui::Color32::WHITE,
         );
         if self.combo {
+            let t = theme::shell_tokens(ui.visuals());
             // Office combobox: visible input border around the control
             ui.painter().rect_stroke(
                 r,
                 1.0,
-                Stroke::new(1.0, theme::RIBBON_GROUP),
+                Stroke::new(1.0, t.ribbon_group),
                 egui::StrokeKind::Middle,
             );
             let cx = r.right() - 6.0;
@@ -1193,7 +1215,7 @@ impl RibbonButton {
                     Pos2::new(cx, r.center().y + 2.0),
                 ],
                 if self.enabled {
-                    Color32::from_rgb(90, 90, 90)
+                    t.tab_text_inactive
                 } else {
                     Color32::from_gray(185)
                 },
@@ -1306,6 +1328,7 @@ pub fn content_row(
     on_action: &mut dyn FnMut(Action),
     on_launcher: &mut dyn FnMut(&'static str),
 ) {
+    let t = theme::shell_tokens(ui.visuals());
     let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
     ui.vertical(|ui| {
         ui.add_space(2.0);
@@ -1330,7 +1353,7 @@ pub fn content_row(
                     ui.painter().vline(
                         sr.center().x,
                         sr.top()..=sr.bottom(),
-                        Stroke::new(1.0, theme::RIBBON_GROUP),
+                        Stroke::new(1.0, t.ribbon_group),
                     );
                     ui.add_space(6.0);
                 }
@@ -1342,7 +1365,7 @@ pub fn content_row(
             let gal = ui.painter().layout_no_wrap(
                 label.to_string(),
                 egui::FontId::proportional(9.5),
-                theme::RIBBON_LABEL,
+                t.ribbon_label,
             );
             // the label centers on the group; leave room for the
             // launcher only where the group has one
@@ -1367,7 +1390,7 @@ pub fn content_row(
             ui.painter().rect_stroke(
                 lr,
                 1.0,
-                Stroke::new(0.8, theme::RULER_TICK),
+                Stroke::new(0.8, t.ruler_tick),
                 egui::StrokeKind::Middle,
             );
             let c = lr.center();
@@ -1382,7 +1405,7 @@ pub fn content_row(
                 Stroke::new(
                     1.2,
                     if hot {
-                        theme::ACCENT
+                        t.accent
                     } else {
                         Color32::from_gray(120)
                     },

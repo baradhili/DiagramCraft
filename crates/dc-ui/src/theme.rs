@@ -52,8 +52,171 @@ pub const BACK_TITLE: Color32 = Color32::from_rgb(50, 50, 50);
 /// Backstage gallery card fill (edge rides RIBBON_GROUP, hover RIBBON_BG).
 pub const CARD_BG: Color32 = Color32::WHITE;
 
-/// Apply the Office-2016-ish light visuals.
+/// Shell chrome tokens for the active visual mode (GitHub #52).
+///
+/// One field per palette constant above, resolved from the live
+/// visuals the way [`MenuTokens`] is: light values are the constants
+/// verbatim (the observed Visio 2016 look); dark values are our
+/// counterparts, chosen here once — never at the call sites that
+/// paint the chrome. The page *paper* is not part of this mapping:
+/// it stays white in dark mode (the document, not the shell).
+#[derive(Clone, Copy)]
+pub struct ShellTokens {
+    /// The green title/File/rail band fill — the brand green in both
+    /// modes (Office keeps brand bands in dark themes).
+    pub accent_band: Color32,
+    /// Accent for lines and small elements (tab underline, launcher
+    /// hover, armed stencil border): lifted in dark so it reads on
+    /// dark fills.
+    pub accent: Color32,
+    /// Text-accent / pressed green: the deep green in light, a light
+    /// green in dark (the light one vanishes on dark surfaces).
+    pub accent_dark: Color32,
+    pub ribbon_bg: Color32,
+    pub ribbon_content: Color32,
+    pub ribbon_edge: Color32,
+    pub ribbon_hover: Color32,
+    pub ribbon_hover_edge: Color32,
+    pub ribbon_selected: Color32,
+    pub ribbon_selected_edge: Color32,
+    pub ribbon_group: Color32,
+    pub ribbon_label: Color32,
+    /// Ribbon-button label (enabled).
+    pub label: Color32,
+    /// Ribbon-button label (disabled placeholders).
+    pub label_disabled: Color32,
+    /// Desk around the page.
+    pub desk: Color32,
+    pub page_edge: Color32,
+    /// Selection frame / marquee.
+    pub selection: Color32,
+    pub status_bg: Color32,
+    pub status_text: Color32,
+    pub stencil_bg: Color32,
+    /// Stencil master caption.
+    pub caption: Color32,
+    pub ruler_bg: Color32,
+    pub ruler_tick: Color32,
+    pub ruler_text: Color32,
+    pub tabs_bg: Color32,
+    pub tab_active: Color32,
+    /// Page-tab text on the active tab.
+    pub tab_text_active: Color32,
+    /// Page-tab text on inactive tabs.
+    pub tab_text_inactive: Color32,
+    /// Ribbon tab-strip text on inactive tabs.
+    pub tab_strip_text: Color32,
+    pub rail_selected: Color32,
+    pub rail_disabled: Color32,
+    pub back_title: Color32,
+    pub card_bg: Color32,
+    /// The "Tell me" search box fill.
+    pub tellme_bg: Color32,
+    /// Muted hint text (the Tell-Me placeholder).
+    pub hint_text: Color32,
+}
+
+/// The light mapping: the constants above, verbatim.
+pub const LIGHT: ShellTokens = ShellTokens {
+    accent_band: ACCENT,
+    accent: ACCENT,
+    accent_dark: ACCENT_DARK,
+    ribbon_bg: RIBBON_BG,
+    ribbon_content: RIBBON_CONTENT,
+    ribbon_edge: RIBBON_EDGE,
+    ribbon_hover: RIBBON_HOVER,
+    ribbon_hover_edge: RIBBON_HOVER_EDGE,
+    ribbon_selected: RIBBON_SELECTED,
+    ribbon_selected_edge: RIBBON_SELECTED_EDGE,
+    ribbon_group: RIBBON_GROUP,
+    ribbon_label: RIBBON_LABEL,
+    label: Color32::from_rgb(50, 50, 50),
+    label_disabled: Color32::from_rgb(160, 160, 160),
+    desk: DESK,
+    page_edge: PAGE_EDGE,
+    selection: SELECTION,
+    status_bg: STATUS_BG,
+    status_text: STATUS_TEXT,
+    stencil_bg: STENCIL_BG,
+    caption: Color32::from_rgb(60, 60, 60),
+    ruler_bg: RULER_BG,
+    ruler_tick: RULER_TICK,
+    ruler_text: RULER_TEXT,
+    tabs_bg: TABS_BG,
+    tab_active: TAB_ACTIVE,
+    tab_text_active: Color32::from_rgb(30, 30, 30),
+    tab_text_inactive: Color32::from_rgb(90, 90, 90),
+    tab_strip_text: Color32::from_rgb(70, 70, 70),
+    rail_selected: RAIL_SELECTED,
+    rail_disabled: RAIL_DISABLED,
+    back_title: BACK_TITLE,
+    card_bg: CARD_BG,
+    tellme_bg: Color32::WHITE,
+    hint_text: Color32::from_rgb(130, 130, 130),
+};
+
+/// The dark mapping: neutral surfaces in the Office dark family with
+/// the same green accents lifted to read on them (GitHub #52).
+pub const DARK: ShellTokens = ShellTokens {
+    accent_band: ACCENT,
+    accent: Color32::from_rgb(56, 167, 110),
+    accent_dark: Color32::from_rgb(98, 200, 145),
+    ribbon_bg: Color32::from_gray(43),
+    ribbon_content: Color32::from_gray(54),
+    ribbon_edge: Color32::from_gray(86),
+    ribbon_hover: Color32::from_gray(66),
+    ribbon_hover_edge: Color32::from_gray(104),
+    ribbon_selected: Color32::from_gray(74),
+    ribbon_selected_edge: Color32::from_gray(122),
+    ribbon_group: Color32::from_gray(88),
+    ribbon_label: Color32::from_gray(168),
+    label: Color32::from_gray(225),
+    label_disabled: Color32::from_gray(125),
+    desk: Color32::from_gray(52),
+    page_edge: Color32::from_gray(120),
+    selection: Color32::from_rgb(96, 172, 240),
+    status_bg: Color32::from_gray(38),
+    status_text: Color32::from_gray(205),
+    stencil_bg: Color32::from_gray(47),
+    caption: Color32::from_gray(200),
+    ruler_bg: Color32::from_gray(36),
+    ruler_tick: Color32::from_gray(130),
+    ruler_text: Color32::from_gray(180),
+    tabs_bg: Color32::from_gray(31),
+    tab_active: Color32::from_gray(74),
+    tab_text_active: Color32::from_gray(240),
+    tab_text_inactive: Color32::from_gray(150),
+    tab_strip_text: Color32::from_gray(185),
+    rail_selected: Color32::from_rgb(70, 180, 128),
+    rail_disabled: RAIL_DISABLED,
+    back_title: Color32::from_gray(230),
+    card_bg: Color32::from_gray(60),
+    tellme_bg: Color32::from_gray(30),
+    hint_text: Color32::from_gray(150),
+};
+
+/// Resolve shell tokens for the active visuals (GitHub #52).
+pub fn shell_tokens(v: &Visuals) -> ShellTokens {
+    if v.dark_mode {
+        DARK
+    } else {
+        LIGHT
+    }
+}
+
+/// Apply the light Visio style and select it (host loops that pin the
+/// shell light, e.g. the kittest harness).
 pub fn install(ctx: &egui::Context) {
+    install_for(ctx, egui::ThemePreference::Light);
+}
+
+/// Install BOTH style slots — light = the Visio 2016 look, dark = the
+/// counterpart above — and select `pref` (GitHub #52). With both slots
+/// filled, switching the preference at runtime restyles native surfaces
+/// and the menu mapping together; eframe on Linux reports no system
+/// theme and egui's fallback is Dark, so the preference must come from
+/// OS detection (`crate::os_theme`) instead of the integration (#48).
+pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
     let mut style = Style::default();
     let mut v = Visuals::light();
     v.panel_fill = RIBBON_BG;
@@ -76,16 +239,39 @@ pub fn install(ctx: &egui::Context) {
     v.selection.bg_fill = Color32::from_rgba_premultiplied(33, 115, 70, 36);
     v.selection.stroke.color = ACCENT;
     style.visuals = v;
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(6.0, 3.0);
     ctx.set_style_of(egui::Theme::Light, style);
-    // The shell is a light app (every palette constant above is the
-    // Visio light look), so select the Light slot too. Without this,
-    // native surfaces render dark: eframe on Linux reports no system
-    // theme, egui's fallback is Dark, and the OS being in Light mode
-    // never reaches the context — popups/menus went dark while the
-    // custom chrome stayed light (GitHub #48 review).
-    ctx.set_theme(egui::ThemePreference::Light);
+
+    let mut style = Style::default();
+    let mut v = Visuals::dark();
+    v.panel_fill = DARK.ribbon_bg;
+    v.window_fill = Color32::from_gray(50);
+    v.extreme_bg_color = Color32::from_gray(30);
+    v.faint_bg_color = Color32::from_gray(52);
+    craft_ui::theme::WidgetPalette {
+        noninteractive: Color32::from_gray(47),
+        inactive: DARK.ribbon_content,
+        hovered: Color32::from_rgb(58, 86, 66),
+        active: Color32::from_rgb(52, 78, 60),
+        open: Color32::from_rgb(52, 78, 60),
+    }
+    .apply_to(
+        &mut v.widgets,
+        egui::CornerRadius::same(3),
+        egui::Stroke::new(1.0, Color32::from_gray(150)),
+    );
+    v.selection.bg_fill = Color32::from_rgba_premultiplied(56, 167, 110, 46);
+    v.selection.stroke.color = DARK.accent_dark;
+    style.visuals = v;
+    ctx.set_style_of(egui::Theme::Dark, style);
+
+    // Shared sizing so the modes differ only in color.
+    for theme in [egui::Theme::Light, egui::Theme::Dark] {
+        ctx.style_mut_of(theme, |style| {
+            style.spacing.item_spacing = egui::vec2(6.0, 4.0);
+            style.spacing.button_padding = egui::vec2(6.0, 3.0);
+        });
+    }
+    ctx.set_theme(pref);
 }
 
 /// Context-menu color tokens, resolved from the active visuals so the
@@ -132,7 +318,9 @@ impl MenuTokens {
 
 /// Scale a light-palette color up so its brightest channel reaches
 /// ~200 — presence on a ~gray(50) menu fill while keeping the hue.
-fn lift_for_dark(c: Color32) -> Color32 {
+/// `pub(crate)`: the ribbon re-tints its icons for dark mode the same
+/// way the menu does (GitHub #52).
+pub(crate) fn lift_for_dark(c: Color32) -> Color32 {
     let m = c.r().max(c.g()).max(c.b()) as f32;
     if m >= 200.0 {
         return c;
@@ -238,5 +426,85 @@ mod tests {
             "dark separators {:?} must clear the dark fill",
             dark.separator
         );
+    }
+
+    /// GitHub #52: the light token set pins the observed Visio 2016
+    /// constants verbatim (goldens must not move), and the dark set is
+    /// a readable counterpart — text clears fills, chips stand off
+    /// their surfaces, and accents survive the dark background.
+    #[test]
+    fn shell_tokens_pin_light_and_lift_dark() {
+        let light = shell_tokens(&Visuals::light());
+        assert_eq!(light.ribbon_bg, RIBBON_BG);
+        assert_eq!(light.ribbon_content, RIBBON_CONTENT);
+        assert_eq!(light.desk, DESK);
+        assert_eq!(light.status_bg, STATUS_BG);
+        assert_eq!(light.tabs_bg, TABS_BG);
+        assert_eq!(light.card_bg, CARD_BG);
+        assert_eq!(light.tellme_bg, Color32::WHITE);
+        assert_eq!(light.accent, ACCENT);
+        assert_eq!(light.accent_band, ACCENT);
+
+        let dark = shell_tokens(&Visuals::dark());
+        // Text clears its surfaces.
+        assert!(
+            lum(dark.label) > lum(dark.ribbon_content) + 60.0,
+            "ribbon labels {:?} must read on {:?}",
+            dark.label,
+            dark.ribbon_content
+        );
+        assert!(
+            lum(dark.status_text) > lum(dark.status_bg) + 80.0,
+            "status text must read on the dark status band"
+        );
+        assert!(
+            lum(dark.ruler_text) > lum(dark.ruler_bg) + 80.0,
+            "ruler numbers must read on the dark ruler"
+        );
+        assert!(
+            lum(dark.tab_text_active) > lum(dark.tab_active) + 60.0,
+            "active page-tab text must read on the dark tab"
+        );
+        assert!(
+            lum(dark.caption) > lum(dark.stencil_bg) + 60.0,
+            "stencil captions must read on the dark pane"
+        );
+        // Chips stand off their surfaces, and the selected state deepens
+        // the interaction beyond hover (light chips darken: 232→220;
+        // dark chips lighten — direction flips with the surface).
+        assert!(
+            lum(dark.ribbon_hover) > lum(dark.ribbon_content) + 8.0,
+            "hover chip must stand off the dark ribbon"
+        );
+        let stand_off = |mode: &str, hover: Color32, selected: Color32, content: Color32| {
+            let d = |c: Color32| (lum(c) - lum(content)).abs();
+            assert!(
+                d(selected) > d(hover),
+                "{mode} selected chip ({selected:?}) must stand off the surface \
+                 further than hover ({hover:?}) does"
+            );
+        };
+        stand_off(
+            "light",
+            light.ribbon_hover,
+            light.ribbon_selected,
+            light.ribbon_content,
+        );
+        stand_off(
+            "dark",
+            dark.ribbon_hover,
+            dark.ribbon_selected,
+            dark.ribbon_content,
+        );
+        // Accents survive the dark background (the #48 lesson).
+        assert!(
+            lum(dark.accent) > lum(dark.ribbon_bg) + 40.0,
+            "accent lines must read on dark surfaces"
+        );
+        assert_ne!(dark.accent_band, dark.accent, "band vs line accent split");
+        assert_eq!(dark.accent_band, ACCENT, "the brand band stays green");
+        // The desk stays darker than the page edge so the white page
+        // floats (page paper is white in both modes).
+        assert!(lum(dark.page_edge) > lum(dark.desk));
     }
 }

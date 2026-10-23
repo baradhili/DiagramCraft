@@ -76,6 +76,9 @@ pub struct App {
     /// Ephemeral in the headless constructors; `App::new` swaps in the
     /// persistent on-disk list.
     recent: RecentFiles,
+    /// OS light/dark watcher (GitHub #52). Production only — the
+    /// headless constructors leave it off so goldens are deterministic.
+    os_theme: Option<crate::os_theme::OsThemeWatcher>,
 }
 
 /// Which cell a ribbon palette click targets.
@@ -142,8 +145,14 @@ struct DragState {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
-        crate::theme::install(&cc.egui_ctx);
+        // OS light/dark (GitHub #52): detect the opening mode (gsettings
+        // with the XDG portal as fallback; `detect` debug-prints the
+        // source), install BOTH style slots and select it — then follow
+        // runtime flips via a watcher thread.
+        let pref = crate::os_theme::detect();
+        crate::theme::install_for(&cc.egui_ctx, pref);
         let mut app = App::with_doc_opt(None);
+        app.os_theme = Some(crate::os_theme::OsThemeWatcher::spawn());
         // Production entry only: adopt the persistent on-disk MRU
         // (tests and kittest constructors stay ephemeral so they never
         // touch the user's real config dir).
@@ -187,6 +196,7 @@ impl App {
             placed_last_click: false,
             color_pick: None,
             recent: RecentFiles::ephemeral(),
+            os_theme: None,
         };
         if let Some(p) = path {
             app.load(p);
@@ -991,7 +1001,9 @@ impl App {
 
     fn title_band(&mut self, ui: &mut Ui) {
         // Visio 2016: green band, tiny QAT (Save/Undo/Redo + chevron) at
-        // the far left, document title centered.
+        // the far left, document title centered. The brand green band
+        // stays green in dark mode (GitHub #52).
+        let t = theme::shell_tokens(ui.visuals());
         let name = self
             .path
             .file_name()
@@ -1004,7 +1016,7 @@ impl App {
         egui::Panel::top("title_band")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::ACCENT)
+                    .fill(t.accent_band)
                     .inner_margin(egui::Margin::symmetric(8, 2)),
             )
             .show(ui, |ui| {
@@ -1046,10 +1058,12 @@ impl App {
         // tabs), the active tab carries the accent underline, and
         // Office's "Tell me" search box sits at the strip's right end.
         const STRIP_H: f32 = 28.0;
+        // `tk`: the for-loop below binds `t` for each Tab.
+        let tk = theme::shell_tokens(ui.visuals());
         egui::Panel::top("tab_strip")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::RIBBON_CONTENT)
+                    .fill(tk.ribbon_content)
                     .inner_margin(egui::Margin::same(0)),
             )
             .show(ui, |ui| {
@@ -1068,7 +1082,7 @@ impl App {
                             se: 2,
                             sw: 2,
                         },
-                        theme::ACCENT,
+                        tk.accent_band,
                     );
                     ui.painter().text(
                         fr.center(),
@@ -1096,9 +1110,9 @@ impl App {
                         let txt = egui::RichText::new(t_title(*t))
                             .size(12.0)
                             .color(if active {
-                                theme::ACCENT_DARK
+                                tk.accent_dark
                             } else {
-                                Color32::from_rgb(70, 70, 70)
+                                tk.tab_strip_text
                             });
                         let b = egui::Button::new(txt).small().frame(false);
                         let resp = ui.add_enabled(true, b);
@@ -1110,7 +1124,7 @@ impl App {
                             ui.painter().hline(
                                 r.left() + 2.0..=r.right() - 2.0,
                                 r.bottom(),
-                                Stroke::new(2.0, theme::ACCENT),
+                                Stroke::new(2.0, tk.accent),
                             );
                         }
                         ui.add_space(6.0);
@@ -1121,18 +1135,11 @@ impl App {
                         let (pr, presp) =
                             ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
                         let hot = presp.hovered();
-                        ui.painter().rect_filled(pr, 2, Color32::WHITE);
+                        ui.painter().rect_filled(pr, 2, tk.tellme_bg);
                         ui.painter().rect_stroke(
                             pr,
                             2,
-                            Stroke::new(
-                                1.0,
-                                if hot {
-                                    theme::RULER_TICK
-                                } else {
-                                    theme::RIBBON_EDGE
-                                },
-                            ),
+                            Stroke::new(1.0, if hot { tk.ruler_tick } else { tk.ribbon_edge }),
                             egui::StrokeKind::Middle,
                         );
                         Icon::TellMe.paint(
@@ -1148,7 +1155,7 @@ impl App {
                             egui::Align2::LEFT_CENTER,
                             "Tell me what you want to do",
                             egui::FontId::proportional(11.0),
-                            Color32::from_rgb(130, 130, 130),
+                            tk.hint_text,
                         );
                         let presp = presp.on_hover_text("Tell Me — planned for a later milestone");
                         if presp.clicked() {
@@ -1693,6 +1700,7 @@ impl App {
     }
 
     fn page_tabs(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
         ui.horizontal(|ui| {
             ui.add_space(4.0);
             let tabs: Vec<(String, i64)> = self
@@ -1710,17 +1718,13 @@ impl App {
                 for (i, (name, _id)) in tabs.iter().enumerate() {
                     let active = i == self.page_idx;
                     let txt = egui::RichText::new(name).size(11.5).color(if active {
-                        Color32::from_rgb(30, 30, 30)
+                        t.tab_text_active
                     } else {
-                        Color32::from_rgb(90, 90, 90)
+                        t.tab_text_inactive
                     });
                     let b = egui::Button::new(txt)
                         .small()
-                        .fill(if active {
-                            theme::TAB_ACTIVE
-                        } else {
-                            theme::TABS_BG
-                        })
+                        .fill(if active { t.tab_active } else { t.tabs_bg })
                         .frame(true);
                     let resp = ui
                         .add(b)
@@ -1739,6 +1743,7 @@ impl App {
     }
 
     fn status_bar(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
         ui.horizontal_centered(|ui| {
             let mut left;
             if let Some(ed) = self.ed() {
@@ -1782,18 +1787,14 @@ impl App {
             } else {
                 left = "no document".into();
             }
-            ui.label(
-                egui::RichText::new(left)
-                    .color(theme::STATUS_TEXT)
-                    .size(11.0),
-            );
+            ui.label(egui::RichText::new(left).color(t.status_text).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Visio status bar right end: − [zoom slider] + N%
                 if self.ed.is_some() {
                     let pct = (self.view.zoom * 100.0).round() as u32;
                     ui.label(
                         egui::RichText::new(format!("{pct}%"))
-                            .color(theme::STATUS_TEXT)
+                            .color(t.status_text)
                             .size(11.0)
                             .strong(),
                     );
@@ -1815,7 +1816,7 @@ impl App {
                 if let Some((x, y)) = self.mouse_page {
                     ui.label(
                         egui::RichText::new(self.view.unit.fmt_pt(x, y))
-                            .color(theme::STATUS_TEXT)
+                            .color(t.status_text)
                             .size(11.0),
                     );
                 } else {
@@ -2820,10 +2821,11 @@ impl App {
                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                     Color32::from_white_alpha(150),
                 );
+                let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
                 painter.rect_stroke(
                     r,
                     1.0,
-                    Stroke::new(1.0, theme::SELECTION),
+                    Stroke::new(1.0, t.selection),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -2851,11 +2853,35 @@ impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        // OS theme flips (GitHub #52): the watcher thread re-probes the
+        // OS preference on its period; switch the active style slot when
+        // it reports a change, and ask for a repaint on the same period
+        // so an idle app still wakes to pick a flip up.
+        if let Some(watcher) = &self.os_theme {
+            if let Some(pref) = watcher.poll() {
+                eprintln!("os_theme: OS preference changed → {pref:?}");
+                ctx.set_theme(pref);
+            }
+            ctx.request_repaint_after(Duration::from_secs(2));
+        }
         self.handle_shortcuts(&ctx);
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.text_edit_window(&ctx);
         self.color_palette_window(&ctx);
+
+        // The eframe root Ui paints no background and eframe's clear
+        // color is near-black, so the shell must own one: the panel
+        // fill (kittest synthesizes exactly this behind the root Ui,
+        // which is why the goldens never caught the black production
+        // canvas) covers the start screen, the File backstage, and any
+        // margin the panels leave. The canvas paints the desk over its
+        // own area on top (GitHub #52).
+        ui.painter().rect_filled(
+            ui.max_rect(),
+            0.0,
+            theme::shell_tokens(ui.visuals()).ribbon_bg,
+        );
 
         if self.backstage {
             self.backstage_view(ui);
@@ -2864,31 +2890,32 @@ impl App {
         }
 
         // Shell order: top bands, bottom bands, side panels, canvas.
+        let t = theme::shell_tokens(ui.visuals());
         self.title_band(ui);
         self.tab_strip(ui);
         egui::Panel::top("ribbon_content")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::RIBBON_CONTENT)
+                    .fill(t.ribbon_content)
                     .inner_margin(egui::Margin::symmetric(4, 3)),
             )
             .show(ui, |ui| self.ribbon_content(ui));
         // Visio: a hairline rule closes the ribbon off from the canvas.
         egui::Panel::top("ribbon_rule")
             .exact_size(1.0)
-            .frame(egui::Frame::new().fill(theme::RIBBON_EDGE))
+            .frame(egui::Frame::new().fill(t.ribbon_edge))
             .show(ui, |_| {});
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::STATUS_BG)
+                    .fill(t.status_bg)
                     .inner_margin(egui::Margin::symmetric(10, 3)),
             )
             .show(ui, |ui| self.status_bar(ui));
         egui::Panel::bottom("page_tabs")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::TABS_BG)
+                    .fill(t.tabs_bg)
                     .inner_margin(egui::Margin::same(2)),
             )
             .show(ui, |ui| self.page_tabs(ui));
@@ -2900,7 +2927,7 @@ impl App {
             egui::Panel::left("stencil")
                 .frame(
                     egui::Frame::new()
-                        .fill(theme::STENCIL_BG)
+                        .fill(t.stencil_bg)
                         .inner_margin(egui::Margin::same(6)),
                 )
                 .default_size(160.0)
@@ -3003,10 +3030,11 @@ impl App {
             close_backstage = true;
         }
         let has_doc = self.ed.is_some();
+        let t = theme::shell_tokens(ui.visuals());
         egui::Panel::left("backstage_rail")
             .frame(
                 egui::Frame::new()
-                    .fill(theme::ACCENT)
+                    .fill(t.accent_band)
                     .inner_margin(egui::Margin::same(10)),
             )
             .default_size(190.0)
@@ -3035,11 +3063,11 @@ impl App {
                         let txt = egui::RichText::new(label).size(14.0).color(if enabled {
                             Color32::WHITE
                         } else {
-                            theme::RAIL_DISABLED
+                            t.rail_disabled
                         });
                         let mut b = egui::Button::new(txt).frame(false);
                         if selected {
-                            b = b.fill(theme::RAIL_SELECTED);
+                            b = b.fill(t.rail_selected);
                         }
                         let resp = ui.add_enabled(enabled, b);
                         if resp.clicked() {
@@ -3088,7 +3116,7 @@ impl App {
                         egui::Button::new(
                             egui::RichText::new("Options")
                                 .size(14.0)
-                                .color(theme::RAIL_DISABLED),
+                                .color(t.rail_disabled),
                         )
                         .frame(false),
                     )
@@ -3102,7 +3130,7 @@ impl App {
         let page = self.backstage_page;
         let mut search_text = self.backstage_search.clone();
         egui::Frame::new()
-            .fill(theme::RIBBON_CONTENT)
+            .fill(t.ribbon_content)
             .inner_margin(egui::Margin::same(28))
             .show(ui, |ui| {
                 ui.add_space(12.0);
@@ -3318,13 +3346,14 @@ const NEW_TEMPLATE_ENTRIES: &[(&str, Icon)] = &[
 /// The caption is a real Label so the card stays in the accessibility
 /// tree (kittest queries it); all colors ride theme tokens (#55).
 fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
+    let t = theme::shell_tokens(ui.visuals());
     ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
         let (tile, _) = ui.allocate_exact_size(Vec2::new(120.0, 96.0), Sense::hover());
-        ui.painter().rect_filled(tile, 3.0, theme::CARD_BG);
+        ui.painter().rect_filled(tile, 3.0, t.card_bg);
         ui.painter().rect_stroke(
             tile,
             3.0,
-            Stroke::new(1.0, theme::RIBBON_GROUP),
+            Stroke::new(1.0, t.ribbon_group),
             egui::StrokeKind::Middle,
         );
         icon.paint(
@@ -3339,12 +3368,8 @@ fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
         };
         let caption = ui
             .add(
-                egui::Label::new(
-                    egui::RichText::new(name)
-                        .size(12.0)
-                        .color(theme::BACK_TITLE),
-                )
-                .selectable(false),
+                egui::Label::new(egui::RichText::new(name).size(12.0).color(t.back_title))
+                    .selectable(false),
             )
             .on_hover_text(tip);
         let card = tile.union(caption.rect);
@@ -3357,7 +3382,7 @@ fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
             ui.painter().rect_stroke(
                 card.shrink(1.0),
                 3.0,
-                Stroke::new(1.5, theme::RIBBON_HOVER_EDGE),
+                Stroke::new(1.5, t.ribbon_hover_edge),
                 egui::StrokeKind::Middle,
             );
         }
@@ -3369,16 +3394,17 @@ fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
 /// elementary-style welcome action: icon beside a bold title with a
 /// one-line description — one button keeps it one accessible widget.
 fn welcome_action(ui: &mut Ui, icon: Icon, title: &str, desc: &str) -> bool {
+    let t = theme::shell_tokens(ui.visuals());
     let mut job = egui::text::LayoutJob::default();
     job.append(
         &format!("    {title}"),
         0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(13.0), theme::BACK_TITLE),
+        egui::TextFormat::simple(egui::FontId::proportional(13.0), t.back_title),
     );
     job.append(
         &format!("\n    {desc}"),
         0.0,
-        egui::TextFormat::simple(egui::FontId::proportional(10.5), theme::RIBBON_LABEL),
+        egui::TextFormat::simple(egui::FontId::proportional(10.5), t.ribbon_label),
     );
     let resp = ui.add(egui::Button::new(job).min_size(Vec2::new(280.0, 44.0)));
     let r = resp.rect;
