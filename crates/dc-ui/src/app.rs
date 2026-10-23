@@ -907,12 +907,14 @@ impl App {
         let Some((page_id, shape_id)) = self.sel else {
             return;
         };
-        let guard_cells: Vec<&str> = match end {
-            HandleId::LineBegin => vec!["BeginX", "BeginY"],
-            HandleId::LineEnd => vec!["EndX", "EndY"],
+        // Only the lock matching the dragged endpoint guards the drag
+        // (Visio: LockBegin locks the begin point alone).
+        let (guard_cells, lock): (Vec<&str>, &str) = match end {
+            HandleId::LineBegin => (vec!["BeginX", "BeginY"], "LockBegin"),
+            HandleId::LineEnd => (vec!["EndX", "EndY"], "LockEnd"),
             _ => return,
         };
-        if let Some(reason) = self.line_drag_guard(&guard_cells, &["LockBegin", "LockEnd"]) {
+        if let Some(reason) = self.line_drag_guard(&guard_cells, &[lock]) {
             self.status = format!("endpoint drag refused: {reason}");
             return;
         }
@@ -955,7 +957,9 @@ impl App {
         .map(|c| Box::new(c) as Box<dyn dc_core::Command>)
         .collect();
         // Derived cells: skip any that a formula owns (never overwrite a
-        // guarded cell; the status explains the visual lag).
+        // guarded cell; the note is written after `apply`, which would
+        // otherwise overwrite the status with the command label).
+        let mut kept_note: Option<String> = None;
         for (name, v) in [
             ("Width", w),
             ("Angle", angle),
@@ -970,7 +974,9 @@ impl App {
                 .and_then(|c| c.f.clone())
                 .filter(|f| f != "Inh");
             if formula.is_some() {
-                self.status = format!("endpoint moved, but {name} is formula-driven and kept");
+                kept_note = Some(format!(
+                    "endpoint moved, but {name} is formula-driven and kept"
+                ));
                 continue;
             }
             cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
@@ -979,6 +985,9 @@ impl App {
             format!("move line endpoint (shape {shape_id})"),
             cmds,
         ));
+        if let Some(note) = kept_note {
+            self.status = note;
+        }
     }
 
     /// Drag a 1D shape's midpoint: the whole line translates, both
@@ -988,8 +997,12 @@ impl App {
         let Some((page_id, shape_id)) = self.sel else {
             return;
         };
+        // Guard the endpoint cells only: real Visio 1D masters commonly
+        // derive PinX/PinY through GUARD((BeginX+EndX)/2) — a formula
+        // there must not refuse the drag, the cell is simply kept (the
+        // endpoints carry the geometry).
         if let Some(reason) = self.line_drag_guard(
-            &["BeginX", "BeginY", "EndX", "EndY", "PinX", "PinY"],
+            &["BeginX", "BeginY", "EndX", "EndY"],
             &["LockBegin", "LockEnd"],
         ) {
             self.status = format!("line move refused: {reason}");
@@ -1021,6 +1034,84 @@ impl App {
             shape: shape_id,
         };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // Pin cells are derived: keep any a formula owns instead of
+        // overwriting the guard.
+        let mut kept_note: Option<String> = None;
+        let mut cmds: Vec<(&str, f64)> = vec![
+            ("BeginX", bx + dx),
+            ("BeginY", by + dy),
+            ("EndX", ex + dx),
+            ("EndY", ey + dy),
+        ];
+        for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
+            let formula = ed
+                .doc
+                .resolve_cell(sh, &chain, name)
+                .and_then(|c| c.f.clone())
+                .filter(|f| f != "Inh");
+            if formula.is_some() {
+                kept_note = Some(format!("line moved, but {name} is formula-driven and kept"));
+            } else {
+                cmds.push((name, v));
+            }
+        }
+        let cmds: Vec<Box<dyn dc_core::Command>> = cmds
+            .into_iter()
+            .map(|(n, v)| {
+                Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
+            })
+            .collect();
+        self.apply(Macro::new(format!("move line shape {shape_id}"), cmds));
+        if let Some(note) = kept_note {
+            self.status = note;
+        }
+    }
+
+    /// Apply a pre-boxed command (the multi-shape move paths build
+    /// commands per member); wrapped in a one-step Macro so the status
+    /// and history behave like every other apply.
+    fn apply_boxed(&mut self, label: &str, cmd: Box<dyn dc_core::Command>) {
+        self.apply(Macro::new(label, vec![cmd]));
+    }
+
+    /// The move command for one shape at a target pin: a 1D shape
+    /// translates Begin/End/Pin together (a pin-only move would leave
+    /// the endpoint cells stale — the handles would sit at the old
+    /// positions and the next endpoint drag would snap the line back,
+    /// CodeRabbit review of df4a562); 2D shapes move the pin alone.
+    fn move_cmd_for(
+        &self,
+        page_id: i64,
+        sid: i64,
+        new_pin: (f64, f64),
+    ) -> Box<dyn dc_core::Command> {
+        let Some(ed) = self.ed() else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let Some(((bx, by), (ex, ey), (px, py))) = get("BeginX")
+            .zip(get("BeginY"))
+            .zip(get("EndX").zip(get("EndY")))
+            .zip(get("PinX").zip(get("PinY")))
+            .map(|(((bx, by), (ex, ey)), (px, py))| ((bx, by), (ex, ey), (px, py)))
+        else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let (dx, dy) = (new_pin.0 - px, new_pin.1 - py);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
         let cmds: Vec<Box<dyn dc_core::Command>> = [
             ("BeginX", bx + dx),
             ("BeginY", by + dy),
@@ -1034,7 +1125,7 @@ impl App {
             Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
         })
         .collect();
-        self.apply(Macro::new(format!("move line shape {shape_id}"), cmds));
+        Box::new(Macro::new(format!("move line shape {sid}"), cmds))
     }
 
     /// Track an in-progress shape drag; commit on release.
@@ -1065,15 +1156,19 @@ impl App {
                     // Moving a multi-selection moves every member by the
                     // same delta, as one undo step. The group was
                     // captured at press time (members of the selection
-                    // the press actually landed on).
+                    // the press actually landed on). Each member moves
+                    // through `move_cmd_for`: 1D members translate their
+                    // endpoints too, not just the pin.
                     if d.group.is_empty() {
-                        self.apply(MoveShape::new(page_id, d.shape, d.last_pin));
+                        let label = format!("move shape {}", d.shape);
+                        let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
+                        self.apply_boxed(&label, cmd);
                     } else {
                         let Some(ed) = self.ed() else { return };
                         let dx = d.last_pin.0 - d.start_pin.0;
                         let dy = d.last_pin.1 - d.start_pin.1;
                         let mut cmds: Vec<Box<dyn dc_core::Command>> =
-                            vec![Box::new(MoveShape::new(page_id, d.shape, d.last_pin))];
+                            vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
                         for sid in d.group {
                             let page = &ed.doc.pages[self.page_idx];
                             let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
@@ -1086,11 +1181,7 @@ impl App {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
                             if let (Some(px), Some(py)) = (get("PinX"), get("PinY")) {
-                                cmds.push(Box::new(MoveShape::new(
-                                    page_id,
-                                    sid,
-                                    (px + dx, py + dy),
-                                )));
+                                cmds.push(self.move_cmd_for(page_id, sid, (px + dx, py + dy)));
                             }
                         }
                         self.apply(Macro::new("move shapes", cmds));
@@ -2409,18 +2500,33 @@ impl App {
             self.apply_marquee(x0, y0, x1, y1);
         }
         if let Some((id, start, end)) = out.handle_drag_done {
-            match id {
-                HandleId::Corner(corner) => {
-                    // y-down screen-orientation delta, as before.
-                    let dx = end.0 - start.0;
-                    let dy = start.1 - end.1;
-                    self.apply_resize(corner, dx, dy);
-                }
-                HandleId::LineBegin | HandleId::LineEnd => {
-                    self.apply_line_endpoint(id, end);
-                }
-                HandleId::LineMid => {
-                    self.apply_line_move(start, end);
+            // A press on a handle released without travel is just a
+            // click: committing it would create no-op undo steps (or a
+            // bogus "refused" status for an unprotected shape).
+            let travel_px = (end.0 - start.0).hypot(end.1 - start.1) * self.view.px_per_in() as f64;
+            if travel_px > 1.0 {
+                match id {
+                    HandleId::Corner(corner) => {
+                        // y-down screen-orientation delta, as before.
+                        let dx = end.0 - start.0;
+                        let dy = start.1 - end.1;
+                        self.apply_resize(corner, dx, dy);
+                    }
+                    HandleId::LineBegin | HandleId::LineEnd => {
+                        // The endpoint moves by the drag DELTA from the
+                        // handle's own position — the grab may start up
+                        // to HANDLE_GRAB px away from the handle center,
+                        // and snapping to the raw pointer would jump it.
+                        if let Some(origin) = handles.iter().find(|h| h.id == id).map(|h| h.pos) {
+                            self.apply_line_endpoint(
+                                id,
+                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
+                            );
+                        }
+                    }
+                    HandleId::LineMid => {
+                        self.apply_line_move(start, end);
+                    }
                 }
             }
         }
@@ -3133,31 +3239,40 @@ impl App {
             return;
         };
         let val = if on { "1" } else { "0" };
+        // Replace an existing lock cell in place (Row::cell reads the
+        // first match — appending would make a later `on=false`
+        // unreadable and the lock uncleearable); create the section
+        // otherwise. Both paths bump the version so the view refreshes.
+        let set_cell = |cells: &mut Vec<(String, vsdx::model::Cell)>| match cells
+            .iter_mut()
+            .find(|(n, _)| n == name)
+        {
+            Some((_, c)) => *c = vsdx::model::Cell::value(val),
+            None => cells.push((name.to_string(), vsdx::model::Cell::value(val))),
+        };
         if let Some(SheetChild::Section(sec)) = sh
             .sheet
             .children
             .iter_mut()
             .find(|c| matches!(c, SheetChild::Section(s) if s.name == "Protection"))
         {
-            if let Some(row) = sec.rows.first_mut() {
-                row.cells
-                    .push((name.to_string(), vsdx::model::Cell::value(val)));
-            } else {
-                sec.rows.push(Row {
+            match sec.rows.first_mut() {
+                Some(row) => set_cell(&mut row.cells),
+                None => sec.rows.push(Row {
                     cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
                     ..Row::default()
-                });
+                }),
             }
-            return;
+        } else {
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "Protection".into(),
+                rows: vec![Row {
+                    cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
         }
-        sh.sheet.children.push(SheetChild::Section(Section {
-            name: "Protection".into(),
-            rows: vec![Row {
-                cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
-                ..Row::default()
-            }],
-            ..Section::default()
-        }));
         self.dirty = true;
         self.version += 1;
     }

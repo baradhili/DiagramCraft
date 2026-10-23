@@ -621,6 +621,78 @@ fn protection_locks_refuse_resize() {
     );
 }
 
+/// Body-dragging a 1D line (press away from the handles) must translate
+/// Begin/End/Pin TOGETHER — a pin-only move leaves the endpoint cells
+/// stale, so the handles sit at the old positions and the next endpoint
+/// drag snaps the line back (CodeRabbit review of df4a562).
+#[test]
+fn line_body_drag_translates_endpoints() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, LINE_MASTER);
+
+    // Stretch the line first so its body has room clear of every
+    // handle's 12 px grab radius.
+    let ex_pre = cell_of(&h, page, shape, "EndX");
+    let end_handle = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("line endpoint handle");
+    drag_naturally(&mut h, end_handle, egui::vec2(180.0, 0.0));
+    let (bx0, by0, ex0, ey0) = (
+        cell_of(&h, page, shape, "BeginX"),
+        cell_of(&h, page, shape, "BeginY"),
+        cell_of(&h, page, shape, "EndX"),
+        cell_of(&h, page, shape, "EndY"),
+    );
+    assert!(
+        (ex0 - ex_pre - 180.0 / (96.0 * h.state().debug_zoom()) as f64).abs() < 0.05,
+        "endpoint stretch landed: {ex_pre:.3} → {ex0:.3}"
+    );
+
+    // Press a quarter of the way along the body: on the line, well
+    // outside any handle's grab radius.
+    let beg = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineBegin)
+        .unwrap();
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .unwrap();
+    let quarter = egui::pos2(
+        beg.x + (end.x - beg.x) * 0.25,
+        beg.y + (end.y - beg.y) * 0.25,
+    );
+    drag_naturally(&mut h, quarter, egui::vec2(50.0, 30.0));
+
+    let zoom = h.state().debug_zoom();
+    let ppi = 96.0 * zoom;
+    let (bx1, by1, ex1, ey1) = (
+        cell_of(&h, page, shape, "BeginX"),
+        cell_of(&h, page, shape, "BeginY"),
+        cell_of(&h, page, shape, "EndX"),
+        cell_of(&h, page, shape, "EndY"),
+    );
+    assert!(
+        (bx1 - bx0 - 50.0 / ppi as f64).abs() < 0.05,
+        "begin translated with the body drag: {bx0:.3} → {bx1:.3}"
+    );
+    assert!(
+        (ex1 - ex0 - 50.0 / ppi as f64).abs() < 0.05,
+        "end translated with the body drag: {ex0:.3} → {ex1:.3}"
+    );
+    assert!(
+        ((by1 - by0) + 30.0 / ppi as f64).abs() < 0.05
+            && ((ey1 - ey0) + 30.0 / ppi as f64).abs() < 0.05,
+        "both ends moved down (y-up decreases) by the drag"
+    );
+    assert!(
+        ((ex1 - bx1) - (ex0 - bx0)).abs() < 1e-6,
+        "body drag translated, did not stretch"
+    );
+}
+
 /// Dropping the 1D Line master snapshots XForm1D cells on the instance
 /// (a horizontal 1-inch line centered on the drop), and dragging one
 /// endpoint moves only that end, re-deriving Width/Angle/Pin (#59).
