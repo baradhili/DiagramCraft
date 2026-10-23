@@ -2,7 +2,7 @@
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.75%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![CI](https://img.shields.io/github/actions/workflow/status/baradhili/DiagramCraft/release.yml?style=flat-square&label=CI)](https://github.com/baradhili/DiagramCraft/actions/workflows/release.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/baradhili/DiagramCraft/ci.yml?style=flat-square&label=CI)](https://github.com/baradhili/DiagramCraft/actions/workflows/ci.yml)
 [![Powered by Z.ai GLM](https://img.shields.io/badge/Powered_by-Z.ai_GLM_5.x-0066FF?style=flat-square)](https://z.ai)
 [![AI harness: ZCode](https://img.shields.io/badge/AI_harness-ZCode-000000?style=flat-square)](https://z.ai)
 [![RE tooling: morluto/rea](https://img.shields.io/badge/RE_tooling-morluto/rea-555555?style=flat-square)](https://github.com/morluto/rea)
@@ -24,7 +24,7 @@ If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or
 
 ## Current screenshots
 
-![Screenshot.png](/home/bret/Documents/sites/DiagramCraft/diagramcraft/Screenshot.png)
+![Screenshot.png](Screenshot.png)
 
 ## Helping
 
