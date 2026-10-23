@@ -3348,7 +3348,11 @@ fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
             )
             .on_hover_text(tip);
         let card = tile.union(caption.rect);
-        let resp = ui.interact(card, ui.id().with(("backstage_card", name)), Sense::click());
+        let resp = ui.interact(
+            card,
+            ui.scope_id().with(("backstage_card", name)),
+            Sense::click(),
+        );
         if resp.hovered() && enabled {
             ui.painter().rect_stroke(
                 card.shrink(1.0),
