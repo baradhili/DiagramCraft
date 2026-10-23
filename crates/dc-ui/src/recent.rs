@@ -32,9 +32,13 @@ impl RecentFiles {
     }
 
     /// Load from the user-config path, starting empty on any error
-    /// (missing file, corrupt JSON, unknown schema version).
+    /// (missing file, corrupt JSON, unknown schema version). With no
+    /// config base discoverable (unset HOME/XDG/APPDATA) the list is
+    /// ephemeral — nothing is persisted to a relative path.
     pub fn open() -> RecentFiles {
-        let path = default_path();
+        let Some(path) = default_path() else {
+            return RecentFiles::ephemeral();
+        };
         let files = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| parse(&text))
@@ -79,13 +83,17 @@ impl RecentFiles {
 }
 
 fn serialize(files: &[PathBuf]) -> String {
-    let names: Vec<String> = files.iter().map(|p| p.display().to_string()).collect();
+    // `to_str` (not lossy `display`): a non-UTF-8 path would be silently
+    // corrupted by replacement characters, so it is skipped instead.
+    let names: Vec<&str> = files.iter().filter_map(|p| p.to_str()).collect();
     serde_json::json!({ "version": SCHEMA_VERSION, "files": names }).to_string()
 }
 
 /// Parse the on-disk form; `None` for anything unreadable or carrying
 /// a schema version this build does not know (v1 is the only one — a
 /// future bump that can migrate will match on its old version here).
+/// Entries beyond MAX_ENTRIES (a hand-edited file) are dropped so the
+/// loaded list keeps the same cap as saved ones.
 fn parse(text: &str) -> Option<Vec<PathBuf>> {
     let v: serde_json::Value = serde_json::from_str(text).ok()?;
     if v.get("version")?.as_u64()? != SCHEMA_VERSION {
@@ -96,35 +104,37 @@ fn parse(text: &str) -> Option<Vec<PathBuf>> {
         names
             .iter()
             .filter_map(|n| n.as_str())
+            .take(MAX_ENTRIES)
             .map(PathBuf::from)
             .collect(),
     )
 }
 
-/// `…/diagramcraft/recent.json` under the per-user config dir.
-fn default_path() -> PathBuf {
-    config_base().join("diagramcraft").join("recent.json")
+/// `…/diagramcraft/recent.json` under the per-user config dir; `None`
+/// when no config base is discoverable.
+fn default_path() -> Option<PathBuf> {
+    config_base().map(|b| b.join("diagramcraft").join("recent.json"))
 }
 
-fn config_base() -> PathBuf {
+fn config_base() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         if !x.is_empty() {
-            return PathBuf::from(x);
+            return Some(PathBuf::from(x));
         }
     }
     #[cfg(windows)]
     if let Some(a) = std::env::var_os("APPDATA") {
         if !a.is_empty() {
-            return PathBuf::from(a);
+            return Some(PathBuf::from(a));
         }
     }
     #[cfg(target_os = "macos")]
     {
         if let Some(h) = std::env::var_os("HOME") {
-            return PathBuf::from(h).join("Library").join("Application Support");
+            return Some(PathBuf::from(h).join("Library").join("Application Support"));
         }
     }
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config"))
 }
 
 #[cfg(test)]
@@ -213,6 +223,25 @@ mod tests {
     fn version_field_is_written() {
         let text = serialize(&[p("/x.vsdx")]);
         assert!(text.contains(r#""version":1"#), "serialized form: {text}");
+    }
+
+    #[test]
+    fn parse_caps_loaded_entries_at_max() {
+        let files: Vec<String> = (0..MAX_ENTRIES + 5)
+            .map(|i| format!("/f{i}.vsdx"))
+            .collect();
+        let text = serde_json::json!({ "version": 1, "files": files }).to_string();
+        assert_eq!(parse(&text).unwrap().len(), MAX_ENTRIES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_paths_are_skipped_not_corrupted() {
+        use std::os::unix::ffi::OsStrExt;
+        let bad = PathBuf::from(std::ffi::OsStr::from_bytes(b"/tmp/\xff\xfe.vsdx"));
+        let text = serialize(&[p("/ok.vsdx"), bad]);
+        let back = parse(&text).unwrap();
+        assert_eq!(back, &[p("/ok.vsdx")], "raw form: {text}");
     }
 
     #[test]
