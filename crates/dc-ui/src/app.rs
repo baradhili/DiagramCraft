@@ -59,6 +59,32 @@ pub struct App {
     /// Continue into a new blank drawing once the save-as dialog
     /// triggered by "Save & New" completes (or is cancelled).
     new_after_save: bool,
+    /// Close decision pending: the "Save changes?" prompt a window
+    /// close (✕ / Alt-F4) or File → Close must clear before a dirty
+    /// document is lost (GitHub #65).
+    confirm_close: Option<CloseTarget>,
+    /// Close once the save-as dialog triggered by the close prompt's
+    /// Save (an untitled document) completes; dropped when that dialog
+    /// is cancelled — cancelling the save means staying open.
+    close_after_save: Option<CloseTarget>,
+    /// Test hook input: a close request as if the window's ✕ was
+    /// clicked — kittest cannot synthesize a WM_CLOSE (GitHub #65).
+    close_req_for_test: bool,
+    /// A close was approved and issued. egui-winit turns
+    /// `ViewportCommand::Close` into the NEXT frame's close-requested
+    /// input (`egui-winit/src/lib.rs` `ViewportCommand::Close`), so
+    /// that echo must pass through un-vetoed — otherwise "Don't Save"
+    /// (document left dirty) resurrects the prompt forever (#65).
+    closing: bool,
+    /// Test seam for the native save-as dialog: when armed, the next
+    /// SaveAs dialog resolves with the preset answer instead of
+    /// opening rfd (headless kittest must not open GTK dialogs).
+    /// `Some(None)` = the dialog is "cancelled".
+    dialog_preset_for_test: Option<Option<PathBuf>>,
+    /// Test observability (#65): viewport commands sent by the close
+    /// path (kittest cannot read viewport output after a pass).
+    debug_close_vetoes: u32,
+    debug_close_issued: u32,
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
@@ -108,6 +134,14 @@ enum BackAction {
     Save,
     SaveAs,
     CloseDoc,
+}
+
+/// What a confirmed "Save changes?" prompt closes (GitHub #65): the
+/// whole app (window ✕ / Alt-F4) or just the document (File → Close).
+#[derive(Clone, Copy, PartialEq)]
+enum CloseTarget {
+    App,
+    Doc,
 }
 
 /// Backstage content page (GitHub #55: 2010 three-band rail — commands
@@ -201,6 +235,13 @@ impl App {
             backstage_search: String::new(),
             confirm_new: false,
             new_after_save: false,
+            confirm_close: None,
+            close_after_save: None,
+            close_req_for_test: false,
+            closing: false,
+            dialog_preset_for_test: None,
+            debug_close_vetoes: 0,
+            debug_close_issued: 0,
             ctx_menu: None,
             ctx_menu_rect: None,
             clipboard: None,
@@ -227,6 +268,46 @@ impl App {
         let mut app = App::with_doc_opt(None);
         app.do_new();
         app
+    }
+
+    /// Test hooks for the close-prompt flow (GitHub #65). kittest
+    /// cannot synthesize a WM_CLOSE or read viewport output, so the
+    /// request is flagged in and the sent commands counted out.
+    #[doc(hidden)]
+    pub fn request_close_for_test(&mut self) {
+        self.close_req_for_test = true;
+    }
+    #[doc(hidden)]
+    pub fn mark_dirty_for_test(&mut self) {
+        self.dirty = true;
+    }
+    #[doc(hidden)]
+    pub fn preset_save_as_for_test(&mut self, answer: Option<PathBuf>) {
+        self.dialog_preset_for_test = Some(answer);
+    }
+    #[doc(hidden)]
+    pub fn debug_close_prompt(&self) -> bool {
+        self.confirm_close.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_close_chain_armed(&self) -> bool {
+        self.close_after_save.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_doc_open(&self) -> bool {
+        self.ed.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_dirty(&self) -> bool {
+        self.dirty
+    }
+    #[doc(hidden)]
+    pub fn debug_close_vetoes(&self) -> u32 {
+        self.debug_close_vetoes
+    }
+    #[doc(hidden)]
+    pub fn debug_close_issued(&self) -> u32 {
+        self.debug_close_issued
     }
 
     /// Test hooks: select a shape / switch ribbon tab.
@@ -361,6 +442,7 @@ impl App {
     fn start_new(&mut self) {
         self.confirm_new = false;
         self.new_after_save = false;
+        self.close_after_save = None;
         self.ed = Some(Editor::new_blank());
         self.path = PathBuf::new();
         self.dirty = false;
@@ -383,15 +465,21 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "drawing.vsdx".into());
         let (tx, rx) = mpsc::channel();
+        // The native dialog is untestable headless (rfd opens GTK);
+        // an armed preset answers in its place (tests only).
+        let preset = self.dialog_preset_for_test.take();
         std::thread::spawn(move || {
-            let picked = match kind {
-                PendingKind::Open => rfd::FileDialog::new()
-                    .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
-                    .pick_file(),
-                PendingKind::SaveAs => rfd::FileDialog::new()
-                    .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
-                    .set_file_name(&default_name)
-                    .save_file(),
+            let picked = match preset {
+                Some(p) => p,
+                None => match kind {
+                    PendingKind::Open => rfd::FileDialog::new()
+                        .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
+                        .pick_file(),
+                    PendingKind::SaveAs => rfd::FileDialog::new()
+                        .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
+                        .set_file_name(&default_name)
+                        .save_file(),
+                },
             };
             let _ = tx.send(picked);
         });
@@ -421,8 +509,9 @@ impl App {
             return;
         }
         let Some(path) = path else {
-            // cancelled: drop any chained "Save & New"
+            // cancelled: drop any chained follow-up
             self.new_after_save = false;
+            self.close_after_save = None;
             return;
         };
         match dialog {
@@ -436,6 +525,12 @@ impl App {
                     } else {
                         self.start_new();
                     }
+                } else if let Some(target) = self.close_after_save.take() {
+                    if !self.dirty {
+                        // save succeeded — the close continues (GitHub #65)
+                        self.finish_close(ctx, target);
+                    }
+                    // save failed — keep everything open
                 }
             }
         }
@@ -3487,6 +3582,7 @@ impl App {
         self.handle_shortcuts(&ctx);
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
+        self.handle_close_request(&ctx);
         self.text_edit_window(&ctx);
         self.color_palette_window(&ctx);
 
@@ -3506,6 +3602,7 @@ impl App {
         if self.backstage {
             self.backstage_view(ui);
             self.confirm_new_window(&ctx);
+            self.confirm_close_window(&ctx);
             return;
         }
 
@@ -3599,6 +3696,136 @@ impl App {
             }
         }
         self.confirm_new_window(&ctx);
+        self.confirm_close_window(&ctx);
+    }
+
+    /// A close request arrived — the window's ✕ / Alt-F4 (or the
+    /// kittest hook): veto it and ask the user first when there is
+    /// anything to lose; a clean document closes straight away
+    /// (GitHub #65). egui 0.37 semantics: the app exits after this
+    /// frame unless `ViewportCommand::CancelClose` is sent.
+    fn handle_close_request(&mut self, ctx: &Context) {
+        let requested = self.close_req_for_test || ctx.input(|i| i.viewport().close_requested());
+        self.close_req_for_test = false;
+        if !requested {
+            return;
+        }
+        if self.closing {
+            // Our own approved close echoing back (egui-winit feeds
+            // ViewportCommand::Close into the next frame's input):
+            // send nothing — the un-vetoed request is what exits the
+            // app — and never resurrect the prompt.
+            return;
+        }
+        // While the prompt is already up, absorb further requests —
+        // clicking ✕ again changes nothing (one prompt, not two).
+        if self.confirm_close.is_some() {
+            self.veto_close(ctx);
+            return;
+        }
+        if self.dirty && self.ed.is_some() {
+            // Leaving supersedes the New prompt if it was up.
+            self.confirm_new = false;
+            self.veto_close(ctx);
+            self.confirm_close = Some(CloseTarget::App);
+        } else {
+            // Clean: let the close proceed. Re-issuing Close also
+            // covers the test hook, where no OS close stands behind
+            // the flag (in production it is an idempotent no-op).
+            self.issue_close(ctx);
+        }
+    }
+
+    /// The "Save changes?" modal before a window close or File → Close
+    /// discards a dirty document (GitHub #65). Visio 2016 shape:
+    /// Save (save-as first when untitled, then close), Don't Save,
+    /// Cancel.
+    fn confirm_close_window(&mut self, ctx: &Context) {
+        let Some(target) = self.confirm_close else {
+            return;
+        };
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.confirm_close = None;
+            return;
+        }
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "the drawing".into());
+        egui::Window::new("Save changes?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("Save changes to {name}?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.confirm_close = None;
+                        // New and close chains are mutually exclusive.
+                        self.new_after_save = false;
+                        if self.path.as_os_str().is_empty() {
+                            // pick a file first; the close continues
+                            // after the dialog completes
+                            self.close_after_save = Some(target);
+                            self.begin_dialog(PendingKind::SaveAs);
+                        } else {
+                            let p = self.path.clone();
+                            self.save_to(&p);
+                            if !self.dirty {
+                                self.finish_close(ctx, target);
+                            }
+                            // save failed — stay open; the status bar
+                            // carries the error
+                        }
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        self.confirm_close = None;
+                        self.finish_close(ctx, target);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_close = None;
+                    }
+                });
+            });
+    }
+
+    /// Execute a confirmed close: the app window (re-issue the close
+    /// the veto cancelled) or just the document (back to the start
+    /// screen — the app stays open, Visio's File → Close).
+    fn finish_close(&mut self, ctx: &Context, target: CloseTarget) {
+        self.close_after_save = None;
+        match target {
+            CloseTarget::App => self.issue_close(ctx),
+            CloseTarget::Doc => self.close_doc(),
+        }
+    }
+
+    /// Veto an in-flight OS close so the prompt can run.
+    fn veto_close(&mut self, ctx: &Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.debug_close_vetoes += 1;
+    }
+
+    /// Ask the viewport to close (eframe exits the app for the root).
+    /// Marked so the close's own echo — egui-winit delivers
+    /// `ViewportCommand::Close` as next frame's close-requested
+    /// input — passes through instead of being re-prompted (#65).
+    fn issue_close(&mut self, ctx: &Context) {
+        self.closing = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.debug_close_issued += 1;
+    }
+
+    /// File → Close teardown: back to the start screen, nothing dirty.
+    fn close_doc(&mut self) {
+        self.ed = None;
+        self.path = PathBuf::new();
+        self.dirty = false;
+        self.set_selection(None);
+        self.stencil = Stencil::default();
+        self.tex.clear();
+        self.status = "document closed".into();
     }
 
     /// Unsaved-changes prompt before File → New discards work.
@@ -3647,9 +3874,12 @@ impl App {
     fn backstage_view(&mut self, ui: &mut Ui) {
         let mut close_backstage = false;
         let mut action: Option<BackAction> = None;
-        // Esc always returns to the document — unless the unsaved-
-        // changes prompt owns the screen.
-        if !self.confirm_new && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Esc always returns to the document — unless a prompt owns
+        // the screen.
+        if !self.confirm_new
+            && self.confirm_close.is_none()
+            && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+        {
             close_backstage = true;
         }
         let has_doc = self.ed.is_some();
@@ -3924,13 +4154,14 @@ impl App {
                     close_backstage = true;
                 }
                 BackAction::CloseDoc => {
-                    self.ed = None;
-                    self.path = PathBuf::new();
-                    self.dirty = false;
-                    self.set_selection(None);
-                    self.stencil = Stencil::default();
-                    self.tex.clear();
-                    self.status = "document closed".into();
+                    // Ask before a dirty document is discarded (#65);
+                    // Cancel returns to the document, so the backstage
+                    // closes either way, Visio-style.
+                    if self.dirty && self.ed.is_some() {
+                        self.confirm_close = Some(CloseTarget::Doc);
+                    } else {
+                        self.close_doc();
+                    }
                     close_backstage = true;
                 }
             }
