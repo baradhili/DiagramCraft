@@ -151,11 +151,15 @@ impl App {
         // OS light/dark (GitHub #52): detect the opening mode (gsettings
         // with the XDG portal as fallback; `detect` debug-prints the
         // source), install BOTH style slots and select it — then follow
-        // runtime flips via a watcher thread.
+        // runtime flips via a watcher thread. Linux only: elsewhere
+        // `detect` yields System and eframe tracks the OS natively.
         let pref = crate::os_theme::detect();
         crate::theme::install_for(&cc.egui_ctx, pref);
         let mut app = App::with_doc_opt(None);
-        app.os_theme = Some(crate::os_theme::OsThemeWatcher::spawn());
+        #[cfg(target_os = "linux")]
+        {
+            app.os_theme = Some(crate::os_theme::OsThemeWatcher::spawn());
+        }
         // Production entry only: adopt the persistent on-disk MRU
         // (tests and kittest constructors stay ephemeral so they never
         // touch the user's real config dir).

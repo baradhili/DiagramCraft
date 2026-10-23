@@ -1,12 +1,12 @@
 //! OS light/dark preference detection (GitHub #52).
 //!
 //! eframe on Linux reports no system theme and egui's own fallback is
-//! Dark, so the OS setting has to be probed explicitly. Primary path:
-//! `gsettings get org.gnome.desktop.interface color-scheme`. Fallback:
-//! the XDG desktop portal (`org.freedesktop.appearance.color-scheme`
-//! via `ReadOne`) for sessions that expose the preference there. All
-//! mapping is plain data-in → preference-out, unit-testable without a
-//! desktop; only [`detect_now`] touches the environment.
+//! Dark, so the OS setting has to be probed explicitly (gsettings with
+//! the XDG portal as fallback). Everywhere else eframe tracks the OS
+//! theme natively — probing is Linux-only and [`detect`] defers to
+//! `ThemePreference::System`. All mapping is plain data-in →
+//! preference-out, unit-testable without a desktop; only [`detect_now`]
+//! touches the environment.
 
 use egui::ThemePreference;
 use std::sync::mpsc::{self, Receiver};
@@ -49,6 +49,7 @@ fn portal_uint(out: &str) -> Option<u32> {
 /// fallback. Returns the answering source alongside the preference so
 /// callers can log *how* the mode was detected. Spawns subprocesses —
 /// call at startup and from the watcher thread, never per frame.
+#[cfg(target_os = "linux")]
 pub fn probe_os() -> Option<(&'static str, ThemePreference)> {
     let gsettings = run_quiet(
         "gsettings",
@@ -85,38 +86,73 @@ pub fn probe_os() -> Option<(&'static str, ThemePreference)> {
 }
 
 /// One-shot startup detection with a debug line reporting the source
-/// (or that nothing was detected) and the resulting preference.
+/// (or that nothing was detected) and the resulting preference. On
+/// non-Linux targets eframe follows the OS theme natively, so the
+/// preference is `System` and nothing is probed.
 pub fn detect() -> ThemePreference {
-    match probe_os() {
-        Some((source, pref)) => {
-            eprintln!("os_theme: {source} → {pref:?}");
-            pref
+    #[cfg(target_os = "linux")]
+    {
+        match probe_os() {
+            Some((source, pref)) => {
+                eprintln!("os_theme: {source} → {pref:?}");
+                pref
+            }
+            None => {
+                eprintln!(
+                    "os_theme: no OS color-scheme detected (gsettings and portal silent) → Light"
+                );
+                ThemePreference::Light
+            }
         }
-        None => {
-            eprintln!(
-                "os_theme: no OS color-scheme detected (gsettings and portal silent) → Light"
-            );
-            ThemePreference::Light
-        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        ThemePreference::System
     }
 }
 
 /// Silent detection for the watcher's polling loop (its probe must not
 /// print every period).
+#[cfg(target_os = "linux")]
 fn detect_quiet() -> ThemePreference {
     probe_os()
         .map(|(_, pref)| pref)
         .unwrap_or(ThemePreference::Light)
 }
 
+#[cfg(target_os = "linux")]
 fn run_quiet(prog: &str, args: &[&str]) -> Option<String> {
-    std::process::Command::new(prog)
+    use std::io::Read;
+    // Bounded wait: a hung gsettings/portal call must never block app
+    // startup (or the watcher period) indefinitely.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+    let mut child = std::process::Command::new(prog)
         .args(args)
         .stdin(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(_) => return None,
+        }
+    };
+    if !status.success() {
+        return None;
+    }
+    // Replies are a few bytes; reading after exit cannot deadlock.
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out)
 }
 
 /// Delivers OS preference changes to the UI thread (GitHub #52): a
@@ -130,7 +166,10 @@ pub struct OsThemeWatcher {
 
 impl OsThemeWatcher {
     /// Watch the live OS setting (2 s period — GNOME switches are
-    /// user-paced; sub-second reaction buys nothing).
+    /// user-paced; sub-second reaction buys nothing). Linux only: the
+    /// OS theme needs explicit probing there (#52); other targets get
+    /// it natively from eframe.
+    #[cfg(target_os = "linux")]
     pub fn spawn() -> Self {
         Self::spawn_with(detect_quiet, Duration::from_secs(2))
     }
