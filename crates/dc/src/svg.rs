@@ -452,77 +452,12 @@ fn mirror_master(
 }
 
 /// Evaluation environment for re-evaluating a master root's sub-shape
-/// XForms at instance size (issue #15): the group's effective Width /
-/// Height under both the bare and the `Sheet.N!` spellings master
-/// formulas use, plus the root's User cells — their formulas re-evaluate
-/// too, because layout cells like `User.IconY` reference the (instance)
-/// `Height`. Instance-local User rows override the master's.
+/// XForms at instance size (issue #15). Shared implementation in
+/// `vsdx::model::instance_env` — the editor's cache refresh (dc-ui,
+/// issue #59) computes from the same environment, so a refreshed cache
+/// and a mirrored placement agree.
 fn mirror_env(root: &Shape, instance: &Shape, width: f64, height: f64) -> vsdx::formula::Env {
-    let mut env = vsdx::formula::Env::new();
-    env.insert("Width".into(), width);
-    env.insert("Height".into(), height);
-    env.insert(format!("Sheet.{}!Width", root.id), width);
-    env.insert(format!("Sheet.{}!Height", root.id), height);
-    // User rows: master root's, overridden by the instance's own (an
-    // instance can override editable User rows such as ShapeLayout).
-    let mut users: Vec<(String, &Cell)> = Vec::new();
-    for user in root.sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(c) = row.cell("Value") {
-                users.push((row.n.clone().unwrap(), c));
-            }
-        }
-    }
-    for user in instance.sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(c) = row.cell("Value") {
-                if let Some(slot) = users
-                    .iter_mut()
-                    .find(|(n, _)| n == row.n.as_deref().unwrap())
-                {
-                    slot.1 = c;
-                } else {
-                    users.push((row.n.clone().unwrap(), c));
-                }
-            }
-        }
-    }
-    let set = |env: &mut vsdx::formula::Env, name: &str, v: f64| {
-        env.insert(format!("User.{name}"), v);
-        env.insert(format!("Sheet.{}!User.{name}", root.id), v);
-    };
-    for (name, c) in &users {
-        if let Some(v) = c.numeric().filter(|v| v.is_finite()) {
-            set(&mut env, name, v);
-        }
-    }
-    // User formulas re-evaluate against the instance dims (e.g. IconY =
-    // IF(OR(User.ShapeLayout<>1), Height - User.InfoPanelHeight/2, …)).
-    // Two passes let a User formula reference another User formula.
-    for _ in 0..2 {
-        let mut changed = false;
-        for (name, c) in &users {
-            let Some(f) = c.f.as_deref() else { continue };
-            if f == "Inh" || f == "No Formula" {
-                continue;
-            }
-            if let Some(v) = vsdx::formula::eval(f, &env)
-                .ok()
-                .and_then(|v| v.as_f64())
-                .filter(|v| v.is_finite())
-            {
-                let cur = env.get(&format!("User.{name}")).copied();
-                if cur != Some(v) {
-                    set(&mut env, name, v);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    env
+    vsdx::model::instance_env(root, instance, width, height)
 }
 
 /// Corrective transform for one mirrored sub-shape: maps where
@@ -546,17 +481,14 @@ fn mirror_child_transform(
 
     // Effective values: formula first (Visio re-evaluates against the
     // instance group), then the uniform-scale fallback.
-    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings:
-    // a bare name in a child formula means the child's own cell, so the
-    // root's unqualified Width/Height/User.* must not leak in — without
-    // the filter a bare reference silently reads the group's value and
-    // skips the per-axis fallback below. (Child sheets are not in this
-    // env; bare child-cell references fail to resolve and fall back.)
-    let mut env: vsdx::formula::Env = root_env
-        .iter()
-        .filter(|(k, _)| k.contains('!'))
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings
+    // (`vsdx::model::qualified_env`): a bare name in a child formula
+    // means the child's own cell, so the root's unqualified
+    // Width/Height/User.* must not leak in — without the filter a bare
+    // reference silently reads the group's value and skips the per-axis
+    // fallback below. (Child sheets are not in this env; bare
+    // child-cell references fail to resolve and fall back.)
+    let mut env: vsdx::formula::Env = vsdx::model::qualified_env(root_env);
     let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
         let Some(c) = sub.sheet.cell(name) else {
             return None;

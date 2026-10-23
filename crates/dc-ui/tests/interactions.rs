@@ -1303,7 +1303,6 @@ fn backstage_search_filters_templates() {
     );
 }
 
-
 /// A synthetic flattened group — the structure real Visio files save
 /// (inline sub-shapes whose XForm and geometry cells are `F='Inh'`
 /// snapshots of formula evaluations at the instance's size; the
@@ -1331,15 +1330,36 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         type_: Some("Group".into()),
         ..vsdx::model::Shape::default()
     };
+    // The layout cells real task masters use (Process.7 pattern): the
+    // Txt block and icon pins hide their size dependence behind User
+    // rows — `TxtPinX = GUARD(User.TxtPinX)` where `User.TxtPinX =
+    // Width/2`, `PinY = GUARD(Sheet.1!User.IconY)` where
+    // `User.IconY = Height - User.InfoPanelHeight/2`. A refresh that
+    // only greps formulas for "Width"/"Height" cannot see through the
+    // indirection and leaves those caches stale (the icon/text drift
+    // report on #59).
+    for (n, v, f) in [
+        ("IconX", "0.1", None),
+        ("IconY", "0.9", Some("Height-User.InfoPanelHeight/2")),
+        ("InfoPanelHeight", "0.2", None),
+        ("TxtPinX", "1", Some("Width/2")),
+        ("TxtPinY", "0.5", Some("Height/2")),
+        ("TxtWidth", "2", Some("Width*1")),
+        ("TxtHeight", "1", Some("Height*1")),
+    ] {
+        add_user_row(&mut mroot.sheet, n, v, f);
+    }
     for (n, v, f) in [
         ("PinX", "1", None),
         ("PinY", "0.5", None),
         ("Width", "2", None),
         ("Height", "1", None),
-        ("TxtPinX", "1", Some("Width*0.5")),
-        ("TxtPinY", "0.5", Some("Height*0.5")),
-        ("TxtWidth", "2", Some("Width*1")),
-        ("TxtHeight", "1", Some("Height*1")),
+        ("TxtPinX", "1", Some("GUARD(User.TxtPinX)")),
+        ("TxtPinY", "0.5", Some("GUARD(User.TxtPinY)")),
+        ("TxtWidth", "2", Some("GUARD(User.TxtWidth)")),
+        ("TxtHeight", "1", Some("GUARD(User.TxtHeight)")),
+        ("TxtLocPinX", "1", Some("TxtWidth*0.5")),
+        ("TxtLocPinY", "0.5", Some("TxtHeight*0.5")),
     ] {
         mroot.sheet.set_cell(n, cell(v, f));
     }
@@ -1365,16 +1385,16 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         ..vsdx::model::Shape::default()
     };
     for (n, v, f) in [
-        ("PinX", "0.2", "Sheet.1!User.IconX"),
-        ("PinY", "0.2", "Sheet.1!User.IconY"),
-        ("Width", "0.157", "GUARD(4MM)"),
-        ("Height", "0.11", "GUARD(2.8MM)"),
-        ("LocPinX", "0.0785", "Width*0.5"),
-        ("LocPinY", "0.055", "Height*0.5"),
+        ("PinX", "0.2", "GUARD(Sheet.1!User.IconX)"),
+        ("PinY", "0.2", "GUARD(Sheet.1!User.IconY)"),
+        ("Width", "0.157480", "GUARD(4MM)"),
+        ("Height", "0.110236", "GUARD(2.8MM)"),
+        ("LocPinX", "0.078740", "Width*0.5"),
+        ("LocPinY", "0.055118", "Height*0.5"),
     ] {
         micon.sheet.set_cell(n, cell(v, Some(f)));
     }
-    add_rect_geometry(&mut micon.sheet, 0.157, 0.11, None);
+    add_rect_geometry(&mut micon.sheet, 0.157480, 0.110236, None);
     mroot.sub_shapes = vec![mbody, micon];
     ed.doc.masters.push(vsdx::model::Master {
         id: 10,
@@ -1420,9 +1440,15 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         ("TxtPinY", "0.25", Some("Inh")),
         ("TxtWidth", "1", Some("Inh")),
         ("TxtHeight", "0.5", Some("Inh")),
+        ("TxtLocPinX", "0.5", Some("Inh")),
+        ("TxtLocPinY", "0.25", Some("Inh")),
     ] {
         inst.sheet.set_cell(n, cell(v, f));
     }
+    // A cached User row (F='Inh') — real instances ship these too. The
+    // master's formula must still own the value at refresh time; a
+    // frozen cache here must not freeze the icon's position.
+    add_user_row(&mut inst.sheet, "IconY", "0.4", Some("Inh"));
     let mut isub = vsdx::model::Shape {
         id: root_id + 1,
         type_: Some("Shape".into()),
@@ -1463,11 +1489,11 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
     ];
     for (n, v) in [
         ("PinX", "0.1"),
-        ("PinY", "0.1"),
-        ("Width", "0.157"),
-        ("Height", "0.11"),
-        ("LocPinX", "0.0785"),
-        ("LocPinY", "0.055"),
+        ("PinY", "0.4"),
+        ("Width", "0.157480"),
+        ("Height", "0.110236"),
+        ("LocPinX", "0.078740"),
+        ("LocPinY", "0.055118"),
     ] {
         iicon.sheet.set_cell(n, cell(v, Some("Inh")));
     }
@@ -1528,18 +1554,61 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         (sub_px - 0.5 * kx).abs() < 1e-3,
         "sub PinX cache scaled: {sub_px:.4}"
     );
-    // The Txt block followed too.
+    // The Txt block followed too — including the cells the indirection
+    // hides: TxtPinX = GUARD(User.TxtPinX) with User.TxtPinX = Width/2
+    // must re-center (the pre-evaluation refresh left these stale and
+    // the text drifted low-left).
     let txt_w = cell_of(&h, page_id, root_id, "TxtWidth");
     assert!(
         (txt_w - kx).abs() < 1e-3,
         "root TxtWidth scaled: {txt_w:.4}"
     );
+    let txt_px = cell_of(&h, page_id, root_id, "TxtPinX");
+    assert!(
+        (txt_px - w1 / 2.0).abs() < 1e-3,
+        "root TxtPinX re-centered through User.TxtPinX: {txt_px:.4} vs {:.4}",
+        w1 / 2.0
+    );
+    let txt_py = cell_of(&h, page_id, root_id, "TxtPinY");
+    assert!(
+        (txt_py - h1 / 2.0).abs() < 1e-3,
+        "root TxtPinY re-centered: {txt_py:.4} vs {:.4}",
+        h1 / 2.0
+    );
+    let txt_lx = cell_of(&h, page_id, root_id, "TxtLocPinX");
+    assert!(
+        (txt_lx - w1 / 2.0).abs() < 1e-3,
+        "root TxtLocPinX follows TxtWidth: {txt_lx:.4}"
+    );
+    // Refreshed cells keep F='Inh' — a later resize must refresh them
+    // again, not meet frozen literals.
+    let (_, txt_px_f) = h
+        .state()
+        .debug_cell(page_id, root_id, "TxtPinX")
+        .expect("TxtPinX cell");
+    assert_eq!(txt_px_f, "Inh", "refreshed cache keeps its Inh marker");
 
-    // The fixed-size icon kept its GUARD'ed size.
+    // The fixed-size icon kept its GUARD'ed size …
     let icon_w = cell_of(&h, page_id, root_id + 2, "Width");
     assert!(
-        (icon_w - 0.157).abs() < 1e-6,
+        (icon_w - 0.157480).abs() < 1e-6,
         "GUARD'ed icon Width unchanged, got {icon_w}"
+    );
+    // … its pin X stays the fixed User.IconX offset …
+    let icon_px = cell_of(&h, page_id, root_id + 2, "PinX");
+    assert!(
+        (icon_px - 0.1).abs() < 1e-6,
+        "icon PinX keeps the fixed IconX offset, got {icon_px}"
+    );
+    // … while PinY = GUARD(Sheet.1!User.IconY) with
+    // User.IconY = Height - User.InfoPanelHeight/2 re-evaluates at the
+    // new height (the instance's own cached User.IconY must not freeze
+    // it).
+    let icon_py = cell_of(&h, page_id, root_id + 2, "PinY");
+    assert!(
+        (icon_py - (h1 - 0.1)).abs() < 1e-3,
+        "icon PinY follows Height through the User indirection: {icon_py:.4} vs {:.4}",
+        h1 - 0.1
     );
 
     // And the rendered drawing spans the new size: the Body's geometry
@@ -1552,12 +1621,38 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         svg.lines().take(6).collect::<Vec<_>>().join("\n")
     );
 
-    // One undo restores the whole refresh with the resize.
+    // A SECOND resize refreshes again (the Inh markers survived).
+    let br2 = h.state().debug_sel_br_corner().expect("sel");
+    drag_naturally(&mut h, br2, egui::vec2(30.0, 20.0));
+    let w2 = h.state().debug_sel_width();
+    let txt_px2 = cell_of(&h, page_id, root_id, "TxtPinX");
+    assert!(
+        (txt_px2 - w2 / 2.0).abs() < 1e-3,
+        "second resize re-centered TxtPinX: {txt_px2:.4} vs {:.4}",
+        w2 / 2.0
+    );
+
+    // Each undo restores one resize's whole refresh; two undos return
+    // to the authored caches.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page_id, root_id, "TxtPinX") - w1 / 2.0).abs() < 1e-3,
+        "undo #1 restored the first refresh state"
+    );
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
     assert!(
         (cell_of(&h, page_id, root_id + 1, "Width") - 1.0).abs() < 1e-6,
         "undo restored the sub cache"
+    );
+    assert!(
+        (cell_of(&h, page_id, root_id, "TxtPinX") - 0.5).abs() < 1e-6,
+        "undo restored the authored TxtPinX cache"
+    );
+    assert!(
+        (cell_of(&h, page_id, root_id + 2, "PinY") - 0.4).abs() < 1e-6,
+        "undo restored the authored icon PinY cache"
     );
 }
 
@@ -1567,6 +1662,29 @@ fn vsdx_model_cell(v: &str, f: Option<&str>) -> vsdx::model::Cell {
         v: Some(v.to_string()),
         f: f.map(|s| s.to_string()),
         ..vsdx::model::Cell::default()
+    }
+}
+
+/// Helper of the fixture tests: a named User row with a Value cell.
+fn add_user_row(sheet: &mut vsdx::model::Sheet, name: &str, v: &str, f: Option<&str>) {
+    use vsdx::model::{Row, Section, SheetChild};
+    let row = Row {
+        n: Some(name.to_string()),
+        cells: vec![("Value".to_string(), vsdx_model_cell(v, f))],
+        ..Row::default()
+    };
+    if let Some(SheetChild::Section(sec)) = sheet
+        .children
+        .iter_mut()
+        .find(|c| matches!(c, SheetChild::Section(s) if s.name == "User"))
+    {
+        sec.rows.push(row);
+    } else {
+        sheet.children.push(SheetChild::Section(Section {
+            name: "User".into(),
+            rows: vec![row],
+            ..Section::default()
+        }));
     }
 }
 
