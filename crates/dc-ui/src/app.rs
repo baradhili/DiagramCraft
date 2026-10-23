@@ -867,6 +867,17 @@ impl App {
         }
         cmds.push(Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))));
         cmds.push(Box::new(SetCell::new(scope, "PinY", cell(npy))));
+        // Refresh the flattened group's inherited caches (sub-shape
+        // XForms, Txt block, row coordinates) to the new size — Visio's
+        // save-time refresh; without it a real-file group renders stale
+        // inside the grown selection box (#59).
+        cmds.extend(crate::cmd::group_cache_refresh(
+            &ed.doc,
+            page_id,
+            shape_id,
+            nw / w,
+            nh / h,
+        ));
         self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
         if let Some(note) = guard_note {
             self.status = note;
@@ -934,6 +945,7 @@ impl App {
         else {
             return;
         };
+        let w0 = get("Width").unwrap_or(1.0);
         let (a, b) = if end == HandleId::LineBegin {
             (to, (ex, ey))
         } else {
@@ -981,6 +993,14 @@ impl App {
             }
             cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
         }
+        // A 1D shape's cached row coordinates scale with its Width.
+        cmds.extend(crate::cmd::group_cache_refresh(
+            &ed.doc,
+            page_id,
+            shape_id,
+            w / w0.max(1e-6),
+            1.0,
+        ));
         self.apply(Macro::new(
             format!("move line endpoint (shape {shape_id})"),
             cmds,
@@ -3164,6 +3184,13 @@ impl App {
     #[doc(hidden)]
     pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
         self.selected_text(shape_id)
+    }
+    /// The page SVG the canvas is currently showing (scratch debugging).
+    #[doc(hidden)]
+    pub fn debug_page_svg(&self) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        dc::svg::render_page(&ed.doc, page).ok()
     }
     /// All four selection-frame corners in SCREEN coords, [tl, tr, bl,
     /// br] — the four-corner resize tests (GitHub #59).

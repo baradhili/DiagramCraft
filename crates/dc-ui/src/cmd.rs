@@ -4,7 +4,8 @@
 //! (see `units.rs`).
 
 use dc_core::commands::{remove_cell, SetCell};
-use dc_core::{Command, Scope};
+use dc_core::Command;
+use dc_core::Scope;
 use vsdx::model::{Cell, Document, Shape};
 
 /// Move a shape's pin to a new page position (inches).
@@ -154,6 +155,203 @@ impl Command for AddMasterInstance {
     }
 }
 
+/// Refresh a flattened group's inherited cell caches after a resize
+/// (GitHub #59). Visio instances carry `F='Inh'` snapshots of every
+/// formula-driven cell — sub-shape XForms, the Txt* block, Connection
+/// and Geometry row coordinates. Resizing only the top-level sheet
+/// leaves those caches at the old size, and the renderer (which treats
+/// caches as authoritative, like Visio at load) keeps composing the
+/// drawing at it: the selection box grows around a stale shape.
+/// Visio refreshes the caches when an edit changes what they evaluate
+/// to; this emits the same refresh as SetCell/SetRowCell commands,
+/// riding in the resize's Macro so one undo reverts everything.
+///
+/// Which cells scale: the value follows the MASTER's formula. A formula
+/// that mentions the axis variable (`Width` for the x family, `Height`
+/// for y — the same heuristic the renderer's geometry merge uses) is
+/// proportional and scales by the new/old ratio; a fixed formula
+/// (`GUARD(4MM)` icons inside a task group) or a literal keeps its
+/// value. LocPin follows the shape's own Width/Height (its formula is
+/// `Width*0.5`-style: proportional only if the size is). Geometry and
+/// Connection row cells with no master formula are proportional by the
+/// renderer's own convention. Cells with a real local formula (GUARD,
+/// functions) are never touched — they re-evaluate, they don't cache.
+pub fn group_cache_refresh(
+    doc: &Document,
+    page: i64,
+    shape: i64,
+    kx: f64,
+    ky: f64,
+) -> Vec<Box<dyn dc_core::Command>> {
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let Some(root) = vsdx::model::find_shape_by_id(&p.shapes, shape) else {
+        return Vec::new();
+    };
+    let mut cmds = Vec::new();
+    walk(root, root, page, kx, ky, true, doc, &mut cmds);
+    cmds
+}
+
+/// One (cell name, axis) pair: the axis variable whose mention in the
+/// master's formula marks the value as proportional.
+const X_CELLS: &[&str] = &[
+    "PinX",
+    "Width",
+    "LocPinX",
+    "TxtPinX",
+    "TxtWidth",
+    "TxtLocPinX",
+];
+const Y_CELLS: &[&str] = &[
+    "PinY",
+    "Height",
+    "LocPinY",
+    "TxtPinY",
+    "TxtHeight",
+    "TxtLocPinY",
+];
+
+/// Does the master's formula for `name` make the value proportional to
+/// the axis? `None` = no master cell at all (nothing inherited).
+fn scales_with(mcell: Option<&vsdx::model::Cell>, axis: &str) -> Option<bool> {
+    let c = mcell?;
+    Some(match c.f.as_deref() {
+        Some(f) if f != "Inh" => f.contains(axis),
+        // No formula on the master cell: XForm/Txt cells are literal
+        // local values (size-independent); geometry row cells are
+        // proportional by the renderer's convention (handled by the
+        // caller passing `literal_proportional`).
+        _ => false,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    root: &Shape,
+    sh: &Shape,
+    page: i64,
+    kx: f64,
+    ky: f64,
+    is_root: bool,
+    doc: &Document,
+    cmds: &mut Vec<Box<dyn dc_core::Command>>,
+) {
+    // The inheritance source for this shape's cells: the master's
+    // corresponding shape (the root's master root, a sub's master sub).
+    let chain: Vec<&Shape> = vec![root];
+    let source = doc.instance_source(sh, &chain);
+    for (names, axis, k) in [(X_CELLS, "Width", kx), (Y_CELLS, "Height", ky)] {
+        for name in names {
+            // The root's own XForm cells are written by the resize
+            // itself; only its Txt* block is cache-refreshed.
+            if is_root && !name.starts_with("Txt") {
+                continue;
+            }
+            // LocPin follows the shape's own size: scale it only when
+            // the size cell itself is proportional.
+            if name.starts_with("LocPin") || name.starts_with("TxtLocPin") {
+                let size = if axis == "Width" { "Width" } else { "Height" };
+                let tsize = if name.starts_with("Txt") {
+                    format!("Txt{size}")
+                } else {
+                    size.to_string()
+                };
+                let size_scales = source
+                    .and_then(|src| scales_with(src.sheet.cell(&tsize), axis))
+                    .unwrap_or(true);
+                if !size_scales {
+                    continue;
+                }
+            }
+            let Some(cell) = sh.sheet.cell(name) else {
+                continue;
+            };
+            if cell.f.as_deref() != Some("Inh") {
+                continue;
+            }
+            let Some(v) = cell.numeric() else { continue };
+            let proportional = source
+                .and_then(|src| scales_with(src.sheet.cell(name), axis))
+                .unwrap_or(true);
+            if !proportional {
+                continue;
+            }
+            let scope = Scope::Shape { page, shape: sh.id };
+            cmds.push(Box::new(SetCell::new(
+                scope,
+                *name,
+                Cell::value(format!("{:.6}", v * k)),
+            )));
+        }
+    }
+    // Row coordinates (Geometry, Connection): X/A/C follow Width,
+    // Y/B/D follow Height; a master cell without a formula is
+    // proportional by the renderer's convention.
+    if let Some(source) = source {
+        const ROW_X: &[&str] = &["X", "A", "C"];
+        const ROW_Y: &[&str] = &["Y", "B", "D"];
+        for (own_secs, src_secs) in [
+            (
+                sh.sheet.sections_named("Geometry"),
+                source.sheet.sections_named("Geometry"),
+            ),
+            (
+                sh.sheet.sections_named("Connection"),
+                source.sheet.sections_named("Connection"),
+            ),
+        ] {
+            for (si, sec) in own_secs.iter().enumerate() {
+                let src_sec = src_secs.get(si);
+                for row in &sec.rows {
+                    use dc_core::commands::RowSel;
+                    let sel = match &row.n {
+                        Some(n) => RowSel::Named(n.clone()),
+                        None => RowSel::Ix(row.ix),
+                    };
+                    let src_row = src_sec.and_then(|ss| {
+                        ss.rows.iter().find(|r| match &sel {
+                            RowSel::Ix(ix) => r.ix == *ix,
+                            RowSel::Named(n) => r.n.as_deref() == Some(n.as_str()),
+                        })
+                    });
+                    for (name, axis, k) in ROW_X
+                        .iter()
+                        .map(|n| (*n, "Width", kx))
+                        .chain(ROW_Y.iter().map(|n| (*n, "Height", ky)))
+                    {
+                        let Some(cell) = row.cell(name) else { continue };
+                        if cell.f.as_deref() != Some("Inh") {
+                            continue;
+                        }
+                        let Some(v) = cell.numeric() else { continue };
+                        let proportional = src_row
+                            .and_then(|r| r.cell(name))
+                            .and_then(|c| scales_with(Some(c), axis).map(|_| (c, ())))
+                            .map(|(c, _)| c.f.as_deref().map(|f| f.contains(axis)).unwrap_or(true))
+                            .unwrap_or(true);
+                        if !proportional {
+                            continue;
+                        }
+                        cmds.push(Box::new(dc_core::commands::SetRowCell::new(
+                            Scope::Shape { page, shape: sh.id },
+                            &sec.name,
+                            sec.ix,
+                            sel.clone(),
+                            name,
+                            Cell::value(format!("{:.6}", v * k)),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    for sub in &sh.sub_shapes {
+        walk(root, sub, page, kx, ky, false, doc, cmds);
+    }
+}
+
 /// Delete every cell of a shape's own sheet and the shape itself is NOT
 /// handled here — see dc_core::commands::RemoveShape for removal. This
 /// helper exists for tests: exact restoration of a moved shape.
@@ -229,3 +427,4 @@ mod tests {
         assert!(vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 2).is_some());
     }
 }
+
