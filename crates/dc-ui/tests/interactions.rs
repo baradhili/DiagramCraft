@@ -2429,3 +2429,35 @@ fn hyperlink_dialog_close_dismisses_and_discards_draft() {
         "the discarded draft wrote nothing"
     );
 }
+
+/// Live report on #30: the Shape Data window must be closable — Close
+/// (always visible) and the title-bar X dismiss it.
+#[test]
+fn shape_data_dialog_close_dismisses() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Shape Data")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Shape Data… row")
+        .click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Department").count() > 0,
+        "the Shape Data window opened"
+    );
+    h.get_by_label("Close").click();
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("Department").count(),
+        0,
+        "the Shape Data window closed on Close"
+    );
+}

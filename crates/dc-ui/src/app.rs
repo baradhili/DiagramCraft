@@ -4242,10 +4242,24 @@ impl App {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut bufs = std::mem::take(&mut self.prop_bufs);
+        // Closable (live report on #30): the title-bar X AND a labeled
+        // Close button in an always-visible action bar — the same
+        // elementary/Apple-HIG cancel path the Hyperlinks window uses.
+        // Default position: top-right of the viewport, where Visio
+        // pins its Shape Data pane.
+        let mut open = true;
+        let mut close_btn = false;
+        let top_right = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map_or(egui::pos2(900.0, 60.0), |r| {
+                r.right_top() + egui::vec2(-360.0, 60.0)
+            });
         egui::Window::new("Shape Data")
+            .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(340.0)
+            .default_pos(top_right)
             .show(ctx, |ui| {
                 egui::Grid::new("dc-shape-data")
                     .num_columns(2)
@@ -4361,8 +4375,22 @@ impl App {
                             ui.end_row();
                         }
                     });
+                // Always-visible action bar: Close bottom-right.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            close_btn = true;
+                        }
+                    });
+                });
             });
-        self.prop_bufs = bufs;
+        if open && !close_btn {
+            self.prop_bufs = bufs;
+        } else {
+            self.shape_data_open = None;
+            self.prop_bufs.clear();
+        }
     }
 
     fn hyperlink_window(&mut self, ctx: &egui::Context) {
