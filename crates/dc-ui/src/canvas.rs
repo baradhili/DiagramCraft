@@ -300,10 +300,10 @@ pub fn show(
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
             } else if !ui.input(|i| i.modifiers.command) {
-                let pagePos = screen_to_page(p, view, page);
-                if hit_shape(pagePos) {
+                let page_pos = screen_to_page(p, view, page);
+                if hit_shape(page_pos) {
                     // The app arms its move-drag from the press.
-                    out.press_page_pos = Some(pagePos);
+                    out.press_page_pos = Some(page_pos);
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()
