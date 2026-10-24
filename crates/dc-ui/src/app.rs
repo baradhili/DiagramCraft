@@ -2783,9 +2783,11 @@ impl App {
                         }
                     });
                 });
-            if !tabs.is_empty() && ui.button("+").on_hover_text("Append a page").clicked() {
-                self.dispatch(Action::NewPage);
-            }
+            // No "+" button: it duplicated the tab context menu's
+            // Insert Page… and its rect overflowed the strip band so
+            // clicks could miss (#70 — removed by owner decision
+            // 2026-10-24). The ribbon's New Page button remains, as
+            // does right-click ▸ Insert Page….
         });
     }
 
