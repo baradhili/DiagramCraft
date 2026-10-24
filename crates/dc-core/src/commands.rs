@@ -531,6 +531,86 @@ impl crate::Command for AddShape {
     }
 }
 
+/// Remove one row from a sheet section (GitHub #28: deleting a
+/// Hyperlink row). Undo reinserts it at its original position.
+#[derive(Debug, Clone)]
+pub struct RemoveSectionRow {
+    pub scope: Scope,
+    pub section: String,
+    pub section_ix: i64,
+    pub row: RowSel,
+    removed: Option<(vsdx::model::Row, usize)>,
+}
+
+impl RemoveSectionRow {
+    pub fn new(
+        scope: Scope,
+        section: impl Into<String>,
+        section_ix: i64,
+        row: RowSel,
+    ) -> RemoveSectionRow {
+        RemoveSectionRow {
+            scope,
+            section: section.into(),
+            section_ix,
+            row,
+            removed: None,
+        }
+    }
+}
+
+impl crate::Command for RemoveSectionRow {
+    fn label(&self) -> String {
+        format!(
+            "remove {} row {:?} on {}",
+            self.section, self.row, self.scope
+        )
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("section {}:{} not found", self.section, self.section_ix)
+            })?;
+        let ri = row_index(&sec.rows, &self.row)
+            .with_context(|| format!("row {:?} not found", self.row))?;
+        self.removed = Some((sec.rows.remove(ri), ri));
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let (row, pos) = self
+            .removed
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("section vanished before undo"))?;
+        let at = pos.min(sec.rows.len());
+        sec.rows.insert(at, row);
+        Ok(())
+    }
+}
+
 /// Remove a shape (any depth), storing it with its position for undo.
 #[derive(Debug, Clone)]
 pub struct RemoveShape {

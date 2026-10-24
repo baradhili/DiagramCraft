@@ -1461,3 +1461,69 @@ fn add_container_records_membership_and_survives_reload() {
         .and_then(|c| c.v.clone());
     assert_eq!(m.as_deref(), Some(id.to_string().as_str()));
 }
+
+// ---------------------------------------------------------------------------
+// Hyperlink rows (GitHub #28)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hyperlink_row_add_edit_remove_round_trip() {
+    use dc_core::commands::{RemoveSectionRow, RowSel};
+    use dc_core::{Macro, SetRowCell};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let scope = Scope::Shape { page: 0, shape: 1 };
+    let row = |ix: i64, name: &str, v: &str| {
+        SetRowCell::new(
+            scope.clone(),
+            "Hyperlink",
+            0,
+            RowSel::Ix(ix),
+            name,
+            vsdx::model::Cell::value(v.to_string()),
+        )
+    };
+    ed.apply(Macro::new(
+        "add hyperlink",
+        vec![
+            Box::new(row(0, "Address", "https://example.test/")),
+            Box::new(row(0, "Description", "Docs")),
+        ],
+    ))
+    .unwrap();
+    let link = |ed: &dc_core::Editor| {
+        ed.doc.pages[0].shapes[0]
+            .sheet
+            .sections_named("Hyperlink")
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .map(|r| {
+                (
+                    r.cell("Address").and_then(|c| c.v.clone()),
+                    r.cell("Description").and_then(|c| c.v.clone()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        link(&ed),
+        vec![(Some("https://example.test/".into()), Some("Docs".into()))]
+    );
+    // One undo removes the whole row materialization.
+    ed.undo().unwrap();
+    assert!(link(&ed).is_empty());
+    ed.redo().unwrap();
+
+    // RemoveSectionRow + undo.
+    ed.apply(RemoveSectionRow::new(
+        scope.clone(),
+        "Hyperlink",
+        0,
+        RowSel::Ix(0),
+    ))
+    .unwrap();
+    assert!(link(&ed).is_empty());
+    ed.undo().unwrap();
+    assert_eq!(link(&ed).len(), 1);
+}

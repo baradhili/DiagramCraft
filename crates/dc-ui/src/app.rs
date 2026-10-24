@@ -23,6 +23,16 @@ use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
 use crate::theme;
 
+/// Draft row for the Hyperlinks dialog (#28): `edit_row` names the
+/// instance row being edited (None = adding).
+#[derive(Clone)]
+struct HyperlinkDraft {
+    edit_row: Option<i64>,
+    address: String,
+    sub: String,
+    desc: String,
+}
+
 /// One master ShapeSheet Actions row, evaluated for THIS instance
 /// (#25): label, SETF formula, and the live Checked/Disabled flags.
 #[derive(Clone)]
@@ -66,6 +76,10 @@ pub struct App {
     tab_scroll_to_active: bool,
     /// The Reorder Pages dialog is open (#54, Visio mechanism).
     reorder_open: bool,
+    /// The Hyperlinks dialog is open for this shape (#28).
+    hyperlink_open: Option<i64>,
+    /// Draft row being added/edited in the Hyperlinks dialog (#28).
+    hyperlink_draft: Option<HyperlinkDraft>,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -263,6 +277,8 @@ impl App {
             tab_rename: None,
             tab_scroll_to_active: false,
             reorder_open: false,
+            hyperlink_open: None,
+            hyperlink_draft: None,
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -1674,8 +1690,17 @@ impl App {
         }
     }
 
-    fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool) {
+    fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool, ctrl: bool) {
         self.placed_last_click = false;
+        // Ctrl/Cmd+click follows the hit shape's first hyperlink
+        // (Visio, #28) before any selection semantics.
+        if ctrl {
+            if let Some(hit) = self.shape_hit(page_pos) {
+                if self.follow_first_hyperlink(hit) {
+                    return;
+                }
+            }
+        }
         // Stencil placement takes priority.
         if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
             let new_id = self
@@ -3072,7 +3097,7 @@ impl App {
             // select (and possible drag-start) semantics on its frame.
             self.on_canvas_dbl_click(pos);
         } else if let Some(pos) = out.click_page_pos {
-            self.on_canvas_click(pos, out.shift_click);
+            self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
         }
         if let Some(pos) = out.press_page_pos {
             self.on_canvas_press(pos);
@@ -3232,6 +3257,261 @@ impl App {
             Act::Duplicate => self.tab_cmd_duplicate(idx),
             Act::Reorder => self.reorder_open = true,
         }
+    }
+
+    /// The shape's hyperlink rows (#28): instance rows first, then the
+    /// master's (resolved like every other cell read).
+    fn shape_hyperlinks(&self, shape_id: i64) -> Vec<(String, String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        let collect = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .flat_map(|s| s.sheet.sections_named("Hyperlink"))
+                .flat_map(|sec| sec.rows.iter())
+                .map(|r| {
+                    let t = |n: &str| r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default();
+                    (t("Address"), t("SubAddress"), t("Description"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut out = collect(std::slice::from_ref(sh));
+        if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
+            out.extend(collect(&m.shapes));
+        }
+        out
+    }
+
+    /// Follow a hyperlink (#28): a SubAddress naming a page navigates
+    /// the document; anything else opens through the OS (fire-and-
+    /// forget). Returns whether a link existed.
+    fn follow_first_hyperlink(&mut self, shape_id: i64) -> bool {
+        let Some((addr, sub, _)) = self.shape_hyperlinks(shape_id).into_iter().next() else {
+            return false;
+        };
+        self.follow_hyperlink(&addr, &sub);
+        true
+    }
+
+    fn follow_hyperlink(&mut self, address: &str, sub: &str) {
+        let address = address.trim();
+        let sub = sub.trim();
+        if !sub.is_empty() {
+            // GOTOPAGE-class navigation: SubAddress names a page.
+            let target = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.iter().position(|p| p.name == sub));
+            match target {
+                Some(i) => {
+                    self.switch_page(i);
+                    self.status = format!("went to page {sub:?}");
+                    return;
+                }
+                None => {
+                    self.status = format!("page {sub:?} not found");
+                    return;
+                }
+            }
+        }
+        if address.is_empty() {
+            self.status = "the link has no address".into();
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let open = "xdg-open";
+        #[cfg(target_os = "macos")]
+        let open = "open";
+        #[cfg(target_os = "windows")]
+        let open = "cmd";
+        #[cfg(target_os = "windows")]
+        let flag = "/C";
+        #[cfg(not(target_os = "windows"))]
+        let flag = "";
+        let mut cmd = std::process::Command::new(open);
+        if !flag.is_empty() {
+            cmd.arg(flag);
+        }
+        match cmd.arg(address).spawn() {
+            Ok(_) => self.status = format!("opened {address}"),
+            Err(e) => self.status = format!("could not open {address}: {e}"),
+        }
+    }
+
+    /// The Hyperlinks dialog (#28): rows of the selected shape with
+    /// add / edit / remove through the command layer (one undo per
+    /// change) and Go to follow a link. The draft lives OUTSIDE the
+    /// window closure (a per-frame clone would drop typed text — the
+    /// text_edit_window pattern).
+    fn hyperlink_window(&mut self, ctx: &egui::Context) {
+        let Some(shape_id) = self.hyperlink_open else {
+            return;
+        };
+        // Close automatically when the shape or page goes away.
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.hyperlink_open = None;
+            self.hyperlink_draft = None;
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let rows: Vec<(i64, String, String, String)> = self
+            .ed()
+            .map(|ed| {
+                let page = &ed.doc.pages[self.page_idx];
+                vsdx::model::find_shape_by_id(&page.shapes, shape_id)
+                    .map(|sh| {
+                        sh.sheet
+                            .sections_named("Hyperlink")
+                            .iter()
+                            .flat_map(|sec| sec.rows.iter())
+                            .map(|r| {
+                                let t = |n: &str| {
+                                    r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default()
+                                };
+                                (r.ix, t("Address"), t("SubAddress"), t("Description"))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let mut draft = self.hyperlink_draft.take();
+        egui::Window::new("Hyperlinks")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                if rows.is_empty() && draft.is_none() {
+                    ui.weak("No hyperlinks on this shape.");
+                }
+                for (ix, addr, sub, desc) in &rows {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(if desc.is_empty() {
+                                addr.clone()
+                            } else {
+                                format!("{desc} — {addr}")
+                            })
+                            .size(12.0),
+                        );
+                        if ui.button("Go").clicked() {
+                            let (a, s) = (addr.clone(), sub.clone());
+                            self.follow_hyperlink(&a, &s);
+                        }
+                        if ui.button("Edit").clicked() {
+                            draft = Some(HyperlinkDraft {
+                                edit_row: Some(*ix),
+                                address: addr.clone(),
+                                sub: sub.clone(),
+                                desc: desc.clone(),
+                            });
+                        }
+                        if ui.button("Remove").clicked() {
+                            self.apply(dc_core::commands::RemoveSectionRow::new(
+                                scope.clone(),
+                                "Hyperlink",
+                                0,
+                                dc_core::commands::RowSel::Ix(*ix),
+                            ));
+                        }
+                    });
+                }
+                ui.separator();
+                match draft.as_mut() {
+                    Some(d) => {
+                        // Accessible names on the inputs (#56 pattern);
+                        // the grid labels alone don't label the fields.
+                        let field = |ui: &mut Ui, label: &str, buf: &mut String| {
+                            ui.label(label);
+                            let r = ui.add(egui::TextEdit::singleline(buf).hint_text(label));
+                            r.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::Role::TextInput, true, label)
+                            });
+                        };
+                        egui::Grid::new("dc-hyperlink-draft")
+                            .num_columns(2)
+                            .spacing(egui::vec2(8.0, 4.0))
+                            .show(ui, |ui| {
+                                field(ui, "Address", &mut d.address);
+                                ui.end_row();
+                                field(ui, "Sub-address", &mut d.sub);
+                                ui.end_row();
+                                field(ui, "Description", &mut d.desc);
+                                ui.end_row();
+                            });
+                        let (edit_row, address, sub, desc) =
+                            (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
+                        let mut close_draft = false;
+                        ui.horizontal(|ui| {
+                            if ui.button("OK").clicked() {
+                                let ix = edit_row.unwrap_or_else(|| {
+                                    rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
+                                });
+                                let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+                                if let Some(old) = edit_row {
+                                    cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                                        scope.clone(),
+                                        "Hyperlink",
+                                        0,
+                                        dc_core::commands::RowSel::Ix(old),
+                                    )));
+                                }
+                                for (name, val) in [
+                                    ("Address", &address),
+                                    ("SubAddress", &sub),
+                                    ("Description", &desc),
+                                ] {
+                                    if !val.trim().is_empty() {
+                                        cmds.push(Box::new(dc_core::SetRowCell::new(
+                                            scope.clone(),
+                                            "Hyperlink",
+                                            0,
+                                            dc_core::commands::RowSel::Ix(ix),
+                                            name,
+                                            vsdx::model::Cell::value(val.trim()),
+                                        )));
+                                    }
+                                }
+                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                                close_draft = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                close_draft = true;
+                            }
+                        });
+                        if close_draft {
+                            draft = None;
+                        }
+                    }
+                    None => {
+                        if ui.button("New…").clicked() {
+                            draft = Some(HyperlinkDraft {
+                                edit_row: None,
+                                address: String::new(),
+                                sub: String::new(),
+                                desc: String::new(),
+                            });
+                        }
+                    }
+                }
+            });
+        self.hyperlink_draft = draft;
     }
 
     /// Visio's Reorder Pages dialog (#54): the page list with Move Up /
@@ -3579,6 +3859,7 @@ impl App {
             Group,
             Ungroup,
             Container,
+            Hyperlink,
             Cut,
             Copy,
             Paste,
@@ -3762,7 +4043,9 @@ impl App {
             if ctx_item(ui, None, "Container", "", !self.sel_set.is_empty()) {
                 act = Some(Act::Container);
             }
-            ctx_item(ui, None, "Hyperlink…", "(v0.5)", false);
+            if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
+                act = Some(Act::Hyperlink);
+            }
             ctx_item(ui, None, "Add Comment", "(v0.5)", false);
             ctx_item(ui, None, "Shape Data…", "(v0.5)", false);
             ctx_item(ui, None, "Format Shape…", "(v0.5)", false);
@@ -3810,6 +4093,10 @@ impl App {
                 }
             }
             Act::Container => self.wrap_selection_in_container(),
+            Act::Hyperlink => {
+                self.hyperlink_open = Some(shape_id);
+                self.hyperlink_draft = None;
+            }
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
                     ed.doc.pages.get(self.page_idx).and_then(|p| {
@@ -4128,6 +4415,15 @@ impl App {
             .cell("Value")?
             .numeric()
     }
+    /// kittest: a shape's hyperlink rows as (address, sub-address)
+    /// from the instance section (#28).
+    #[doc(hidden)]
+    pub fn debug_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
+        self.shape_hyperlinks(shape_id)
+            .into_iter()
+            .map(|(a, s, _)| (a, s))
+            .collect()
+    }
     /// kittest: the active page's name (#54).
     #[doc(hidden)]
     pub fn debug_active_page_name(&self) -> String {
@@ -4445,6 +4741,7 @@ impl App {
         self.handle_close_request(&ctx);
         self.text_edit_window(&ctx);
         self.reorder_pages_window(&ctx);
+        self.hyperlink_window(&ctx);
         self.color_palette_window(&ctx);
 
         // The eframe root Ui paints no background and eframe's clear
@@ -5620,7 +5917,7 @@ mod tests {
             .map(|m| m.id)
             .unwrap();
         app.stencil.armed = Some(master);
-        app.on_canvas_click((4.0, 5.0), false);
+        app.on_canvas_click((4.0, 5.0), false, false);
         assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
         assert!(app.placed_last_click);
 

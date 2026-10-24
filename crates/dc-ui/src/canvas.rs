@@ -124,6 +124,8 @@ pub struct CanvasOut {
     pub marquee_live: Option<Rect>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
+    /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
+    pub ctrl_click: bool,
     pub zoom_changed: bool,
 }
 
@@ -207,6 +209,7 @@ pub fn show(
         marquee_done: None,
         marquee_live: None,
         shift_click: false,
+        ctrl_click: false,
         zoom_changed: false,
     };
     let avail = ui.available_size();
@@ -551,6 +554,7 @@ pub fn show(
     // Clicks / drops: report page position; the app hit-tests.
     if resp.clicked() {
         out.shift_click = ui.input(|i| i.modifiers.shift);
+        out.ctrl_click = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
         if let Some(mp) = resp.interact_pointer_pos() {
             let x_in = (mp.x - view.pan.x) as f64 / view.px_per_in() as f64;
             let y_up = page.h_in - (mp.y - view.pan.y) as f64 / view.px_per_in() as f64;

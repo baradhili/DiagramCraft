@@ -1972,3 +1972,97 @@ fn context_menu_container_wraps_and_carries_members() {
     );
     assert!(h.state().debug_shape_screen_rect(s1).is_some());
 }
+
+/// GitHub #28: Hyperlink… dialog adds a row through the command layer,
+/// and Ctrl+Click follows a SubAddress to its page.
+#[test]
+fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two pages so SubAddress navigation has somewhere to go: insert
+    // via the tab context menu (the + button's rect straddles panels
+    // and its center misses the click target — separate wart).
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+    assert_eq!(h.state().debug_page_names(), vec!["Page-1", "Page-2"]);
+
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_shape_count(), 1);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    // Open Hyperlink… from the context menu, add a row.
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row in the context menu")
+        .click();
+    h.run();
+    h.get_by_label("New…").click();
+    h.run();
+    // Fill the draft's three fields: the dialog's inputs are the
+    // TextInputs near the top-left (the stencil search sits lower in
+    // the left pane; order = Address, Sub-address, Description).
+    // The draft inputs carry accessible names (#56 pattern).
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://example.test/");
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Sub-address"),
+    )
+    .set_text_value_accesskit("Page-2");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+
+    // The row landed on the instance and undo removes it.
+    let links = h.state().debug_hyperlinks_for_test(sid);
+    assert_eq!(
+        links,
+        vec![("https://example.test/".into(), "Page-2".into())],
+        "hyperlink row added through the dialog"
+    );
+    // Ctrl+Click the shape: SubAddress navigation to Page-2.
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::CTRL,
+    };
+    h.hover_at(to);
+    h.event(b(to, true));
+    h.event(b(to, false));
+    h.run();
+    assert_eq!(
+        h.state().debug_active_page_name(),
+        "Page-2",
+        "Ctrl+Click followed the SubAddress"
+    );
+    // Back to page 1 and undo removes the row.
+    h.get_by_label("Page-1").click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        h.state().debug_hyperlinks_for_test(sid).is_empty(),
+        "undo removed the hyperlink row"
+    );
+}
