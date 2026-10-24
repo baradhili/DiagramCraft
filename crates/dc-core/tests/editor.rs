@@ -1218,3 +1218,101 @@ fn macro_rolls_back_applied_children_on_failure() {
         "failed macro left no undo entry"
     );
 }
+
+// ---------------------------------------------------------------------------
+// ShapeSheet Actions execution (GitHub #25)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shape_action_setf_chain_builds_and_applies_commands() {
+    use dc_core::commands::shape_action_commands;
+    use std::collections::HashMap;
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let mut env = HashMap::new();
+    env.insert("User.Style".to_string(), 0.0);
+    let cmds = shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),1)&SETF(GetRef(Para.HorzAlign),1)&SETF(GetRef(VerticalAlign),1)",
+        &env,
+    )
+    .unwrap();
+    assert_eq!(cmds.len(), 3);
+    ed.apply(dc_core::Macro::new("run shape action", cmds))
+        .unwrap();
+
+    // All three writes land on the INSTANCE sheet (row 1's shape).
+    let sh = &ed.doc.pages[0].shapes[0];
+    let user = sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .expect("User.Style materialized");
+    assert_eq!(
+        user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
+        Some("1")
+    );
+    let para = sh
+        .sheet
+        .sections_named("Paragraph")
+        .iter()
+        .find_map(|s| s.row_by_ix(0))
+        .expect("Paragraph row materialized");
+    assert_eq!(
+        para.cell("HorzAlign").and_then(|c| c.v.clone()).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        sh.sheet
+            .cell("VerticalAlign")
+            .and_then(|c| c.v.clone())
+            .as_deref(),
+        Some("1")
+    );
+
+    // One undo rolls the whole chain back (materialized rows removed).
+    ed.undo().unwrap();
+    let sh = &ed.doc.pages[0].shapes[0];
+    assert!(sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .is_none());
+
+    // Chained values may be expressions; unsupported terms defer.
+    let mut env2 = HashMap::new();
+    env2.insert("User.N".to_string(), 3.0);
+    let cmds = shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),User.N+1)",
+        &env2,
+    )
+    .unwrap();
+    ed.apply(dc_core::Macro::new("expr", cmds)).unwrap();
+    let sh = &ed.doc.pages[0].shapes[0];
+    let user = sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .unwrap();
+    assert_eq!(
+        user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
+        Some("4")
+    );
+    assert!(shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "RUNADDON(\"mystery\")",
+        &env2
+    )
+    .is_err());
+    // No Formula / empty: display-only, no commands.
+    assert!(
+        shape_action_commands(Scope::Shape { page: 0, shape: 1 }, "No Formula", &env2)
+            .unwrap()
+            .is_empty()
+    );
+}

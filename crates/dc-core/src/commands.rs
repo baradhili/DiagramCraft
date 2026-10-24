@@ -1254,6 +1254,180 @@ impl crate::Command for RemoveConnect {
 }
 
 // ---------------------------------------------------------------------------
+// ShapeSheet Actions execution (GitHub #25)
+// ---------------------------------------------------------------------------
+
+/// Split a formula on top-level `&` (Visio's action chaining),
+/// respecting parentheses and double-quoted strings.
+fn split_top_level_amp(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut cur = String::new();
+    for ch in expr.chars() {
+        match ch {
+            '"' => {
+                in_str = !in_str;
+                cur.push(ch);
+            }
+            '(' if !in_str => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' if !in_str => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            '&' if !in_str && depth == 0 => {
+                out.push(cur.clone());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// Format a numeric cell value the way Visio writes flags and small
+/// numbers: integral → no decimal point.
+fn fmt_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Build the commands for one ShapeSheet `Actions` row's `Action`
+/// formula (GitHub #25): a `SETF(GetRef(target), value)` chain, each
+/// term becoming one `SetCell`/`SetRowCell` against `scope` (the
+/// instance — masters are never mutated). Values evaluate against
+/// `env` (the instance's effective cells). `No Formula` and empty
+/// actions return an empty vec (display-only rows); anything else
+/// (RUNADDON, RUNMACRO, …) returns `Err` so the caller can defer with
+/// a status note.
+pub fn shape_action_commands(
+    scope: Scope,
+    formula: &str,
+    env: &vsdx::formula::Env,
+) -> Result<Vec<Box<dyn crate::Command>>, String> {
+    let f = formula.trim();
+    if f.is_empty() || f.eq_ignore_ascii_case("no formula") {
+        return Ok(Vec::new());
+    }
+    let mut cmds: Vec<Box<dyn crate::Command>> = Vec::new();
+    for term in split_top_level_amp(f) {
+        let term = term.trim();
+        let Some(inner) = term
+            .strip_prefix("SETF(")
+            .or_else(|| term.strip_prefix("setf("))
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return Err(format!("unsupported action term {term:?}"));
+        };
+        // First top-level comma splits target from value; the target
+        // is GetRef(<cell>) or a bare cell name.
+        let inner = inner.trim();
+        let (first, rest) = split_top_level_comma(inner);
+        let Some(value_str) = rest else {
+            return Err(format!("action term has no value: {term:?}"));
+        };
+        let first = first.trim();
+        let target = if let Some(g) = first
+            .strip_prefix("GetRef(")
+            .or_else(|| first.strip_prefix("getref("))
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            g.trim().to_string()
+        } else {
+            first.to_string()
+        };
+        let value = match vsdx::formula::eval(value_str.trim(), env) {
+            Ok(vsdx::formula::Value::Num(n)) if n.is_finite() => fmt_num(n),
+            Ok(vsdx::formula::Value::Str(s)) => s,
+            _ => value_str.trim().trim_matches('"').to_string(),
+        };
+        let cell = vsdx::model::Cell::value(value.clone());
+        // Map the reference spelling to a command. Named-row sections:
+        // User (Value), Prop→Property, Scratch. Row-0 sections:
+        // Para→Paragraph, Char→Character. Anything else is a plain
+        // sheet cell (VerticalAlign, Width, …).
+        let cmd: Box<dyn crate::Command> = if let Some((sec, row)) = target
+            .strip_prefix("User.")
+            .map(|r| ("User", r.to_string()))
+        {
+            Box::new(SetRowCell::new(
+                scope.clone(),
+                sec,
+                0,
+                RowSel::Named(row),
+                "Value",
+                cell,
+            ))
+        } else if let Some(row) = target.strip_prefix("Prop.") {
+            Box::new(SetRowCell::new(
+                scope.clone(),
+                "Property",
+                0,
+                RowSel::Named(row.to_string()),
+                "Value",
+                cell,
+            ))
+        } else if let Some(row) = target.strip_prefix("Scratch.") {
+            Box::new(SetRowCell::new(
+                scope.clone(),
+                "Scratch",
+                0,
+                RowSel::Named(row.to_string()),
+                "Value",
+                cell,
+            ))
+        } else if let Some(cellname) = target.strip_prefix("Para.") {
+            Box::new(SetRowCell::new(
+                scope.clone(),
+                "Paragraph",
+                0,
+                RowSel::Ix(0),
+                cellname.to_string(),
+                cell,
+            ))
+        } else if let Some(cellname) = target.strip_prefix("Char.") {
+            Box::new(SetRowCell::new(
+                scope.clone(),
+                "Character",
+                0,
+                RowSel::Ix(0),
+                cellname.to_string(),
+                cell,
+            ))
+        } else {
+            Box::new(SetCell::new(scope.clone(), target.clone(), cell))
+        };
+        cmds.push(cmd);
+    }
+    Ok(cmds)
+}
+
+/// Split `a,b` on the first top-level comma (parens/quotes respected).
+fn split_top_level_comma(s: &str) -> (String, Option<&str>) {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' => in_str = !in_str,
+            '(' if !in_str => depth += 1,
+            ')' if !in_str => depth -= 1,
+            ',' if !in_str && depth == 0 => {
+                return (s[..i].to_string(), Some(&s[i + 1..]));
+            }
+            _ => {}
+        }
+    }
+    (s.to_string(), None)
+}
+
+// ---------------------------------------------------------------------------
 // Layer commands (live in layers.rs)
 // ---------------------------------------------------------------------------
 

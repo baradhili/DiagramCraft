@@ -179,9 +179,25 @@ fn right_click_menu_duplicate_creates_shape() {
 // Visio anchors the context menu just outside the shape's top-right
 // corner (menu growing right/down); near the right screen edge it
 // mirrors to just outside the top-left corner (GitHub #49).
+/// The blank harness at a taller viewport (#25): the context menu grew
+/// by its master-Actions rows, and the beside-the-shape anchoring
+/// tests need room for the full menu below the anchor.
+fn tall_harness_with_blank() -> Harness<'static, App> {
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    Harness::builder()
+        .with_size(egui::vec2(1280.0, 1100.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        )
+}
+
 #[test]
 fn right_click_menu_opens_beside_shape() {
-    let mut h = harness_with_blank();
+    let mut h = tall_harness_with_blank();
     h.run();
     let from = h.state().debug_master_cells()[0].1.center();
     // High on the canvas so the tall menu fits below the shape (egui
@@ -217,7 +233,7 @@ fn right_click_menu_opens_beside_shape() {
 
 #[test]
 fn right_click_menu_flips_near_right_edge() {
-    let mut h = harness_with_blank();
+    let mut h = tall_harness_with_blank();
     h.run();
     let from = h.state().debug_master_cells()[0].1.center();
     let canvas = h.state().debug_canvas_rect();
@@ -1730,4 +1746,55 @@ fn add_rect_geometry(sheet: &mut vsdx::model::Sheet, w: f64, h: f64, f: Option<&
         rows,
         ..Section::default()
     }));
+}
+
+/// GitHub #25: master ShapeSheet Actions rows execute through the
+/// command layer — the blank Rectangle master carries a synthetic
+/// Actions section (User.Style layouts; ours, not Microsoft's).
+#[test]
+fn master_action_row_executes_setf_chain() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_shape_count(), 1);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    assert_eq!(
+        h.state().debug_user_value_for_test(sid, "Style"),
+        None,
+        "User.Style is inherited from the master before any action"
+    );
+
+    // The master's Actions rows head the context menu; the labels live
+    // in Menu text content (multi-line cells).
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    assert!(
+        h.get_all_by_label_contains("Rectangle text style").count() > 0,
+        "flyout header row present"
+    );
+    h.get_all_by_label_contains("2. Centered")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Centered action row")
+        .click();
+    h.run();
+
+    // The SETF chain wrote instance-locally: User.Style = 1.
+    assert_eq!(
+        h.state().debug_user_value_for_test(sid, "Style"),
+        Some(1.0),
+        "the action executed its SETF chain on the instance"
+    );
+    // One undo restores the inherited row.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_user_value_for_test(sid, "Style"),
+        None,
+        "undo removed the materialized row (inheritance restored)"
+    );
 }

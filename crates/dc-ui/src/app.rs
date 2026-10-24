@@ -23,6 +23,19 @@ use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
 use crate::theme;
 
+/// One master ShapeSheet Actions row, evaluated for THIS instance
+/// (#25): label, SETF formula, and the live Checked/Disabled flags.
+#[derive(Clone)]
+struct MasterActionRow {
+    menu: String,
+    action: String,
+    checked: bool,
+    disabled: bool,
+    begin_group: bool,
+    flyout_child: bool,
+    display_only: bool,
+}
+
 /// Per-page UI state parked while another page is active (#54):
 /// selection (primary + multi) and the view position return as they
 /// were left. View chrome (rulers, grid, units) stays app-level like
@@ -3154,41 +3167,175 @@ impl App {
     /// Master-defined right-click actions (ShapeSheet Actions section),
     /// in row order: (menu label, is-flyout-child). Visio heads the shape
     /// menu with these.
-    fn master_actions(&self, shape_id: i64) -> Vec<(String, bool)> {
-        fn collect(self_: &App, shape_id: i64) -> Option<Vec<(String, bool)>> {
-            fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
+    /// Master-defined Actions rows (#25): labels, evaluated
+    /// Checked/Invisible/Disabled, BeginGroup/FlyoutChild, SortKey
+    /// ordering — everything the context menu needs, evaluated against
+    /// the INSTANCE's effective sheet so instance-local User rows
+    /// (which the actions themselves write) drive the checkmarks.
+    fn master_actions(&self, shape_id: i64) -> Vec<MasterActionRow> {
+        struct RawRow {
+            menu: String,
+            action: String,
+            checked_f: Option<String>,
+            checked_v: Option<String>,
+            disabled_f: Option<String>,
+            disabled_v: Option<String>,
+            invisible_f: Option<String>,
+            invisible_v: Option<String>,
+            begin_group: bool,
+            flyout_child: bool,
+            sort_key: f64,
+            /// `Action` = No Formula or ReadOnly: a flyout header, not a
+            /// command.
+            display_only: bool,
+        }
+        // A cell's live value: formula first (evaluated in `env`),
+        // cached V as fallback — the row-cell convention.
+        let eval_flag =
+            |f: &Option<String>, v: &Option<String>, env: &vsdx::formula::Env| -> bool {
+                let by_formula = f.as_deref().and_then(|f| {
+                    if f == "Inh" || f == "No Formula" {
+                        None
+                    } else {
+                        vsdx::formula::eval(f, env).ok().and_then(|x| x.as_f64())
+                    }
+                });
+                by_formula
+                    .or_else(|| v.as_deref().and_then(|v| v.trim().parse::<f64>().ok()))
+                    .is_some_and(|x| x != 0.0)
+            };
+        let collect = |self_: &App| -> Option<Vec<MasterActionRow>> {
+            let ed = self_.ed.as_ref()?;
+            let page = ed.doc.pages.get(self_.page_idx)?;
+            let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+            let m = ed.doc.master(shape.master?)?;
+            // Instance evaluation environment: instance-local User rows
+            // override the master's (dc::svg::shape_env layers them).
+            let chain = dc_core::scope::shape_chain(&ed.doc, page.id, shape_id).ok()?;
+            let env = dc::svg::shape_env(&ed.doc, shape, &chain);
+            let mut rows: Vec<RawRow> = Vec::new();
+            fn walk(sh: &Shape, out: &mut Vec<RawRow>) {
                 for sec in sh.sheet.sections_named("Actions") {
                     for row in &sec.rows {
-                        let Some(menu) = row
+                        // Visio writes flyout labels either as V or as
+                        // the Cell's text content (multi-line menus) —
+                        // the parser keeps the latter as raw_inner.
+                        let menu = row
                             .cell("Menu")
-                            .and_then(|c| c.v.clone())
+                            .and_then(|c| {
+                                c.v.clone()
+                                    .or_else(|| c.raw_inner.as_deref().map(str::to_owned))
+                            })
                             .map(|t| t.trim().to_owned())
-                            .filter(|t| !t.is_empty())
-                        else {
-                            continue;
+                            .filter(|t| !t.is_empty());
+                        let Some(menu) = menu else { continue };
+                        let f = |n: &str| -> Option<String> {
+                            row.cell(n)
+                                .and_then(|c| c.f.clone())
+                                .filter(|f| !f.is_empty() && f != "No Formula" && f != "Inh")
                         };
-                        if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
-                            continue;
-                        }
-                        let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
-                        out.push((menu, child));
+                        let v =
+                            |n: &str| -> Option<String> { row.cell(n).and_then(|c| c.v.clone()) };
+                        // The Action FORMULA is F; V caches the last
+                        // evaluation ('No Formula' rows carry V only).
+                        let action_f = row.cell("Action").and_then(|c| c.f.clone());
+                        let action = action_f
+                            .clone()
+                            .filter(|f| f != "No Formula")
+                            .or_else(|| v("Action"))
+                            .unwrap_or_default();
+                        let display_only = action_f.as_deref() == Some("No Formula")
+                            || v("ReadOnly")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0);
+                        out.push(RawRow {
+                            menu,
+                            action,
+                            display_only,
+                            checked_f: f("Checked"),
+                            checked_v: v("Checked"),
+                            disabled_f: f("Disabled"),
+                            disabled_v: v("Disabled"),
+                            invisible_f: f("Invisible"),
+                            invisible_v: v("Invisible"),
+                            begin_group: v("BeginGroup")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0),
+                            flyout_child: v("FlyoutChild")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0),
+                            sort_key: v("SortKey")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .unwrap_or(0.0),
+                        });
                     }
                 }
                 for sub in &sh.sub_shapes {
                     walk(sub, out);
                 }
             }
-            let ed = self_.ed.as_ref()?;
-            let page = ed.doc.pages.get(self_.page_idx)?;
-            let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
-            let m = ed.doc.master(sh.master?)?;
-            let mut out = Vec::new();
             for root in &m.shapes {
-                walk(root, &mut out);
+                walk(root, &mut rows);
             }
-            Some(out)
+            // Visio orders by SortKey, then row order (stable).
+            rows.sort_by(|a, b| {
+                a.sort_key
+                    .partial_cmp(&b.sort_key)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            Some(
+                rows.into_iter()
+                    .filter(|r| !eval_flag(&r.invisible_f, &r.invisible_v, &env))
+                    .map(|r| MasterActionRow {
+                        menu: r.menu,
+                        action: r.action,
+                        checked: eval_flag(&r.checked_f, &r.checked_v, &env),
+                        disabled: eval_flag(&r.disabled_f, &r.disabled_v, &env),
+                        begin_group: r.begin_group,
+                        flyout_child: r.flyout_child,
+                        display_only: r.display_only,
+                    })
+                    .collect(),
+            )
+        };
+        collect(self).unwrap_or_default()
+    }
+
+    /// Execute a master Actions row (#25): parse the SETF/GetRef chain
+    /// and apply it as one undoable Macro against the instance. Rows
+    /// whose formula needs a runtime we do not ship (RUNADDON, …)
+    /// defer with a status note — the EventDblClick policy (#20).
+    fn run_master_action(&mut self, shape_id: i64, row: &MasterActionRow) {
+        let Some(ed) = self.ed() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(shape) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = dc_core::scope::shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let env = dc::svg::shape_env(&ed.doc, shape, &chain);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        match dc_core::commands::shape_action_commands(scope, &row.action, &env) {
+            Ok(cmds) if cmds.is_empty() => {
+                self.status = format!("{:?} is display-only", row.menu);
+            }
+            Ok(cmds) => {
+                let label = format!("run shape action {:?}", row.menu);
+                self.apply(dc_core::Macro::new(label, cmds));
+            }
+            Err(why) => {
+                self.status = format!("{:?} deferred: {why}", row.menu);
+            }
         }
-        collect(self, shape_id).unwrap_or_default()
     }
 
     /// Bump the selected shapes' Character.Size by whole points.
@@ -3305,6 +3452,7 @@ impl App {
 
         #[derive(Clone, Copy, PartialEq)]
         enum Act {
+            Master(usize),
             Cut,
             Copy,
             Paste,
@@ -3371,13 +3519,26 @@ impl App {
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
-            for (menu, child) in &actions {
-                let label = if *child {
-                    format!("     {menu}")
+            // Actions rows are live (#25): evaluated checkmarks and
+            // disabled state, BeginGroup separators, FlyoutChild
+            // indentation, and SETF execution on click.
+            for (ai, row) in actions.iter().enumerate() {
+                if row.begin_group && ai > 0 {
+                    ui.separator();
+                }
+                // Flyout arrow: › (the pinned font set has no ▸).
+                let label = if row.flyout_child {
+                    format!("     {}", row.menu)
                 } else {
-                    format!("{menu}  ▸")
+                    format!("{}  ›", row.menu)
                 };
-                ctx_item(ui, None, &label, "(v0.5)", false);
+                // A display-only row (No Formula) stays grayed like
+                // Visio's flyout headers; Disabled is the formula's.
+                let enabled = !row.disabled && !row.display_only && !row.action.trim().is_empty();
+                let icon = row.checked.then_some(crate::ribbon::Icon::Check);
+                if ctx_item(ui, icon, &label, "", enabled) && enabled {
+                    act = Some(Act::Master(ai));
+                }
             }
             if !actions.is_empty() {
                 ui.separator();
@@ -3487,6 +3648,11 @@ impl App {
         self.ctx_menu = None;
         let Some((page_id, _)) = self.sel else { return };
         match a {
+            Act::Master(ai) => {
+                if let Some(row) = actions.get(ai).cloned() {
+                    self.run_master_action(shape_id, &row);
+                }
+            }
             Act::Cut | Act::Copy => {
                 self.copy_selection();
                 if a == Act::Cut {
@@ -3771,6 +3937,20 @@ impl App {
         self.ed()
             .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
             .unwrap_or_default()
+    }
+    /// kittest: a shape's INSTANCE-LOCAL User row value (#25) — None
+    /// while the row is inherited from the master.
+    #[doc(hidden)]
+    pub fn debug_user_value_for_test(&self, shape_id: i64, row: &str) -> Option<f64> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        sh.sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row(row))?
+            .cell("Value")?
+            .numeric()
     }
     /// kittest: the active page's name (#54).
     #[doc(hidden)]
