@@ -1161,6 +1161,16 @@ impl crate::Command for UngroupShape {
                         .set_cell(yn, vsdx::model::Cell::value(fmt_num(ey)));
                 }
             }
+            // Compose the group's rotation into the member's own Angle:
+            // a member's page orientation is the group angle plus its
+            // own (the nested render transforms compose), so skipping
+            // this would orbit a rotated group's members into position
+            // but leave them pointing the old way.
+            if ang != 0.0 {
+                let a = m.sheet.cell("Angle").and_then(|c| c.numeric()).unwrap_or(0.0);
+                m.sheet
+                    .set_cell("Angle", vsdx::model::Cell::value(fmt_num(a + ang)));
+            }
         }
         let at = pos.min(doc.pages[pi].shapes.len());
         doc.pages[pi].shapes.splice(at..at, promoted);

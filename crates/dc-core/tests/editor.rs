@@ -1543,6 +1543,54 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
         );
     }
 
+    // A rotated group composes its Angle into the members: positions
+    // orbit around the group's pin AND orientations rotate with it.
+    ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
+    let g = ed.doc.pages[0]
+        .shapes
+        .iter_mut()
+        .find(|s| s.sub_shapes.len() == 2)
+        .unwrap();
+    let gid = g.id;
+    let (gpx, gpy, glx, gly) = (
+        g.sheet.cell("PinX").and_then(|c| c.numeric()).unwrap(),
+        g.sheet.cell("PinY").and_then(|c| c.numeric()).unwrap(),
+        g.sheet.cell("LocPinX").and_then(|c| c.numeric()).unwrap(),
+        g.sheet.cell("LocPinY").and_then(|c| c.numeric()).unwrap(),
+    );
+    // Member-local values BEFORE the rotation lands (they were
+    // converted into the group frame by grouping).
+    let m7 = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
+    let (b_local, begin_y_local) = (
+        m7.sheet.cell("BeginX").and_then(|c| c.numeric()).unwrap(),
+        m7.sheet.cell("BeginY").and_then(|c| c.numeric()).unwrap(),
+    );
+    g.sheet.set_cell(
+        "Angle",
+        vsdx::model::Cell::value(format!("{}", std::f64::consts::FRAC_PI_2)),
+    );
+    drop(g);
+    ed.apply(UngroupShape::new(0, gid)).unwrap();
+    let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
+    let rect = ed.doc.pages[0].shapes.iter().find(|s| s.id == 1).unwrap();
+    // R(90°): page = Pin + R·(p − LocPin), (dx,dy) → (−dy,dx).
+    assert!(
+        (n(line, "BeginX") - (gpx - (begin_y_local - gly))).abs() < 1e-9,
+        "BeginX rotated with the group"
+    );
+    assert!(
+        (n(line, "BeginY") - (gpy + (b_local - glx))).abs() < 1e-9,
+        "BeginY rotated with the group"
+    );
+    let line_ang0 = 1.5f64.atan2(4.0);
+    assert!(
+        (n(line, "Angle") - (line_ang0 + std::f64::consts::FRAC_PI_2)).abs() < 1e-9,
+        "line Angle composes group + own: {} vs {}",
+        n(line, "Angle"),
+        line_ang0 + std::f64::consts::FRAC_PI_2
+    );
+    assert!((n(rect, "Angle") - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+
     // A formula-driven endpoint cannot be offset: grouping refuses and
     // the document is untouched.
     let line = ed
