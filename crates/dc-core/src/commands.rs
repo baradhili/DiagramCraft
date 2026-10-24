@@ -862,13 +862,13 @@ pub fn add_container(
     )
 }
 
-/// Undo payload for [`GroupShapes`]: member id, original z-position,
-/// and the pre-group PinX/PinY cells.
+/// Undo payload for [`GroupShapes`]: member id, original z-position, and
+/// the pre-group cells of every Xform cell grouping rewrote (PinX/PinY,
+/// plus a 1D member's endpoints).
 type GroupUndo = Vec<(
     i64,
     usize,
-    Option<vsdx::model::Cell>,
-    Option<vsdx::model::Cell>,
+    Vec<(&'static str, Option<vsdx::model::Cell>)>,
 )>;
 
 /// Group top-level shapes into one `Type='Group'` shape (GitHub #26).
@@ -876,14 +876,19 @@ type GroupUndo = Vec<(
 /// bottom-left, and each member's Pin is rewritten into the group's
 /// local frame — the renderer places sub-shapes relative to the
 /// group's LocPin origin, so the drawing renders identically and the
-/// members follow the group's moves.
+/// members follow the group's moves. A 1D member's endpoints
+/// (BeginX/BeginY/EndX/EndY) are parent-frame points too and are
+/// offset alongside the Pin; an endpoint a formula owns cannot be
+/// offset safely, so grouping a member with formula-driven endpoints
+/// is refused.
 #[derive(Debug, Clone)]
 pub struct GroupShapes {
     pub page: i64,
     /// Member ids, any order; the group preserves ascending z-order.
     pub members: Vec<i64>,
     id: Option<i64>,
-    /// (member id, original z-position, old PinX/PinY cells) for undo.
+    /// (member id, original z-position, rewritten cells with their
+    /// originals) for undo.
     undo: Option<GroupUndo>,
 }
 
@@ -947,22 +952,46 @@ impl crate::Command for GroupShapes {
         let gid = next_shape_id(doc, self.page);
         self.id = Some(gid);
         let mut undo = Vec::new();
-        // Rewrite members' Pins into the group frame and detach.
+        // Rewrite members' Pins into the group frame and detach. A 1D
+        // member's endpoints are parent-frame points as well (Visio
+        // keeps sub-shape cells in the group's coordinate system):
+        // offset them alongside the Pin, or the next endpoint drag or
+        // derivation would snap the shape back to its pre-grouping page
+        // position. An endpoint a formula owns cannot be offset safely
+        // — refuse grouping that member (nothing has been mutated yet).
         let mut members: Vec<Shape> = Vec::new();
         for (pos, id) in &found {
             let s = doc.pages[pi].shapes.iter().find(|s| s.id == *id).unwrap();
             let (px, py) = (num(s, "PinX"), num(s, "PinY"));
-            undo.push((
-                *id,
-                *pos,
-                s.sheet.cell("PinX").cloned(),
-                s.sheet.cell("PinY").cloned(),
-            ));
+            let mut undo_cells: Vec<(&'static str, Option<vsdx::model::Cell>)> = vec![
+                ("PinX", s.sheet.cell("PinX").cloned()),
+                ("PinY", s.sheet.cell("PinY").cloned()),
+            ];
             let mut m = s.clone();
             m.sheet
                 .set_cell("PinX", vsdx::model::Cell::value(fmt_num(px - x0)));
             m.sheet
                 .set_cell("PinY", vsdx::model::Cell::value(fmt_num(py - y0)));
+            for name in ["BeginX", "BeginY", "EndX", "EndY"] {
+                let Some(c) = doc.resolve_cell(s, &[], name) else {
+                    continue;
+                };
+                if c
+                    .f
+                    .as_deref()
+                    .is_some_and(|f| !f.is_empty() && f != "Inh" && f != "No Formula")
+                {
+                    bail!("cannot group shape {id}: {name} is formula-driven");
+                }
+                let Some(v) = c.numeric() else {
+                    bail!("cannot group shape {id}: {name} has no numeric value");
+                };
+                undo_cells.push((name, s.sheet.cell(name).cloned()));
+                let off = if name.ends_with('X') { x0 } else { y0 };
+                m.sheet
+                    .set_cell(name, vsdx::model::Cell::value(fmt_num(v - off)));
+            }
+            undo.push((*id, *pos, undo_cells));
             members.push(m);
         }
         self.undo = Some(undo);
@@ -1009,21 +1038,20 @@ impl crate::Command for GroupShapes {
             .position(|s| s.id == gid)
             .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
         let mut extracted = doc.pages[pi].shapes.remove(gpos).sub_shapes;
-        // Restore original absolute Pins and z-positions.
-        for (id, pos, old_x, old_y) in &undo {
+        // Restore original absolute Xform cells and z-positions.
+        for (id, pos, cells) in &undo {
             let m = extracted
                 .iter_mut()
                 .find(|s| s.id == *id)
                 .ok_or_else(|| anyhow::anyhow!("member {id} vanished from group"))?;
-            let restore = |m: &mut Shape, n: &str, old: &Option<vsdx::model::Cell>| match old {
-                Some(c) => m.sheet.set_cell(n, c.clone()),
-                None => m
-                    .sheet
-                    .children
-                    .retain(|c| !matches!(c, vsdx::model::SheetChild::Cell(k, _) if k == n)),
-            };
-            restore(m, "PinX", old_x);
-            restore(m, "PinY", old_y);
+            for (name, old) in cells {
+                match old {
+                    Some(c) => m.sheet.set_cell(name, c.clone()),
+                    None => m.sheet.children.retain(|c| {
+                        !matches!(c, vsdx::model::SheetChild::Cell(k, _) if k.as_str() == *name)
+                    }),
+                }
+            }
             let at = (*pos).min(doc.pages[pi].shapes.len());
             doc.pages[pi].shapes.insert(at, m.clone());
         }
@@ -1032,8 +1060,9 @@ impl crate::Command for GroupShapes {
 }
 
 /// Dissolve a group one level (GitHub #26): members are promoted to
-/// the group's z-position with their Pins translated back to absolute
-/// page coordinates using the group's live Xform.
+/// the group's z-position with their Pins — and a 1D member's
+/// endpoints — translated back to absolute page coordinates using the
+/// group's live Xform.
 #[derive(Debug, Clone)]
 pub struct UngroupShape {
     pub page: i64,
@@ -1078,12 +1107,24 @@ impl crate::Command for UngroupShape {
                 .and_then(|c| c.numeric())
                 .unwrap_or(0.0)
         };
-        let (gx, gy) = {
+        // The group's live Xform maps member-local points to the page:
+        // Pin + R(Angle)·(p − LocPin). Angle 0 (every group
+        // GroupShapes builds) reduces to the plain Pin−LocPin offset;
+        // a rotated group promotes its members around the arc.
+        let (gpx, gpy, glx, gly, ang) = {
             let g = &doc.pages[pi].shapes[pos];
             (
-                num(g, "PinX") - num(g, "LocPinX"),
-                num(g, "PinY") - num(g, "LocPinY"),
+                num(g, "PinX"),
+                num(g, "PinY"),
+                num(g, "LocPinX"),
+                num(g, "LocPinY"),
+                num(g, "Angle"),
             )
+        };
+        let (sin, cos) = ang.sin_cos();
+        let to_page = |x: f64, y: f64| -> (f64, f64) {
+            let (dx, dy) = (x - glx, y - gly);
+            (gpx + dx * cos - dy * sin, gpy + dx * sin + dy * cos)
         };
         let group_shape = doc.pages[pi].shapes.remove(pos);
         self.old_pos = Some(pos);
@@ -1100,10 +1141,26 @@ impl crate::Command for UngroupShape {
                     .and_then(|c| c.numeric())
                     .unwrap_or(0.0),
             );
+            let (ppx, ppy) = to_page(px, py);
             m.sheet
-                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(px + gx)));
+                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(ppx)));
             m.sheet
-                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(py + gy)));
+                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(ppy)));
+            // A 1D member's endpoints are points in the group frame —
+            // map them back with the same transform so they stay
+            // consistent with the promoted Pin.
+            for (xn, yn) in [("BeginX", "BeginY"), ("EndX", "EndY")] {
+                if let (Some(x), Some(y)) = (
+                    m.sheet.cell(xn).and_then(|c| c.numeric()),
+                    m.sheet.cell(yn).and_then(|c| c.numeric()),
+                ) {
+                    let (ex, ey) = to_page(x, y);
+                    m.sheet
+                        .set_cell(xn, vsdx::model::Cell::value(fmt_num(ex)));
+                    m.sheet
+                        .set_cell(yn, vsdx::model::Cell::value(fmt_num(ey)));
+                }
+            }
         }
         let at = pos.min(doc.pages[pi].shapes.len());
         doc.pages[pi].shapes.splice(at..at, promoted);

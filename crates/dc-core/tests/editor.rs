@@ -1454,6 +1454,117 @@ fn group_and_ungroup_round_trip_with_undo() {
     assert_eq!(g.sub_shapes.len(), 2, "nested tree survives save/reload");
 }
 
+/// A 1D member's endpoints are parent-frame points: grouping offsets
+/// them into the group frame, ungroup maps them back through the
+/// group's live Xform (a moved group moves them with it), and a
+/// formula-driven endpoint refuses the grouping.
+#[test]
+fn group_converts_1d_endpoints_and_ungroup_restores() {
+    use dc_core::commands::{GroupShapes, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    // A 1D line: endpoints (2, 5.25)→(6, 6.75) with consistent derived
+    // Xform cells (Width/Angle/Pin/LocPin), the way placement writes
+    // them.
+    let w = (4.0f64).hypot(1.5);
+    let mut line = ed.doc.pages[0].shapes[0].clone();
+    line.id = 7;
+    let cells: &[(&str, String)] = &[
+        ("BeginX", "2".into()),
+        ("BeginY", "5.25".into()),
+        ("EndX", "6".into()),
+        ("EndY", "6.75".into()),
+        ("Width", format!("{w}")),
+        ("Height", "0".into()),
+        ("Angle", format!("{}", 1.5f64.atan2(4.0))),
+        ("PinX", "4".into()),
+        ("PinY", "6".into()),
+        ("LocPinX", format!("{}", w / 2.0)),
+        ("LocPinY", "0".into()),
+    ];
+    for (n, v) in cells {
+        line.sheet.set_cell(n, vsdx::model::Cell::value(v.clone()));
+    }
+    ed.doc.pages[0].shapes.push(line);
+
+    // Union bbox with shape 1's rect (3.25, 5)-(5.25, 6): the line's
+    // rect runs (4 − w/2, 6)-(4 + w/2, 6) → x0 = 4 − w/2, y0 = 5.
+    let x0 = 4.0 - w / 2.0;
+    ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
+    let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
+    let gid = g.id;
+    let n = |s: &vsdx::model::Shape, k: &str| {
+        s.sheet.cell(k).and_then(|c| c.numeric()).unwrap_or(f64::NAN)
+    };
+    let line = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
+    for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
+        let off = if cell.ends_with('X') { x0 } else { 5.0 };
+        assert!(
+            (n(line, cell) - (page_val - off)).abs() < 1e-9,
+            "{cell} converted to the group frame: {} vs {}",
+            n(line, cell),
+            page_val - off
+        );
+    }
+
+    // Ungroup (group unmoved): endpoints return to page values.
+    ed.apply(UngroupShape::new(0, gid)).unwrap();
+    let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
+    for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
+        assert!((n(line, cell) - page_val).abs() < 1e-9, "{cell} restored");
+    }
+
+    // A moved group carries the endpoints with it on ungroup.
+    ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
+    let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
+    let gid = g.id;
+    let (gpx, gpy) = (n(g, "PinX"), n(g, "PinY"));
+    let gsheet = &mut ed.doc.pages[0]
+        .shapes
+        .iter_mut()
+        .find(|s| s.id == gid)
+        .unwrap()
+        .sheet;
+    gsheet.set_cell("PinX", vsdx::model::Cell::value(format!("{}", gpx + 2.0)));
+    gsheet.set_cell("PinY", vsdx::model::Cell::value(format!("{}", gpy + 1.0)));
+    ed.apply(UngroupShape::new(0, gid)).unwrap();
+    let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
+    for (cell, moved_val) in [
+        ("BeginX", 4.0),
+        ("BeginY", 6.25),
+        ("EndX", 8.0),
+        ("EndY", 7.75),
+    ] {
+        assert!(
+            (n(line, cell) - moved_val).abs() < 1e-9,
+            "{cell} followed the moved group: {} vs {moved_val}",
+            n(line, cell)
+        );
+    }
+
+    // A formula-driven endpoint cannot be offset: grouping refuses and
+    // the document is untouched.
+    let line = ed
+        .doc
+        .pages[0]
+        .shapes
+        .iter_mut()
+        .find(|s| s.id == 7)
+        .unwrap();
+    let mut f_cell = vsdx::model::Cell::value("2");
+    f_cell.f = Some("Width*0.5".into());
+    line.sheet.set_cell("BeginX", f_cell);
+    let before = ed.doc.pages[0].shapes.len();
+    let err = ed.apply(GroupShapes::new(0, vec![1, 7]));
+    assert!(err.is_err(), "formula endpoint refuses grouping");
+    assert_eq!(
+        ed.doc.pages[0].shapes.len(),
+        before,
+        "refused grouping mutated nothing"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Containers (GitHub #27)
 // ---------------------------------------------------------------------------
