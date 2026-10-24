@@ -940,6 +940,18 @@ fn render_all_geometry(
             if let Some(src) = src {
                 let src_secs = src.sheet.sections_named("Geometry");
                 let src_geo = src_secs.get(si);
+                // Section-level cells (Geometry NoFill/NoLine/NoShow)
+                // inherit from the master section just like rows do:
+                // inline copies keep only row caches, and a lost NoShow
+                // draws sections Visio hides — e.g. every heading-band
+                // geometry of the "Plain" container style (#12).
+                if let Some(sg) = src_geo {
+                    for (name, cell) in &sg.cells {
+                        if !m.cells.iter().any(|(n, _)| n == name) {
+                            m.cells.push((name.clone(), cell.clone()));
+                        }
+                    }
+                }
                 let mw = src
                     .sheet
                     .cell("Width")
@@ -1109,20 +1121,6 @@ fn render_geometry(
     frame: Frame<'_>,
     out: &mut String,
 ) {
-    // Section-level cells carry NoFill/NoLine/etc.
-    let flag = |name: &str| -> bool {
-        section
-            .cell(name)
-            .and_then(|c| c.numeric())
-            .map(|v| v != 0.0)
-            .unwrap_or(false)
-    };
-    let no_fill = flag("NoFill");
-    let no_show = flag("NoShow");
-    if no_show {
-        return;
-    }
-
     let rows = &section.rows;
     let (width, height) = shape_size(doc, s, chain);
     // Formulas evaluate in the geometry's own frame: instance dims for
@@ -1134,6 +1132,31 @@ fn render_geometry(
         Frame::Instance => shape_env_for(doc, s, chain, rows),
         Frame::Master(src) => shape_env_for(doc, src, &[], rows),
     };
+    // Section-level cells carry NoFill/NoLine/NoShow. Formula first,
+    // cached V as fallback (the row-cell convention): the master's
+    // cache reflects its default style while the formula re-evaluates
+    // per instance — NoShow=OR(User.hidden,User.CStyle<>7) gates the
+    // container heading's geometry bands by container style.
+    let flag = |name: &str| -> bool {
+        section.cell(name).is_some_and(|c| {
+            let by_formula =
+                c.f.as_deref()
+                    .and_then(|f| {
+                        if f == "Inh" || f == "No Formula" {
+                            None
+                        } else {
+                            vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                        }
+                    })
+                    .filter(|v| v.is_finite());
+            by_formula.or_else(|| c.numeric()).is_some_and(|v| v != 0.0)
+        })
+    };
+    let no_fill = flag("NoFill");
+    let no_show = flag("NoShow");
+    if no_show {
+        return;
+    }
     // Visio hides the outline when LinePattern = 0 (e.g. legend label
     // boxes carry THEMEGUARD(0)); the geometry still exists for hit
     // testing but must not stroke.
@@ -1985,16 +2008,29 @@ pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::
     }
     // User-defined cells (master geometry formulas reference
     // `User.Corner` and friends for rounded-corner rectangles).
-    let sheet = doc.effective_sheet(s, chain);
-    for user in sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(v) = row.cell("Value").and_then(|c| c.numeric()) {
-                env.insert(format!("User.{}", row.n.as_deref().unwrap_or("")), v);
+    // Instance-local rows override the master's: inline copies keep
+    // only sparse User caches (e.g. a heading's HTxtWidth) while the
+    // rest — CStyle, hidden, … — inherit from the master source, so
+    // style-gated section cells like NoShow re-evaluate per instance.
+    let own = doc.effective_sheet(s, chain);
+    let mut user_sheets: Vec<&Sheet> = Vec::new();
+    if let Some(src) = doc.instance_source(s, chain) {
+        if !std::ptr::eq(&src.sheet, own.as_ref()) {
+            user_sheets.push(&src.sheet);
+        }
+    }
+    user_sheets.push(own.as_ref());
+    for sheet in user_sheets {
+        for user in sheet.sections_named("User") {
+            for row in user.rows.iter().filter(|r| r.n.is_some()) {
+                if let Some(v) = row.cell("Value").and_then(|c| c.numeric()) {
+                    env.insert(format!("User.{}", row.n.as_deref().unwrap_or("")), v);
+                }
             }
         }
     }
     // Geometry row coordinates (Geometry1.X1 style references).
-    for (i, geo) in sheet.sections_named("Geometry").iter().enumerate() {
+    for (i, geo) in own.sections_named("Geometry").iter().enumerate() {
         let gname = format!("Geometry{}", i + 1);
         for row in geo.rows.iter().filter(|r| r.t.is_some()) {
             for (cname, cell) in &row.cells {
@@ -2478,7 +2514,11 @@ mod tests {
         s
     }
 
-    fn text_wrapper_transform(sx: f64, sy: f64, txt_angle_deg: f64) -> Option<(String, (f64, f64))> {
+    fn text_wrapper_transform(
+        sx: f64,
+        sy: f64,
+        txt_angle_deg: f64,
+    ) -> Option<(String, (f64, f64))> {
         let doc = Document::default();
         let s = shape_with_pinned_text(txt_angle_deg);
         let chain = [&s];
@@ -2604,5 +2644,137 @@ mod tests {
         let (r1, r2, a) = transform_ellipse(1.0, 1.0, std::f64::consts::FRAC_PI_2, (2.0, 1.0));
         assert!((r1 - 2.0).abs() < 1e-9 && (r2 - 1.0).abs() < 1e-9);
         assert!(a.abs() < 1e-9);
+    }
+
+    /// #12 specimen class: a container-heading shape whose master
+    /// Geometry section is gated by a section-level `NoShow` cell, and a
+    /// page instance carrying only sparse row caches (no section cells).
+    /// The merge must inherit the flag, and the formula must re-evaluate
+    /// per instance so a restyled instance shows its band again even
+    /// against a stale master cache.
+    #[test]
+    fn geometry_noshow_inherits_and_formula_reevaluates() {
+        let urow = |n: &str, v: f64| Row {
+            n: Some(n.into()),
+            cells: vec![(
+                "Value".into(),
+                Cell {
+                    v: Some(format!("{v}")),
+                    ..Cell::default()
+                },
+            )],
+            ..Row::default()
+        };
+        let grow = |ix: i64, t: &str, x: f64, y: f64| Row {
+            ix,
+            t: Some(t.into()),
+            cells: vec![
+                ("X".into(), Cell::value(format!("{x}"))),
+                ("Y".into(), Cell::value(format!("{y}"))),
+            ],
+            ..Row::default()
+        };
+        // Heading master: band rect 2.0 × 0.5 with a style-gated NoShow.
+        let heading_master = |cstyle: f64, noshow_f: Option<&str>| -> vsdx::Master {
+            let mut sh = Shape {
+                id: 8,
+                ..Shape::default()
+            };
+            let set = |sheet: &mut Sheet, n: &str, v: f64| {
+                sheet.set_cell(n, Cell::value(format!("{v}")));
+            };
+            set(&mut sh.sheet, "Width", 2.0);
+            set(&mut sh.sheet, "Height", 0.5);
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "User".into(),
+                rows: vec![urow("hidden", 0.0), urow("CStyle", cstyle)],
+                ..Section::default()
+            }));
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: 0,
+                cells: vec![
+                    ("NoFill".into(), Cell::value("0".to_string())),
+                    ("NoLine".into(), Cell::value("0".to_string())),
+                    (
+                        "NoShow".into(),
+                        Cell {
+                            v: Some("1".into()),
+                            f: noshow_f.map(str::to_string),
+                            ..Cell::default()
+                        },
+                    ),
+                ],
+                rows: vec![
+                    grow(1, "MoveTo", 0.0, 0.0),
+                    grow(2, "LineTo", 2.0, 0.0),
+                    grow(3, "LineTo", 2.0, 0.5),
+                    grow(4, "LineTo", 0.0, 0.5),
+                    grow(5, "LineTo", 0.0, 0.0),
+                ],
+                ..Section::default()
+            }));
+            vsdx::Master {
+                id: 42,
+                shapes: vec![sh],
+                ..Default::default()
+            }
+        };
+        // Sparse instance: only two row caches, no section-level cells —
+        // exactly how Visio writes inline copies of master geometry.
+        let inst = Shape {
+            id: 1228,
+            master: Some(42),
+            master_shape: Some(8),
+            ..Shape::default()
+        };
+        let mut inst = inst;
+        inst.sheet.set_cell("Width", Cell::value("4.0"));
+        inst.sheet.set_cell("Height", Cell::value("0.5"));
+        inst.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![grow(1, "MoveTo", 0.0, 0.0), grow(2, "LineTo", 4.0, 0.0)],
+            ..Section::default()
+        }));
+
+        // Plain style (CStyle=1): the formula hides the band — the
+        // utilisation.vsdx heading case.
+        let doc = Document {
+            masters: vec![heading_master(1.0, Some("OR(User.hidden,User.CStyle<>4)"))],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(
+            !out.contains("<path"),
+            "NoShow'd section must not draw: {out}"
+        );
+
+        // Restyled (CStyle=4): the formula re-evaluates to visible even
+        // though the master's cached NoShow V=1 says hidden.
+        let doc = Document {
+            masters: vec![heading_master(4.0, Some("OR(User.hidden,User.CStyle<>4)"))],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(
+            out.contains("<path"),
+            "formula must beat the stale cache: {out}"
+        );
+        assert!(
+            out.contains("4.00000"),
+            "row merge must scale master X into instance units: {out}"
+        );
+
+        // Cache-only flag (no formula): the cached V=1 still hides.
+        let doc = Document {
+            masters: vec![heading_master(4.0, None)],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(!out.contains("<path"), "cached NoShow must hide: {out}");
     }
 }
