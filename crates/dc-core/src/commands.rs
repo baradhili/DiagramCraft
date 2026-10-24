@@ -1810,60 +1810,82 @@ pub fn shape_action_commands(
         };
         let cell = vsdx::model::Cell::value(value.clone());
         // Map the reference spelling to a command. Named-row sections:
-        // User (Value), Prop→Property, Scratch. Row-0 sections:
-        // Para→Paragraph, Char→Character. Anything else is a plain
-        // sheet cell (VerticalAlign, Width, …).
-        let cmd: Box<dyn crate::Command> = if let Some((sec, row)) = target
-            .strip_prefix("User.")
-            .map(|r| ("User", r.to_string()))
-        {
-            Box::new(SetRowCell::new(
-                scope.clone(),
-                sec,
-                0,
-                RowSel::Named(row),
-                "Value",
-                cell,
-            ))
-        } else if let Some(row) = target.strip_prefix("Prop.") {
-            Box::new(SetRowCell::new(
-                scope.clone(),
-                "Property",
-                0,
-                RowSel::Named(row.to_string()),
-                "Value",
-                cell,
-            ))
-        } else if let Some(row) = target.strip_prefix("Scratch.") {
-            Box::new(SetRowCell::new(
-                scope.clone(),
-                "Scratch",
-                0,
-                RowSel::Named(row.to_string()),
-                "Value",
-                cell,
-            ))
-        } else if let Some(cellname) = target.strip_prefix("Para.") {
-            Box::new(SetRowCell::new(
-                scope.clone(),
-                "Paragraph",
-                0,
-                RowSel::Ix(0),
-                cellname.to_string(),
-                cell,
-            ))
-        } else if let Some(cellname) = target.strip_prefix("Char.") {
-            Box::new(SetRowCell::new(
-                scope.clone(),
-                "Character",
-                0,
-                RowSel::Ix(0),
-                cellname.to_string(),
-                cell,
-            ))
-        } else {
-            Box::new(SetCell::new(scope.clone(), target.clone(), cell))
+        // User/Prop/Scratch — the bare row name (`User.Style`) is the
+        // row's Value cell; a trailing cell suffix (`User.Style.Prompt`)
+        // targets that row's named cell. Row-0 sections: Para→Paragraph,
+        // Char→Character. Anything else is a plain sheet cell
+        // (VerticalAlign, Width, …); a dotted or sheet-qualified target
+        // (`Actions.Menu`, `ThePage!PageWidth`) no branch maps defers
+        // instead of writing a bogus cell name.
+        let named_target = |rest: &str| -> Result<(String, String), String> {
+            // Row names carry no dots: `Row.Cell`, defaulting the cell
+            // to Value. Anything else is not a row we can name.
+            match rest.rsplit_once('.') {
+                Some((row, cellname)) => {
+                    if row.is_empty() || cellname.is_empty() || row.contains('.') {
+                        Err(format!("unsupported action target {target:?}"))
+                    } else {
+                        Ok((row.to_string(), cellname.to_string()))
+                    }
+                }
+                None => Ok((rest.to_string(), "Value".to_string())),
+            }
         };
+        let cmd: Box<dyn crate::Command> = (|| -> Result<Box<dyn crate::Command>, String> {
+            if let Some(rest) = target.strip_prefix("User.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "User",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )) as Box<dyn crate::Command>)
+            } else if let Some(rest) = target.strip_prefix("Prop.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Property",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )))
+            } else if let Some(rest) = target.strip_prefix("Scratch.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Scratch",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )))
+            } else if let Some(cellname) = target.strip_prefix("Para.") {
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Paragraph",
+                    0,
+                    RowSel::Ix(0),
+                    cellname.to_string(),
+                    cell,
+                )))
+            } else if let Some(cellname) = target.strip_prefix("Char.") {
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Character",
+                    0,
+                    RowSel::Ix(0),
+                    cellname.to_string(),
+                    cell,
+                )))
+            } else if target.contains('.') || target.contains('!') {
+                Err(format!("unsupported action target {target:?}"))
+            } else {
+                Ok(Box::new(SetCell::new(scope.clone(), target.clone(), cell)))
+            }
+        })()?;
         cmds.push(cmd);
     }
     Ok(cmds)
