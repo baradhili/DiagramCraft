@@ -4406,7 +4406,15 @@ impl App {
             })
             .unwrap_or_default();
         let mut draft = self.hyperlink_draft.take();
+        // Cancel mechanism (live report + the 2016 dialog's Cancel):
+        // the title-bar X and an explicit Close button both discard
+        // any draft and dismiss the window.
+        let mut open = true;
+        // The Close BUTTON flips this (the X writes `open` via the
+        // builder; the two can't share a borrow).
+        let mut close_btn = false;
         egui::Window::new("Hyperlinks")
+            .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(380.0)
@@ -4447,85 +4455,99 @@ impl App {
                     });
                 }
                 ui.separator();
-                match draft.as_mut() {
-                    Some(d) => {
-                        // Accessible names on the inputs (#56 pattern);
-                        // the grid labels alone don't label the fields.
-                        let field = |ui: &mut Ui, label: &str, buf: &mut String| {
-                            ui.label(label);
-                            let r = ui.add(egui::TextEdit::singleline(buf).hint_text(label));
-                            r.widget_info(|| {
-                                egui::WidgetInfo::labeled(egui::Role::TextInput, true, label)
+                if let Some(d) = draft.as_mut() {
+                    // Accessible names on the inputs (#56 pattern);
+                    // the grid labels alone don't label the fields.
+                    let field = |ui: &mut Ui, label: &str, buf: &mut String| {
+                        ui.label(label);
+                        let r = ui.add(egui::TextEdit::singleline(buf).hint_text(label));
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, label)
+                        });
+                    };
+                    egui::Grid::new("dc-hyperlink-draft")
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 4.0))
+                        .show(ui, |ui| {
+                            field(ui, "Address", &mut d.address);
+                            ui.end_row();
+                            field(ui, "Sub-address", &mut d.sub);
+                            ui.end_row();
+                            field(ui, "Description", &mut d.desc);
+                            ui.end_row();
+                        });
+                    let (edit_row, address, sub, desc) =
+                        (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
+                    let mut close_draft = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            let ix = edit_row.unwrap_or_else(|| {
+                                rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
                             });
-                        };
-                        egui::Grid::new("dc-hyperlink-draft")
-                            .num_columns(2)
-                            .spacing(egui::vec2(8.0, 4.0))
-                            .show(ui, |ui| {
-                                field(ui, "Address", &mut d.address);
-                                ui.end_row();
-                                field(ui, "Sub-address", &mut d.sub);
-                                ui.end_row();
-                                field(ui, "Description", &mut d.desc);
-                                ui.end_row();
-                            });
-                        let (edit_row, address, sub, desc) =
-                            (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
-                        let mut close_draft = false;
-                        ui.horizontal(|ui| {
-                            if ui.button("OK").clicked() {
-                                let ix = edit_row.unwrap_or_else(|| {
-                                    rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
-                                });
-                                let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
-                                if let Some(old) = edit_row {
-                                    cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                            let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+                            if let Some(old) = edit_row {
+                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(old),
+                                )));
+                            }
+                            for (name, val) in [
+                                ("Address", &address),
+                                ("SubAddress", &sub),
+                                ("Description", &desc),
+                            ] {
+                                if !val.trim().is_empty() {
+                                    cmds.push(Box::new(dc_core::SetRowCell::new(
                                         scope.clone(),
                                         "Hyperlink",
                                         0,
-                                        dc_core::commands::RowSel::Ix(old),
+                                        dc_core::commands::RowSel::Ix(ix),
+                                        name,
+                                        vsdx::model::Cell::value(val.trim()),
                                     )));
                                 }
-                                for (name, val) in [
-                                    ("Address", &address),
-                                    ("SubAddress", &sub),
-                                    ("Description", &desc),
-                                ] {
-                                    if !val.trim().is_empty() {
-                                        cmds.push(Box::new(dc_core::SetRowCell::new(
-                                            scope.clone(),
-                                            "Hyperlink",
-                                            0,
-                                            dc_core::commands::RowSel::Ix(ix),
-                                            name,
-                                            vsdx::model::Cell::value(val.trim()),
-                                        )));
-                                    }
-                                }
-                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
-                                close_draft = true;
                             }
-                            if ui.button("Cancel").clicked() {
-                                close_draft = true;
-                            }
-                        });
-                        if close_draft {
-                            draft = None;
+                            self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            close_draft = true;
                         }
-                    }
-                    None => {
-                        if ui.button("New…").clicked() {
-                            draft = Some(HyperlinkDraft {
-                                edit_row: None,
-                                address: String::new(),
-                                sub: String::new(),
-                                desc: String::new(),
-                            });
+                        if ui.button("Cancel").clicked() {
+                            close_draft = true;
                         }
+                    });
+                    if close_draft {
+                        draft = None;
                     }
                 }
+                // The window's action bar (always visible — elementary/
+                // Apple HIG: the dismiss control must be obvious, not
+                // hidden behind editor state): New… left, Close right.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if draft.is_none() && ui.button("New…").clicked() {
+                        draft = Some(HyperlinkDraft {
+                            edit_row: None,
+                            address: String::new(),
+                            sub: String::new(),
+                            desc: String::new(),
+                        });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            draft = None;
+                            close_btn = true;
+                        }
+                    });
+                });
             });
-        self.hyperlink_draft = draft;
+        if open && !close_btn {
+            self.hyperlink_draft = draft;
+        } else {
+            // Cancelled: discard the draft and close.
+            self.hyperlink_open = None;
+            self.hyperlink_draft = None;
+        }
     }
 
     /// Visio's Reorder Pages dialog (#54): the page list with Move Up /

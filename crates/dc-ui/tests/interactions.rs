@@ -2065,6 +2065,9 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
         h.state().debug_hyperlinks_for_test(sid).is_empty(),
         "undo removed the hyperlink row"
     );
+
+    // The dialog auto-closed when the page switched (the alive check);
+    // the explicit cancel path is covered by its own test below.
 }
 
 /// GitHub #29: Add Comment creates an annotation shape on the
@@ -2378,4 +2381,51 @@ fn comment_badge_opens_thread_with_edit_reply_delete() {
     h.run();
     let reply_inputs = h.query_all_by_label_contains("Reply").count();
     assert_eq!(reply_inputs, 0, "the Comments popup closed on Close");
+}
+
+/// Live report follow-up (#28): the Hyperlinks window must have a
+/// cancel mechanism — Close (and the title-bar X) dismiss it and
+/// discard any draft.
+#[test]
+fn hyperlink_dialog_close_dismisses_and_discards_draft() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row")
+        .click();
+    h.run();
+    // Start a draft, then cancel the whole window: no row lands.
+    h.get_by_label("New…").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://example.test/cancelled");
+    h.run();
+    // The window's Close is ALWAYS visible — even with a draft open
+    // (elementary/Apple HIG: the dismiss control is obvious).
+    h.get_by_label("Close").click();
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("New…").count(),
+        0,
+        "the Hyperlinks window closed on Close"
+    );
+    assert!(
+        h.state().debug_hyperlinks_for_test(sid).is_empty(),
+        "the discarded draft wrote nothing"
+    );
 }
