@@ -5110,7 +5110,37 @@ impl App {
             if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
                 act = Some(Act::Ungroup);
             }
-            if ctx_item(ui, None, "Container", "", !self.sel_set.is_empty()) {
+            // Container is a flyout, not an action (Visio 2016): the
+            // parent row only opens the submenu. Anchor: draw the row
+            // directly so we own its Response for Popup::menu.
+            let tokens = theme::menu_tokens(ui.visuals());
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "  Container  ›",
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
+            );
+            let cont = ui.add_enabled(
+                !self.sel_set.is_empty(),
+                egui::Button::new(job).min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
+            );
+            let mut sub_action = false;
+            egui::Popup::menu(&cont)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(210.0);
+                    if ctx_item(ui, None, "Add to New Container", "", true) {
+                        sub_action = true;
+                    }
+                    ctx_item(
+                        ui,
+                        None,
+                        "Add to Underlying Container",
+                        "(later milestone)",
+                        false,
+                    );
+                });
+            if sub_action {
                 act = Some(Act::Container);
             }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {

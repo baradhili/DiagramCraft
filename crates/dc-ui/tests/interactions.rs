@@ -1931,11 +1931,21 @@ fn context_menu_container_wraps_and_carries_members() {
         egui::PointerButton::Secondary,
     );
     h.run();
+    // Container opens a flyout (Visio 2016); the action is in it.
     h.get_all_by_label_contains("Container")
         .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
         .min_by_key(|n| n.rect().min.y as i64)
-        .expect("Container row in the context menu")
+        .expect("Container flyout parent")
         .click();
+    h.run();
+    h.run(); // the flyout settles a frame later
+             // ctx_item rows carry leading spaces in their labels — match by
+             // contains and click at the row's center (get_by_label is exact).
+    let rows = h
+        .query_all_by_label_contains("Add to New Container")
+        .collect::<Vec<_>>();
+    let r = rows[0].rect();
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
     h.run();
     assert_eq!(h.state().debug_shape_count(), 3, "members stay top-level");
     let (_, cid) = h.state().debug_sel().expect("container selected");
