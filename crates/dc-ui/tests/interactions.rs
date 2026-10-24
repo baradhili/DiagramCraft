@@ -325,8 +325,15 @@ fn ctrl_drag_pans_without_marquee_or_move() {
         "pan did not commit a selection-clobbering marquee"
     );
 
-    // Ctrl+drag ON the shape: still a pan — no move-drag armed.
-    ctrl_drag(&mut h, to, to + egui::vec2(50.0, -25.0));
+    // Ctrl+drag ON the shape: still a pan — no move-drag armed. The
+    // first drag panned the view, so re-locate the shape on screen;
+    // a short drag keeps it on the canvas.
+    let on_shape = h
+        .state()
+        .debug_shape_screen_rect_for_test(sid)
+        .expect("shape screen rect after pan")
+        .center();
+    ctrl_drag(&mut h, on_shape, on_shape + egui::vec2(20.0, -10.0));
     assert_eq!(
         h.state().debug_cell_for_test(sid, "PinX"),
         pin_before,

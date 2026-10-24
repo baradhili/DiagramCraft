@@ -964,6 +964,14 @@ impl App {
         .collect()
     }
 
+    /// kittest: one shape's bbox in SCREEN coords (y-down) — follows
+    /// the live pan/zoom, for drag tests that must press the shape
+    /// where it actually is (#59).
+    #[doc(hidden)]
+    pub fn debug_shape_screen_rect_for_test(&self, shape_id: i64) -> Option<egui::Rect> {
+        self.shape_screen_rect(shape_id)
+    }
+
     /// One shape's bbox in SCREEN coords (y-down), for anchoring the
     /// context menu beside the shape (issue #49).
     fn shape_screen_rect(&self, shape_id: i64) -> Option<egui::Rect> {
