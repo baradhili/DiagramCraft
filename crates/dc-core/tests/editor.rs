@@ -6,8 +6,8 @@
 //! package — the real editing scenario.
 
 use dc_core::commands::{
-    AddConnect, AddLayer, AddPage, AddShape, MovePage, RemoveConnect, RemoveLayer, RemovePage,
-    RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, MovePage, RemoveConnect, RemoveLayer,
+    RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
 };
 use dc_core::connects::{Connect, ConnectsHost, ConnectsOwner};
 use dc_core::layers::{layer_name, layer_rows};
@@ -604,6 +604,96 @@ fn rename_and_move_page() {
     ed.undo().unwrap();
     let names: Vec<&str> = ed.doc.pages.iter().map(|p| p.name.as_str()).collect();
     assert_eq!(names, vec!["Page-1", "Page-2", "Page-3"]);
+}
+
+#[test]
+fn duplicate_page_clones_content_with_fresh_identity() {
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    ed.apply(DuplicatePage::new(0)).unwrap();
+    assert_eq!(ed.doc.pages.len(), 2);
+    let src = &ed.doc.pages[0];
+    let copy = &ed.doc.pages[1];
+    assert_ne!(copy.id, src.id, "fresh page id");
+    assert_eq!(copy.part, "visio/pages/page2.xml", "own part");
+    assert_eq!(copy.name, src.name, "name kept; the UI renames");
+    assert_eq!(copy.shapes.len(), src.shapes.len(), "shapes deep-cloned");
+    assert_eq!(
+        copy.shapes[0].id, src.shapes[0].id,
+        "shape ids are page-local"
+    );
+    let rid_of = |p: &vsdx::model::Page| {
+        p.children.iter().find_map(|c| match c {
+            vsdx::model::IndexChild::Rel(attrs) => attrs
+                .iter()
+                .find(|(k, _)| k == "r:id")
+                .map(|(_, v)| v.clone()),
+            _ => None,
+        })
+    };
+    assert_ne!(rid_of(copy).unwrap(), rid_of(src).unwrap(), "fresh r:id");
+
+    // Save → reparse: the duplicate is materialized as its own part
+    // with the cloned shapes.
+    let out = tmp.path().join("dup.vsdx");
+    ed.save_as(&out).unwrap();
+    let pkg = vsdx::Package::open(&out).unwrap();
+    assert!(pkg.part_names().contains(&"visio/pages/page2.xml"));
+    let reparsed = vsdx::parse::parse(&out).unwrap();
+    assert_eq!(reparsed.pages.len(), 2);
+    assert_eq!(
+        reparsed.pages[1].shapes.len(),
+        reparsed.pages[0].shapes.len(),
+        "clone keeps every shape"
+    );
+
+    // Undo returns to one page; redo re-materializes the copy.
+    ed.undo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 1);
+    ed.redo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 2);
+}
+
+#[test]
+fn multi_page_save_reload_preserves_names_order_and_edits() {
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    ed.apply(AddPage::new("Middle")).unwrap();
+    // Edit page 2 through its own duplicate of the source shape.
+    ed.apply(DuplicatePage::new(0)).unwrap();
+    let page2 = ed.doc.pages[1].id;
+    let sid = ed.doc.pages[1].shapes[0].id;
+    // Scope addresses pages by ID, not index.
+    ed.apply(SetText::new(
+        Scope::Shape {
+            page: page2,
+            shape: sid,
+        },
+        "page two edit",
+    ))
+    .unwrap();
+    ed.apply(RenamePage::new(page2, "Renamed-2")).unwrap();
+    ed.apply(MovePage { from: 1, to: 0 }).unwrap();
+
+    let out = tmp.path().join("multi.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let names: Vec<&str> = re.pages.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Renamed-2", "Page-1", "Middle"],
+        "order survives"
+    );
+    let text = |p: &vsdx::model::Page| {
+        p.shapes[0]
+            .sheet
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(text(&re.pages[0]), "page two edit", "edit follows its page");
+    assert_ne!(text(&re.pages[1]), "page two edit", "source untouched");
 }
 
 // ---------------------------------------------------------------------------

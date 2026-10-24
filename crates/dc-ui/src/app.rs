@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use dc_core::commands::{AddPage, AddShape, DuplicateShape, RemoveShape, ReorderShape};
+use dc_core::commands::{
+    AddPage, AddShape, DuplicatePage, DuplicateShape, MovePage, RemovePage, RemoveShape,
+    RenamePage, ReorderShape,
+};
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
 use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
@@ -20,6 +23,17 @@ use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
 use crate::theme;
 
+/// Per-page UI state parked while another page is active (#54):
+/// selection (primary + multi) and the view position return as they
+/// were left. View chrome (rulers, grid, units) stays app-level like
+/// Visio, so it is excluded on restore.
+#[derive(Clone)]
+struct PageUiState {
+    sel: Option<(i64, i64)>,
+    sel_set: Vec<(i64, i64)>,
+    view: View,
+}
+
 pub struct App {
     ed: Option<Editor>,
     path: PathBuf,
@@ -27,6 +41,16 @@ pub struct App {
     version: u64,
     view: View,
     page_idx: usize,
+    /// Per-page UI state saved while another page is active (#54):
+    /// selection and view position restore when the page comes back.
+    page_states: std::collections::HashMap<i64, PageUiState>,
+    /// Open page-tab context menu: (page index, anchor) (#54).
+    tab_menu: Option<(usize, Pos2)>,
+    /// Inline tab rename: (page id, draft) (#54).
+    tab_rename: Option<(i64, String)>,
+    /// Scroll the tab strip to the active tab once, after a switch
+    /// (#54) — consumed by the next strip paint.
+    tab_scroll_to_active: bool,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -219,6 +243,10 @@ impl App {
             version: 0,
             view: View::default(),
             page_idx: 0,
+            page_states: std::collections::HashMap::new(),
+            tab_menu: None,
+            tab_rename: None,
+            tab_scroll_to_active: false,
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -368,6 +396,9 @@ impl App {
                 self.set_selection(None);
                 self.stencil.armed = None;
                 self.tex.clear();
+                self.page_states.clear();
+                self.tab_menu = None;
+                self.tab_rename = None;
             }
             Err(e) => self.status = format!("open failed: {e:#}"),
         }
@@ -436,6 +467,147 @@ impl App {
         }
     }
 
+    /// Switch the active page (#54): selection and view position park
+    /// under the outgoing page's ID and restore when it comes back;
+    /// chrome (rulers/grid/units) is app-level and follows the live
+    /// view, like Visio.
+    fn switch_page(&mut self, to: usize) {
+        let Some((cur_id, new_id)) = self.ed().and_then(|ed| {
+            let n = ed.doc.pages.len();
+            (to < n && to != self.page_idx)
+                .then(|| ed.doc.pages.get(self.page_idx).map(|c| c.id))
+                .flatten()
+                .zip(ed.doc.pages.get(to).map(|p| p.id))
+        }) else {
+            return;
+        };
+        {
+            self.page_states.insert(
+                cur_id,
+                PageUiState {
+                    sel: self.sel,
+                    sel_set: self.sel_set.clone(),
+                    view: self.view.clone(),
+                },
+            );
+        }
+        self.page_idx = to;
+        self.tab_scroll_to_active = true;
+        match self.page_states.remove(&new_id) {
+            Some(st) => {
+                self.sel = st.sel;
+                self.sel_set = st.sel_set;
+                let (unit, grid, rulers) =
+                    (self.view.unit, self.view.show_grid, self.view.show_rulers);
+                self.view = st.view;
+                self.view.unit = unit;
+                self.view.show_grid = grid;
+                self.view.show_rulers = rulers;
+            }
+            None => {
+                self.set_selection(None);
+                self.view.fit_pending = true;
+            }
+        }
+    }
+
+    /// Next sequential Visio page name for a new/duplicated tab.
+    fn next_page_name(&self) -> String {
+        let mut n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0) + 1;
+        let taken = |self_: &Self, name: &str| {
+            self_
+                .ed()
+                .map(|e| e.doc.pages.iter().any(|p| p.name == name))
+                .unwrap_or(false)
+        };
+        while taken(self, &format!("Page-{n}")) {
+            n += 1;
+        }
+        format!("Page-{n}")
+    }
+
+    /// Drop per-page state and selection that outlived their pages
+    /// (delete) or no longer match the active page (#54).
+    fn reconcile_page_state(&mut self) {
+        let live: Option<std::collections::HashSet<i64>> = self
+            .ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.id).collect());
+        if let Some(live) = live {
+            self.page_states.retain(|id, _| live.contains(id));
+        }
+        self.page_idx = self.page_idx.min(
+            self.ed()
+                .map(|e| e.doc.pages.len())
+                .unwrap_or(0)
+                .saturating_sub(1),
+        );
+        if let Some((p, _)) = self.sel {
+            if Some(p) != self.page_id() {
+                self.set_selection(None);
+            }
+        }
+    }
+
+    /// Tab context-menu commands (#54). Each goes through the command
+    /// layer (undoable) and lands the user on the affected page.
+    fn tab_cmd_insert(&mut self, after: usize) {
+        let name = self.next_page_name();
+        self.apply(AddPage::new(name));
+        if let Some(n) = self.ed().map(|e| e.doc.pages.len()) {
+            if n > 1 && after + 1 < n {
+                self.apply(MovePage {
+                    from: n - 1,
+                    to: after + 1,
+                });
+            }
+            self.page_idx = after + 1;
+        }
+        self.view.fit_pending = true;
+        self.tab_scroll_to_active = true;
+    }
+
+    fn tab_cmd_duplicate(&mut self, idx: usize) {
+        let Some(id) = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id) else {
+            return;
+        };
+        let name = self.next_page_name();
+        self.apply(DuplicatePage::new(id));
+        self.apply(RenamePage::new(
+            self.ed()
+                .and_then(|e| e.doc.pages.get(idx + 1))
+                .map(|p| p.id)
+                .unwrap_or(id),
+            name,
+        ));
+        self.page_idx = idx + 1;
+        self.view.fit_pending = true;
+        self.tab_scroll_to_active = true;
+    }
+
+    fn tab_cmd_delete(&mut self, idx: usize) {
+        let Some(ed) = self.ed() else { return };
+        if ed.doc.pages.len() < 2 {
+            self.status = "the last page cannot be deleted".into();
+            return;
+        }
+        let Some(id) = ed.doc.pages.get(idx).map(|p| p.id) else {
+            return;
+        };
+        self.apply(RemovePage::new(id));
+        self.reconcile_page_state();
+        self.view.fit_pending = true;
+    }
+
+    fn tab_cmd_reorder(&mut self, idx: usize, to: usize) {
+        let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+        if idx >= n || to >= n {
+            return;
+        }
+        self.apply(MovePage { from: idx, to });
+        self.page_idx = to;
+        self.tab_scroll_to_active = true;
+    }
+
     fn do_redo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.redo() {
@@ -486,6 +658,9 @@ impl App {
         self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.page_states.clear();
+        self.tab_menu = None;
+        self.tab_rename = None;
         self.status = "new blank drawing (unsaved)".into();
     }
 
@@ -1518,6 +1693,7 @@ impl App {
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
+                    self.tab_scroll_to_active = true;
                 }
             }
             Action::Delete => self.delete_selection(),
@@ -2288,30 +2464,81 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default();
-            if !tabs.is_empty() {
-                for (i, (name, _id)) in tabs.iter().enumerate() {
-                    let active = i == self.page_idx;
-                    let txt = egui::RichText::new(name).size(11.5).color(if active {
-                        t.tab_text_active
-                    } else {
-                        t.tab_text_inactive
+            // Many pages scroll instead of pushing the status bar (#54);
+            // the + stays pinned at the strip's end, always visible.
+            let scroll_to_active = self.tab_scroll_to_active;
+            self.tab_scroll_to_active = false;
+            egui::ScrollArea::horizontal()
+                .id_salt("dc-page-tabs")
+                .max_height(24.0)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (i, (name, id)) in tabs.iter().enumerate() {
+                            let active = i == self.page_idx;
+                            // Inline rename (#54): the tab becomes an
+                            // editor on double-click / Rename; Enter or
+                            // focus loss commits, Escape cancels.
+                            let resp = if self.tab_rename.as_ref().is_some_and(|(rid, _)| rid == id)
+                            {
+                                let r = ui.add_sized(
+                                    [96.0, 18.0],
+                                    egui::TextEdit::singleline(
+                                        &mut self.tab_rename.as_mut().unwrap().1,
+                                    )
+                                    .font(egui::TextStyle::Small)
+                                    .hint_text("Page name"),
+                                );
+                                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if escaped {
+                                    self.tab_rename = None;
+                                } else if entered || r.lost_focus() {
+                                    let new = self
+                                        .tab_rename
+                                        .take()
+                                        .map(|(_, d)| d.trim().to_string())
+                                        .unwrap_or_default();
+                                    if !new.is_empty() && new != *name {
+                                        self.apply(RenamePage::new(*id, new));
+                                    }
+                                }
+                                r
+                            } else {
+                                let txt = egui::RichText::new(name).size(11.5).color(if active {
+                                    t.tab_text_active
+                                } else {
+                                    t.tab_text_inactive
+                                });
+                                let b = egui::Button::new(txt)
+                                    .small()
+                                    .fill(if active { t.tab_active } else { t.tabs_bg })
+                                    .frame(true);
+                                let resp =
+                                    ui.add(b)
+                                        .on_hover_text(format!("page {} (id {})", i + 1, id));
+                                if active && scroll_to_active {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                resp
+                            };
+                            if resp.clicked() {
+                                self.switch_page(i);
+                            }
+                            if resp.double_clicked() {
+                                self.tab_rename = Some((*id, name.clone()));
+                            }
+                            if resp.secondary_clicked() {
+                                self.tab_menu = Some((
+                                    i,
+                                    resp.interact_pointer_pos().unwrap_or(resp.rect.left_top()),
+                                ));
+                            }
+                        }
                     });
-                    let b = egui::Button::new(txt)
-                        .small()
-                        .fill(if active { t.tab_active } else { t.tabs_bg })
-                        .frame(true);
-                    let resp = ui
-                        .add(b)
-                        .on_hover_text(format!("page {} (id {})", i + 1, _id));
-                    if resp.clicked() {
-                        self.page_idx = i;
-                        self.set_selection(None);
-                        self.view.fit_pending = true;
-                    }
-                }
-                if ui.button("+").on_hover_text("Append a page").clicked() {
-                    self.dispatch(Action::NewPage);
-                }
+                });
+            if !tabs.is_empty() && ui.button("+").on_hover_text("Append a page").clicked() {
+                self.dispatch(Action::NewPage);
             }
         });
     }
@@ -2322,9 +2549,17 @@ impl App {
             let mut left;
             if let Some(ed) = self.ed() {
                 let geom = self.page_geom();
+                // Visio names the active page in the status bar (#54),
+                // e.g. "Page-2 of 4".
+                let page_name = ed
+                    .doc
+                    .pages
+                    .get(self.page_idx)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Page");
                 left = format!(
-                    "Page {} of {}    {}",
-                    self.page_idx + 1,
+                    "{} of {}    {}",
+                    page_name,
                     ed.doc.pages.len(),
                     self.view.unit.fmt(geom.w_in)
                         + " × "
@@ -2707,6 +2942,104 @@ impl App {
             }
         }
         self.shape_context_menu(ui.ctx());
+        self.tab_context_menu(ui.ctx());
+    }
+
+    /// The page-tab context menu (#54): Visio's tab affordances —
+    /// insert, duplicate, delete (never the last page), rename, and
+    /// reorder — all through the undoable command layer.
+    #[allow(deprecated)] // Id::new: one tab menu, stable identity wanted
+    fn tab_context_menu(&mut self, ctx: &egui::Context) {
+        let Some((idx, anchor)) = self.tab_menu else {
+            return;
+        };
+        let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+        if idx >= n {
+            self.tab_menu = None;
+            return;
+        }
+        #[derive(Clone, Copy, PartialEq)]
+        enum Act {
+            Insert,
+            Duplicate,
+            Delete,
+            Rename,
+            Up,
+            Down,
+        }
+        let mut act: Option<Act> = None;
+        let menu = egui::Popup::new(
+            egui::Id::new("dc-tab-ctx-menu"),
+            ctx.clone(),
+            anchor,
+            egui::LayerId::background(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(232.0);
+        let popup = menu.show(|ui| {
+            ui.set_min_width(232.0);
+            let tokens = theme::menu_tokens(ui.visuals());
+            ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
+            if ctx_item(ui, None, "Insert Page…", "", true) {
+                act = Some(Act::Insert);
+            }
+            if ctx_item(ui, None, "Duplicate Page", "", true) {
+                act = Some(Act::Duplicate);
+            }
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Delete),
+                "Delete Page",
+                "",
+                n > 1,
+            ) {
+                act = Some(Act::Delete);
+            }
+            ui.separator();
+            if ctx_item(ui, None, "Rename Page", "", true) {
+                act = Some(Act::Rename);
+            }
+            if ctx_item(ui, None, "Move Page Up", "", idx > 0) {
+                act = Some(Act::Up);
+            }
+            if ctx_item(ui, None, "Move Page Down", "", idx + 1 < n) {
+                act = Some(Act::Down);
+            }
+        });
+        // Close on an outside primary click (the shape menu's idiom).
+        let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
+        if let Some(ir) = &popup {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
+                self.tab_menu = None;
+            }
+        }
+        let Some(a) = act else { return };
+        self.tab_menu = None;
+        match a {
+            Act::Insert => self.tab_cmd_insert(idx),
+            Act::Duplicate => self.tab_cmd_duplicate(idx),
+            Act::Delete => self.tab_cmd_delete(idx),
+            Act::Rename => {
+                let id = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id);
+                let name = self
+                    .ed()
+                    .and_then(|e| e.doc.pages.get(idx))
+                    .map(|p| p.name.clone());
+                if let (Some(id), Some(name)) = (id, name) {
+                    self.tab_rename = Some((id, name));
+                }
+            }
+            Act::Up => self.tab_cmd_reorder(idx, idx - 1),
+            Act::Down => self.tab_cmd_reorder(idx, idx + 1),
+        }
     }
 
     /// The Visio 2016 shape context menu: clipboard, duplicate, delete,
@@ -3327,6 +3660,21 @@ impl App {
         self.view.fit_mode = false;
         self.view.fit_pending = false;
     }
+    /// kittest: page names in tab order (#54).
+    #[doc(hidden)]
+    pub fn debug_page_names(&self) -> Vec<String> {
+        self.ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+    /// kittest: the active page's name (#54).
+    #[doc(hidden)]
+    pub fn debug_active_page_name(&self) -> String {
+        self.ed()
+            .and_then(|e| e.doc.pages.get(self.page_idx))
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
     /// A shape's current text (double-click edit tests).
     #[doc(hidden)]
     pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
@@ -3880,6 +4228,9 @@ impl App {
         self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.page_states.clear();
+        self.tab_menu = None;
+        self.tab_rename = None;
         self.status = "document closed".into();
     }
 

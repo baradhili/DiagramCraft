@@ -1102,6 +1102,71 @@ fn move_page(doc: &mut Document, from: usize, to: usize) -> Result<()> {
     Ok(())
 }
 
+/// Duplicate a page by ID (#54): a deep clone (shapes, sheet, index
+/// children) inserted directly after the source, carrying a fresh page
+/// ID, part name, and relationship ID so the writer materializes it as
+/// its own part. The name is kept from the source; the caller renames
+/// (Visio's UI assigns the next sequential name).
+#[derive(Debug, Clone)]
+pub struct DuplicatePage {
+    pub page: i64,
+    id: Option<i64>,
+}
+
+impl DuplicatePage {
+    pub fn new(page: i64) -> DuplicatePage {
+        DuplicatePage { page, id: None }
+    }
+}
+
+impl crate::Command for DuplicatePage {
+    fn label(&self) -> String {
+        format!("duplicate page {}", self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pos = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        // Fresh identity for the copy; allocations consider the doc
+        // before insertion, exactly like AddPage.
+        let id = next_page_id(doc);
+        let rid = next_page_rid(doc);
+        let mut copy = doc.pages[pos].clone();
+        copy.id = id;
+        copy.part = next_page_part(doc);
+        match copy.attrs.iter_mut().find(|(k, _)| k == "ID") {
+            Some(slot) => slot.1 = id.to_string(),
+            None => copy.attrs.insert(0, ("ID".to_string(), id.to_string())),
+        }
+        for child in copy.children.iter_mut() {
+            if let IndexChild::Rel(attrs) = child {
+                for (k, v) in attrs.iter_mut() {
+                    if k == "r:id" {
+                        *v = rid.clone();
+                    }
+                }
+            }
+        }
+        self.id = Some(id);
+        doc.pages.insert(pos + 1, copy);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let id = self
+            .id
+            .ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
+        match doc.pages.iter().position(|p| p.id == id) {
+            Some(pos) => {
+                doc.pages.remove(pos);
+                Ok(())
+            }
+            None => bail!("duplicate page {id} vanished"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection commands
 // ---------------------------------------------------------------------------
