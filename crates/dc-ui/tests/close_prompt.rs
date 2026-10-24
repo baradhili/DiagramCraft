@@ -123,6 +123,30 @@ fn save_titled_document_closes_after_saving() {
 }
 
 #[test]
+fn close_request_while_save_as_is_pending_is_vetoed_without_a_new_prompt() {
+    // Regression (CodeRabbit on 76660e2): while the untitled close
+    // prompt's Save has the native save-as dialog open, a second ✕
+    // must not open another prompt — its Cancel would contradict the
+    // pending chain, and its Don't Save would race the dialog's save.
+    // kittest cannot hold the native dialog open deterministically,
+    // so the chain is armed directly.
+    let (_dir, app) = titled_doc();
+    let mut h = harness_with(app);
+    h.run();
+    h.state_mut().mark_dirty_for_test();
+    h.state_mut().arm_close_chain_for_test();
+    h.run();
+    h.state_mut().request_close_for_test();
+    h.run();
+    assert!(
+        !h.state().debug_close_prompt(),
+        "no second prompt while the dialog is pending"
+    );
+    assert_eq!(h.state().debug_close_vetoes(), 1);
+    assert_eq!(h.state().debug_close_issued(), 0);
+}
+
+#[test]
 fn untitled_save_routes_through_the_dialog_then_closes() {
     let dir = tempfile::tempdir().unwrap();
     let pick = dir.path().join("chosen.vsdx");

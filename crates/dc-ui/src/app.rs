@@ -282,6 +282,10 @@ impl App {
         self.dirty = true;
     }
     #[doc(hidden)]
+    pub fn arm_close_chain_for_test(&mut self) {
+        self.close_after_save = Some(CloseTarget::App);
+    }
+    #[doc(hidden)]
     pub fn preset_save_as_for_test(&mut self, answer: Option<PathBuf>) {
         self.dialog_preset_for_test = Some(answer);
     }
@@ -3717,9 +3721,12 @@ impl App {
             // app — and never resurrect the prompt.
             return;
         }
-        // While the prompt is already up, absorb further requests —
-        // clicking ✕ again changes nothing (one prompt, not two).
-        if self.confirm_close.is_some() {
+        // While the prompt is already up — or its Save has the native
+        // save-as dialog open (`close_after_save` armed) — absorb
+        // further requests: a second prompt's Cancel would contradict
+        // the pending chain, and its Don't Save would race the
+        // dialog's save (one prompt; the open dialog still decides).
+        if self.confirm_close.is_some() || self.close_after_save.is_some() {
             self.veto_close(ctx);
             return;
         }
