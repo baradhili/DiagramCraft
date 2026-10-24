@@ -3,7 +3,7 @@
 //! uses (build plan M5: "rendering via the SVG backend first"), so what
 //! you see is what `dc render` produces.
 
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+use egui::{ColorImage, Context, TextureHandle, TextureId, TextureOptions};
 
 /// Widest texture we ever allocate (kittest caps at 2048; GPUs allow more
 /// but upscaling a 2048px raster is fine on screen).
@@ -219,6 +219,15 @@ impl TextureCache {
 
     pub fn clear(&mut self) {
         self.map.clear();
+    }
+
+    /// The live texture id for a cache key, if it has been rasterized
+    /// (test observability for #58's thumbnail invalidation).
+    pub fn id_for(&self, key_part: &str, version: u64, px_per_in: f32) -> Option<TextureId> {
+        let bucket = (px_per_in * 4.0).round().max(4.0) as u32; // ±0.25 ppi
+        self.map
+            .get(&(key_part.to_string(), version, bucket))
+            .map(|t| t.id())
     }
 }
 

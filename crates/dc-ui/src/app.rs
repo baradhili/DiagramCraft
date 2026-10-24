@@ -37,6 +37,8 @@ pub struct App {
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
     tex: TextureCache,
+    /// Test-only: force the Info thumbnail's render to fail (#58).
+    info_render_fail_for_test: bool,
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
@@ -224,6 +226,7 @@ impl App {
             stencil: Stencil::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
+            info_render_fail_for_test: false,
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
@@ -280,6 +283,33 @@ impl App {
     #[doc(hidden)]
     pub fn mark_dirty_for_test(&mut self) {
         self.dirty = true;
+    }
+    /// kittest: what every editing command does — dirty + version bump
+    /// (the Info thumbnail's cache key, #58).
+    #[doc(hidden)]
+    pub fn simulate_edit_for_test(&mut self) {
+        self.dirty = true;
+        self.version += 1;
+    }
+    /// kittest: force the Info thumbnail render to fail (#58).
+    #[doc(hidden)]
+    pub fn force_info_render_failure_for_test(&mut self, on: bool) {
+        self.info_render_fail_for_test = on;
+    }
+    /// kittest: the Info thumbnail texture for the active page, if the
+    /// Info page has drawn one (#58).
+    #[doc(hidden)]
+    pub fn info_thumb_tex_id_for_test(&self) -> Option<egui::TextureId> {
+        let ed = self.ed.as_ref()?;
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        let w_in = page
+            .sheet()
+            .and_then(|s| s.cell("PageWidth"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(8.5)
+            .max(0.1);
+        let key = format!("info-{}", page.part.replace('/', "_"));
+        self.tex.id_for(&key, self.version, (192.0 / w_in) as f32)
     }
     #[doc(hidden)]
     pub fn arm_close_chain_for_test(&mut self) {
@@ -4023,22 +4053,91 @@ impl App {
                             } else {
                                 "All changes saved"
                             };
+                            // Live thumbnail of the active page (#58):
+                            // the same render → rasterize → texture pipeline
+                            // the stencil pane uses, cached per (page,
+                            // version) so any edit refreshes it.
+                            let (thumb_svg, thumb_w_in, thumb_h_in, thumb_part) = {
+                                let ed = self.ed.as_ref().unwrap();
+                                let page = &ed.doc.pages
+                                    [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                                let n = |name: &str| {
+                                    page.sheet()
+                                        .and_then(|s| s.cell(name))
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(0.0)
+                                };
+                                let svg = if self.info_render_fail_for_test {
+                                    None
+                                } else {
+                                    dc::svg::render_page(&ed.doc, page).ok()
+                                };
+                                (
+                                    svg,
+                                    n("PageWidth").max(0.1),
+                                    n("PageHeight").max(0.1),
+                                    page.part.clone(),
+                                )
+                            };
                             ui.heading(&name);
                             ui.add_space(8.0);
-                            egui::Grid::new("backstage_info")
-                                .num_columns(2)
-                                .spacing(Vec2::new(18.0, 6.0))
-                                .show(ui, |ui| {
-                                    ui.weak("Name");
-                                    ui.label(&name);
-                                    ui.end_row();
-                                    ui.weak("Location");
-                                    ui.label(&dir);
-                                    ui.end_row();
-                                    ui.weak("Status");
-                                    ui.label(status);
-                                    ui.end_row();
-                                });
+                            ui.horizontal(|ui| {
+                                egui::Grid::new("backstage_info")
+                                    .num_columns(2)
+                                    .spacing(Vec2::new(18.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.weak("Name");
+                                        ui.label(&name);
+                                        ui.end_row();
+                                        ui.weak("Location");
+                                        ui.label(&dir);
+                                        ui.end_row();
+                                        ui.weak("Status");
+                                        ui.label(status);
+                                        ui.end_row();
+                                    });
+                                ui.add_space(24.0);
+                                // Bordered card on the card token; neutral
+                                // (no error text) when the render fails.
+                                let img_w = 192.0_f64;
+                                let aspect = (thumb_h_in / thumb_w_in).clamp(0.2, 3.0);
+                                let (r, _) = ui.allocate_exact_size(
+                                    Vec2::new(
+                                        (img_w + 16.0) as f32,
+                                        (img_w * aspect + 16.0) as f32,
+                                    ),
+                                    Sense::hover(),
+                                );
+                                ui.painter().rect_filled(r, 3.0, t.card_bg);
+                                ui.painter().rect_stroke(
+                                    r,
+                                    3.0,
+                                    Stroke::new(1.0, t.ribbon_group),
+                                    egui::StrokeKind::Middle,
+                                );
+                                if let Some(svg) = thumb_svg.as_deref() {
+                                    // ~192 px wide, aspect-true: the raster
+                                    // derives its height from the page.
+                                    let ppi = (img_w / thumb_w_in) as f32;
+                                    let key = format!("info-{}", thumb_part.replace('/', "_"));
+                                    if let Ok(tex) = self.tex.get(
+                                        ui.ctx(),
+                                        svg,
+                                        thumb_w_in,
+                                        &key,
+                                        self.version,
+                                        ppi,
+                                    ) {
+                                        let ir = Rect::from_min_size(
+                                            r.min + Vec2::new(8.0, 8.0),
+                                            Vec2::new(img_w as f32, (img_w * aspect) as f32),
+                                        );
+                                        let uv =
+                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                                        ui.painter().image(tex.id(), ir, uv, Color32::WHITE);
+                                    }
+                                }
+                            });
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 ui.add_enabled(false, egui::Button::new("Protect Drawing…"))

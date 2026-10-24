@@ -213,6 +213,63 @@ fn shell_snapshot_backstage() {
 }
 
 #[test]
+fn info_thumbnail_refreshes_after_edit() {
+    // #58: the Info page carries a live page thumbnail keyed by
+    // (page, version) — an edit must re-rasterize it (new texture id).
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::with_doc(&fixture(tmp.path()));
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
+    app.open_backstage_for_test();
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    harness.run();
+    harness.run(); // second pass: the raster settles
+    let id1 = harness.state().info_thumb_tex_id_for_test();
+    assert!(
+        id1.is_some(),
+        "Info page should have rasterized a thumbnail"
+    );
+    // What every editing command does: dirty + version bump.
+    harness.state_mut().simulate_edit_for_test();
+    harness.run();
+    let id2 = harness.state().info_thumb_tex_id_for_test();
+    assert!(id2.is_some());
+    assert_ne!(id1, id2, "an edit must invalidate the thumbnail cache");
+}
+
+#[test]
+fn info_thumbnail_placeholder_on_render_failure() {
+    // #58: a failed render leaves the neutral card (no error text, no
+    // texture) and must not panic.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::with_doc(&fixture(tmp.path()));
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
+    app.force_info_render_failure_for_test(true);
+    app.open_backstage_for_test();
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            app,
+        );
+    harness.run();
+    harness.run();
+    assert!(harness.state().info_thumb_tex_id_for_test().is_none());
+}
+
+#[test]
 fn shell_snapshot_backstage_recent() {
     // No document → the Recent page, with its recents list.
     let tmp = tempfile::tempdir().unwrap();
