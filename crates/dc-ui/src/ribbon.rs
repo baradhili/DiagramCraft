@@ -1164,6 +1164,11 @@ impl RibbonButton {
     pub fn show_big(self, ui: &mut Ui) -> bool {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+        // The caption is a painted galley — attach its text for
+        // screen readers and keyboard focus (GitHub #56).
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+        });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r =
@@ -1201,6 +1206,10 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+        // Painted galley caption — name the control (GitHub #56).
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+        });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r = Rect::from_min_size(r.left_top() + Vec2::new(1.0, 2.0), Vec2::splat(18.0));

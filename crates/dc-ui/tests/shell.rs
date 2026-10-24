@@ -281,3 +281,56 @@ fn recent_entry_click_reopens() {
     );
     assert_eq!(harness.state().debug_recent(), &[doc]);
 }
+
+/// GitHub #56: the painted controls — the File tab block, the Tell-Me
+/// box, the QAT icon buttons, the ribbon galley captions — carry
+/// accessible names on their responses, so kittest finds them by label
+/// (and screen readers announce them).
+#[test]
+fn painted_shell_controls_carry_accessible_labels() {
+    use egui_kittest::kittest::Queryable;
+    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    harness.run();
+
+    // File tab: a painted green block; the label must exist and the
+    // click must still open the backstage.
+    let file = harness.get_by_label("File");
+    assert!(
+        file.rect().height() > 20.0,
+        "the File tab block carries the label"
+    );
+    file.click();
+    harness.run();
+    assert!(
+        harness.state().backstage,
+        "clicking the labeled File tab opens the backstage"
+    );
+    harness.state_mut().backstage = false;
+    harness.run();
+
+    // Tell-Me box: painted placeholder + lightbulb icon.
+    harness.get_by_label("Tell Me");
+
+    // QAT buttons: painted icons, names without the shortcut hint.
+    for name in ["Save", "Undo", "Redo"] {
+        assert!(
+            harness.query_by_label(name).is_some(),
+            "QAT button {name} is labeled"
+        );
+    }
+
+    // Ribbon hero caption: painted galley text.
+    assert!(
+        harness.query_by_label("Paste").is_some(),
+        "the ribbon Paste button is labeled"
+    );
+}

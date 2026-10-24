@@ -1608,6 +1608,11 @@ impl App {
                     // tall tab, like the Office File tab.
                     let (fr, fresp) =
                         ui.allocate_exact_size(Vec2::new(54.0, STRIP_H), Sense::click());
+                    // The painted text never reaches the accessibility
+                    // tree on its own (GitHub #56).
+                    fresp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, "File")
+                    });
                     ui.painter().rect_filled(
                         fr,
                         egui::CornerRadius {
@@ -1668,6 +1673,11 @@ impl App {
                         ui.add_space(6.0);
                         let (pr, presp) =
                             ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
+                        // Painted placeholder, so name the control for
+                        // screen readers (GitHub #56).
+                        presp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, "Tell Me")
+                        });
                         let hot = presp.hovered();
                         ui.painter().rect_filled(pr, 2, tk.tellme_bg);
                         ui.painter().rect_stroke(
@@ -4361,6 +4371,10 @@ fn write_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<(
 
 fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::click());
+    // The icon is painted, so the control needs its name attached;
+    // screen readers read "Save", not "Save (Ctrl+S)" (GitHub #56).
+    let name = tip.split(" (").next().unwrap_or(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     let resp = resp.on_hover_text(tip);
     let hover = resp.hovered();
     if hover {
