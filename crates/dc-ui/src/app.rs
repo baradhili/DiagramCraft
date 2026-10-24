@@ -3000,7 +3000,13 @@ impl App {
             match self.shape_hit(pos) {
                 Some(shape_id) => {
                     if let Some(p) = self.page_id() {
-                        self.set_selection(Some((p, shape_id)));
+                        // Right-clicking a member of the current
+                        // multi-selection keeps the selection (Visio's
+                        // Group flow depends on it, #26); clicking
+                        // outside it collapses to the hit shape.
+                        if !self.sel_set.contains(&(p, shape_id)) {
+                            self.set_selection(Some((p, shape_id)));
+                        }
                     }
                     let anchor = ui
                         .ctx()
@@ -3453,6 +3459,8 @@ impl App {
         #[derive(Clone, Copy, PartialEq)]
         enum Act {
             Master(usize),
+            Group,
+            Ungroup,
             Cut,
             Copy,
             Paste,
@@ -3619,7 +3627,20 @@ impl App {
                 act = Some(Act::FlipH);
             }
             ui.separator();
-            ctx_item(ui, None, "Group", "(v0.5)", false);
+            // Group needs a multi-selection; Ungroup needs a selected
+            // group (#26).
+            let can_group = self.sel_set.len() >= 2;
+            let is_group = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+                .is_some_and(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
+            if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
+                act = Some(Act::Group);
+            }
+            if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
+                act = Some(Act::Ungroup);
+            }
             ctx_item(ui, None, "Container", "(v0.5)", false);
             ctx_item(ui, None, "Hyperlink…", "(v0.5)", false);
             ctx_item(ui, None, "Add Comment", "(v0.5)", false);
@@ -3651,6 +3672,33 @@ impl App {
             Act::Master(ai) => {
                 if let Some(row) = actions.get(ai).cloned() {
                     self.run_master_action(shape_id, &row);
+                }
+            }
+            Act::Group => {
+                let members: Vec<i64> = self
+                    .sel_set
+                    .iter()
+                    .filter(|(p, _)| *p == page_id)
+                    .map(|(_, sid)| *sid)
+                    .collect();
+                let new_id = self
+                    .ed()
+                    .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
+                self.apply(dc_core::commands::GroupShapes::new(page_id, members));
+                if let Some(nid) = new_id {
+                    self.set_selection(Some((page_id, nid)));
+                }
+            }
+            Act::Ungroup => {
+                let first_member = self.ed().and_then(|ed| {
+                    ed.doc.pages.get(self.page_idx).and_then(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, shape_id)
+                            .and_then(|g| g.sub_shapes.first().map(|m| m.id))
+                    })
+                });
+                self.apply(dc_core::commands::UngroupShape::new(page_id, shape_id));
+                if let Some(m) = first_member {
+                    self.set_selection(Some((page_id, m)));
                 }
             }
             Act::Cut | Act::Copy => {
@@ -3808,6 +3856,8 @@ impl App {
     }
     /// Stencil panel content rect from the last frame; its right edge
     /// plus the 6px frame margin is the panel's resize handle (the
+    /// kittest: multi-selection size (#26).
+    #[doc(hidden)]
     /// kittest re-wrap tests drag it, GitHub #53).
     #[doc(hidden)]
     pub fn debug_stencil_panel_inner_rect(&self) -> Rect {
@@ -3818,6 +3868,11 @@ impl App {
         self.canvas_rect
     }
     #[doc(hidden)]
+    /// kittest: multi-selection size (#26).
+    #[doc(hidden)]
+    pub fn debug_sel_set_len(&self) -> usize {
+        self.sel_set.len()
+    }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
     }

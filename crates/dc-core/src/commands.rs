@@ -679,6 +679,274 @@ impl crate::Command for DuplicateShape {
     }
 }
 
+/// Undo payload for [`GroupShapes`]: member id, original z-position,
+/// and the pre-group PinX/PinY cells.
+type GroupUndo = Vec<(
+    i64,
+    usize,
+    Option<vsdx::model::Cell>,
+    Option<vsdx::model::Cell>,
+)>;
+
+/// Group top-level shapes into one `Type='Group'` shape (GitHub #26).
+/// The group's XForm is the members' union bbox with `LocPin` at its
+/// bottom-left, and each member's Pin is rewritten into the group's
+/// local frame — the renderer places sub-shapes relative to the
+/// group's LocPin origin, so the drawing renders identically and the
+/// members follow the group's moves.
+#[derive(Debug, Clone)]
+pub struct GroupShapes {
+    pub page: i64,
+    /// Member ids, any order; the group preserves ascending z-order.
+    pub members: Vec<i64>,
+    id: Option<i64>,
+    /// (member id, original z-position, old PinX/PinY cells) for undo.
+    undo: Option<GroupUndo>,
+}
+
+impl GroupShapes {
+    pub fn new(page: i64, members: Vec<i64>) -> GroupShapes {
+        GroupShapes {
+            page,
+            members,
+            id: None,
+            undo: None,
+        }
+    }
+}
+
+impl crate::Command for GroupShapes {
+    fn label(&self) -> String {
+        format!("group {} shapes on page {}", self.members.len(), self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        // Resolve members (top-level only) with their z-positions.
+        let mut found: Vec<(usize, i64)> = self
+            .members
+            .iter()
+            .filter_map(|id| {
+                doc.pages[pi]
+                    .shapes
+                    .iter()
+                    .position(|s| s.id == *id)
+                    .map(|p| (p, *id))
+            })
+            .collect();
+        if found.len() < 2 {
+            bail!("grouping needs at least two member shapes");
+        }
+        found.sort();
+        // Union bbox from each member's absolute rect.
+        let num = |s: &Shape, n: &str| -> f64 {
+            doc.resolve_cell(s, &[], n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for (_, id) in &found {
+            let s = doc.pages[pi].shapes.iter().find(|s| s.id == *id).unwrap();
+            let (px, py) = (num(s, "PinX"), num(s, "PinY"));
+            let (w, h) = (num(s, "Width"), num(s, "Height"));
+            let (lx, ly) = (num(s, "LocPinX"), num(s, "LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        let gid = next_shape_id(doc, self.page);
+        self.id = Some(gid);
+        let mut undo = Vec::new();
+        // Rewrite members' Pins into the group frame and detach.
+        let mut members: Vec<Shape> = Vec::new();
+        for (pos, id) in &found {
+            let s = doc.pages[pi].shapes.iter().find(|s| s.id == *id).unwrap();
+            let (px, py) = (num(s, "PinX"), num(s, "PinY"));
+            undo.push((
+                *id,
+                *pos,
+                s.sheet.cell("PinX").cloned(),
+                s.sheet.cell("PinY").cloned(),
+            ));
+            let mut m = s.clone();
+            m.sheet
+                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(px - x0)));
+            m.sheet
+                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(py - y0)));
+            members.push(m);
+        }
+        self.undo = Some(undo);
+        // Remove back-to-front so earlier positions stay valid.
+        for (pos, _) in found.iter().rev() {
+            doc.pages[pi].shapes.remove(*pos);
+        }
+        let group = Shape {
+            id: gid,
+            name_u: Some(format!("Group.{gid}")),
+            type_: Some("Group".into()),
+            sheet: {
+                let mut sh = vsdx::model::Sheet::default();
+                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(x0)));
+                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(y0)));
+                sh.set_cell("Width", vsdx::model::Cell::value(fmt_num(x1 - x0)));
+                sh.set_cell("Height", vsdx::model::Cell::value(fmt_num(y1 - y0)));
+                sh.set_cell("LocPinX", vsdx::model::Cell::value("0"));
+                sh.set_cell("LocPinY", vsdx::model::Cell::value("0"));
+                sh
+            },
+            sub_shapes: members,
+            flow: vec![vsdx::model::ShapeFlow::Shapes],
+            ..Shape::default()
+        };
+        let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.insert(at, group);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let gid = self.id.ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let undo = self
+            .undo
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let gpos = doc.pages[pi]
+            .shapes
+            .iter()
+            .position(|s| s.id == gid)
+            .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
+        let mut extracted = doc.pages[pi].shapes.remove(gpos).sub_shapes;
+        // Restore original absolute Pins and z-positions.
+        for (id, pos, old_x, old_y) in &undo {
+            let m = extracted
+                .iter_mut()
+                .find(|s| s.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("member {id} vanished from group"))?;
+            let restore = |m: &mut Shape, n: &str, old: &Option<vsdx::model::Cell>| match old {
+                Some(c) => m.sheet.set_cell(n, c.clone()),
+                None => m
+                    .sheet
+                    .children
+                    .retain(|c| !matches!(c, vsdx::model::SheetChild::Cell(k, _) if k == n)),
+            };
+            restore(m, "PinX", old_x);
+            restore(m, "PinY", old_y);
+            let at = (*pos).min(doc.pages[pi].shapes.len());
+            doc.pages[pi].shapes.insert(at, m.clone());
+        }
+        Ok(())
+    }
+}
+
+/// Dissolve a group one level (GitHub #26): members are promoted to
+/// the group's z-position with their Pins translated back to absolute
+/// page coordinates using the group's live Xform.
+#[derive(Debug, Clone)]
+pub struct UngroupShape {
+    pub page: i64,
+    pub group: i64,
+    /// The removed group (members still in local-frame state) — undo
+    /// reinserts it verbatim.
+    removed: Option<Shape>,
+    old_pos: Option<usize>,
+}
+
+impl UngroupShape {
+    pub fn new(page: i64, group: i64) -> UngroupShape {
+        UngroupShape {
+            page,
+            group,
+            removed: None,
+            old_pos: None,
+        }
+    }
+}
+
+impl crate::Command for UngroupShape {
+    fn label(&self) -> String {
+        format!("ungroup shape {} on page {}", self.group, self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let pos = doc.pages[pi]
+            .shapes
+            .iter()
+            .position(|s| s.id == self.group)
+            .ok_or_else(|| anyhow::anyhow!("shape {} not found", self.group))?;
+        if doc.pages[pi].shapes[pos].sub_shapes.is_empty() {
+            bail!("shape {} has no members to ungroup", self.group);
+        }
+        let num = |s: &Shape, n: &str| -> f64 {
+            doc.resolve_cell(s, &[], n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        let (gx, gy) = {
+            let g = &doc.pages[pi].shapes[pos];
+            (
+                num(g, "PinX") - num(g, "LocPinX"),
+                num(g, "PinY") - num(g, "LocPinY"),
+            )
+        };
+        let group_shape = doc.pages[pi].shapes.remove(pos);
+        self.old_pos = Some(pos);
+        self.removed = Some(group_shape.clone());
+        let mut promoted = group_shape.sub_shapes;
+        for m in promoted.iter_mut() {
+            let (px, py) = (
+                m.sheet
+                    .cell("PinX")
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0),
+                m.sheet
+                    .cell("PinY")
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0),
+            );
+            m.sheet
+                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(px + gx)));
+            m.sheet
+                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(py + gy)));
+        }
+        let at = pos.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.splice(at..at, promoted);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let removed = self
+            .removed
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pos = self
+            .old_pos
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let ids: Vec<i64> = removed.sub_shapes.iter().map(|s| s.id).collect();
+        doc.pages[pi].shapes.retain(|s| !ids.contains(&s.id));
+        let at = pos.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.insert(at, removed);
+        Ok(())
+    }
+}
+
 /// Move a top-level shape to the front or back of its page's z-order
 /// (Visio Bring to Front / Send to Back).
 #[derive(Debug, Clone)]

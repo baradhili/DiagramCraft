@@ -1316,3 +1316,77 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
             .is_empty()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Group / Ungroup (GitHub #26)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_and_ungroup_round_trip_with_undo() {
+    use dc_core::commands::{GroupShapes, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    // A second top-level shape to group with.
+    let mut second = ed.doc.pages[0].shapes[0].clone();
+    second.id = 5;
+    second.sheet.set_cell("PinX", vsdx::model::Cell::value("6"));
+    second.sheet.set_cell("PinY", vsdx::model::Cell::value("6"));
+    ed.doc.pages[0].shapes.push(second);
+    // The fixture page also carries shape 2 (a master instance) which
+    // stays outside the group.
+    let before = ed.doc.pages[0].shapes.len();
+    assert_eq!(before, 3);
+
+    // Shape 1 sits at PinX 4.25/PinY 5.5, W2 H1, LocPin (1, 0.5) →
+    // rect (3.25, 5)-(5.25, 6). Shape 5 at (6,6) same size → (5, 5.5)-
+    // (7, 6.5). Union: (3.25, 5)-(7, 6.5) → group Pin (3.25, 5),
+    // W 3.75, H 1.5.
+    ed.apply(GroupShapes::new(0, vec![5, 1])).unwrap();
+    assert_eq!(
+        ed.doc.pages[0].shapes.len(),
+        2,
+        "group + the ungrouped shape 2"
+    );
+    let g = &ed.doc.pages[0].shapes[0];
+    assert_eq!(g.type_.as_deref(), Some("Group"));
+    assert_eq!(g.sub_shapes.len(), 2);
+    let n = |s: &vsdx::model::Sheet, k: &str| s.cell(k).and_then(|c| c.numeric()).unwrap_or(0.0);
+    assert!((n(&g.sheet, "PinX") - 3.25).abs() < 1e-9);
+    assert!((n(&g.sheet, "PinY") - 5.0).abs() < 1e-9);
+    assert!((n(&g.sheet, "Width") - 3.75).abs() < 1e-9);
+    assert!((n(&g.sheet, "Height") - 1.5).abs() < 1e-9);
+    // Members in the group frame: shape 1 (4.25, 5.5) → (1, 0.5);
+    // shape 5 (6, 6) → (2.75, 1).
+    let m1 = g.sub_shapes.iter().find(|s| s.id == 1).unwrap();
+    assert!((n(&m1.sheet, "PinX") - 1.0).abs() < 1e-9);
+    assert!((n(&m1.sheet, "PinY") - 0.5).abs() < 1e-9);
+    let m5 = g.sub_shapes.iter().find(|s| s.id == 5).unwrap();
+    assert!((n(&m5.sheet, "PinX") - 2.75).abs() < 1e-9);
+    assert!((n(&m5.sheet, "PinY") - 1.0).abs() < 1e-9);
+
+    // Ungroup promotes with absolute Pins at the group's z-position.
+    let gid = g.id;
+    ed.apply(UngroupShape::new(0, gid)).unwrap();
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    let s1 = ed.doc.pages[0].shapes.iter().find(|s| s.id == 1).unwrap();
+    assert!((n(&s1.sheet, "PinX") - 4.25).abs() < 1e-9);
+    assert!((n(&s1.sheet, "PinY") - 5.5).abs() < 1e-9);
+    // Undo both directions.
+    ed.undo().unwrap(); // undo ungroup → group back
+    assert_eq!(ed.doc.pages[0].shapes.len(), 2);
+    ed.undo().unwrap(); // undo group → original three, original order
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    assert_eq!(ed.doc.pages[0].shapes[0].id, 1);
+    let s1 = &ed.doc.pages[0].shapes[0];
+    assert!((n(&s1.sheet, "PinX") - 4.25).abs() < 1e-9);
+
+    // Save → reparse keeps the nested <Shapes> tree.
+    ed.apply(GroupShapes::new(0, vec![1, 5])).unwrap();
+    let out = _tmp.path().join("grouped.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let g = &re.pages[0].shapes[0];
+    assert_eq!(g.type_.as_deref(), Some("Group"));
+    assert_eq!(g.sub_shapes.len(), 2, "nested tree survives save/reload");
+}

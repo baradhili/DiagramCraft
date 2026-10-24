@@ -1798,3 +1798,87 @@ fn master_action_row_executes_setf_chain() {
         "undo removed the materialized row (inheritance restored)"
     );
 }
+
+/// GitHub #26: marquee-select two shapes, Group from the context menu,
+/// move the group (members follow), then undo both.
+#[test]
+fn context_menu_group_creates_one_shape_that_moves_as_one() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2);
+
+    // Marquee both shapes.
+    let c = canvas.center();
+    let a = c + egui::vec2(-120.0, -120.0);
+    let b = c + egui::vec2(120.0, 120.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+
+    // Right-click one of them and Group.
+    click_at(
+        &mut h,
+        c + egui::vec2(-40.0, 40.0),
+        egui::PointerButton::Secondary,
+    );
+    h.run();
+    // The ribbon also has a Group button, and the menu shows Ungroup
+    // right below Group — take the topmost "…Group…" row in the menu
+    // (below the ribbon bands).
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group row in the context menu");
+    group_row.click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "one top-level group");
+    let (_, gid) = h.state().debug_sel().expect("group selected");
+    let g0 = h.state().debug_shape_screen_rect(gid).expect("group rect");
+
+    // Moving the group moves the whole composition (members live in
+    // its frame).
+    let before_svg = h.state().debug_page_svg().unwrap_or_default();
+    assert!(before_svg.contains("<path"), "the grouped members render");
+    drag_naturally(&mut h, g0.center(), egui::vec2(60.0, 40.0));
+    let g1 = h.state().debug_shape_screen_rect(gid).expect("group rect");
+    assert!(
+        (g1.min.x - g0.min.x - 60.0).abs() < 1.0 && (g1.min.y - g0.min.y - 40.0).abs() < 1.0,
+        "group moved: {:?} → {:?}",
+        g0,
+        g1
+    );
+
+    // Undo the move, then the group itself.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let g2 = h.state().debug_shape_screen_rect(gid).expect("group rect");
+    assert!((g2.min.x - g0.min.x).abs() < 0.5, "move undone");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
+}
