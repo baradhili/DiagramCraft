@@ -1797,7 +1797,16 @@ pub fn shape_action_commands(
         let value = match vsdx::formula::eval(value_str.trim(), env) {
             Ok(vsdx::formula::Value::Num(n)) if n.is_finite() => fmt_num(n),
             Ok(vsdx::formula::Value::Str(s)) => s,
-            _ => value_str.trim().trim_matches('"').to_string(),
+            _ => {
+                // Only a plain quoted string literal may be stored as a
+                // value (quotes stripped); anything else would persist
+                // formula text into the cell's V — defer instead.
+                let t = value_str.trim();
+                t.strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("unsupported action value {t:?}"))?
+            }
         };
         let cell = vsdx::model::Cell::value(value.clone());
         // Map the reference spelling to a command. Named-row sections:

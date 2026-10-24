@@ -1309,6 +1309,35 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
         &env2
     )
     .is_err());
+    // A value that cannot be evaluated defers (Err) instead of
+    // persisting formula text in the cell's V; a quoted string is
+    // stored unquoted.
+    assert!(shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),Width*2)",
+        &HashMap::new(),
+    )
+    .is_err());
+    let cmds = shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),\"Hello\")",
+        &HashMap::new(),
+    )
+    .unwrap();
+    ed.apply(dc_core::Macro::new("str", cmds)).unwrap();
+    let sh = &ed.doc.pages[0].shapes[0];
+    let user = sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .unwrap();
+    assert_eq!(
+        user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
+        Some("Hello"),
+        "quoted string value stored unquoted"
+    );
+    ed.undo().unwrap();
     // No Formula / empty: display-only, no commands.
     assert!(
         shape_action_commands(Scope::Shape { page: 0, shape: 1 }, "No Formula", &env2)
