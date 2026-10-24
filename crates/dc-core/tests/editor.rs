@@ -6,8 +6,8 @@
 //! package — the real editing scenario.
 
 use dc_core::commands::{
-    AddConnect, AddLayer, AddPage, AddShape, MovePage, RemoveConnect, RemoveLayer, RemovePage,
-    RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, MovePage, RemoveConnect, RemoveLayer,
+    RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
 };
 use dc_core::connects::{Connect, ConnectsHost, ConnectsOwner};
 use dc_core::layers::{layer_name, layer_rows};
@@ -233,7 +233,7 @@ fn history_undo_redo_and_labels() {
     )
     .unwrap();
     assert_eq!(h.undo_labels().len(), 2);
-    assert!(h.can_redo() == false);
+    assert!(!h.can_redo());
 
     let label = h.undo(&mut doc).unwrap().unwrap();
     assert!(label.contains("PinX"));
@@ -606,6 +606,96 @@ fn rename_and_move_page() {
     assert_eq!(names, vec!["Page-1", "Page-2", "Page-3"]);
 }
 
+#[test]
+fn duplicate_page_clones_content_with_fresh_identity() {
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    ed.apply(DuplicatePage::new(0)).unwrap();
+    assert_eq!(ed.doc.pages.len(), 2);
+    let src = &ed.doc.pages[0];
+    let copy = &ed.doc.pages[1];
+    assert_ne!(copy.id, src.id, "fresh page id");
+    assert_eq!(copy.part, "visio/pages/page2.xml", "own part");
+    assert_eq!(copy.name, src.name, "name kept; the UI renames");
+    assert_eq!(copy.shapes.len(), src.shapes.len(), "shapes deep-cloned");
+    assert_eq!(
+        copy.shapes[0].id, src.shapes[0].id,
+        "shape ids are page-local"
+    );
+    let rid_of = |p: &vsdx::model::Page| {
+        p.children.iter().find_map(|c| match c {
+            vsdx::model::IndexChild::Rel(attrs) => attrs
+                .iter()
+                .find(|(k, _)| k == "r:id")
+                .map(|(_, v)| v.clone()),
+            _ => None,
+        })
+    };
+    assert_ne!(rid_of(copy).unwrap(), rid_of(src).unwrap(), "fresh r:id");
+
+    // Save → reparse: the duplicate is materialized as its own part
+    // with the cloned shapes.
+    let out = tmp.path().join("dup.vsdx");
+    ed.save_as(&out).unwrap();
+    let pkg = vsdx::Package::open(&out).unwrap();
+    assert!(pkg.part_names().contains(&"visio/pages/page2.xml"));
+    let reparsed = vsdx::parse::parse(&out).unwrap();
+    assert_eq!(reparsed.pages.len(), 2);
+    assert_eq!(
+        reparsed.pages[1].shapes.len(),
+        reparsed.pages[0].shapes.len(),
+        "clone keeps every shape"
+    );
+
+    // Undo returns to one page; redo re-materializes the copy.
+    ed.undo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 1);
+    ed.redo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 2);
+}
+
+#[test]
+fn multi_page_save_reload_preserves_names_order_and_edits() {
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    ed.apply(AddPage::new("Middle")).unwrap();
+    // Edit page 2 through its own duplicate of the source shape.
+    ed.apply(DuplicatePage::new(0)).unwrap();
+    let page2 = ed.doc.pages[1].id;
+    let sid = ed.doc.pages[1].shapes[0].id;
+    // Scope addresses pages by ID, not index.
+    ed.apply(SetText::new(
+        Scope::Shape {
+            page: page2,
+            shape: sid,
+        },
+        "page two edit",
+    ))
+    .unwrap();
+    ed.apply(RenamePage::new(page2, "Renamed-2")).unwrap();
+    ed.apply(MovePage { from: 1, to: 0 }).unwrap();
+
+    let out = tmp.path().join("multi.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let names: Vec<&str> = re.pages.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["Renamed-2", "Page-1", "Middle"],
+        "order survives"
+    );
+    let text = |p: &vsdx::model::Page| {
+        p.shapes[0]
+            .sheet
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert_eq!(text(&re.pages[0]), "page two edit", "edit follows its page");
+    assert_ne!(text(&re.pages[1]), "page two edit", "source untouched");
+}
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------
@@ -849,7 +939,7 @@ fn scopes_parse_and_resolve() {
     let chain = dc_core::scope::shape_chain(&ed.doc, 0, 2).unwrap();
     let cell = ed
         .doc
-        .resolve_cell(&chain[chain.len() - 1], &chain, "LineWeight")
+        .resolve_cell(chain[chain.len() - 1], &chain, "LineWeight")
         .unwrap();
     assert_eq!(cell.v.as_deref(), Some("0.015625"));
 }
@@ -858,13 +948,19 @@ fn scopes_parse_and_resolve() {
 fn new_blank_roundtrips() {
     let mut ed = Editor::new_blank();
     assert_eq!(ed.doc.pages.len(), 1);
-    // Starter masters ship with the blank drawing (Basic Shapes set).
-    assert_eq!(ed.doc.masters.len(), 7);
+    // Starter masters ship with the blank drawing (Basic Shapes set,
+    // plus the 1D Line master — GitHub #59).
+    assert_eq!(ed.doc.masters.len(), 8);
     assert!(ed
         .doc
         .masters
         .iter()
         .any(|m| m.name_u.as_deref() == Some("Rectangle")));
+    assert!(ed
+        .doc
+        .masters
+        .iter()
+        .any(|m| m.name_u.as_deref() == Some("Line")));
     let page = &ed.doc.pages[0];
     assert_eq!(page.name, "Page-1");
     let w = page
@@ -944,8 +1040,10 @@ fn duplicate_shape_clones_offsets_and_undoes() {
         page,
         parent: None,
         shape: {
-            let mut s = vsdx::model::Shape::default();
-            s.id = first;
+            let mut s = vsdx::model::Shape {
+                id: first,
+                ..Default::default()
+            };
             s.sheet.set_cell("PinX", vsdx::model::Cell::value("2"));
             s.sheet.set_cell("PinY", vsdx::model::Cell::value("3"));
             s
@@ -977,10 +1075,12 @@ fn reorder_shape_moves_zorder_and_restores() {
     let mut ed = Editor::new_blank();
     let page = ed.doc.pages[0].id;
     let mut ids = [0i64; 3];
-    for i in 0..3 {
-        ids[i] = dc_core::commands::next_shape_id(&ed.doc, page);
-        let mut s = vsdx::model::Shape::default();
-        s.id = ids[i];
+    for id in &mut ids {
+        *id = dc_core::commands::next_shape_id(&ed.doc, page);
+        let s = vsdx::model::Shape {
+            id: *id,
+            ..Default::default()
+        };
         ed.apply(dc_core::AddShape {
             page,
             parent: None,
@@ -1020,9 +1120,11 @@ fn set_row_cell_materializes_missing_character_section_with_undo() {
     let sid = dc_core::commands::next_shape_id(&ed.doc, page);
     // A master-backed instance whose sheet carries NO local Character
     // section (the common case for placed shapes).
-    let mut s = vsdx::model::Shape::default();
-    s.id = sid;
-    s.master = Some(7); // blank template master with Character rows
+    let s = vsdx::model::Shape {
+        id: sid,
+        master: Some(7), // blank template master with Character rows
+        ..Default::default()
+    };
     ed.apply(dc_core::AddShape {
         page,
         parent: None,
@@ -1077,8 +1179,10 @@ fn macro_rolls_back_applied_children_on_failure() {
     let mut ed = Editor::new_blank();
     let page = ed.doc.pages[0].id;
     let a = dc_core::commands::next_shape_id(&ed.doc, page);
-    let mut sa = vsdx::model::Shape::default();
-    sa.id = a;
+    let sa = vsdx::model::Shape {
+        id: a,
+        ..Default::default()
+    };
     ed.apply(dc_core::AddShape {
         page,
         parent: None,
@@ -1086,8 +1190,10 @@ fn macro_rolls_back_applied_children_on_failure() {
     })
     .unwrap();
 
-    let mut sb = vsdx::model::Shape::default();
-    sb.id = a + 1;
+    let sb = vsdx::model::Shape {
+        id: a + 1,
+        ..Default::default()
+    };
     let cmds: Vec<Box<dyn dc_core::Command>> = vec![
         Box::new(dc_core::RemoveShape::new(page, a)),
         Box::new(dc_core::AddShape {
@@ -1111,4 +1217,313 @@ fn macro_rolls_back_applied_children_on_failure() {
         undo_depth_before,
         "failed macro left no undo entry"
     );
+}
+
+// ---------------------------------------------------------------------------
+// ShapeSheet Actions execution (GitHub #25)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn shape_action_setf_chain_builds_and_applies_commands() {
+    use dc_core::commands::shape_action_commands;
+    use std::collections::HashMap;
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let mut env = HashMap::new();
+    env.insert("User.Style".to_string(), 0.0);
+    let cmds = shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),1)&SETF(GetRef(Para.HorzAlign),1)&SETF(GetRef(VerticalAlign),1)",
+        &env,
+    )
+    .unwrap();
+    assert_eq!(cmds.len(), 3);
+    ed.apply(dc_core::Macro::new("run shape action", cmds))
+        .unwrap();
+
+    // All three writes land on the INSTANCE sheet (row 1's shape).
+    let sh = &ed.doc.pages[0].shapes[0];
+    let user = sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .expect("User.Style materialized");
+    assert_eq!(
+        user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
+        Some("1")
+    );
+    let para = sh
+        .sheet
+        .sections_named("Paragraph")
+        .iter()
+        .find_map(|s| s.row_by_ix(0))
+        .expect("Paragraph row materialized");
+    assert_eq!(
+        para.cell("HorzAlign").and_then(|c| c.v.clone()).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        sh.sheet
+            .cell("VerticalAlign")
+            .and_then(|c| c.v.clone())
+            .as_deref(),
+        Some("1")
+    );
+
+    // One undo rolls the whole chain back (materialized rows removed).
+    ed.undo().unwrap();
+    let sh = &ed.doc.pages[0].shapes[0];
+    assert!(sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .is_none());
+
+    // Chained values may be expressions; unsupported terms defer.
+    let mut env2 = HashMap::new();
+    env2.insert("User.N".to_string(), 3.0);
+    let cmds = shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),User.N+1)",
+        &env2,
+    )
+    .unwrap();
+    ed.apply(dc_core::Macro::new("expr", cmds)).unwrap();
+    let sh = &ed.doc.pages[0].shapes[0];
+    let user = sh
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|s| s.named_row("Style"))
+        .unwrap();
+    assert_eq!(
+        user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
+        Some("4")
+    );
+    assert!(shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "RUNADDON(\"mystery\")",
+        &env2
+    )
+    .is_err());
+    // No Formula / empty: display-only, no commands.
+    assert!(
+        shape_action_commands(Scope::Shape { page: 0, shape: 1 }, "No Formula", &env2)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group / Ungroup (GitHub #26)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn group_and_ungroup_round_trip_with_undo() {
+    use dc_core::commands::{GroupShapes, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    // A second top-level shape to group with.
+    let mut second = ed.doc.pages[0].shapes[0].clone();
+    second.id = 5;
+    second.sheet.set_cell("PinX", vsdx::model::Cell::value("6"));
+    second.sheet.set_cell("PinY", vsdx::model::Cell::value("6"));
+    ed.doc.pages[0].shapes.push(second);
+    // The fixture page also carries shape 2 (a master instance) which
+    // stays outside the group.
+    let before = ed.doc.pages[0].shapes.len();
+    assert_eq!(before, 3);
+
+    // Shape 1 sits at PinX 4.25/PinY 5.5, W2 H1, LocPin (1, 0.5) →
+    // rect (3.25, 5)-(5.25, 6). Shape 5 at (6,6) same size → (5, 5.5)-
+    // (7, 6.5). Union: (3.25, 5)-(7, 6.5) → group Pin (3.25, 5),
+    // W 3.75, H 1.5.
+    ed.apply(GroupShapes::new(0, vec![5, 1])).unwrap();
+    assert_eq!(
+        ed.doc.pages[0].shapes.len(),
+        2,
+        "group + the ungrouped shape 2"
+    );
+    let g = &ed.doc.pages[0].shapes[0];
+    assert_eq!(g.type_.as_deref(), Some("Group"));
+    assert_eq!(g.sub_shapes.len(), 2);
+    let n = |s: &vsdx::model::Sheet, k: &str| s.cell(k).and_then(|c| c.numeric()).unwrap_or(0.0);
+    assert!((n(&g.sheet, "PinX") - 3.25).abs() < 1e-9);
+    assert!((n(&g.sheet, "PinY") - 5.0).abs() < 1e-9);
+    assert!((n(&g.sheet, "Width") - 3.75).abs() < 1e-9);
+    assert!((n(&g.sheet, "Height") - 1.5).abs() < 1e-9);
+    // Members in the group frame: shape 1 (4.25, 5.5) → (1, 0.5);
+    // shape 5 (6, 6) → (2.75, 1).
+    let m1 = g.sub_shapes.iter().find(|s| s.id == 1).unwrap();
+    assert!((n(&m1.sheet, "PinX") - 1.0).abs() < 1e-9);
+    assert!((n(&m1.sheet, "PinY") - 0.5).abs() < 1e-9);
+    let m5 = g.sub_shapes.iter().find(|s| s.id == 5).unwrap();
+    assert!((n(&m5.sheet, "PinX") - 2.75).abs() < 1e-9);
+    assert!((n(&m5.sheet, "PinY") - 1.0).abs() < 1e-9);
+
+    // Ungroup promotes with absolute Pins at the group's z-position.
+    let gid = g.id;
+    ed.apply(UngroupShape::new(0, gid)).unwrap();
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    let s1 = ed.doc.pages[0].shapes.iter().find(|s| s.id == 1).unwrap();
+    assert!((n(&s1.sheet, "PinX") - 4.25).abs() < 1e-9);
+    assert!((n(&s1.sheet, "PinY") - 5.5).abs() < 1e-9);
+    // Undo both directions.
+    ed.undo().unwrap(); // undo ungroup → group back
+    assert_eq!(ed.doc.pages[0].shapes.len(), 2);
+    ed.undo().unwrap(); // undo group → original three, original order
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    assert_eq!(ed.doc.pages[0].shapes[0].id, 1);
+    let s1 = &ed.doc.pages[0].shapes[0];
+    assert!((n(&s1.sheet, "PinX") - 4.25).abs() < 1e-9);
+
+    // Save → reparse keeps the nested <Shapes> tree.
+    ed.apply(GroupShapes::new(0, vec![1, 5])).unwrap();
+    let out = _tmp.path().join("grouped.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let g = &re.pages[0].shapes[0];
+    assert_eq!(g.type_.as_deref(), Some("Group"));
+    assert_eq!(g.sub_shapes.len(), 2, "nested tree survives save/reload");
+}
+
+// ---------------------------------------------------------------------------
+// Containers (GitHub #27)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_container_records_membership_and_survives_reload() {
+    use dc_core::commands::{add_container, next_shape_id};
+
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    let id = next_shape_id(&ed.doc, 0);
+    // Wrap shapes 1 and 2 (fixture rect at (3.25,5)-(5.25,6) and the
+    // master instance around (2,2)) with a rect of our own.
+    ed.apply(add_container(
+        0,
+        id,
+        &[1, 2],
+        (1.0, 1.0, 6.0, 6.0),
+        "Legend",
+    ))
+    .unwrap();
+
+    // Container at the BACK of the z-order, members still top-level.
+    assert_eq!(ed.doc.pages[0].shapes[0].id, id);
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    let member_row = |ed: &dc_core::Editor, sid: i64| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == sid)
+            .unwrap()
+            .sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row("msvSDContainerShape"))
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.v.clone())
+    };
+    assert_eq!(member_row(&ed, 1).as_deref(), Some(id.to_string().as_str()));
+    assert_eq!(member_row(&ed, 2).as_deref(), Some(id.to_string().as_str()));
+
+    // One undo removes container AND membership rows.
+    ed.undo().unwrap();
+    assert_eq!(ed.doc.pages[0].shapes.len(), 2);
+    assert!(
+        member_row(&ed, 1).is_none(),
+        "membership row removed with the container"
+    );
+
+    // Re-apply, save, reparse: membership rides along.
+    ed.redo().unwrap();
+    let out = tmp.path().join("container.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let c = &re.pages[0].shapes[0];
+    assert_eq!(c.id, id);
+    assert_eq!(c.sheet.text.as_deref(), Some("Legend"));
+    let m = re.pages[0]
+        .shapes
+        .iter()
+        .find(|s| s.id == 1)
+        .unwrap()
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|sec| sec.named_row("msvSDContainerShape"))
+        .and_then(|r| r.cell("Value"))
+        .and_then(|c| c.v.clone());
+    assert_eq!(m.as_deref(), Some(id.to_string().as_str()));
+}
+
+// ---------------------------------------------------------------------------
+// Hyperlink rows (GitHub #28)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hyperlink_row_add_edit_remove_round_trip() {
+    use dc_core::commands::{RemoveSectionRow, RowSel};
+    use dc_core::{Macro, SetRowCell};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let scope = Scope::Shape { page: 0, shape: 1 };
+    let row = |ix: i64, name: &str, v: &str| {
+        SetRowCell::new(
+            scope.clone(),
+            "Hyperlink",
+            0,
+            RowSel::Ix(ix),
+            name,
+            vsdx::model::Cell::value(v.to_string()),
+        )
+    };
+    ed.apply(Macro::new(
+        "add hyperlink",
+        vec![
+            Box::new(row(0, "Address", "https://example.test/")),
+            Box::new(row(0, "Description", "Docs")),
+        ],
+    ))
+    .unwrap();
+    let link = |ed: &dc_core::Editor| {
+        ed.doc.pages[0].shapes[0]
+            .sheet
+            .sections_named("Hyperlink")
+            .iter()
+            .flat_map(|s| s.rows.iter())
+            .map(|r| {
+                (
+                    r.cell("Address").and_then(|c| c.v.clone()),
+                    r.cell("Description").and_then(|c| c.v.clone()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        link(&ed),
+        vec![(Some("https://example.test/".into()), Some("Docs".into()))]
+    );
+    // One undo removes the whole row materialization.
+    ed.undo().unwrap();
+    assert!(link(&ed).is_empty());
+    ed.redo().unwrap();
+
+    // RemoveSectionRow + undo.
+    ed.apply(RemoveSectionRow::new(
+        scope.clone(),
+        "Hyperlink",
+        0,
+        RowSel::Ix(0),
+    ))
+    .unwrap();
+    assert!(link(&ed).is_empty());
+    ed.undo().unwrap();
+    assert_eq!(link(&ed).len(), 1);
 }

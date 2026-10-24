@@ -316,7 +316,7 @@ fn roundtrip_preserves_messy_package() {
     let ti = flow
         .iter()
         .position(|f| matches!(f, vsdx::model::ShapeFlow::Text));
-    assert!(fi.map_or(false, |fi| ti.map_or(false, |ti| fi < ti)));
+    assert!(fi.is_some_and(|fi| ti.is_some_and(|ti| fi < ti)));
     // Icon survived in the masters index.
     let m = doc.master(7).unwrap();
     assert!(m.children.iter().any(|c| matches!(
@@ -379,12 +379,14 @@ fn writes_fresh_document_from_model() {
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships".to_string(),
         ),
     ];
-    let mut doc = Document::default();
-    doc.root_attrs = xmlns.clone();
-    doc.pages_attrs = xmlns.clone();
-    doc.doc_part = "visio/document.xml".into();
-    doc.pages_part = "visio/pages/pages.xml".into();
-    doc.items = vec![DocItem::StyleSheets];
+    let mut doc = Document {
+        root_attrs: xmlns.clone(),
+        pages_attrs: xmlns.clone(),
+        doc_part: "visio/document.xml".into(),
+        pages_part: "visio/pages/pages.xml".into(),
+        items: vec![DocItem::StyleSheets],
+        ..Default::default()
+    };
     let ss_attrs: Vec<(String, String)> = vec![
         ("ID".into(), "0".into()),
         ("NameU".into(), "No Style".into()),

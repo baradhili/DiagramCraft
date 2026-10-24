@@ -6,19 +6,56 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use dc_core::commands::{AddPage, AddShape, DuplicateShape, RemoveShape, ReorderShape};
+use dc_core::commands::{
+    AddPage, AddShape, DuplicatePage, DuplicateShape, MovePage, RemovePage, RemoveShape,
+    RenamePage, ReorderShape,
+};
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
 use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
-use crate::canvas::{self, PageGeom, View};
+use crate::canvas::{self, Handle, HandleId, PageGeom, View};
 use crate::cmd::{AddMasterInstance, MoveShape};
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::Stencil;
 use crate::svgimg::TextureCache;
 use crate::theme;
+
+/// Draft row for the Hyperlinks dialog (#28): `edit_row` names the
+/// instance row being edited (None = adding).
+#[derive(Clone)]
+struct HyperlinkDraft {
+    edit_row: Option<i64>,
+    address: String,
+    sub: String,
+    desc: String,
+}
+
+/// One master ShapeSheet Actions row, evaluated for THIS instance
+/// (#25): label, SETF formula, and the live Checked/Disabled flags.
+#[derive(Clone)]
+struct MasterActionRow {
+    menu: String,
+    action: String,
+    checked: bool,
+    disabled: bool,
+    begin_group: bool,
+    flyout_child: bool,
+    display_only: bool,
+}
+
+/// Per-page UI state parked while another page is active (#54):
+/// selection (primary + multi) and the view position return as they
+/// were left. View chrome (rulers, grid, units) stays app-level like
+/// Visio, so it is excluded on restore.
+#[derive(Clone)]
+struct PageUiState {
+    sel: Option<(i64, i64)>,
+    sel_set: Vec<(i64, i64)>,
+    view: View,
+}
 
 pub struct App {
     ed: Option<Editor>,
@@ -27,6 +64,40 @@ pub struct App {
     version: u64,
     view: View,
     page_idx: usize,
+    /// Per-page UI state saved while another page is active (#54):
+    /// selection and view position restore when the page comes back.
+    page_states: std::collections::HashMap<i64, PageUiState>,
+    /// Open page-tab context menu: (page index, anchor) (#54).
+    tab_menu: Option<(usize, Pos2)>,
+    /// Inline tab rename: (page id, draft) (#54).
+    tab_rename: Option<(i64, String)>,
+    /// Scroll the tab strip to the active tab once, after a switch
+    /// (#54) — consumed by the next strip paint.
+    tab_scroll_to_active: bool,
+    /// The Reorder Pages dialog is open (#54, Visio mechanism).
+    reorder_open: bool,
+    /// The Hyperlinks dialog is open for this shape (#28).
+    hyperlink_open: Option<i64>,
+    /// Draft row being added/edited in the Hyperlinks dialog (#28).
+    hyperlink_draft: Option<HyperlinkDraft>,
+    /// The Comments popup is open for this shape (#29 rework: the
+    /// Visio 2016 thread view — author header, edit/delete/reply).
+    comment_target: Option<i64>,
+    /// The reply / new-comment input body (#29).
+    comment_body: String,
+    /// Inline edit buffer: (annotation id, body) (#29).
+    comment_edit: Option<(i64, String)>,
+    /// Annotation visibility (Review ▸ Show Comments, #29).
+    show_comments: bool,
+    /// The Shape Data dialog is open for this shape (#30).
+    shape_data_open: Option<i64>,
+    /// The Format Shape pane is open (#31).
+    format_pane_open: bool,
+    /// Text buffers for the Format pane's numeric/text fields (#31).
+    fmt_bufs: std::collections::HashMap<String, String>,
+    /// Text buffers for the Shape Data string fields (#30) — commits
+    /// on focus loss, one undo per change.
+    prop_bufs: std::collections::HashMap<String, String>,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -37,6 +108,8 @@ pub struct App {
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
     tex: TextureCache,
+    /// Test-only: force the Info thumbnail's render to fail (#58).
+    info_render_fail_for_test: bool,
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
@@ -59,6 +132,32 @@ pub struct App {
     /// Continue into a new blank drawing once the save-as dialog
     /// triggered by "Save & New" completes (or is cancelled).
     new_after_save: bool,
+    /// Close decision pending: the "Save changes?" prompt a window
+    /// close (✕ / Alt-F4) or File → Close must clear before a dirty
+    /// document is lost (GitHub #65).
+    confirm_close: Option<CloseTarget>,
+    /// Close once the save-as dialog triggered by the close prompt's
+    /// Save (an untitled document) completes; dropped when that dialog
+    /// is cancelled — cancelling the save means staying open.
+    close_after_save: Option<CloseTarget>,
+    /// Test hook input: a close request as if the window's ✕ was
+    /// clicked — kittest cannot synthesize a WM_CLOSE (GitHub #65).
+    close_req_for_test: bool,
+    /// A close was approved and issued. egui-winit turns
+    /// `ViewportCommand::Close` into the NEXT frame's close-requested
+    /// input (`egui-winit/src/lib.rs` `ViewportCommand::Close`), so
+    /// that echo must pass through un-vetoed — otherwise "Don't Save"
+    /// (document left dirty) resurrects the prompt forever (#65).
+    closing: bool,
+    /// Test seam for the native save-as dialog: when armed, the next
+    /// SaveAs dialog resolves with the preset answer instead of
+    /// opening rfd (headless kittest must not open GTK dialogs).
+    /// `Some(None)` = the dialog is "cancelled".
+    dialog_preset_for_test: Option<Option<PathBuf>>,
+    /// Test observability (#65): viewport commands sent by the close
+    /// path (kittest cannot read viewport output after a pass).
+    debug_close_vetoes: u32,
+    debug_close_issued: u32,
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
@@ -88,6 +187,7 @@ pub struct App {
 #[derive(Clone, Copy, PartialEq)]
 enum ColorTarget {
     Fill,
+    FillBkgnd,
     Line,
 }
 
@@ -108,6 +208,14 @@ enum BackAction {
     Save,
     SaveAs,
     CloseDoc,
+}
+
+/// What a confirmed "Save changes?" prompt closes (GitHub #65): the
+/// whole app (window ✕ / Alt-F4) or just the document (File → Close).
+#[derive(Clone, Copy, PartialEq)]
+enum CloseTarget {
+    App,
+    Doc,
 }
 
 /// Backstage content page (GitHub #55: 2010 three-band rail — commands
@@ -144,6 +252,10 @@ struct DragState {
     start_pin: (f64, f64),
     last_pin: (f64, f64),
     moved: bool,
+    /// Other members of a multi-selection captured when the press began
+    /// (the press on a selected member drags the whole group; a press on
+    /// an unselected shape moves only that shape — GitHub #59).
+    group: Vec<i64>,
 }
 
 impl App {
@@ -179,6 +291,21 @@ impl App {
             version: 0,
             view: View::default(),
             page_idx: 0,
+            page_states: std::collections::HashMap::new(),
+            tab_menu: None,
+            tab_rename: None,
+            tab_scroll_to_active: false,
+            reorder_open: false,
+            hyperlink_open: None,
+            hyperlink_draft: None,
+            comment_target: None,
+            comment_body: String::new(),
+            comment_edit: None,
+            show_comments: true,
+            shape_data_open: None,
+            prop_bufs: std::collections::HashMap::new(),
+            format_pane_open: false,
+            fmt_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -186,6 +313,7 @@ impl App {
             stencil: Stencil::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
+            info_render_fail_for_test: false,
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
@@ -197,6 +325,13 @@ impl App {
             backstage_search: String::new(),
             confirm_new: false,
             new_after_save: false,
+            confirm_close: None,
+            close_after_save: None,
+            close_req_for_test: false,
+            closing: false,
+            dialog_preset_for_test: None,
+            debug_close_vetoes: 0,
+            debug_close_issued: 0,
             ctx_menu: None,
             ctx_menu_rect: None,
             clipboard: None,
@@ -225,6 +360,77 @@ impl App {
         app
     }
 
+    /// Test hooks for the close-prompt flow (GitHub #65). kittest
+    /// cannot synthesize a WM_CLOSE or read viewport output, so the
+    /// request is flagged in and the sent commands counted out.
+    #[doc(hidden)]
+    pub fn request_close_for_test(&mut self) {
+        self.close_req_for_test = true;
+    }
+    #[doc(hidden)]
+    pub fn mark_dirty_for_test(&mut self) {
+        self.dirty = true;
+    }
+    /// kittest: what every editing command does — dirty + version bump
+    /// (the Info thumbnail's cache key, #58).
+    #[doc(hidden)]
+    pub fn simulate_edit_for_test(&mut self) {
+        self.dirty = true;
+        self.version += 1;
+    }
+    /// kittest: force the Info thumbnail render to fail (#58).
+    #[doc(hidden)]
+    pub fn force_info_render_failure_for_test(&mut self, on: bool) {
+        self.info_render_fail_for_test = on;
+    }
+    /// kittest: the Info thumbnail texture for the active page, if the
+    /// Info page has drawn one (#58).
+    #[doc(hidden)]
+    pub fn info_thumb_tex_id_for_test(&self) -> Option<egui::TextureId> {
+        let ed = self.ed.as_ref()?;
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        let w_in = page
+            .sheet()
+            .and_then(|s| s.cell("PageWidth"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(8.5)
+            .max(0.1);
+        let key = format!("info-{}", page.part.replace('/', "_"));
+        self.tex.id_for(&key, self.version, (192.0 / w_in) as f32)
+    }
+    #[doc(hidden)]
+    pub fn arm_close_chain_for_test(&mut self) {
+        self.close_after_save = Some(CloseTarget::App);
+    }
+    #[doc(hidden)]
+    pub fn preset_save_as_for_test(&mut self, answer: Option<PathBuf>) {
+        self.dialog_preset_for_test = Some(answer);
+    }
+    #[doc(hidden)]
+    pub fn debug_close_prompt(&self) -> bool {
+        self.confirm_close.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_close_chain_armed(&self) -> bool {
+        self.close_after_save.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_doc_open(&self) -> bool {
+        self.ed.is_some()
+    }
+    #[doc(hidden)]
+    pub fn debug_dirty(&self) -> bool {
+        self.dirty
+    }
+    #[doc(hidden)]
+    pub fn debug_close_vetoes(&self) -> u32 {
+        self.debug_close_vetoes
+    }
+    #[doc(hidden)]
+    pub fn debug_close_issued(&self) -> u32 {
+        self.debug_close_issued
+    }
+
     /// Test hooks: select a shape / switch ribbon tab.
     #[doc(hidden)]
     pub fn select_shape_for_test(&mut self, page: i64, shape: i64) {
@@ -249,6 +455,12 @@ impl App {
                 self.set_selection(None);
                 self.stencil.armed = None;
                 self.tex.clear();
+                self.page_states.clear();
+                self.tab_menu = None;
+                self.tab_rename = None;
+                self.reorder_open = false;
+                self.comment_target = None;
+                self.comment_edit = None;
             }
             Err(e) => self.status = format!("open failed: {e:#}"),
         }
@@ -317,6 +529,157 @@ impl App {
         }
     }
 
+    /// Switch the active page (#54): selection and view position park
+    /// under the outgoing page's ID and restore when it comes back;
+    /// chrome (rulers/grid/units) is app-level and follows the live
+    /// view, like Visio.
+    fn switch_page(&mut self, to: usize) {
+        let Some((cur_id, new_id)) = self.ed().and_then(|ed| {
+            let n = ed.doc.pages.len();
+            (to < n && to != self.page_idx)
+                .then(|| ed.doc.pages.get(self.page_idx).map(|c| c.id))
+                .flatten()
+                .zip(ed.doc.pages.get(to).map(|p| p.id))
+        }) else {
+            return;
+        };
+        {
+            self.page_states.insert(
+                cur_id,
+                PageUiState {
+                    sel: self.sel,
+                    sel_set: self.sel_set.clone(),
+                    view: self.view.clone(),
+                },
+            );
+        }
+        self.page_idx = to;
+        self.tab_scroll_to_active = true;
+        match self.page_states.remove(&new_id) {
+            Some(st) => {
+                self.sel = st.sel;
+                self.sel_set = st.sel_set;
+                let (unit, grid, rulers) =
+                    (self.view.unit, self.view.show_grid, self.view.show_rulers);
+                self.view = st.view;
+                self.view.unit = unit;
+                self.view.show_grid = grid;
+                self.view.show_rulers = rulers;
+            }
+            None => {
+                self.set_selection(None);
+                self.view.fit_pending = true;
+            }
+        }
+    }
+
+    /// Next sequential Visio page name for a new/duplicated tab.
+    fn next_page_name(&self) -> String {
+        let mut n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0) + 1;
+        let taken = |self_: &Self, name: &str| {
+            self_
+                .ed()
+                .map(|e| e.doc.pages.iter().any(|p| p.name == name))
+                .unwrap_or(false)
+        };
+        while taken(self, &format!("Page-{n}")) {
+            n += 1;
+        }
+        format!("Page-{n}")
+    }
+
+    /// Drop per-page state and selection that outlived their pages
+    /// (delete) or no longer match the active page (#54).
+    fn reconcile_page_state(&mut self) {
+        let live: Option<std::collections::HashSet<i64>> = self
+            .ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.id).collect());
+        if let Some(live) = live {
+            self.page_states.retain(|id, _| live.contains(id));
+        }
+        self.page_idx = self.page_idx.min(
+            self.ed()
+                .map(|e| e.doc.pages.len())
+                .unwrap_or(0)
+                .saturating_sub(1),
+        );
+        if let Some((p, _)) = self.sel {
+            if Some(p) != self.page_id() {
+                self.set_selection(None);
+            }
+        }
+    }
+
+    /// Tab context-menu commands (#54). Each goes through the command
+    /// layer (undoable) and lands the user on the affected page.
+    fn tab_cmd_insert(&mut self, after: usize) {
+        let name = self.next_page_name();
+        self.apply(AddPage::new(name));
+        if let Some(n) = self.ed().map(|e| e.doc.pages.len()) {
+            if n > 1 && after + 1 < n {
+                self.apply(MovePage {
+                    from: n - 1,
+                    to: after + 1,
+                });
+            }
+            self.page_idx = after + 1;
+        }
+        self.view.fit_pending = true;
+        self.tab_scroll_to_active = true;
+    }
+
+    fn tab_cmd_duplicate(&mut self, idx: usize) {
+        let Some(id) = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id) else {
+            return;
+        };
+        let name = self.next_page_name();
+        self.apply(DuplicatePage::new(id));
+        self.apply(RenamePage::new(
+            self.ed()
+                .and_then(|e| e.doc.pages.get(idx + 1))
+                .map(|p| p.id)
+                .unwrap_or(id),
+            name,
+        ));
+        self.page_idx = idx + 1;
+        self.view.fit_pending = true;
+        self.tab_scroll_to_active = true;
+    }
+
+    fn tab_cmd_delete(&mut self, idx: usize) {
+        let Some(ed) = self.ed() else { return };
+        if ed.doc.pages.len() < 2 {
+            self.status = "the last page cannot be deleted".into();
+            return;
+        }
+        let Some(id) = ed.doc.pages.get(idx).map(|p| p.id) else {
+            return;
+        };
+        self.apply(RemovePage::new(id));
+        self.reconcile_page_state();
+        self.view.fit_pending = true;
+    }
+
+    fn tab_cmd_reorder(&mut self, idx: usize, to: usize) {
+        let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+        if idx >= n || to >= n {
+            return;
+        }
+        let active = self.page_id();
+        self.apply(MovePage { from: idx, to });
+        // The ACTIVE page stays active wherever it lands (Visio's
+        // reorder dialog never moves your view).
+        if let Some(id) = active {
+            if let Some(p) = self
+                .ed()
+                .and_then(|e| e.doc.pages.iter().position(|p| p.id == id))
+            {
+                self.page_idx = p;
+            }
+        }
+        self.tab_scroll_to_active = true;
+    }
+
     fn do_redo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.redo() {
@@ -357,6 +720,7 @@ impl App {
     fn start_new(&mut self) {
         self.confirm_new = false;
         self.new_after_save = false;
+        self.close_after_save = None;
         self.ed = Some(Editor::new_blank());
         self.path = PathBuf::new();
         self.dirty = false;
@@ -366,6 +730,12 @@ impl App {
         self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.page_states.clear();
+        self.tab_menu = None;
+        self.tab_rename = None;
+        self.reorder_open = false;
+        self.comment_target = None;
+        self.comment_edit = None;
         self.status = "new blank drawing (unsaved)".into();
     }
 
@@ -379,15 +749,21 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "drawing.vsdx".into());
         let (tx, rx) = mpsc::channel();
+        // The native dialog is untestable headless (rfd opens GTK);
+        // an armed preset answers in its place (tests only).
+        let preset = self.dialog_preset_for_test.take();
         std::thread::spawn(move || {
-            let picked = match kind {
-                PendingKind::Open => rfd::FileDialog::new()
-                    .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
-                    .pick_file(),
-                PendingKind::SaveAs => rfd::FileDialog::new()
-                    .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
-                    .set_file_name(&default_name)
-                    .save_file(),
+            let picked = match preset {
+                Some(p) => p,
+                None => match kind {
+                    PendingKind::Open => rfd::FileDialog::new()
+                        .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
+                        .pick_file(),
+                    PendingKind::SaveAs => rfd::FileDialog::new()
+                        .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
+                        .set_file_name(&default_name)
+                        .save_file(),
+                },
             };
             let _ = tx.send(picked);
         });
@@ -417,8 +793,9 @@ impl App {
             return;
         }
         let Some(path) = path else {
-            // cancelled: drop any chained "Save & New"
+            // cancelled: drop any chained follow-up
             self.new_after_save = false;
+            self.close_after_save = None;
             return;
         };
         match dialog {
@@ -432,6 +809,12 @@ impl App {
                     } else {
                         self.start_new();
                     }
+                } else if let Some(target) = self.close_after_save.take() {
+                    if !self.dirty {
+                        // save succeeded — the close continues (GitHub #65)
+                        self.finish_close(ctx, target);
+                    }
+                    // save failed — keep everything open
                 }
             }
         }
@@ -474,8 +857,7 @@ impl App {
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         for shape in page.shapes.iter().rev() {
             if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
-                let (px, py) = page_pos;
-                if px >= x && px <= x + w && py >= y && py <= y + h {
+                if hit_in_rect(page_pos, x, y, w, h) {
                     return Some(shape.id);
                 }
             }
@@ -518,6 +900,64 @@ impl App {
             Pos2::new(x as f32, (geom.h_in - y - h) as f32),
             Vec2::new(w as f32, h as f32),
         ))
+    }
+
+    /// The grab handles for the primary selection (GitHub #59). A 1D
+    /// shape (resolved `BeginX`/`EndX` — the XForm1D marker) gets a
+    /// handle at each endpoint plus the midpoint; everything else gets
+    /// the four resize corners of its bounding box.
+    fn selection_handles(&self) -> Vec<Handle> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some((page_id, shape_id)) = self.sel else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return Vec::new();
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        if let (Some(bx), Some(by), Some(ex), Some(ey)) =
+            (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+        {
+            return vec![
+                Handle {
+                    id: HandleId::LineBegin,
+                    pos: (bx, by),
+                },
+                Handle {
+                    id: HandleId::LineEnd,
+                    pos: (ex, ey),
+                },
+                Handle {
+                    id: HandleId::LineMid,
+                    pos: ((bx + ex) / 2.0, (by + ey) / 2.0),
+                },
+            ];
+        }
+        let Some(r) = self.sel_page_rect() else {
+            return Vec::new();
+        };
+        let page_h = self.page_geom().h_in;
+        // The rect is y-down page inches; handles are y-up.
+        [
+            (canvas::Corner::TopLeft, r.left(), r.top()),
+            (canvas::Corner::TopRight, r.right(), r.top()),
+            (canvas::Corner::BottomLeft, r.left(), r.bottom()),
+            (canvas::Corner::BottomRight, r.right(), r.bottom()),
+        ]
+        .into_iter()
+        .map(|(c, x, y)| Handle {
+            id: HandleId::Corner(c),
+            pos: (x as f64, page_h - y as f64),
+        })
+        .collect()
     }
 
     /// One shape's bbox in SCREEN coords (y-down), for anchoring the
@@ -680,13 +1120,51 @@ impl App {
         self.sel = self.sel_set.last().copied();
     }
 
+    /// The resize/lock guard for one axis of a 2D resize (GitHub #59):
+    /// Some(reason) when the size cell resolves to a formula (`GUARD(…)`,
+    /// any function — a silent overwrite is never acceptable) or the
+    /// Protection section locks it (`LockWidth`/`LockHeight`).
+    fn resize_guard(&self, size_cell: &str, lock_cell: &str) -> Option<String> {
+        let ed = self.ed()?;
+        let (page_id, shape_id) = self.sel?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        // Effective size cell formula: instance-local first, then the
+        // master's (a GUARD in the master protects instances too).
+        let resolved = ed.doc.resolve_cell(sh, &chain, size_cell);
+        if let Some(f) = resolved.as_ref().and_then(|c| c.f.as_deref()) {
+            if f != "Inh" {
+                return Some(format!("{size_cell} is formula-driven ({f})"));
+            }
+        }
+        if protection_flag(&ed.doc, sh, &chain, lock_cell) {
+            return Some(format!("{lock_cell} is set (Protection section)"));
+        }
+        None
+    }
+
     /// Commit a corner-handle resize: the dragged corner moves by the
     /// page-inch delta (y-down); the opposite corner stays anchored and
     /// LocPin stays proportional (Visio's `Width*0.5` semantics).
+    /// Guarded axes (formula or Protection lock) refuse with a status
+    /// note instead of being overwritten (#59); the min-size clamp
+    /// stays.
     fn apply_resize(&mut self, corner: canvas::Corner, dx: f64, dy: f64) {
         let Some((page_id, shape_id)) = self.sel else {
             return;
         };
+        let (w_guard, h_guard) = (
+            self.resize_guard("Width", "LockWidth"),
+            self.resize_guard("Height", "LockHeight"),
+        );
+        if let (Some(w), Some(h)) = (&w_guard, &h_guard) {
+            self.status = format!(
+                "resize refused: {} and {} — shape {shape_id} is protected",
+                w, h
+            );
+            return;
+        }
         let Some(ed) = self.ed.as_ref() else { return };
         let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
             return;
@@ -716,8 +1194,28 @@ impl App {
             canvas::Corner::BottomRight => (dx, dy),
         };
         let (w, h) = (w.max(1e-6), h.max(1e-6)); // ratio guards
-        let nw = (w + dw).max(0.05);
-        let nh = (h + dh).max(0.05);
+                                                 // A guarded axis keeps its size; only the free axis changes.
+        let nw = if w_guard.is_some() {
+            w
+        } else {
+            (w + dw).max(0.05)
+        };
+        let nh = if h_guard.is_some() {
+            h
+        } else {
+            (h + dh).max(0.05)
+        };
+        if (nw - w).abs() < 1e-9 && (nh - h).abs() < 1e-9 {
+            self.status = "resize refused: shape is protected".into();
+            return;
+        }
+        // The partial-guard note is written AFTER `apply`, which
+        // overwrites the status with the command label.
+        let guard_note = match (&w_guard, &h_guard) {
+            (Some(g), _) => Some(format!("width not resized: {} (height only)", g)),
+            (_, Some(g)) => Some(format!("height not resized: {} (width only)", g)),
+            _ => None,
+        };
         // Anchor the OPPOSITE corner: fractions (0|1) of its y-up bbox
         // position, selected by the dragged (screen-oriented) corner.
         // LocPin stays proportional (Visio's Width*0.5 semantics).
@@ -737,15 +1235,380 @@ impl App {
             shape: shape_id,
         };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
-        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
-            Box::new(SetCell::new(scope.clone(), "Width", cell(nw))),
-            Box::new(SetCell::new(scope.clone(), "Height", cell(nh))),
-            Box::new(SetCell::new(scope.clone(), "LocPinX", cell(nlx))),
-            Box::new(SetCell::new(scope.clone(), "LocPinY", cell(nly))),
-            Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))),
-            Box::new(SetCell::new(scope, "PinY", cell(npy))),
-        ];
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        if w_guard.is_none() {
+            cmds.push(Box::new(SetCell::new(scope.clone(), "Width", cell(nw))));
+            cmds.push(Box::new(SetCell::new(scope.clone(), "LocPinX", cell(nlx))));
+        }
+        if h_guard.is_none() {
+            cmds.push(Box::new(SetCell::new(scope.clone(), "Height", cell(nh))));
+            cmds.push(Box::new(SetCell::new(scope.clone(), "LocPinY", cell(nly))));
+        }
+        cmds.push(Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))));
+        cmds.push(Box::new(SetCell::new(scope, "PinY", cell(npy))));
+        // Refresh the flattened group's inherited caches (sub-shape
+        // XForms, Txt block, row coordinates) to the new size — Visio's
+        // save-time refresh; without it a real-file group renders stale
+        // inside the grown selection box (#59).
+        cmds.extend(crate::cmd::group_cache_refresh(
+            &ed.doc,
+            page_id,
+            shape_id,
+            nw / w,
+            nh / h,
+        ));
         self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
+        if let Some(note) = guard_note {
+            self.status = note;
+        }
+    }
+
+    /// Guard for a 1D endpoint/midpoint drag: refuse when any of the
+    /// cells the drag rewrites resolves to a formula, or when the
+    /// Protection section locks the endpoints (`LockBegin`/`LockEnd`).
+    fn line_drag_guard(&self, cells: &[&str], locks: &[&str]) -> Option<String> {
+        let ed = self.ed()?;
+        let (page_id, shape_id) = self.sel?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        for name in cells {
+            let resolved = ed.doc.resolve_cell(sh, &chain, name);
+            if let Some(f) = resolved.as_ref().and_then(|c| c.f.as_deref()) {
+                if f != "Inh" {
+                    return Some(format!("{name} is formula-driven ({f})"));
+                }
+            }
+        }
+        for lock in locks {
+            if protection_flag(&ed.doc, sh, &chain, lock) {
+                return Some(format!("{lock} is set (Protection section)"));
+            }
+        }
+        None
+    }
+
+    /// Drag one endpoint of a 1D shape to a new page position; the
+    /// other endpoint stays anchored. Rewrites `BeginX`/`BeginY` (or
+    /// `EndX`/`EndY`) plus the derived XForm cells the renderer reads
+    /// (Width, Angle, Pin, LocPin) as consistent literals — one undo
+    /// step (#59).
+    fn apply_line_endpoint(&mut self, end: HandleId, to: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        // Only the lock matching the dragged endpoint guards the drag
+        // (Visio: LockBegin locks the begin point alone).
+        let (guard_cells, lock): (Vec<&str>, &str) = match end {
+            HandleId::LineBegin => (vec!["BeginX", "BeginY"], "LockBegin"),
+            HandleId::LineEnd => (vec!["EndX", "EndY"], "LockEnd"),
+            _ => return,
+        };
+        if let Some(reason) = self.line_drag_guard(&guard_cells, &[lock]) {
+            self.status = format!("endpoint drag refused: {reason}");
+            return;
+        }
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let (Some(bx), Some(by), Some(ex), Some(ey)) =
+            (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+        else {
+            return;
+        };
+        let w0 = get("Width").unwrap_or(1.0);
+        let (a, b) = if end == HandleId::LineBegin {
+            (to, (ex, ey))
+        } else {
+            ((bx, by), to)
+        };
+        let w = (a.0 - b.0).hypot(a.1 - b.1).max(1e-4);
+        let angle = (b.1 - a.1).atan2(b.0 - a.0);
+        let (pin, other) = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            SetCell::new(scope.clone(), "BeginX", cell(a.0)),
+            SetCell::new(scope.clone(), "BeginY", cell(a.1)),
+            SetCell::new(scope.clone(), "EndX", cell(b.0)),
+            SetCell::new(scope.clone(), "EndY", cell(b.1)),
+        ]
+        .into_iter()
+        .map(|c| Box::new(c) as Box<dyn dc_core::Command>)
+        .collect();
+        // Derived cells: skip any that a formula owns (never overwrite a
+        // guarded cell; the note is written after `apply`, which would
+        // otherwise overwrite the status with the command label).
+        let mut kept_note: Option<String> = None;
+        for (name, v) in [
+            ("Width", w),
+            ("Angle", angle),
+            ("PinX", pin),
+            ("PinY", other),
+            ("LocPinX", w / 2.0),
+            ("LocPinY", 0.0),
+        ] {
+            let formula = ed
+                .doc
+                .resolve_cell(sh, &chain, name)
+                .and_then(|c| c.f.clone())
+                .filter(|f| f != "Inh");
+            if formula.is_some() {
+                kept_note = Some(format!(
+                    "endpoint moved, but {name} is formula-driven and kept"
+                ));
+                continue;
+            }
+            cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
+        }
+        // A 1D shape's cached row coordinates scale with its Width.
+        cmds.extend(crate::cmd::group_cache_refresh(
+            &ed.doc,
+            page_id,
+            shape_id,
+            w / w0.max(1e-6),
+            1.0,
+        ));
+        self.apply(Macro::new(
+            format!("move line endpoint (shape {shape_id})"),
+            cmds,
+        ));
+        if let Some(note) = kept_note {
+            self.status = note;
+        }
+    }
+
+    /// Drag a 1D shape's midpoint: the whole line translates, both
+    /// endpoints keep their separation (Visio's straight-line midpoint
+    /// handle). One undo step (#59).
+    fn apply_line_move(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        // Guard the endpoint cells only: real Visio 1D masters commonly
+        // derive PinX/PinY through GUARD((BeginX+EndX)/2) — a formula
+        // there must not refuse the drag, the cell is simply kept (the
+        // endpoints carry the geometry).
+        if let Some(reason) = self.line_drag_guard(
+            &["BeginX", "BeginY", "EndX", "EndY"],
+            &["LockBegin", "LockEnd"],
+        ) {
+            self.status = format!("line move refused: {reason}");
+            return;
+        }
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let Some(((bx, by), (ex, ey))) = get("BeginX")
+            .zip(get("BeginY"))
+            .zip(get("EndX").zip(get("EndY")))
+        else {
+            return;
+        };
+        let Some((px, py)) = get("PinX").zip(get("PinY")) else {
+            return;
+        };
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // Pin cells are derived: keep any a formula owns instead of
+        // overwriting the guard.
+        let mut kept_note: Option<String> = None;
+        let mut cmds: Vec<(&str, f64)> = vec![
+            ("BeginX", bx + dx),
+            ("BeginY", by + dy),
+            ("EndX", ex + dx),
+            ("EndY", ey + dy),
+        ];
+        for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
+            let formula = ed
+                .doc
+                .resolve_cell(sh, &chain, name)
+                .and_then(|c| c.f.clone())
+                .filter(|f| f != "Inh");
+            if formula.is_some() {
+                kept_note = Some(format!("line moved, but {name} is formula-driven and kept"));
+            } else {
+                cmds.push((name, v));
+            }
+        }
+        let cmds: Vec<Box<dyn dc_core::Command>> = cmds
+            .into_iter()
+            .map(|(n, v)| {
+                Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
+            })
+            .collect();
+        self.apply(Macro::new(format!("move line shape {shape_id}"), cmds));
+        if let Some(note) = kept_note {
+            self.status = note;
+        }
+    }
+
+    /// Apply a pre-boxed command (the multi-shape move paths build
+    /// commands per member); wrapped in a one-step Macro so the status
+    /// and history behave like every other apply.
+    /// Shapes whose `User.msvSDContainerShape` names `container_id`
+    /// (Visio's membership convention, #27).
+    fn container_member_ids(&self, page_id: i64, container_id: i64) -> Vec<i64> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                s.sheet.sections_named("User").iter().any(|sec| {
+                    sec.named_row("msvSDContainerShape")
+                        .and_then(|r| r.cell("Value"))
+                        .and_then(|c| c.numeric())
+                        == Some(container_id as f64)
+                })
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Context-menu Container (#27): wrap the current selection's
+    /// union bbox (padded) in a plain container shape at the back of
+    /// the z-order; membership rides on the members. One undo step.
+    fn wrap_selection_in_container(&mut self) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for sid in &members {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0)
+            };
+            let (px, py) = (g("PinX"), g("PinY"));
+            let (w, h) = (g("Width"), g("Height"));
+            let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        if x0 > x1 {
+            return;
+        }
+        const PAD: f64 = 0.25;
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let rect = (x0 - PAD, y0 - PAD, x1 - x0 + 2.0 * PAD, y1 - y0 + 2.0 * PAD);
+        self.apply(dc_core::commands::add_container(
+            page_id,
+            id,
+            &members,
+            rect,
+            "Container",
+        ));
+        self.set_selection(Some((page_id, id)));
+    }
+
+    fn apply_boxed(&mut self, label: &str, cmd: Box<dyn dc_core::Command>) {
+        self.apply(Macro::new(label, vec![cmd]));
+    }
+
+    /// The move command for one shape at a target pin: a 1D shape
+    /// translates Begin/End/Pin together (a pin-only move would leave
+    /// the endpoint cells stale — the handles would sit at the old
+    /// positions and the next endpoint drag would snap the line back,
+    /// CodeRabbit review of df4a562); 2D shapes move the pin alone.
+    fn move_cmd_for(
+        &self,
+        page_id: i64,
+        sid: i64,
+        new_pin: (f64, f64),
+    ) -> Box<dyn dc_core::Command> {
+        let Some(ed) = self.ed() else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let Some(((bx, by), (ex, ey), (px, py))) = get("BeginX")
+            .zip(get("BeginY"))
+            .zip(get("EndX").zip(get("EndY")))
+            .zip(get("PinX").zip(get("PinY")))
+            .map(|(((bx, by), (ex, ey)), (px, py))| ((bx, by), (ex, ey), (px, py)))
+        else {
+            return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        let (dx, dy) = (new_pin.0 - px, new_pin.1 - py);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let cmds: Vec<Box<dyn dc_core::Command>> = [
+            ("BeginX", bx + dx),
+            ("BeginY", by + dy),
+            ("EndX", ex + dx),
+            ("EndY", ey + dy),
+            ("PinX", px + dx),
+            ("PinY", py + dy),
+        ]
+        .into_iter()
+        .map(|(n, v)| {
+            Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
+        })
+        .collect();
+        Box::new(Macro::new(format!("move line shape {sid}"), cmds))
     }
 
     /// Track an in-progress shape drag; commit on release.
@@ -774,22 +1637,55 @@ impl App {
             if d.moved {
                 if let Some(page_id) = self.page_id() {
                     // Moving a multi-selection moves every member by the
-                    // same delta, as one undo step.
-                    let others: Vec<i64> = self
-                        .sel_set
-                        .iter()
-                        .filter(|(p, s)| *p == page_id && *s != d.shape)
-                        .map(|(_, s)| *s)
-                        .collect();
-                    if others.is_empty() {
-                        self.apply(MoveShape::new(page_id, d.shape, d.last_pin));
+                    // same delta, as one undo step. The group was
+                    // captured at press time (members of the selection
+                    // the press actually landed on). Each member moves
+                    // through `move_cmd_for`: 1D members translate their
+                    // endpoints too, not just the pin.
+                    if d.group.is_empty() {
+                        // A container drag carries its members (Visio,
+                        // #27): one undo step.
+                        let member_ids = self.container_member_ids(page_id, d.shape);
+                        if member_ids.is_empty() {
+                            let label = format!("move shape {}", d.shape);
+                            let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
+                            self.apply_boxed(&label, cmd);
+                        } else {
+                            let (dx, dy) =
+                                (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                            let mut cmds: Vec<Box<dyn dc_core::Command>> =
+                                vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
+                            if let Some(ed) = self.ed() {
+                                let page = &ed.doc.pages[self.page_idx];
+                                for sid in member_ids {
+                                    let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                                        continue;
+                                    };
+                                    let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                    else {
+                                        continue;
+                                    };
+                                    let g = |n: &str| {
+                                        ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
+                                    };
+                                    if let (Some(px), Some(py)) = (g("PinX"), g("PinY")) {
+                                        cmds.push(self.move_cmd_for(
+                                            page_id,
+                                            sid,
+                                            (px + dx, py + dy),
+                                        ));
+                                    }
+                                }
+                            }
+                            self.apply(Macro::new("move container and members", cmds));
+                        }
                     } else {
                         let Some(ed) = self.ed() else { return };
                         let dx = d.last_pin.0 - d.start_pin.0;
                         let dy = d.last_pin.1 - d.start_pin.1;
                         let mut cmds: Vec<Box<dyn dc_core::Command>> =
-                            vec![Box::new(MoveShape::new(page_id, d.shape, d.last_pin))];
-                        for sid in others {
+                            vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
+                        for sid in d.group {
                             let page = &ed.doc.pages[self.page_idx];
                             let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
                                 continue;
@@ -801,11 +1697,7 @@ impl App {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
                             if let (Some(px), Some(py)) = (get("PinX"), get("PinY")) {
-                                cmds.push(Box::new(MoveShape::new(
-                                    page_id,
-                                    sid,
-                                    (px + dx, py + dy),
-                                )));
+                                cmds.push(self.move_cmd_for(page_id, sid, (px + dx, py + dy)));
                             }
                         }
                         self.apply(Macro::new("move shapes", cmds));
@@ -829,8 +1721,17 @@ impl App {
         }
     }
 
-    fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool) {
+    fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool, ctrl: bool) {
         self.placed_last_click = false;
+        // Ctrl/Cmd+click follows the hit shape's first hyperlink
+        // (Visio, #28) before any selection semantics.
+        if ctrl {
+            if let Some(hit) = self.shape_hit(page_pos) {
+                if self.follow_first_hyperlink(hit) {
+                    return;
+                }
+            }
+        }
         // Stencil placement takes priority.
         if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
             let new_id = self
@@ -873,29 +1774,6 @@ impl App {
                 if !self.sel_set.contains(&(page_id, shape_id)) {
                     self.sel_set = vec![(page_id, shape_id)];
                 }
-                // begin a drag: grab offset keeps the pin under the fingers
-                if let Some(ed) = self.ed() {
-                    let page = &ed.doc.pages[self.page_idx];
-                    let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id);
-                    if let Some(s) = shape {
-                        let chain = shape_chain(&ed.doc, page_id, shape_id).ok();
-                        let pin = chain.and_then(|c| {
-                            ed.doc
-                                .resolve_cell(s, &c, "PinX")
-                                .and_then(|c| c.numeric())
-                                .zip(ed.doc.resolve_cell(s, &c, "PinY").and_then(|c| c.numeric()))
-                        });
-                        if let Some((px, py)) = pin {
-                            self.drag = Some(DragState {
-                                shape: shape_id,
-                                grab_off: (px - page_pos.0, py - page_pos.1),
-                                start_pin: (px, py),
-                                last_pin: (px, py),
-                                moved: false,
-                            });
-                        }
-                    }
-                }
                 self.set_selection(Some((page_id, shape_id)));
                 self.status = format!("selected shape {shape_id}");
             }
@@ -903,6 +1781,60 @@ impl App {
                 self.set_selection(None);
             }
         }
+    }
+
+    /// Primary press on a shape (page inches, y-up), reported by the
+    /// canvas on the press frame. Arms the move-drag — the click path
+    /// cannot: egui's click-vs-drag disambiguation means a natural
+    /// press-drag-release never fires `clicked()`, so arming there made
+    /// moves no-ops (GitHub #59). Selection itself still happens on the
+    /// release-as-click (`on_canvas_click`).
+    fn on_canvas_press(&mut self, page_pos: (f64, f64)) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(shape_id) = self.shape_hit(page_pos) else {
+            return;
+        };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let pin = ed
+            .doc
+            .resolve_cell(s, &chain, "PinX")
+            .and_then(|c| c.numeric())
+            .zip(
+                ed.doc
+                    .resolve_cell(s, &chain, "PinY")
+                    .and_then(|c| c.numeric()),
+            );
+        let Some((px, py)) = pin else { return };
+        // Group semantics at press time: pressing a member of the
+        // current multi-selection drags the whole set; pressing an
+        // unselected shape moves only that shape (its release-click then
+        // selects it solo).
+        let group: Vec<i64> = if self.sel_set.contains(&(page_id, shape_id)) {
+            self.sel_set
+                .iter()
+                .filter(|(p, s)| *p == page_id && *s != shape_id)
+                .map(|(_, s)| *s)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.drag = Some(DragState {
+            shape: shape_id,
+            grab_off: (px - page_pos.0, py - page_pos.1),
+            start_pin: (px, py),
+            last_pin: (px, py),
+            moved: false,
+            group,
+        });
     }
 
     /// Double-click on the canvas (page inches, y-up): Visio's route into
@@ -962,6 +1894,7 @@ impl App {
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
+                    self.tab_scroll_to_active = true;
                 }
             }
             Action::Delete => self.delete_selection(),
@@ -982,6 +1915,7 @@ impl App {
             Action::FitPage => self.view.fit_pending = true,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
+            Action::ToggleComments => self.show_comments = !self.show_comments,
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -1082,6 +2016,11 @@ impl App {
                     // tall tab, like the Office File tab.
                     let (fr, fresp) =
                         ui.allocate_exact_size(Vec2::new(54.0, STRIP_H), Sense::click());
+                    // The painted text never reaches the accessibility
+                    // tree on its own (GitHub #56).
+                    fresp.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, "File")
+                    });
                     ui.painter().rect_filled(
                         fr,
                         egui::CornerRadius {
@@ -1142,6 +2081,11 @@ impl App {
                         ui.add_space(6.0);
                         let (pr, presp) =
                             ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
+                        // Painted placeholder, so name the control for
+                        // screen readers (GitHub #56).
+                        presp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, "Tell Me")
+                        });
                         let hot = presp.hovered();
                         ui.painter().rect_filled(pr, 2, tk.tellme_bg);
                         ui.painter().rect_stroke(
@@ -1600,6 +2544,8 @@ impl App {
                                 .selected(self.view.show_grid),
                         ],
                         vec![
+                            RibbonButton::new(Icon::Comment, "Comments", Action::ToggleComments)
+                                .selected(self.show_comments),
                             RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros)
                                 .enabled(false)
                                 .tip("Connection points — planned"),
@@ -1722,31 +2668,126 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default();
-            if !tabs.is_empty() {
-                for (i, (name, _id)) in tabs.iter().enumerate() {
-                    let active = i == self.page_idx;
-                    let txt = egui::RichText::new(name).size(11.5).color(if active {
+            if tabs.is_empty() {
+                return; // no document: Visio shows no strip at all
+            }
+            // The Visio 2010 navigation cluster at the strip's left end:
+            // << first, < previous, > next, >> last (page navigation, not
+            // strip scrolling — owner-confirmed against the shipped
+            // reference, #54).
+            let n = tabs.len();
+            let page_idx = self.page_idx.min(n.saturating_sub(1));
+            let mut nav = |ui: &mut Ui, glyph: &str, tip: &str, enabled: bool, to: usize| {
+                let b =
+                    egui::Button::new(egui::RichText::new(glyph).size(10.0).color(if enabled {
                         t.tab_text_active
                     } else {
                         t.tab_text_inactive
+                    }))
+                    .small()
+                    .fill(egui::Color32::TRANSPARENT)
+                    .frame(false);
+                let clicked = ui.add_enabled(enabled, b).on_hover_text(tip).clicked();
+                if clicked {
+                    self.switch_page(to);
+                }
+            };
+            nav(ui, "<<", "First page", page_idx > 0, 0);
+            nav(
+                ui,
+                "<",
+                "Previous page",
+                page_idx > 0,
+                page_idx.saturating_sub(1),
+            );
+            nav(
+                ui,
+                ">",
+                "Next page",
+                page_idx + 1 < n,
+                (page_idx + 1).min(n - 1),
+            );
+            nav(ui, ">>", "Last page", page_idx + 1 < n, n - 1);
+            ui.separator();
+            // Tabs fill the strip; overflow clips and the nav cluster /
+            // wheel scrolling reach the rest (Visio shows no scrollbar).
+            let scroll_to_active = self.tab_scroll_to_active;
+            self.tab_scroll_to_active = false;
+            egui::ScrollArea::horizontal()
+                .id_salt("dc-page-tabs")
+                .max_height(24.0)
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for (i, (name, id)) in tabs.iter().enumerate() {
+                            let active = i == self.page_idx;
+                            // Inline rename (#54): the tab becomes an
+                            // editor on double-click / Rename; Enter or
+                            // focus loss commits, Escape cancels.
+                            let resp = if self.tab_rename.as_ref().is_some_and(|(rid, _)| rid == id)
+                            {
+                                let r = ui.add_sized(
+                                    [96.0, 18.0],
+                                    egui::TextEdit::singleline(
+                                        &mut self.tab_rename.as_mut().unwrap().1,
+                                    )
+                                    .font(egui::TextStyle::Small)
+                                    .hint_text("Page name"),
+                                );
+                                let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                                let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if escaped {
+                                    self.tab_rename = None;
+                                } else if entered || r.lost_focus() {
+                                    let new = self
+                                        .tab_rename
+                                        .take()
+                                        .map(|(_, d)| d.trim().to_string())
+                                        .unwrap_or_default();
+                                    if !new.is_empty() && new != *name {
+                                        self.apply(RenamePage::new(*id, new));
+                                    }
+                                }
+                                r
+                            } else {
+                                let txt = egui::RichText::new(name).size(11.5).color(if active {
+                                    t.tab_text_active
+                                } else {
+                                    t.tab_text_inactive
+                                });
+                                let b = egui::Button::new(txt)
+                                    .small()
+                                    .fill(if active { t.tab_active } else { t.tabs_bg })
+                                    .frame(true);
+                                let resp =
+                                    ui.add(b)
+                                        .on_hover_text(format!("page {} (id {})", i + 1, id));
+                                if active && scroll_to_active {
+                                    resp.scroll_to_me(Some(egui::Align::Center));
+                                }
+                                resp
+                            };
+                            if resp.clicked() {
+                                self.switch_page(i);
+                            }
+                            if resp.double_clicked() {
+                                self.tab_rename = Some((*id, name.clone()));
+                            }
+                            if resp.secondary_clicked() {
+                                self.tab_menu = Some((
+                                    i,
+                                    resp.interact_pointer_pos().unwrap_or(resp.rect.left_top()),
+                                ));
+                            }
+                        }
                     });
-                    let b = egui::Button::new(txt)
-                        .small()
-                        .fill(if active { t.tab_active } else { t.tabs_bg })
-                        .frame(true);
-                    let resp = ui
-                        .add(b)
-                        .on_hover_text(format!("page {} (id {})", i + 1, _id));
-                    if resp.clicked() {
-                        self.page_idx = i;
-                        self.set_selection(None);
-                        self.view.fit_pending = true;
-                    }
-                }
-                if ui.button("+").on_hover_text("Append a page").clicked() {
-                    self.dispatch(Action::NewPage);
-                }
-            }
+                });
+            // No "+" button: it duplicated the tab context menu's
+            // Insert Page… and its rect overflowed the strip band so
+            // clicks could miss (#70 — removed by owner decision
+            // 2026-10-24). The ribbon's New Page button remains, as
+            // does right-click ▸ Insert Page….
         });
     }
 
@@ -1756,9 +2797,17 @@ impl App {
             let mut left;
             if let Some(ed) = self.ed() {
                 let geom = self.page_geom();
+                // Visio names the active page in the status bar (#54),
+                // e.g. "Page-2 of 4".
+                let page_name = ed
+                    .doc
+                    .pages
+                    .get(self.page_idx)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("Page");
                 left = format!(
-                    "Page {} of {}    {}",
-                    self.page_idx + 1,
+                    "{} of {}    {}",
+                    page_name,
                     ed.doc.pages.len(),
                     self.view.unit.fmt(geom.w_in)
                         + " × "
@@ -1774,7 +2823,7 @@ impl App {
                 if let Some((_, sid)) = self.sel {
                     if let Some(page) = ed.doc.pages.get(self.page_idx) {
                         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, sid) {
-                            if let Some(chain) = shape_chain(&ed.doc, page.id, sid).ok() {
+                            if let Ok(chain) = shape_chain(&ed.doc, page.id, sid) {
                                 let g = |n: &str| {
                                     ed.doc
                                         .resolve_cell(s, &chain, n)
@@ -1832,6 +2881,342 @@ impl App {
                 }
             });
         });
+    }
+
+    /// Effective cell value of the primary selection (instance →
+    /// master) as a trimmed string (#31).
+    fn eff_cell_str(&self, name: &str) -> Option<String> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .resolve_cell(sh, &chain, name)
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
+
+    fn eff_cell_num(&self, name: &str) -> Option<f64> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .resolve_cell(sh, &chain, name)
+            .and_then(|c| c.numeric())
+    }
+
+    /// Effective first-row cell of a section (Character/Paragraph, #31).
+    fn eff_row_str(&self, section: &str, cell: &str) -> Option<String> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .effective_sheet(sh, &chain)
+            .sections_named(section)
+            .first()
+            .and_then(|sec| sec.rows.first())
+            .and_then(|r| r.cell(cell))
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
+
+    /// Write one cell on every selected shape — one Macro, one undo
+    /// step (#31 requirement 2).
+    fn fmt_set_cell(&mut self, name: &str, value: &str) {
+        let targets = self.sel_set.clone();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
+                name,
+                vsdx::Cell::value(value.to_owned()),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(format!("set {name}"), cmds));
+        }
+    }
+
+    fn fmt_set_row(&mut self, section: &str, cell: &str, value: &str) {
+        let targets = self.sel_set.clone();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            cmds.push(Box::new(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
+                section,
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                cell,
+                vsdx::Cell::value(value.to_owned()),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(format!("set {section}.{cell}"), cmds));
+        }
+    }
+
+    /// A named-choice dropdown (the manual popup — the stock ComboBox
+    /// glyph is missing from the pinned fonts). Returns the chosen
+    /// value's key when the user picks one.
+    fn fmt_dropdown(
+        ui: &mut Ui,
+        current: &str,
+        key_of: &dyn Fn(&str) -> String,
+        choices: &[(&str, &str)], // (key, display)
+    ) -> Option<String> {
+        let display = choices
+            .iter()
+            .find(|(k, _)| *k == current)
+            .map(|(_, d)| d.to_string())
+            .unwrap_or_else(|| current.to_string());
+        let r = ui.button(format!("{display}  ›"));
+        let mut picked = None;
+        egui::Popup::menu(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .show(|ui| {
+                ui.set_min_width(130.0);
+                for (k, d) in choices {
+                    if ui.selectable_label(*k == current, *d).clicked() {
+                        picked = Some(key_of(k));
+                    }
+                }
+            });
+        picked
+    }
+
+    /// The Format Shape pane (#31): Fill / Line / Text for the current
+    /// selection, writing the same cells the renderer reads — WYSIWYG
+    /// by construction. Values seed from the effective sheet; writes
+    /// are instance-local overrides (never the master).
+    fn format_pane(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
+        ui.set_min_width(200.0);
+        ui.heading(
+            egui::RichText::new("Format Shape")
+                .size(13.0)
+                .color(t.label),
+        );
+        ui.add_space(4.0);
+        let mut bufs = std::mem::take(&mut self.fmt_bufs);
+        let mut color_pick: Option<ColorTarget> = None;
+        let mut set_cell: Option<(String, String)> = None;
+        let mut set_row: Option<(String, String, String)> = None;
+
+        egui::CollapsingHeader::new("Fill")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Foreground");
+                    if ui
+                        .button(
+                            self.eff_cell_str("FillForegnd")
+                                .unwrap_or_else(|| "—".into()),
+                        )
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Fill);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    if ui
+                        .button(self.eff_cell_str("FillBkgnd").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::FillBkgnd);
+                    }
+                });
+                let cur = self
+                    .eff_cell_str("FillPattern")
+                    .unwrap_or_else(|| "1".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[
+                        ("0", "None"),
+                        ("1", "Solid"),
+                        ("2", "5%"),
+                        ("3", "10%"),
+                        ("4", "20%"),
+                        ("5", "30%"),
+                        ("6", "40%"),
+                        ("24", "Gradient horiz."),
+                        ("25", "Gradient vert."),
+                        ("28", "Gradient radial"),
+                    ],
+                ) {
+                    set_cell = Some(("FillPattern".into(), v));
+                }
+            });
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new("Line")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui
+                        .button(self.eff_cell_str("LineColor").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Line);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Weight");
+                    let cur_pt = self.eff_cell_num("LineWeight").unwrap_or(0.0104) * 72.0;
+                    let mut pt = cur_pt;
+                    let r = ui.add(
+                        egui::Slider::new(&mut pt, 0.25..=12.0)
+                            .show_value(true)
+                            .custom_formatter(|v, _| format!("{v:.2} pt")),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Slider, true, "Line weight")
+                    });
+                    if r.drag_stopped() && (pt - cur_pt).abs() > 1e-6 {
+                        set_cell = Some(("LineWeight".into(), format!("{:.6}", pt / 72.0)));
+                    }
+                });
+                let cur = self
+                    .eff_cell_str("LinePattern")
+                    .unwrap_or_else(|| "1".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[
+                        ("0", "None"),
+                        ("1", "Solid"),
+                        ("2", "Dotted"),
+                        ("3", "Dash-dot"),
+                        ("4", "Dashed"),
+                        ("9", "Long dash"),
+                    ],
+                ) {
+                    set_cell = Some(("LinePattern".into(), v));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Rounding");
+                    let cur = self.eff_cell_str("Rounding").unwrap_or_else(|| "0".into());
+                    let buf = bufs.entry("rounding".into()).or_insert(cur);
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Rounding")
+                    });
+                    if r.lost_focus() {
+                        if let Ok(v) = buf.trim().parse::<f64>() {
+                            set_cell = Some(("Rounding".into(), format!("{v:.6}")));
+                        }
+                        bufs.remove("rounding");
+                    }
+                });
+            });
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new("Text")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Font");
+                    let cur = self.eff_row_str("Character", "Font").unwrap_or_default();
+                    let buf = bufs.entry("font".into()).or_insert(cur);
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(120.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Font")
+                    });
+                    if r.lost_focus() {
+                        let v = buf.trim().to_string();
+                        if !v.is_empty() {
+                            set_row = Some(("Character".into(), "Font".into(), v));
+                        }
+                        bufs.remove("font");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Size (pt)");
+                    let cur = self
+                        .eff_row_str("Character", "Size")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(10.0)
+                        * 72.0;
+                    let buf = bufs.entry("size".into()).or_insert(format!("{cur:.1}"));
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Size (pt)")
+                    });
+                    if r.lost_focus() {
+                        if let Ok(pt) = buf.trim().parse::<f64>() {
+                            set_row = Some((
+                                "Character".into(),
+                                "Size".into(),
+                                format!("{:.6}", pt / 72.0),
+                            ));
+                        }
+                        bufs.remove("size");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Style");
+                    let bits = self
+                        .eff_row_str("Character", "Style")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let mut bold = bits & 1 != 0;
+                    let mut italic = bits & 2 != 0;
+                    let rb = ui.checkbox(&mut bold, "B");
+                    rb.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Bold")
+                    });
+                    if rb.changed() {
+                        set_row = Some((
+                            "Character".into(),
+                            "Style".into(),
+                            format!("{}", (bits & !1) | bold as i64),
+                        ));
+                    }
+                    let ri = ui.checkbox(&mut italic, "I");
+                    ri.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Italic")
+                    });
+                    if ri.changed() {
+                        set_row = Some((
+                            "Character".into(),
+                            "Style".into(),
+                            format!("{}", (bits & !2) | ((italic as i64) * 2)),
+                        ));
+                    }
+                });
+                let cur = self
+                    .eff_row_str("Paragraph", "HorzAlign")
+                    .unwrap_or_else(|| "0".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[("0", "Left"), ("1", "Center"), ("2", "Right")],
+                ) {
+                    set_row = Some(("Paragraph".into(), "HorzAlign".into(), v));
+                }
+            });
+
+        self.fmt_bufs = bufs;
+        if let Some(target) = color_pick {
+            self.color_pick = Some(target);
+        }
+        if let Some((name, v)) = set_cell {
+            self.fmt_set_cell(&name, &v);
+        }
+        if let Some((sec, cell, v)) = set_row {
+            self.fmt_set_row(&sec, &cell, &v);
+        }
     }
 
     fn shapesheet_panel(&mut self, ui: &mut Ui) {
@@ -2013,10 +3398,26 @@ impl App {
         }
         let npages = self.ed.as_ref().unwrap().doc.pages.len();
         self.page_idx = self.page_idx.min(npages.saturating_sub(1));
+        // Annotation visibility (#29): hide the Annotation layer's
+        // members when the Review toggle is off.
+        let mut hidden: Vec<i64> = Vec::new();
+        if !self.show_comments {
+            if let Some(ed) = self.ed.as_ref() {
+                if let Some(page) = ed.doc.pages.get(self.page_idx) {
+                    if let Ok(rows) = dc_core::layers::layer_rows(&ed.doc, page.id) {
+                        for r in &rows {
+                            if dc_core::layers::layer_name(r) == Some("Annotation") {
+                                hidden.push(r.ix);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (svg, part) = {
             let ed = self.ed.as_ref().unwrap();
             let page = &ed.doc.pages[self.page_idx];
-            match dc::svg::render_page(&ed.doc, page) {
+            match dc::svg::render_page_with(&ed.doc, page, &hidden) {
                 Ok(s) => (s, page.part.clone()),
                 Err(e) => {
                     ui.label(format!("render failed: {e:#}"));
@@ -2028,7 +3429,7 @@ impl App {
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
         let drag_rect = self.drag_preview_rect();
-        let dragging = self.drag.is_some();
+        let handles = self.selection_handles();
         let armed = self.stencil.armed.is_some();
         let tex = self.tex.get(
             ui.ctx(),
@@ -2056,7 +3457,7 @@ impl App {
             let Some(page) = page else { return false };
             for shape in page.shapes.iter().rev() {
                 if let Some((x, y, w, h)) = Self::shape_rect_static(&ed.doc, page.id, shape) {
-                    if pos.0 >= x && pos.0 <= x + w && pos.1 >= y && pos.1 <= y + h {
+                    if hit_in_rect(pos, x, y, w, h) {
                         return true;
                     }
                 }
@@ -2070,8 +3471,8 @@ impl App {
             Some(&tex),
             sel_rect,
             &extra_rects,
+            &handles,
             drag_rect,
-            dragging,
             armed,
             &hit,
             &mut mouse,
@@ -2084,13 +3485,133 @@ impl App {
             // select (and possible drag-start) semantics on its frame.
             self.on_canvas_dbl_click(pos);
         } else if let Some(pos) = out.click_page_pos {
-            self.on_canvas_click(pos, out.shift_click);
+            self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+        }
+        if let Some(pos) = out.press_page_pos {
+            self.on_canvas_press(pos);
         }
         if let Some((x0, y0, x1, y1)) = out.marquee_done {
             self.apply_marquee(x0, y0, x1, y1);
         }
-        if let Some((corner, (dx, dy))) = out.resize_done {
-            self.apply_resize(corner, dx, dy);
+        // Comment badges (#29 rework): a small bubble at the top-left
+        // corner of every commented shape — the shipped 2016 indicator,
+        // non-intrusive (an overlay, never part of the drawing), shown
+        // while comments are visible; clicking opens the thread popup.
+        if self.show_comments {
+            let targets: Vec<i64> = self
+                .ed()
+                .map(|ed| {
+                    let page =
+                        &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                    page.shapes
+                        .iter()
+                        .filter(|s| {
+                            s.sheet
+                                .sections_named("User")
+                                .iter()
+                                .find_map(|sec| sec.named_row("AnnotationRef"))
+                                .and_then(|r| r.cell("Value"))
+                                .and_then(|c| c.numeric())
+                                .is_some_and(|v| page.shapes.iter().any(|t| t.id as f64 == v))
+                        })
+                        .filter_map(|s| {
+                            s.sheet
+                                .sections_named("User")
+                                .iter()
+                                .find_map(|sec| sec.named_row("AnnotationRef"))
+                                .and_then(|r| r.cell("Value"))
+                                .and_then(|c| c.numeric())
+                                .map(|v| v as i64)
+                        })
+                        .collect::<Vec<i64>>()
+                })
+                .unwrap_or_default();
+            // Distinct targets, badge per target.
+            let mut seen = std::collections::HashSet::new();
+            for target in targets {
+                if !seen.insert(target) {
+                    continue;
+                }
+                let count = self.comments_for(target).len();
+                let Some(r) = self.shape_screen_rect(target) else {
+                    continue;
+                };
+                let badge = Rect::from_min_size(
+                    r.left_top() + Vec2::new(-9.0, -9.0),
+                    Vec2::new(18.0, 15.0),
+                );
+                #[allow(deprecated)] // Id::new: one badge per shape, stable
+                let resp = ui.interact(
+                    badge,
+                    egui::Id::new(("dc-comment-badge", target)),
+                    Sense::click(),
+                );
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::Button,
+                        true,
+                        format!("Comments on shape {target} ({count})"),
+                    )
+                });
+                let t = theme::shell_tokens(ui.visuals());
+                ui.painter().rect_filled(badge, 4.0, t.accent_band);
+                ui.painter().rect_stroke(
+                    badge,
+                    4.0,
+                    Stroke::new(1.0, Color32::WHITE),
+                    egui::StrokeKind::Middle,
+                );
+                crate::ribbon::Icon::Comment.paint(ui, badge, true);
+                let gal = ui.painter().layout_no_wrap(
+                    format!("{count}"),
+                    egui::FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+                ui.painter().galley(
+                    Pos2::new(
+                        badge.right() - gal.size().x + 2.0,
+                        badge.bottom() - gal.size().y,
+                    ),
+                    gal,
+                    Color32::WHITE,
+                );
+                if resp.clicked() {
+                    self.comment_target = Some(target);
+                    self.comment_body.clear();
+                    self.comment_edit = None;
+                }
+            }
+        }
+        if let Some((id, start, end)) = out.handle_drag_done {
+            // A press on a handle released without travel is just a
+            // click: committing it would create no-op undo steps (or a
+            // bogus "refused" status for an unprotected shape).
+            let travel_px = (end.0 - start.0).hypot(end.1 - start.1) * self.view.px_per_in() as f64;
+            if travel_px > 1.0 {
+                match id {
+                    HandleId::Corner(corner) => {
+                        // y-down screen-orientation delta, as before.
+                        let dx = end.0 - start.0;
+                        let dy = start.1 - end.1;
+                        self.apply_resize(corner, dx, dy);
+                    }
+                    HandleId::LineBegin | HandleId::LineEnd => {
+                        // The endpoint moves by the drag DELTA from the
+                        // handle's own position — the grab may start up
+                        // to HANDLE_GRAB px away from the handle center,
+                        // and snapping to the raw pointer would jump it.
+                        if let Some(origin) = handles.iter().find(|h| h.id == id).map(|h| h.pos) {
+                            self.apply_line_endpoint(
+                                id,
+                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
+                            );
+                        }
+                    }
+                    HandleId::LineMid => {
+                        self.apply_line_move(start, end);
+                    }
+                }
+            }
         }
         if let Some(pos) = out.right_click_page_pos {
             // Visio: right-click selects the shape under the cursor and
@@ -2098,7 +3619,13 @@ impl App {
             match self.shape_hit(pos) {
                 Some(shape_id) => {
                     if let Some(p) = self.page_id() {
-                        self.set_selection(Some((p, shape_id)));
+                        // Right-clicking a member of the current
+                        // multi-selection keeps the selection (Visio's
+                        // Group flow depends on it, #26); clicking
+                        // outside it collapses to the hit shape.
+                        if !self.sel_set.contains(&(p, shape_id)) {
+                            self.set_selection(Some((p, shape_id)));
+                        }
                     }
                     let anchor = ui
                         .ctx()
@@ -2110,6 +3637,996 @@ impl App {
             }
         }
         self.shape_context_menu(ui.ctx());
+        self.tab_context_menu(ui.ctx());
+    }
+
+    /// The page-tab context menu (#54): Visio's tab affordances —
+    /// insert, duplicate, delete (never the last page), rename, and
+    /// The page-tab context menu (#54), copying the shipped Visio
+    /// reference (owner screenshots 2026-10-24): Insert, Delete, Rename,
+    /// Duplicate, then Page Setup (later milestone) and Reorder Pages….
+    /// All live items run through the undoable command layer.
+    #[allow(deprecated)] // Id::new: one tab menu, stable identity wanted
+    fn tab_context_menu(&mut self, ctx: &egui::Context) {
+        let Some((idx, anchor)) = self.tab_menu else {
+            return;
+        };
+        let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+        if idx >= n {
+            self.tab_menu = None;
+            return;
+        }
+        #[derive(Clone, Copy, PartialEq)]
+        enum Act {
+            Insert,
+            Delete,
+            Rename,
+            Duplicate,
+            Reorder,
+        }
+        let mut act: Option<Act> = None;
+        let menu = egui::Popup::new(
+            egui::Id::new("dc-tab-ctx-menu"),
+            ctx.clone(),
+            anchor,
+            egui::LayerId::background(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .width(232.0);
+        let popup = menu.show(|ui| {
+            ui.set_min_width(232.0);
+            let tokens = theme::menu_tokens(ui.visuals());
+            ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
+            ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
+            ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
+            if ctx_item(ui, None, "Insert Page…", "", true) {
+                act = Some(Act::Insert);
+            }
+            if ctx_item(
+                ui,
+                Some(crate::ribbon::Icon::Delete),
+                "Delete Page",
+                "",
+                n > 1,
+            ) {
+                act = Some(Act::Delete);
+            }
+            if ctx_item(ui, None, "Rename Page", "", true) {
+                act = Some(Act::Rename);
+            }
+            if ctx_item(ui, None, "Duplicate Page", "", true) {
+                act = Some(Act::Duplicate);
+            }
+            ui.separator();
+            ctx_item(ui, None, "Page Setup…", "(later milestone)", false);
+            if ctx_item(ui, None, "Reorder Pages…", "", true) {
+                act = Some(Act::Reorder);
+            }
+        });
+        // Close on an outside primary click (the shape menu's idiom).
+        let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
+        if let Some(ir) = &popup {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
+                self.tab_menu = None;
+            }
+        }
+        let Some(a) = act else { return };
+        self.tab_menu = None;
+        match a {
+            Act::Insert => self.tab_cmd_insert(idx),
+            Act::Delete => self.tab_cmd_delete(idx),
+            Act::Rename => {
+                let id = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id);
+                let name = self
+                    .ed()
+                    .and_then(|e| e.doc.pages.get(idx))
+                    .map(|p| p.name.clone());
+                if let (Some(id), Some(name)) = (id, name) {
+                    self.tab_rename = Some((id, name));
+                }
+            }
+            Act::Duplicate => self.tab_cmd_duplicate(idx),
+            Act::Reorder => self.reorder_open = true,
+        }
+    }
+
+    /// The shape's hyperlink rows (#28): instance rows first, then the
+    /// master's (resolved like every other cell read).
+    fn shape_hyperlinks(&self, shape_id: i64) -> Vec<(String, String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        let collect = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .flat_map(|s| s.sheet.sections_named("Hyperlink"))
+                .flat_map(|sec| sec.rows.iter())
+                .map(|r| {
+                    let t = |n: &str| r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default();
+                    (t("Address"), t("SubAddress"), t("Description"))
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut out = collect(std::slice::from_ref(sh));
+        if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
+            out.extend(collect(&m.shapes));
+        }
+        out
+    }
+
+    /// Follow a hyperlink (#28): a SubAddress naming a page navigates
+    /// the document; anything else opens through the OS (fire-and-
+    /// forget). Returns whether a link existed.
+    fn follow_first_hyperlink(&mut self, shape_id: i64) -> bool {
+        let Some((addr, sub, _)) = self.shape_hyperlinks(shape_id).into_iter().next() else {
+            return false;
+        };
+        self.follow_hyperlink(&addr, &sub);
+        true
+    }
+
+    fn follow_hyperlink(&mut self, address: &str, sub: &str) {
+        let address = address.trim();
+        let sub = sub.trim();
+        if !sub.is_empty() {
+            // GOTOPAGE-class navigation: SubAddress names a page.
+            let target = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.iter().position(|p| p.name == sub));
+            match target {
+                Some(i) => {
+                    self.switch_page(i);
+                    self.status = format!("went to page {sub:?}");
+                    return;
+                }
+                None => {
+                    self.status = format!("page {sub:?} not found");
+                    return;
+                }
+            }
+        }
+        if address.is_empty() {
+            self.status = "the link has no address".into();
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        let open = "xdg-open";
+        #[cfg(target_os = "macos")]
+        let open = "open";
+        #[cfg(target_os = "windows")]
+        let open = "cmd";
+        #[cfg(target_os = "windows")]
+        let flag = "/C";
+        #[cfg(not(target_os = "windows"))]
+        let flag = "";
+        let mut cmd = std::process::Command::new(open);
+        if !flag.is_empty() {
+            cmd.arg(flag);
+        }
+        match cmd.arg(address).spawn() {
+            Ok(_) => self.status = format!("opened {address}"),
+            Err(e) => self.status = format!("could not open {address}: {e}"),
+        }
+    }
+
+    /// The Hyperlinks dialog (#28): rows of the selected shape with
+    /// add / edit / remove through the command layer (one undo per
+    /// change) and Go to follow a link. The draft lives OUTSIDE the
+    /// window closure (a per-frame clone would drop typed text — the
+    /// text_edit_window pattern).
+    fn add_comment(&mut self, shape_id: i64, body: &str) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let g = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        let (px, py) = (g("PinX"), g("PinY"));
+        let (w, h) = (g("Width"), g("Height"));
+        let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+        let (x1, y1) = (px - lx + w, py - ly + h);
+
+        // The Annotation layer, created on first use; LayerMember
+        // references the layer row's IX (Visio's convention).
+        let rows = dc_core::layers::layer_rows(&ed.doc, page_id).unwrap_or_default();
+        let (layer_cmd, layer_ix) = match rows
+            .iter()
+            .find(|r| dc_core::layers::layer_name(r) == Some("Annotation"))
+        {
+            Some(r) => (None, r.ix),
+            None => (
+                Some(dc_core::commands::AddLayer::new(page_id, "Annotation")),
+                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1,
+            ),
+        };
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let author = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".into());
+        let date = format_now_utc();
+        let text = format!("{} — {}: {}", author, date, body.trim());
+        // Replies stack under the thread's first bubble (#29 rework).
+        let thread_len = self.comments_for(shape_id).len();
+        let stack = 0.55 * thread_len as f64;
+
+        let set = |sheet: &mut vsdx::model::Sheet, n: &str, v: &str| {
+            sheet.set_cell(n, vsdx::model::Cell::value(v.to_string()));
+        };
+        let (aw, ah) = (1.8_f64, 0.5_f64);
+        let mut sheet = vsdx::model::Sheet::default();
+        set(&mut sheet, "PinX", &format!("{:.4}", x1 + 0.1));
+        set(
+            &mut sheet,
+            "PinY",
+            &format!("{:.4}", ((y1 + 0.1) - stack).max(ah)),
+        );
+        set(&mut sheet, "Width", &format!("{aw}"));
+        set(&mut sheet, "Height", &format!("{ah}"));
+        set(&mut sheet, "LocPinX", "0");
+        set(&mut sheet, "LocPinY", "0");
+        set(&mut sheet, "LayerMember", &layer_ix.to_string());
+        set(&mut sheet, "FillForegnd", "#FFF3C2");
+        sheet.text = Some(text.clone());
+        sheet.text_raw = Some(
+            text.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
+        );
+        let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+            ix,
+            t: Some(t.into()),
+            cells: vec![
+                ("X".into(), vsdx::model::Cell::value(x.to_string())),
+                ("Y".into(), vsdx::model::Cell::value(y.to_string())),
+            ],
+            ..vsdx::model::Row::default()
+        };
+        sheet
+            .children
+            .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+                name: "Geometry".into(),
+                ix: 0,
+                rows: vec![
+                    row(1, "MoveTo", "0", "0"),
+                    row(2, "LineTo", &format!("{aw}"), "0"),
+                    row(3, "LineTo", &format!("{aw}"), &format!("{ah}")),
+                    row(4, "LineTo", "0", &format!("{ah}")),
+                    row(5, "LineTo", "0", "0"),
+                ],
+                ..vsdx::model::Section::default()
+            }));
+        let annotation = Shape {
+            id,
+            name_u: Some(format!("Comment.{id}")),
+            type_: Some("Shape".into()),
+            sheet,
+            ..Shape::default()
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        if let Some(c) = layer_cmd {
+            cmds.push(Box::new(c));
+        }
+        cmds.push(Box::new(AddShape {
+            page: page_id,
+            parent: None,
+            shape: annotation,
+        }));
+        let user_row = |name: &str, val: &str| {
+            Box::new(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: id,
+                },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named(name.into()),
+                "Value",
+                vsdx::model::Cell::value(val.to_string()),
+            )) as Box<dyn dc_core::Command>
+        };
+        cmds.push(user_row("AnnotationRef", &shape_id.to_string()));
+        cmds.push(user_row("AnnotationAuthor", &author));
+        cmds.push(user_row("AnnotationDate", &date));
+        self.apply(dc_core::Macro::new("add comment", cmds));
+    }
+
+    /// The shape's comment thread (#29): annotation shapes whose
+    /// `User.AnnotationRef` names it, oldest first — (annotation id,
+    /// author, date, body).
+    fn comments_for(&self, shape_id: i64) -> Vec<(i64, String, String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let user_val = |s: &Shape, row: &str| -> Option<String> {
+            s.sheet
+                .sections_named("User")
+                .iter()
+                .find_map(|sec| sec.named_row(row))
+                .and_then(|r| r.cell("Value"))
+                .and_then(|c| c.v.clone())
+        };
+        let mut out: Vec<(i64, String, String, String)> = page
+            .shapes
+            .iter()
+            .filter(|s| {
+                user_val(s, "AnnotationRef").as_deref() == Some(shape_id.to_string().as_str())
+            })
+            .map(|s| {
+                let text = s.sheet.text.clone().unwrap_or_default();
+                let author = user_val(s, "AnnotationAuthor").unwrap_or_default();
+                let date = user_val(s, "AnnotationDate").unwrap_or_default();
+                // Older bubbles carry "author — date: body" in the text
+                // block; strip the header when the cells agree.
+                let body = text
+                    .strip_prefix(&format!("{author} — {date}: "))
+                    .unwrap_or(&text)
+                    .to_string();
+                (s.id, author, date, body)
+            })
+            .collect();
+        out.sort_by_key(|(id, _, _, _)| *id);
+        out
+    }
+
+    /// The Comments popup (#29 rework, after the shipped 2016
+    /// reference): one card per comment — author + date header, body,
+    /// Edit / Delete — with a Reply field at the bottom. The drafts
+    /// live outside the window closure (the #28 lesson).
+    fn comment_window(&mut self, ctx: &egui::Context) {
+        let Some(shape_id) = self.comment_target else {
+            return;
+        };
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.comment_target = None;
+            self.comment_edit = None;
+            self.comment_body.clear();
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let thread = self.comments_for(shape_id);
+        let mut body = std::mem::take(&mut self.comment_body);
+        let mut edit = self.comment_edit.take();
+        let mut close = false;
+        egui::Window::new("Comments")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                if thread.is_empty() {
+                    ui.weak("No comments on this shape yet.");
+                }
+                for (ann_id, author, date, cbody) in &thread {
+                    let card = egui::Frame::new()
+                        .inner_margin(egui::Margin::same(6))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ))
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            // 2016 header: avatar initial + author + date.
+                            ui.horizontal(|ui| {
+                                let initial = author
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "?".into());
+                                let (c, _) =
+                                    ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    c.center(),
+                                    8.0,
+                                    ui.visuals().selection.bg_fill,
+                                );
+                                ui.painter().text(
+                                    c.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    initial,
+                                    egui::FontId::proportional(10.0),
+                                    Color32::WHITE,
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{author}  {date}"))
+                                        .small()
+                                        .weak(),
+                                );
+                            });
+                            let editing_here = edit.as_ref().is_some_and(|(id, _)| id == ann_id);
+                            let mut edit_buf = edit
+                                .as_mut()
+                                .filter(|(id, _)| id == ann_id)
+                                .map(|(_, b)| std::mem::take(b));
+                            let mut edit_done = false;
+                            if editing_here {
+                                let buf = edit_buf.as_mut().unwrap();
+                                let r = ui.add(
+                                    egui::TextEdit::multiline(buf)
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::TextInput,
+                                        true,
+                                        "Edit comment",
+                                    )
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Save").clicked() && !buf.trim().is_empty() {
+                                        let author = author.clone();
+                                        let date = date.clone();
+                                        let new_text =
+                                            format!("{} — {}: {}", author, date, buf.trim());
+                                        self.apply(dc_core::SetText::new(
+                                            Scope::Shape {
+                                                page: page_id,
+                                                shape: *ann_id,
+                                            },
+                                            new_text,
+                                        ));
+                                        edit_done = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        edit_done = true;
+                                    }
+                                });
+                            }
+                            if !editing_here {
+                                ui.label(egui::RichText::new(cbody).size(12.0));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Edit").clicked() {
+                                        edit = Some((*ann_id, cbody.clone()));
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        self.apply(RemoveShape::new(page_id, *ann_id));
+                                    }
+                                });
+                            }
+                            // Write the (possibly typed-into) buffer
+                            // back unless the editor closed.
+                            if let Some(b) = edit_buf {
+                                if let Some((id, slot)) = edit.as_mut() {
+                                    if id == ann_id && !edit_done {
+                                        *slot = b;
+                                    }
+                                }
+                            }
+                        });
+                    let _ = card;
+                    ui.add_space(4.0);
+                }
+                ui.separator();
+                // Reply (or the first comment when the thread is empty).
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut body)
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(if thread.is_empty() {
+                            "Add a comment"
+                        } else {
+                            "Reply"
+                        }),
+                );
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::TextInput,
+                        true,
+                        if thread.is_empty() {
+                            "New comment"
+                        } else {
+                            "Reply"
+                        },
+                    )
+                });
+                ui.horizontal(|ui| {
+                    let caption = if thread.is_empty() { "OK" } else { "Reply" };
+                    if ui.button(caption).clicked() && !body.trim().is_empty() {
+                        self.add_comment(shape_id, &body);
+                        body.clear();
+                    }
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if !close {
+            self.comment_body = body;
+            self.comment_edit = edit;
+        } else {
+            // Close means Close: drop the target too, or the window
+            // re-renders next frame (#29 live report).
+            self.comment_target = None;
+            self.comment_edit = None;
+            self.comment_body = String::new();
+        }
+    }
+
+    /// The shape's Prop rows for the Shape Data dialog (#30):
+    /// instance rows, then the master's (effective view); edits always
+    /// target the instance scope by row name.
+    fn prop_rows(&self, shape_id: i64) -> Vec<(String, vsdx::model::Row)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        let collect = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .flat_map(|s| s.sheet.sections_named("Prop"))
+                .flat_map(|sec| sec.rows.iter())
+                .filter_map(|r| r.n.as_deref().map(|n| (n.to_string(), r.clone())))
+                .collect::<Vec<_>>()
+        };
+        let mut out = collect(std::slice::from_ref(sh));
+        if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
+            out.extend(collect(&m.shapes));
+        }
+        out
+    }
+
+    /// Shape Data… (#30): one field per visible Prop row, ordered by
+    /// SortKey; the editor follows the row's Type/Format. Edits write
+    /// the row's Value through SetRowCell (one undo per change).
+    fn shape_data_window(&mut self, ctx: &egui::Context) {
+        fn write_value(app: &mut App, page_id: i64, shape_id: i64, name: &str, val: &str) {
+            app.apply(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: shape_id,
+                },
+                "Prop",
+                0,
+                dc_core::commands::RowSel::Named(name.to_string()),
+                "Value",
+                vsdx::model::Cell::value(val.to_string()),
+            ));
+        }
+        let Some(shape_id) = self.shape_data_open else {
+            return;
+        };
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.shape_data_open = None;
+            self.prop_bufs.clear();
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let mut rows = self.prop_rows(shape_id);
+        rows.sort_by(|a, b| {
+            crate::props::sort_key(&a.1)
+                .partial_cmp(&crate::props::sort_key(&b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut bufs = std::mem::take(&mut self.prop_bufs);
+        // Closable (live report on #30): the title-bar X AND a labeled
+        // Close button in an always-visible action bar — the same
+        // elementary/Apple-HIG cancel path the Hyperlinks window uses.
+        // Default position: top-right of the viewport, where Visio
+        // pins its Shape Data pane.
+        let mut open = true;
+        let mut close_btn = false;
+        let top_right = ctx
+            .input(|i| i.viewport().inner_rect)
+            .map_or(egui::pos2(900.0, 60.0), |r| {
+                r.right_top() + egui::vec2(-360.0, 60.0)
+            });
+        egui::Window::new("Shape Data")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(340.0)
+            .default_pos(top_right)
+            .show(ctx, |ui| {
+                egui::Grid::new("dc-shape-data")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 6.0))
+                    .show(ui, |ui| {
+                        for (name, row) in &rows {
+                            if crate::props::invisible(row) {
+                                continue;
+                            }
+                            let label = crate::props::label(row, name);
+                            let current = row
+                                .cell("Value")
+                                .and_then(|c| c.v.clone())
+                                .unwrap_or_default();
+                            let tip = row
+                                .cell("Prompt")
+                                .and_then(|c| c.v.clone())
+                                .unwrap_or_default();
+                            ui.label(&label).on_hover_text(&tip);
+                            let _field_id = ();
+                            match crate::props::field_kind(row) {
+                                crate::props::FieldKind::Bool => {
+                                    let mut on = current.trim() == "1";
+                                    let r = ui.checkbox(&mut on, "");
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::CheckBox,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.changed() {
+                                        write_value(
+                                            self,
+                                            page_id,
+                                            shape_id,
+                                            name,
+                                            if on { "1" } else { "0" },
+                                        );
+                                    }
+                                }
+                                crate::props::FieldKind::List(choices) => {
+                                    // A manual dropdown: the stock
+                                    // ComboBox's arrow glyph is missing
+                                    // from the pinned font set.
+                                    let r = ui.button(format!("{current}  ›")).on_hover_text(&tip);
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::ComboBox,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    let mut picked: Option<String> = None;
+                                    egui::Popup::menu(&r)
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                        .show(|ui| {
+                                            ui.set_min_width(120.0);
+                                            for c in &choices {
+                                                if ui.selectable_label(*c == current, c).clicked() {
+                                                    picked = Some(c.clone());
+                                                }
+                                            }
+                                        });
+                                    if let Some(v) = picked {
+                                        write_value(self, page_id, shape_id, name, &v);
+                                    }
+                                }
+                                crate::props::FieldKind::Number => {
+                                    let buf =
+                                        bufs.entry(name.clone()).or_insert_with(|| current.clone());
+                                    let r =
+                                        ui.add(egui::TextEdit::singleline(buf).hint_text("0.0"));
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::TextInput,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.lost_focus() && buf.as_str() != current {
+                                        match buf.trim().parse::<f64>() {
+                                            Ok(_) => {
+                                                let v = buf.trim().to_string();
+                                                write_value(self, page_id, shape_id, name, &v);
+                                            }
+                                            Err(_) => {
+                                                self.status = format!("{label}: not a number");
+                                            }
+                                        }
+                                        bufs.remove(name);
+                                    }
+                                }
+                                crate::props::FieldKind::Str
+                                | crate::props::FieldKind::Formatted(_) => {
+                                    let buf =
+                                        bufs.entry(name.clone()).or_insert_with(|| current.clone());
+                                    let r = ui.add(egui::TextEdit::singleline(buf));
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::TextInput,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.lost_focus() && buf.as_str() != current {
+                                        let v = buf.trim().to_string();
+                                        write_value(self, page_id, shape_id, name, &v);
+                                        bufs.remove(name);
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                // Always-visible action bar: Close bottom-right.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            close_btn = true;
+                        }
+                    });
+                });
+            });
+        if open && !close_btn {
+            self.prop_bufs = bufs;
+        } else {
+            self.shape_data_open = None;
+            self.prop_bufs.clear();
+        }
+    }
+
+    fn hyperlink_window(&mut self, ctx: &egui::Context) {
+        let Some(shape_id) = self.hyperlink_open else {
+            return;
+        };
+        // Close automatically when the shape or page goes away.
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.hyperlink_open = None;
+            self.hyperlink_draft = None;
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let rows: Vec<(i64, String, String, String)> = self
+            .ed()
+            .map(|ed| {
+                let page = &ed.doc.pages[self.page_idx];
+                vsdx::model::find_shape_by_id(&page.shapes, shape_id)
+                    .map(|sh| {
+                        sh.sheet
+                            .sections_named("Hyperlink")
+                            .iter()
+                            .flat_map(|sec| sec.rows.iter())
+                            .map(|r| {
+                                let t = |n: &str| {
+                                    r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default()
+                                };
+                                (r.ix, t("Address"), t("SubAddress"), t("Description"))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        let mut draft = self.hyperlink_draft.take();
+        // Cancel mechanism (live report + the 2016 dialog's Cancel):
+        // the title-bar X and an explicit Close button both discard
+        // any draft and dismiss the window.
+        let mut open = true;
+        // The Close BUTTON flips this (the X writes `open` via the
+        // builder; the two can't share a borrow).
+        let mut close_btn = false;
+        egui::Window::new("Hyperlinks")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(380.0)
+            .show(ctx, |ui| {
+                if rows.is_empty() && draft.is_none() {
+                    ui.weak("No hyperlinks on this shape.");
+                }
+                for (ix, addr, sub, desc) in &rows {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(if desc.is_empty() {
+                                addr.clone()
+                            } else {
+                                format!("{desc} — {addr}")
+                            })
+                            .size(12.0),
+                        );
+                        if ui.button("Go").clicked() {
+                            let (a, s) = (addr.clone(), sub.clone());
+                            self.follow_hyperlink(&a, &s);
+                        }
+                        if ui.button("Edit").clicked() {
+                            draft = Some(HyperlinkDraft {
+                                edit_row: Some(*ix),
+                                address: addr.clone(),
+                                sub: sub.clone(),
+                                desc: desc.clone(),
+                            });
+                        }
+                        if ui.button("Remove").clicked() {
+                            self.apply(dc_core::commands::RemoveSectionRow::new(
+                                scope.clone(),
+                                "Hyperlink",
+                                0,
+                                dc_core::commands::RowSel::Ix(*ix),
+                            ));
+                        }
+                    });
+                }
+                ui.separator();
+                if let Some(d) = draft.as_mut() {
+                    // Accessible names on the inputs (#56 pattern);
+                    // the grid labels alone don't label the fields.
+                    let field = |ui: &mut Ui, label: &str, buf: &mut String| {
+                        ui.label(label);
+                        let r = ui.add(egui::TextEdit::singleline(buf).hint_text(label));
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::TextInput, true, label)
+                        });
+                    };
+                    egui::Grid::new("dc-hyperlink-draft")
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 4.0))
+                        .show(ui, |ui| {
+                            field(ui, "Address", &mut d.address);
+                            ui.end_row();
+                            field(ui, "Sub-address", &mut d.sub);
+                            ui.end_row();
+                            field(ui, "Description", &mut d.desc);
+                            ui.end_row();
+                        });
+                    let (edit_row, address, sub, desc) =
+                        (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
+                    let mut close_draft = false;
+                    ui.horizontal(|ui| {
+                        if ui.button("OK").clicked() {
+                            let ix = edit_row.unwrap_or_else(|| {
+                                rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
+                            });
+                            let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+                            if let Some(old) = edit_row {
+                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(old),
+                                )));
+                            }
+                            for (name, val) in [
+                                ("Address", &address),
+                                ("SubAddress", &sub),
+                                ("Description", &desc),
+                            ] {
+                                if !val.trim().is_empty() {
+                                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                                        scope.clone(),
+                                        "Hyperlink",
+                                        0,
+                                        dc_core::commands::RowSel::Ix(ix),
+                                        name,
+                                        vsdx::model::Cell::value(val.trim()),
+                                    )));
+                                }
+                            }
+                            self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            close_draft = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            close_draft = true;
+                        }
+                    });
+                    if close_draft {
+                        draft = None;
+                    }
+                }
+                // The window's action bar (always visible — elementary/
+                // Apple HIG: the dismiss control must be obvious, not
+                // hidden behind editor state): New… left, Close right.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if draft.is_none() && ui.button("New…").clicked() {
+                        draft = Some(HyperlinkDraft {
+                            edit_row: None,
+                            address: String::new(),
+                            sub: String::new(),
+                            desc: String::new(),
+                        });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Close").clicked() {
+                            draft = None;
+                            close_btn = true;
+                        }
+                    });
+                });
+            });
+        if open && !close_btn {
+            self.hyperlink_draft = draft;
+        } else {
+            // Cancelled: discard the draft and close.
+            self.hyperlink_open = None;
+            self.hyperlink_draft = None;
+        }
+    }
+
+    /// Visio's Reorder Pages dialog (#54): the page list with Move Up /
+    /// Move Down buttons; every click is one undoable MovePage command,
+    /// and the active page stays active wherever it lands.
+    fn reorder_pages_window(&mut self, ctx: &egui::Context) {
+        if !self.reorder_open {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new("Reorder Pages")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+                let names: Vec<String> = self
+                    .ed()
+                    .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+                    .unwrap_or_default();
+                egui::Grid::new("dc-reorder-list")
+                    .num_columns(3)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for (i, name) in names.iter().enumerate() {
+                            ui.label(egui::RichText::new(name.clone()).size(12.0));
+                            if ui
+                                .add_enabled(i > 0, egui::Button::new("Move Up").small())
+                                .clicked()
+                            {
+                                self.tab_cmd_reorder(i, i - 1);
+                            }
+                            if ui
+                                .add_enabled(i + 1 < n, egui::Button::new("Move Down").small())
+                                .clicked()
+                            {
+                                self.tab_cmd_reorder(i, i + 1);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.reorder_open = false;
+        }
     }
 
     /// The Visio 2016 shape context menu: clipboard, duplicate, delete,
@@ -2119,41 +4636,175 @@ impl App {
     /// Master-defined right-click actions (ShapeSheet Actions section),
     /// in row order: (menu label, is-flyout-child). Visio heads the shape
     /// menu with these.
-    fn master_actions(&self, shape_id: i64) -> Vec<(String, bool)> {
-        fn collect(self_: &App, shape_id: i64) -> Option<Vec<(String, bool)>> {
-            fn walk(sh: &Shape, out: &mut Vec<(String, bool)>) {
+    /// Master-defined Actions rows (#25): labels, evaluated
+    /// Checked/Invisible/Disabled, BeginGroup/FlyoutChild, SortKey
+    /// ordering — everything the context menu needs, evaluated against
+    /// the INSTANCE's effective sheet so instance-local User rows
+    /// (which the actions themselves write) drive the checkmarks.
+    fn master_actions(&self, shape_id: i64) -> Vec<MasterActionRow> {
+        struct RawRow {
+            menu: String,
+            action: String,
+            checked_f: Option<String>,
+            checked_v: Option<String>,
+            disabled_f: Option<String>,
+            disabled_v: Option<String>,
+            invisible_f: Option<String>,
+            invisible_v: Option<String>,
+            begin_group: bool,
+            flyout_child: bool,
+            sort_key: f64,
+            /// `Action` = No Formula or ReadOnly: a flyout header, not a
+            /// command.
+            display_only: bool,
+        }
+        // A cell's live value: formula first (evaluated in `env`),
+        // cached V as fallback — the row-cell convention.
+        let eval_flag =
+            |f: &Option<String>, v: &Option<String>, env: &vsdx::formula::Env| -> bool {
+                let by_formula = f.as_deref().and_then(|f| {
+                    if f == "Inh" || f == "No Formula" {
+                        None
+                    } else {
+                        vsdx::formula::eval(f, env).ok().and_then(|x| x.as_f64())
+                    }
+                });
+                by_formula
+                    .or_else(|| v.as_deref().and_then(|v| v.trim().parse::<f64>().ok()))
+                    .is_some_and(|x| x != 0.0)
+            };
+        let collect = |self_: &App| -> Option<Vec<MasterActionRow>> {
+            let ed = self_.ed.as_ref()?;
+            let page = ed.doc.pages.get(self_.page_idx)?;
+            let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+            let m = ed.doc.master(shape.master?)?;
+            // Instance evaluation environment: instance-local User rows
+            // override the master's (dc::svg::shape_env layers them).
+            let chain = dc_core::scope::shape_chain(&ed.doc, page.id, shape_id).ok()?;
+            let env = dc::svg::shape_env(&ed.doc, shape, &chain);
+            let mut rows: Vec<RawRow> = Vec::new();
+            fn walk(sh: &Shape, out: &mut Vec<RawRow>) {
                 for sec in sh.sheet.sections_named("Actions") {
                     for row in &sec.rows {
-                        let Some(menu) = row
+                        // Visio writes flyout labels either as V or as
+                        // the Cell's text content (multi-line menus) —
+                        // the parser keeps the latter as raw_inner.
+                        let menu = row
                             .cell("Menu")
-                            .and_then(|c| c.v.clone())
+                            .and_then(|c| {
+                                c.v.clone()
+                                    .or_else(|| c.raw_inner.as_deref().map(str::to_owned))
+                            })
                             .map(|t| t.trim().to_owned())
-                            .filter(|t| !t.is_empty())
-                        else {
-                            continue;
+                            .filter(|t| !t.is_empty());
+                        let Some(menu) = menu else { continue };
+                        let f = |n: &str| -> Option<String> {
+                            row.cell(n)
+                                .and_then(|c| c.f.clone())
+                                .filter(|f| !f.is_empty() && f != "No Formula" && f != "Inh")
                         };
-                        if row.cell("Invisible").and_then(|c| c.numeric()) == Some(1.0) {
-                            continue;
-                        }
-                        let child = row.cell("FlyoutChild").and_then(|c| c.numeric()) == Some(1.0);
-                        out.push((menu, child));
+                        let v =
+                            |n: &str| -> Option<String> { row.cell(n).and_then(|c| c.v.clone()) };
+                        // The Action FORMULA is F; V caches the last
+                        // evaluation ('No Formula' rows carry V only).
+                        let action_f = row.cell("Action").and_then(|c| c.f.clone());
+                        let action = action_f
+                            .clone()
+                            .filter(|f| f != "No Formula")
+                            .or_else(|| v("Action"))
+                            .unwrap_or_default();
+                        let display_only = action_f.as_deref() == Some("No Formula")
+                            || v("ReadOnly")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0);
+                        out.push(RawRow {
+                            menu,
+                            action,
+                            display_only,
+                            checked_f: f("Checked"),
+                            checked_v: v("Checked"),
+                            disabled_f: f("Disabled"),
+                            disabled_v: v("Disabled"),
+                            invisible_f: f("Invisible"),
+                            invisible_v: v("Invisible"),
+                            begin_group: v("BeginGroup")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0),
+                            flyout_child: v("FlyoutChild")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .is_some_and(|x| x != 0.0),
+                            sort_key: v("SortKey")
+                                .and_then(|x| x.trim().parse::<f64>().ok())
+                                .unwrap_or(0.0),
+                        });
                     }
                 }
                 for sub in &sh.sub_shapes {
                     walk(sub, out);
                 }
             }
-            let ed = self_.ed.as_ref()?;
-            let page = ed.doc.pages.get(self_.page_idx)?;
-            let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
-            let m = ed.doc.master(sh.master?)?;
-            let mut out = Vec::new();
             for root in &m.shapes {
-                walk(root, &mut out);
+                walk(root, &mut rows);
             }
-            Some(out)
+            // Visio orders by SortKey, then row order (stable).
+            rows.sort_by(|a, b| {
+                a.sort_key
+                    .partial_cmp(&b.sort_key)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            Some(
+                rows.into_iter()
+                    .filter(|r| !eval_flag(&r.invisible_f, &r.invisible_v, &env))
+                    .map(|r| MasterActionRow {
+                        menu: r.menu,
+                        action: r.action,
+                        checked: eval_flag(&r.checked_f, &r.checked_v, &env),
+                        disabled: eval_flag(&r.disabled_f, &r.disabled_v, &env),
+                        begin_group: r.begin_group,
+                        flyout_child: r.flyout_child,
+                        display_only: r.display_only,
+                    })
+                    .collect(),
+            )
+        };
+        collect(self).unwrap_or_default()
+    }
+
+    /// Execute a master Actions row (#25): parse the SETF/GetRef chain
+    /// and apply it as one undoable Macro against the instance. Rows
+    /// whose formula needs a runtime we do not ship (RUNADDON, …)
+    /// defer with a status note — the EventDblClick policy (#20).
+    fn run_master_action(&mut self, shape_id: i64, row: &MasterActionRow) {
+        let Some(ed) = self.ed() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(shape) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = dc_core::scope::shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let env = dc::svg::shape_env(&ed.doc, shape, &chain);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        match dc_core::commands::shape_action_commands(scope, &row.action, &env) {
+            Ok(cmds) if cmds.is_empty() => {
+                self.status = format!("{:?} is display-only", row.menu);
+            }
+            Ok(cmds) => {
+                let label = format!("run shape action {:?}", row.menu);
+                self.apply(dc_core::Macro::new(label, cmds));
+            }
+            Err(why) => {
+                self.status = format!("{:?} deferred: {why}", row.menu);
+            }
         }
-        collect(self, shape_id).unwrap_or_default()
     }
 
     /// Bump the selected shapes' Character.Size by whole points.
@@ -2179,7 +4830,7 @@ impl App {
                 .and_then(|r| r.cell("Size"))
                 .and_then(|c| c.numeric())
                 .unwrap_or(0.13888);
-            let next = ((cur * 72.0 + delta_pt).max(4.0).min(200.0)) / 72.0;
+            let next = (cur * 72.0 + delta_pt).clamp(4.0, 200.0) / 72.0;
             cmds.push(Box::new(SetRowCell::new(
                 Scope::Shape {
                     page: page_id,
@@ -2236,6 +4887,7 @@ impl App {
     fn apply_color(&mut self, target: ColorTarget, color: &str) {
         let cell_name = match target {
             ColorTarget::Fill => "FillForegnd",
+            ColorTarget::FillBkgnd => "FillBkgnd",
             ColorTarget::Line => "LineColor",
         };
         let targets = self.sel_set.clone();
@@ -2270,6 +4922,14 @@ impl App {
 
         #[derive(Clone, Copy, PartialEq)]
         enum Act {
+            Master(usize),
+            Group,
+            Ungroup,
+            Container,
+            Hyperlink,
+            AddComment,
+            ShapeData,
+            FormatShape,
             Cut,
             Copy,
             Paste,
@@ -2336,13 +4996,26 @@ impl App {
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
-            for (menu, child) in &actions {
-                let label = if *child {
-                    format!("     {menu}")
+            // Actions rows are live (#25): evaluated checkmarks and
+            // disabled state, BeginGroup separators, FlyoutChild
+            // indentation, and SETF execution on click.
+            for (ai, row) in actions.iter().enumerate() {
+                if row.begin_group && ai > 0 {
+                    ui.separator();
+                }
+                // Flyout arrow: › (the pinned font set has no ▸).
+                let label = if row.flyout_child {
+                    format!("     {}", row.menu)
                 } else {
-                    format!("{menu}  ▸")
+                    format!("{}  ›", row.menu)
                 };
-                ctx_item(ui, None, &label, "(v0.5)", false);
+                // A display-only row (No Formula) stays grayed like
+                // Visio's flyout headers; Disabled is the formula's.
+                let enabled = !row.disabled && !row.display_only && !row.action.trim().is_empty();
+                let icon = row.checked.then_some(crate::ribbon::Icon::Check);
+                if ctx_item(ui, icon, &label, "", enabled) && enabled {
+                    act = Some(Act::Master(ai));
+                }
             }
             if !actions.is_empty() {
                 ui.separator();
@@ -2423,12 +5096,65 @@ impl App {
                 act = Some(Act::FlipH);
             }
             ui.separator();
-            ctx_item(ui, None, "Group", "(v0.5)", false);
-            ctx_item(ui, None, "Container", "(v0.5)", false);
-            ctx_item(ui, None, "Hyperlink…", "(v0.5)", false);
-            ctx_item(ui, None, "Add Comment", "(v0.5)", false);
-            ctx_item(ui, None, "Shape Data…", "(v0.5)", false);
-            ctx_item(ui, None, "Format Shape…", "(v0.5)", false);
+            // Group needs a multi-selection; Ungroup needs a selected
+            // group (#26).
+            let can_group = self.sel_set.len() >= 2;
+            let is_group = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+                .is_some_and(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
+            if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
+                act = Some(Act::Group);
+            }
+            if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
+                act = Some(Act::Ungroup);
+            }
+            // Container is a flyout, not an action (Visio 2016): the
+            // parent row only opens the submenu. Anchor: draw the row
+            // directly so we own its Response for Popup::menu.
+            let tokens = theme::menu_tokens(ui.visuals());
+            let mut job = egui::text::LayoutJob::default();
+            job.append(
+                "  Container  ›",
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
+            );
+            let cont = ui.add_enabled(
+                !self.sel_set.is_empty(),
+                egui::Button::new(job).min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
+            );
+            let mut sub_action = false;
+            egui::Popup::menu(&cont)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(210.0);
+                    if ctx_item(ui, None, "Add to New Container", "", true) {
+                        sub_action = true;
+                    }
+                    ctx_item(
+                        ui,
+                        None,
+                        "Add to Underlying Container",
+                        "(later milestone)",
+                        false,
+                    );
+                });
+            if sub_action {
+                act = Some(Act::Container);
+            }
+            if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
+                act = Some(Act::Hyperlink);
+            }
+            if ctx_item(ui, None, "Add Comment", "", true) {
+                act = Some(Act::AddComment);
+            }
+            if ctx_item(ui, None, "Shape Data…", "", true) {
+                act = Some(Act::ShapeData);
+            }
+            if ctx_item(ui, None, "Format Shape…", "", true) {
+                act = Some(Act::FormatShape);
+            }
             ui.separator();
             if ctx_item(ui, None, "Edit Text…", "F2", true) {
                 act = Some(Act::EditText);
@@ -2452,6 +5178,56 @@ impl App {
         self.ctx_menu = None;
         let Some((page_id, _)) = self.sel else { return };
         match a {
+            Act::Master(ai) => {
+                if let Some(row) = actions.get(ai).cloned() {
+                    self.run_master_action(shape_id, &row);
+                }
+            }
+            Act::Group => {
+                let members: Vec<i64> = self
+                    .sel_set
+                    .iter()
+                    .filter(|(p, _)| *p == page_id)
+                    .map(|(_, sid)| *sid)
+                    .collect();
+                let new_id = self
+                    .ed()
+                    .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
+                self.apply(dc_core::commands::GroupShapes::new(page_id, members));
+                if let Some(nid) = new_id {
+                    self.set_selection(Some((page_id, nid)));
+                }
+            }
+            Act::Container => self.wrap_selection_in_container(),
+            Act::Hyperlink => {
+                self.hyperlink_open = Some(shape_id);
+                self.hyperlink_draft = None;
+            }
+            Act::AddComment => {
+                self.comment_target = Some(shape_id);
+                self.comment_body.clear();
+                self.comment_edit = None;
+            }
+            Act::ShapeData => {
+                self.shape_data_open = Some(shape_id);
+                self.prop_bufs.clear();
+            }
+            Act::FormatShape => {
+                self.format_pane_open = true;
+                self.fmt_bufs.clear();
+            }
+            Act::Ungroup => {
+                let first_member = self.ed().and_then(|ed| {
+                    ed.doc.pages.get(self.page_idx).and_then(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, shape_id)
+                            .and_then(|g| g.sub_shapes.first().map(|m| m.id))
+                    })
+                });
+                self.apply(dc_core::commands::UngroupShape::new(page_id, shape_id));
+                if let Some(m) = first_member {
+                    self.set_selection(Some((page_id, m)));
+                }
+            }
             Act::Cut | Act::Copy => {
                 self.copy_selection();
                 if a == Act::Cut {
@@ -2607,6 +5383,8 @@ impl App {
     }
     /// Stencil panel content rect from the last frame; its right edge
     /// plus the 6px frame margin is the panel's resize handle (the
+    /// kittest: multi-selection size (#26).
+    #[doc(hidden)]
     /// kittest re-wrap tests drag it, GitHub #53).
     #[doc(hidden)]
     pub fn debug_stencil_panel_inner_rect(&self) -> Rect {
@@ -2617,6 +5395,11 @@ impl App {
         self.canvas_rect
     }
     #[doc(hidden)]
+    /// kittest: multi-selection size (#26).
+    #[doc(hidden)]
+    pub fn debug_sel_set_len(&self) -> usize {
+        self.sel_set.len()
+    }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
     }
@@ -2630,8 +5413,8 @@ impl App {
         let r = self.sel_page_rect()?;
         let ppi = self.view.px_per_in();
         Some(egui::pos2(
-            self.view.pan.x + r.right() as f32 * ppi,
-            self.view.pan.y + r.bottom() as f32 * ppi,
+            self.view.pan.x + r.right() * ppi,
+            self.view.pan.y + r.bottom() * ppi,
         ))
     }
     #[doc(hidden)]
@@ -2651,8 +5434,8 @@ impl App {
         let r = self.sel_page_rect()?;
         let ppi = self.view.px_per_in();
         Some(egui::pos2(
-            self.view.pan.x + r.left() as f32 * ppi,
-            self.view.pan.y + r.top() as f32 * ppi,
+            self.view.pan.x + r.left() * ppi,
+            self.view.pan.y + r.top() * ppi,
         ))
     }
     /// One shape's bbox in SCREEN coords (context-menu placement tests).
@@ -2722,10 +5505,259 @@ impl App {
     pub fn debug_zoom(&self) -> f32 {
         self.view.zoom
     }
+    /// kittest: a manual zoom (#62's second ruler density) — leaves fit
+    /// mode like the real control so the zoom actually applies.
+    #[doc(hidden)]
+    pub fn set_zoom_for_test(&mut self, z: f32) {
+        self.view.zoom = z.clamp(0.1, 8.0);
+        self.view.fit_mode = false;
+        self.view.fit_pending = false;
+    }
+    /// kittest: page names in tab order (#54).
+    #[doc(hidden)]
+    pub fn debug_page_names(&self) -> Vec<String> {
+        self.ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default()
+    }
+    /// kittest: a shape's INSTANCE-LOCAL User row value (#25) — None
+    /// while the row is inherited from the master.
+    #[doc(hidden)]
+    pub fn debug_user_value_for_test(&self, shape_id: i64, row: &str) -> Option<f64> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        sh.sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row(row))?
+            .cell("Value")?
+            .numeric()
+    }
+    /// kittest: a shape's hyperlink rows as (address, sub-address)
+    /// from the instance section (#28).
+    #[doc(hidden)]
+    pub fn debug_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
+        self.shape_hyperlinks(shape_id)
+            .into_iter()
+            .map(|(a, s, _)| (a, s))
+            .collect()
+    }
+    /// kittest: annotation shapes on the Annotation layer (#29) as
+    /// (shape id, text).
+    #[doc(hidden)]
+    pub fn debug_annotations_for_test(&self) -> Vec<(i64, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let layer_ix = dc_core::layers::layer_rows(&ed.doc, page.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| dc_core::layers::layer_name(r) == Some("Annotation"))
+            .map(|r| r.ix);
+        let Some(layer_ix) = layer_ix else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                s.sheet.cell("LayerMember").and_then(|c| c.numeric()) == Some(layer_ix as f64)
+            })
+            .map(|s| (s.id, s.sheet.text.clone().unwrap_or_default()))
+            .collect()
+    }
+    /// kittest: annotation visibility state (#29).
+    #[doc(hidden)]
+    pub fn show_comments_for_test(&self) -> bool {
+        self.show_comments
+    }
+    /// kittest: flip annotation visibility directly (#29) — the ribbon
+    /// button shares the standard toggle dispatch.
+    #[doc(hidden)]
+    pub fn set_show_comments_for_test(&mut self, on: bool) {
+        self.show_comments = on;
+    }
+    /// kittest: a shape's effective Prop row Value (#30) — instance
+    /// first, then the master.
+    #[doc(hidden)]
+    pub fn debug_prop_value_for_test(&self, shape_id: i64, row: &str) -> Option<String> {
+        let rows = self.prop_rows(shape_id);
+        rows.iter()
+            .find(|(n, _)| n == row)?
+            .1
+            .cell("Value")
+            .and_then(|c| c.v.clone())
+    }
+    /// kittest: a shape's effective cell value (#31).
+    #[doc(hidden)]
+    pub fn debug_cell_for_test(&self, shape_id: i64, cell: &str) -> Option<String> {
+        let ed = self.ed()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        // Char.X / Para.X read the effective first Character/Paragraph
+        // row cell.
+        if let Some(row_cell) = cell.strip_prefix("Char.") {
+            return ed
+                .doc
+                .effective_sheet(sh, &chain)
+                .sections_named("Character")
+                .first()
+                .and_then(|sec| sec.rows.first())
+                .and_then(|r| r.cell(row_cell))
+                .and_then(|c| c.v.clone())
+                .map(|v| v.trim().to_string());
+        }
+        if let Some(row_cell) = cell.strip_prefix("Para.") {
+            return ed
+                .doc
+                .effective_sheet(sh, &chain)
+                .sections_named("Paragraph")
+                .first()
+                .and_then(|sec| sec.rows.first())
+                .and_then(|r| r.cell(row_cell))
+                .and_then(|c| c.v.clone())
+                .map(|v| v.trim().to_string());
+        }
+        ed.doc
+            .resolve_cell(sh, &chain, cell)
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
+    /// kittest: the active page's name (#54).
+    #[doc(hidden)]
+    pub fn debug_active_page_name(&self) -> String {
+        self.ed()
+            .and_then(|e| e.doc.pages.get(self.page_idx))
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
     /// A shape's current text (double-click edit tests).
     #[doc(hidden)]
     pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
         self.selected_text(shape_id)
+    }
+    /// The page SVG the canvas is currently showing (scratch debugging).
+    #[doc(hidden)]
+    pub fn debug_page_svg(&self) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        dc::svg::render_page(&ed.doc, page).ok()
+    }
+    /// All four selection-frame corners in SCREEN coords, [tl, tr, bl,
+    /// br] — the four-corner resize tests (GitHub #59).
+    #[doc(hidden)]
+    pub fn debug_sel_corners(&self) -> Option<[egui::Pos2; 4]> {
+        let r = self.sel_page_rect()?;
+        let ppi = self.view.px_per_in();
+        let at = |x: f32, y: f32| egui::pos2(self.view.pan.x + x * ppi, self.view.pan.y + y * ppi);
+        Some([
+            at(r.left(), r.top()),
+            at(r.right(), r.top()),
+            at(r.left(), r.bottom()),
+            at(r.right(), r.bottom()),
+        ])
+    }
+    /// One selection handle's screen position (line endpoint/midpoint
+    /// drag tests, GitHub #59).
+    #[doc(hidden)]
+    pub fn debug_handle_screen(&self, id: crate::canvas::HandleId) -> Option<egui::Pos2> {
+        let h = self.selection_handles().into_iter().find(|h| h.id == id)?;
+        let geom = self.page_geom();
+        Some(crate::canvas::page_to_screen(
+            h.pos.0, h.pos.1, &self.view, &geom,
+        ))
+    }
+    /// The status-bar text (guard-refusal tests).
+    #[doc(hidden)]
+    pub fn debug_status(&self) -> &str {
+        &self.status
+    }
+    /// One resolved cell of a shape, as (value, formula) — asserting
+    /// guarded cells stay untouched (GitHub #59 tests).
+    #[doc(hidden)]
+    pub fn debug_cell(&self, page: i64, shape: i64, name: &str) -> Option<(String, String)> {
+        let ed = self.ed.as_ref()?;
+        let p = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&p.shapes, shape)?;
+        let chain = shape_chain(&ed.doc, page, shape).ok()?;
+        let c = ed.doc.resolve_cell(sh, &chain, name)?;
+        Some((
+            c.v.clone().unwrap_or_default(),
+            c.f.clone().unwrap_or_default(),
+        ))
+    }
+    /// Test hook: write a cell on a shape's own sheet, optionally with a
+    /// formula (e.g. `GUARD(2 in)`), through the command layer.
+    #[doc(hidden)]
+    pub fn set_cell_for_test(
+        &mut self,
+        page: i64,
+        shape: i64,
+        name: &str,
+        v: &str,
+        f: Option<&str>,
+    ) {
+        let cell = vsdx::model::Cell {
+            v: Some(v.to_string()),
+            f: f.map(|s| s.to_string()),
+            ..vsdx::model::Cell::default()
+        };
+        self.apply(SetCell::new(Scope::Shape { page, shape }, name, cell));
+    }
+    /// Test hook: turn a Protection-section lock on for a shape
+    /// (LockWidth/LockHeight/LockBegin/LockEnd — GitHub #59 tests).
+    #[doc(hidden)]
+    pub fn set_protection_for_test(&mut self, page: i64, shape: i64, name: &str, on: bool) {
+        use vsdx::model::{Row, Section, SheetChild};
+        let Some(ed) = self.ed_mut() else { return };
+        let Some(p) = ed.doc.pages.iter_mut().find(|p| p.id == page) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id_mut(&mut p.shapes, shape) else {
+            return;
+        };
+        let val = if on { "1" } else { "0" };
+        // Replace an existing lock cell in place (Row::cell reads the
+        // first match — appending would make a later `on=false`
+        // unreadable and the lock uncleearable); create the section
+        // otherwise. Both paths bump the version so the view refreshes.
+        let set_cell = |cells: &mut Vec<(String, vsdx::model::Cell)>| match cells
+            .iter_mut()
+            .find(|(n, _)| n == name)
+        {
+            Some((_, c)) => *c = vsdx::model::Cell::value(val),
+            None => cells.push((name.to_string(), vsdx::model::Cell::value(val))),
+        };
+        if let Some(SheetChild::Section(sec)) = sh
+            .sheet
+            .children
+            .iter_mut()
+            .find(|c| matches!(c, SheetChild::Section(s) if s.name == "Protection"))
+        {
+            match sec.rows.first_mut() {
+                Some(row) => set_cell(&mut row.cells),
+                None => sec.rows.push(Row {
+                    cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
+                    ..Row::default()
+                }),
+            }
+        } else {
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "Protection".into(),
+                rows: vec![Row {
+                    cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
+        }
+        self.dirty = true;
+        self.version += 1;
     }
 
     /// The inline text editor opened by Edit Text… (Visio F2).
@@ -2783,6 +5815,7 @@ impl App {
         let mut open = true;
         egui::Window::new(match target {
             ColorTarget::Fill => "Fill Color",
+            ColorTarget::FillBkgnd => "Fill Background",
             ColorTarget::Line => "Line Color",
         })
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -2903,7 +5936,6 @@ impl App {
         // so an idle app still wakes to pick a flip up.
         if let Some(watcher) = &self.os_theme {
             if let Some(pref) = watcher.poll() {
-                eprintln!("os_theme: OS preference changed → {pref:?}");
                 ctx.set_theme(pref);
             }
             ctx.request_repaint_after(Duration::from_secs(2));
@@ -2911,7 +5943,12 @@ impl App {
         self.handle_shortcuts(&ctx);
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
+        self.handle_close_request(&ctx);
         self.text_edit_window(&ctx);
+        self.reorder_pages_window(&ctx);
+        self.hyperlink_window(&ctx);
+        self.comment_window(&ctx);
+        self.shape_data_window(&ctx);
         self.color_palette_window(&ctx);
 
         // The eframe root Ui paints no background and eframe's clear
@@ -2930,6 +5967,7 @@ impl App {
         if self.backstage {
             self.backstage_view(ui);
             self.confirm_new_window(&ctx);
+            self.confirm_close_window(&ctx);
             return;
         }
 
@@ -3007,6 +6045,12 @@ impl App {
                 .resizable(true)
                 .show(ui, |ui| self.shapesheet_panel(ui));
         }
+        if self.format_pane_open && self.sel.is_some() {
+            egui::Panel::right("format_pane")
+                .default_size(240.0)
+                .resizable(true)
+                .show(ui, |ui| self.format_pane(ui));
+        }
         self.central(ui);
         self.stencil_carry(&ctx);
 
@@ -3023,6 +6067,145 @@ impl App {
             }
         }
         self.confirm_new_window(&ctx);
+        self.confirm_close_window(&ctx);
+    }
+
+    /// A close request arrived — the window's ✕ / Alt-F4 (or the
+    /// kittest hook): veto it and ask the user first when there is
+    /// anything to lose; a clean document closes straight away
+    /// (GitHub #65). egui 0.37 semantics: the app exits after this
+    /// frame unless `ViewportCommand::CancelClose` is sent.
+    fn handle_close_request(&mut self, ctx: &Context) {
+        let requested = self.close_req_for_test || ctx.input(|i| i.viewport().close_requested());
+        self.close_req_for_test = false;
+        if !requested {
+            return;
+        }
+        if self.closing {
+            // Our own approved close echoing back (egui-winit feeds
+            // ViewportCommand::Close into the next frame's input):
+            // send nothing — the un-vetoed request is what exits the
+            // app — and never resurrect the prompt.
+            return;
+        }
+        // While the prompt is already up — or its Save has the native
+        // save-as dialog open (`close_after_save` armed) — absorb
+        // further requests: a second prompt's Cancel would contradict
+        // the pending chain, and its Don't Save would race the
+        // dialog's save (one prompt; the open dialog still decides).
+        if self.confirm_close.is_some() || self.close_after_save.is_some() {
+            self.veto_close(ctx);
+            return;
+        }
+        if self.dirty && self.ed.is_some() {
+            // Leaving supersedes the New prompt if it was up.
+            self.confirm_new = false;
+            self.veto_close(ctx);
+            self.confirm_close = Some(CloseTarget::App);
+        } else {
+            // Clean: let the close proceed. Re-issuing Close also
+            // covers the test hook, where no OS close stands behind
+            // the flag (in production it is an idempotent no-op).
+            self.issue_close(ctx);
+        }
+    }
+
+    /// The "Save changes?" modal before a window close or File → Close
+    /// discards a dirty document (GitHub #65). Visio 2016 shape:
+    /// Save (save-as first when untitled, then close), Don't Save,
+    /// Cancel.
+    fn confirm_close_window(&mut self, ctx: &Context) {
+        let Some(target) = self.confirm_close else {
+            return;
+        };
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.confirm_close = None;
+            return;
+        }
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "the drawing".into());
+        egui::Window::new("Save changes?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
+            .show(ctx, |ui| {
+                ui.label(format!("Save changes to {name}?"));
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        self.confirm_close = None;
+                        // New and close chains are mutually exclusive.
+                        self.new_after_save = false;
+                        if self.path.as_os_str().is_empty() {
+                            // pick a file first; the close continues
+                            // after the dialog completes
+                            self.close_after_save = Some(target);
+                            self.begin_dialog(PendingKind::SaveAs);
+                        } else {
+                            let p = self.path.clone();
+                            self.save_to(&p);
+                            if !self.dirty {
+                                self.finish_close(ctx, target);
+                            }
+                            // save failed — stay open; the status bar
+                            // carries the error
+                        }
+                    }
+                    if ui.button("Don't Save").clicked() {
+                        self.confirm_close = None;
+                        self.finish_close(ctx, target);
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_close = None;
+                    }
+                });
+            });
+    }
+
+    /// Execute a confirmed close: the app window (re-issue the close
+    /// the veto cancelled) or just the document (back to the start
+    /// screen — the app stays open, Visio's File → Close).
+    fn finish_close(&mut self, ctx: &Context, target: CloseTarget) {
+        self.close_after_save = None;
+        match target {
+            CloseTarget::App => self.issue_close(ctx),
+            CloseTarget::Doc => self.close_doc(),
+        }
+    }
+
+    /// Veto an in-flight OS close so the prompt can run.
+    fn veto_close(&mut self, ctx: &Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+        self.debug_close_vetoes += 1;
+    }
+
+    /// Ask the viewport to close (eframe exits the app for the root).
+    /// Marked so the close's own echo — egui-winit delivers
+    /// `ViewportCommand::Close` as next frame's close-requested
+    /// input — passes through instead of being re-prompted (#65).
+    fn issue_close(&mut self, ctx: &Context) {
+        self.closing = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.debug_close_issued += 1;
+    }
+
+    /// File → Close teardown: back to the start screen, nothing dirty.
+    fn close_doc(&mut self) {
+        self.ed = None;
+        self.path = PathBuf::new();
+        self.dirty = false;
+        self.set_selection(None);
+        self.stencil = Stencil::default();
+        self.tex.clear();
+        self.page_states.clear();
+        self.tab_menu = None;
+        self.tab_rename = None;
+        self.reorder_open = false;
+        self.comment_target = None;
+        self.comment_edit = None;
+        self.status = "document closed".into();
     }
 
     /// Unsaved-changes prompt before File → New discards work.
@@ -3071,9 +6254,12 @@ impl App {
     fn backstage_view(&mut self, ui: &mut Ui) {
         let mut close_backstage = false;
         let mut action: Option<BackAction> = None;
-        // Esc always returns to the document — unless the unsaved-
-        // changes prompt owns the screen.
-        if !self.confirm_new && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Esc always returns to the document — unless a prompt owns
+        // the screen.
+        if !self.confirm_new
+            && self.confirm_close.is_none()
+            && ui.ctx().input(|i| i.key_pressed(egui::Key::Escape))
+        {
             close_backstage = true;
         }
         let has_doc = self.ed.is_some();
@@ -3200,22 +6386,91 @@ impl App {
                             } else {
                                 "All changes saved"
                             };
+                            // Live thumbnail of the active page (#58):
+                            // the same render → rasterize → texture pipeline
+                            // the stencil pane uses, cached per (page,
+                            // version) so any edit refreshes it.
+                            let (thumb_svg, thumb_w_in, thumb_h_in, thumb_part) = {
+                                let ed = self.ed.as_ref().unwrap();
+                                let page = &ed.doc.pages
+                                    [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                                let n = |name: &str| {
+                                    page.sheet()
+                                        .and_then(|s| s.cell(name))
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(0.0)
+                                };
+                                let svg = if self.info_render_fail_for_test {
+                                    None
+                                } else {
+                                    dc::svg::render_page(&ed.doc, page).ok()
+                                };
+                                (
+                                    svg,
+                                    n("PageWidth").max(0.1),
+                                    n("PageHeight").max(0.1),
+                                    page.part.clone(),
+                                )
+                            };
                             ui.heading(&name);
                             ui.add_space(8.0);
-                            egui::Grid::new("backstage_info")
-                                .num_columns(2)
-                                .spacing(Vec2::new(18.0, 6.0))
-                                .show(ui, |ui| {
-                                    ui.weak("Name");
-                                    ui.label(&name);
-                                    ui.end_row();
-                                    ui.weak("Location");
-                                    ui.label(&dir);
-                                    ui.end_row();
-                                    ui.weak("Status");
-                                    ui.label(status);
-                                    ui.end_row();
-                                });
+                            ui.horizontal(|ui| {
+                                egui::Grid::new("backstage_info")
+                                    .num_columns(2)
+                                    .spacing(Vec2::new(18.0, 6.0))
+                                    .show(ui, |ui| {
+                                        ui.weak("Name");
+                                        ui.label(&name);
+                                        ui.end_row();
+                                        ui.weak("Location");
+                                        ui.label(&dir);
+                                        ui.end_row();
+                                        ui.weak("Status");
+                                        ui.label(status);
+                                        ui.end_row();
+                                    });
+                                ui.add_space(24.0);
+                                // Bordered card on the card token; neutral
+                                // (no error text) when the render fails.
+                                let img_w = 192.0_f64;
+                                let aspect = (thumb_h_in / thumb_w_in).clamp(0.2, 3.0);
+                                let (r, _) = ui.allocate_exact_size(
+                                    Vec2::new(
+                                        (img_w + 16.0) as f32,
+                                        (img_w * aspect + 16.0) as f32,
+                                    ),
+                                    Sense::hover(),
+                                );
+                                ui.painter().rect_filled(r, 3.0, t.card_bg);
+                                ui.painter().rect_stroke(
+                                    r,
+                                    3.0,
+                                    Stroke::new(1.0, t.ribbon_group),
+                                    egui::StrokeKind::Middle,
+                                );
+                                if let Some(svg) = thumb_svg.as_deref() {
+                                    // ~192 px wide, aspect-true: the raster
+                                    // derives its height from the page.
+                                    let ppi = (img_w / thumb_w_in) as f32;
+                                    let key = format!("info-{}", thumb_part.replace('/', "_"));
+                                    if let Ok(tex) = self.tex.get(
+                                        ui.ctx(),
+                                        svg,
+                                        thumb_w_in,
+                                        &key,
+                                        self.version,
+                                        ppi,
+                                    ) {
+                                        let ir = Rect::from_min_size(
+                                            r.min + Vec2::new(8.0, 8.0),
+                                            Vec2::new(img_w as f32, (img_w * aspect) as f32),
+                                        );
+                                        let uv =
+                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                                        ui.painter().image(tex.id(), ir, uv, Color32::WHITE);
+                                    }
+                                }
+                            });
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
                                 ui.add_enabled(false, egui::Button::new("Protect Drawing…"))
@@ -3348,13 +6603,14 @@ impl App {
                     close_backstage = true;
                 }
                 BackAction::CloseDoc => {
-                    self.ed = None;
-                    self.path = PathBuf::new();
-                    self.dirty = false;
-                    self.set_selection(None);
-                    self.stencil = Stencil::default();
-                    self.tex.clear();
-                    self.status = "document closed".into();
+                    // Ask before a dirty document is discarded (#65);
+                    // Cancel returns to the document, so the backstage
+                    // closes either way, Visio-style.
+                    if self.dirty && self.ed.is_some() {
+                        self.confirm_close = Some(CloseTarget::Doc);
+                    } else {
+                        self.close_doc();
+                    }
                     close_backstage = true;
                 }
             }
@@ -3545,8 +6801,33 @@ fn write_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<(
     Ok(())
 }
 
+/// Current UTC date as `YYYY-MM-DD` — zero-dep civil-from-days
+/// (Hinnant's algorithm) over the Unix epoch seconds.
+fn format_now_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
 fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {
     let (r, resp) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::click());
+    // The icon is painted, so the control needs its name attached;
+    // screen readers read "Save", not "Save (Ctrl+S)" (GitHub #56).
+    let name = tip.split(" (").next().unwrap_or(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, name));
     let resp = resp.on_hover_text(tip);
     let hover = resp.hovered();
     if hover {
@@ -3588,6 +6869,40 @@ fn master_size(doc: &Document, id: i64) -> (f64, f64) {
             })
         })
         .unwrap_or((1.0, 1.0))
+}
+
+/// Point-in-bbox test with a small pad (~1 mm): 1D lines have a
+/// degenerate dimension (Height 0 when horizontal), and a zero-thickness
+/// bbox is otherwise unhittable (GitHub #59). Visio hit-tests lines with
+/// a tolerance too.
+fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
+    const PAD: f64 = 0.04; // inches
+    pos.0 >= x - PAD && pos.0 <= x + w + PAD && pos.1 >= y - PAD && pos.1 <= y + h + PAD
+}
+
+/// Whether a Protection-section flag (`LockWidth`, `LockHeight`,
+/// `LockBegin`, `LockEnd`, …) is effectively ON for a shape: its own
+/// sheet first, then the master's via the inheritance chain. Cells may
+/// sit at section level or in the section's single row, so both spots
+/// are checked (GitHub #59).
+fn protection_flag(doc: &Document, sh: &Shape, chain: &[&Shape], name: &str) -> bool {
+    fn sheet_locked(sheet: &vsdx::model::Sheet, name: &str) -> bool {
+        let on = |c: Option<&vsdx::model::Cell>| {
+            c.and_then(|c| c.numeric())
+                .map(|v| v != 0.0)
+                .unwrap_or(false)
+        };
+        on(sheet.cell(name))
+            || sheet
+                .sections_named("Protection")
+                .iter()
+                .any(|sec| on(sec.cell(name)) || sec.rows.iter().any(|r| on(r.cell(name))))
+    }
+    sheet_locked(&sh.sheet, name)
+        || doc
+            .instance_source(sh, chain)
+            .map(|src| sheet_locked(&src.sheet, name))
+            .unwrap_or(false)
 }
 
 /// Title of the stencil list entry: the open file's stem (a .vssx
@@ -3683,7 +6998,7 @@ mod tests {
         app.load(p.clone());
         assert_eq!(
             app.debug_recent(),
-            &[p.clone()],
+            std::slice::from_ref(&p),
             "successful open records the path"
         );
         // Re-opening moves it to the (single) front.
@@ -3838,7 +7153,7 @@ mod tests {
             .map(|m| m.id)
             .unwrap();
         app.stencil.armed = Some(master);
-        app.on_canvas_click((4.0, 5.0), false);
+        app.on_canvas_click((4.0, 5.0), false, false);
         assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
         assert!(app.placed_last_click);
 

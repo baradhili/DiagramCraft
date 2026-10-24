@@ -1,4 +1,5 @@
 use super::*;
+use crate::testing::TestResult;
 use egui::{
     Color32, Context, Event, FullOutput, Key, Modifiers, PointerButton, Pos2, RawInput, pos2, vec2,
 };
@@ -201,7 +202,7 @@ fn key(key: Key, pressed: bool) -> Event {
 }
 
 #[test]
-fn duplicate_labels_have_distinct_stable_identity_and_tab_roles() {
+fn duplicate_labels_have_distinct_stable_identity_and_tab_roles() -> TestResult {
     let mut h = TabTest::new();
     let responses = h.settle();
     assert_ne!(responses[0].id, responses[1].id);
@@ -210,12 +211,15 @@ fn duplicate_labels_have_distinct_stable_identity_and_tab_roles() {
     let (updated, output) = h.frame(vec![]);
     assert_eq!(responses[1].id, updated[1].id);
     assert!(updated[1].has_focus());
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let (_, selected) = tree
         .nodes
         .iter()
         .find(|(_, n)| n.label() == Some("Layers"))
-        .unwrap();
+        .ok_or("no Layers tab node")?;
     assert_eq!(selected.role(), egui::accesskit::Role::Tab);
     assert_eq!(selected.is_selected(), Some(true));
     assert_eq!(selected.toggled(), None);
@@ -223,12 +227,13 @@ fn duplicate_labels_have_distinct_stable_identity_and_tab_roles() {
         .nodes
         .iter()
         .find(|(_, n)| n.label() == Some("Calques"))
-        .unwrap();
+        .ok_or("no Calques tab node")?;
     assert_eq!(other.is_selected(), Some(false));
+    Ok(())
 }
 
 #[test]
-fn pointer_and_keyboard_activate_once_and_disabled_tabs_do_not_activate() {
+fn pointer_and_keyboard_activate_once_and_disabled_tabs_do_not_activate() -> TestResult {
     for key_code in [Key::Enter, Key::Space] {
         let mut h = TabTest::new();
         let responses = h.settle();
@@ -248,16 +253,17 @@ fn pointer_and_keyboard_activate_once_and_disabled_tabs_do_not_activate() {
     let (responses, output) = h.frame(vec![pointer(center, false), key(Key::Enter, false)]);
     assert_eq!(h.clicks, 1);
     assert!(!responses[1].enabled());
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     assert!(
-        output
-            .platform_output
-            .accesskit_update
-            .unwrap()
-            .nodes
+        tree.nodes
             .iter()
             .filter(|(_, n)| n.role() == egui::accesskit::Role::Tab)
             .all(|(_, n)| n.is_disabled())
     );
+    Ok(())
 }
 
 #[test]

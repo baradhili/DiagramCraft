@@ -24,7 +24,11 @@ struct Cli {
     cmd: Cmd,
 }
 
+// Parsed once per process and immediately consumed; the size
+// difference between the subcommand variants (Edit's flag set vs
+// Info's single PathBuf) buys nothing worth boxing clap fields for.
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Cmd {
     /// Show OPC package inventory
     Info { file: PathBuf },

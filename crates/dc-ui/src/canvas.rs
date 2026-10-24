@@ -1,11 +1,19 @@
 //! The page canvas: the rendered page as a texture (via the SVG
 //! backend), Visio-style rulers with metric ticks, grid overlay,
 //! selection frame with handles, drag-to-move, wheel zoom and pan.
+//!
+//! Gesture arming is PRESS-based (GitHub #59): egui only reports
+//! `drag_started` once the pointer is "decidedly dragging" (moved >6 px
+//! or held >0.8 s), and its click-vs-drag disambiguation means a
+//! natural press-drag-release never produces a `clicked()` — so drags
+//! armed on click/drag_started were unreliable no-ops. The canvas arms
+//! handle drags, shape moves (via the app), and the marquee on the
+//! press frame itself and commits on the release frame.
 
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::theme::{self, ShellTokens};
-use crate::units::{tick_step, Unit};
+use crate::units::{tick_step, tick_tiers, TickTier, Unit};
 
 /// View state for the active page.
 #[derive(Debug, Clone)]
@@ -75,6 +83,13 @@ pub struct PageGeom {
 
 pub const RULER: f32 = 22.0;
 
+/// Ruler subdivision depth (#62): 4 = half + quarter ticks (the Visio
+/// default); the Ruler & Grid Fine/Normal/Coarse setting can lower it.
+const RULER_SUBDIV: u32 = 4;
+/// Minor ruler tiers drop out below this pixel spacing (#62) so ticks
+/// never smear together when zooming out.
+const RULER_MIN_TICK_PX: f64 = 6.0;
+
 /// Outcome of interacting with the canvas this frame.
 pub struct CanvasOut {
     pub page_rect: Rect,
@@ -92,15 +107,16 @@ pub struct CanvasOut {
     /// Right-click position in page inches (y-up); the app hit-tests and
     /// opens the shape context menu.
     pub right_click_page_pos: Option<(f64, f64)>,
-    /// A drag of `shape` finished at this pin position (inches, y-up).
-    pub drag_done: Option<(i64, (f64, f64))>,
     /// A stencil drop happened at this pin position (inches, y-up).
     pub drop_pos: Option<(f64, f64)>,
-    /// A selection-handle drag finished: (corner, page-inches delta from
-    /// drag start, y-up). The app applies the resize.
-    pub resize_done: Option<(Corner, (f64, f64))>,
-    /// A handle drag started this frame on this corner.
-    pub resize_started: Option<Corner>,
+    /// A selection-handle drag finished: (handle, press position,
+    /// release position), both in page inches y-up. The app applies the
+    /// resize / endpoint move / line move.
+    pub handle_drag_done: Option<HandleDragDone>,
+    /// Primary press (this frame) on a shape, NOT consumed by a handle:
+    /// page inches y-up. The app arms its move-drag from this (the
+    /// press, not the click — see the module note).
+    pub press_page_pos: Option<(f64, f64)>,
     /// Marquee (empty-area drag) finished: rect in page inches, y-up,
     /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
@@ -108,6 +124,8 @@ pub struct CanvasOut {
     pub marquee_live: Option<Rect>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
+    /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
+    pub ctrl_click: bool,
     pub zoom_changed: bool,
 }
 
@@ -120,12 +138,47 @@ pub enum Corner {
     BottomRight,
 }
 
+/// One grabbable selection handle (GitHub #59). 2D shapes expose the
+/// four resize corners; 1D shapes (lines/connectors, resolved
+/// Begin/End cells) expose their two endpoints plus the midpoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HandleId {
+    Corner(Corner),
+    LineBegin,
+    LineEnd,
+    LineMid,
+}
+
+/// A finished handle drag (GitHub #59): (handle, press position,
+/// release position), both in page inches y-up.
+pub type HandleDragDone = (HandleId, (f64, f64), (f64, f64));
+
+/// A handle and its position on the page (inches, y-up).
+#[derive(Debug, Clone, Copy)]
+pub struct Handle {
+    pub id: HandleId,
+    pub pos: (f64, f64),
+}
+
+/// Grab radius around a handle's center, in points. Generous on
+/// purpose: the drawn square is ~7 px, but Visio's handles are easy to
+/// grab and a tight radius was part of the #59 no-op feel.
+pub const HANDLE_GRAB: f32 = 12.0;
+
 /// Screen position → page inches (y-up), regardless of the pointer's
 /// position relative to the page.
 pub fn screen_to_page(p: Pos2, view: &View, page: &PageGeom) -> (f64, f64) {
     let x = (p.x - view.pan.x) as f64 / view.px_per_in() as f64;
     let y = page.h_in - (p.y - view.pan.y) as f64 / view.px_per_in() as f64;
     (x, y)
+}
+
+/// Page inches (y-up) → screen position.
+pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
+    Pos2::new(
+        view.pan.x + x as f32 * view.px_per_in(),
+        view.pan.y + (page.h_in - y) as f32 * view.px_per_in(),
+    )
 }
 
 /// Draw the whole canvas area (fills `ui`).
@@ -137,8 +190,8 @@ pub fn show(
     page_tex: Option<&egui::TextureHandle>,
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
+    handles: &[Handle],       // grab points for the primary selection
     drag_rect: Option<Rect>,  // preview while dragging (screen already applied)
-    drag_active: bool,
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
@@ -150,13 +203,13 @@ pub fn show(
         click_page_pos: None,
         dbl_click_page_pos: None,
         right_click_page_pos: None,
-        drag_done: None,
         drop_pos: None,
-        resize_done: None,
-        resize_started: None,
+        handle_drag_done: None,
+        press_page_pos: None,
         marquee_done: None,
         marquee_live: None,
         shift_click: false,
+        ctrl_click: false,
         zoom_changed: false,
     };
     let avail = ui.available_size();
@@ -199,21 +252,6 @@ pub fn show(
         out.zoom_changed = true;
     }
 
-    // Selection rect in screen coords for handle hit-testing.
-    let sel_rect_screen = sel_rect.map(|r| {
-        let tl = Pos2::new(
-            view.pan.x + r.left() as f32 * view.px_per_in(),
-            view.pan.y + r.top() as f32 * view.px_per_in(),
-        );
-        Rect::from_min_size(
-            tl,
-            Vec2::new(
-                r.width() as f32 * view.px_per_in(),
-                r.height() as f32 * view.px_per_in(),
-            ),
-        )
-    });
-
     // Middle-drag or space-drag pans — manual: leaves fit mode.
     let pan_drag = resp.dragged_by(egui::PointerButton::Middle)
         || (ui.input(|i| i.modifiers.command) && resp.dragged());
@@ -222,88 +260,97 @@ pub fn show(
         view.fit_mode = false;
     }
 
-    // Selection-handle resize + marquee (empty-area) drag. Corner-handle
-    // drags take priority; a primary drag starting on a shape is the
-    // app's move; starting on empty page is a marquee.
-    let corner_at = |pos: Pos2, sr: Rect| -> Option<Corner> {
-        let grab = 8.0;
-        [
-            (Corner::TopLeft, sr.left_top()),
-            (Corner::TopRight, sr.right_top()),
-            (Corner::BottomLeft, sr.left_bottom()),
-            (Corner::BottomRight, sr.right_bottom()),
-        ]
-        .into_iter()
-        .find(|(_, c)| pos.distance(*c) <= grab)
-        .map(|(k, _)| k)
+    // ---- gesture arming, on the PRESS frame (see module note) ----
+    // Handles in screen coords; a press inside HANDLE_GRAB of one wins
+    // over everything (resize takes precedence over move, #59).
+    let handles_screen: Vec<(HandleId, Pos2)> = handles
+        .iter()
+        .map(|h| (h.id, page_to_screen(h.pos.0, h.pos.1, view, page)))
+        .collect();
+    let handle_at = |pos: Pos2| -> Option<HandleId> {
+        handles_screen
+            .iter()
+            .find(|(_, p)| pos.distance(*p) <= HANDLE_GRAB)
+            .map(|(id, _)| *id)
     };
+
     // Stable literal ids are intended for the drag-state memory keys.
     #[allow(deprecated)]
-    let mem_resize = egui::Id::new("dc-resize-corner");
+    let mem_handle = egui::Id::new("dc-handle-drag");
     #[allow(deprecated)]
     let mem_start = egui::Id::new("dc-drag-start");
     #[allow(deprecated)]
     let mem_marquee = egui::Id::new("dc-marquee");
-    let press_origin = ui.input(|i| i.pointer.press_origin());
-    if resp.drag_started_by(egui::PointerButton::Primary) {
-        if let Some(start) = press_origin {
-            ui.ctx()
-                .memory_mut(|m| m.data.insert_temp(mem_start, start));
-        }
-        if let (Some(sr), Some(start)) = (sel_rect_screen, press_origin) {
-            if let Some(corner) = corner_at(start, sr) {
-                ui.ctx()
-                    .memory_mut(|m| m.data.insert_temp(mem_resize, corner));
-                out.resize_started = Some(corner);
+    let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
+    let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
+
+    if primary_pressed && resp.contains_pointer() {
+        // `press_origin` is where this press began (set by the press
+        // event itself), so it is always Some on this frame.
+        let p = ui
+            .input(|i| i.pointer.press_origin())
+            .or_else(|| ui.input(|i| i.pointer.interact_pos()));
+        if let Some(p) = p {
+            ui.ctx().memory_mut(|m| m.data.insert_temp(mem_start, p));
+            if let Some(id) = handle_at(p) {
+                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else {
+                let page_pos = screen_to_page(p, view, page);
+                if hit_shape(page_pos) {
+                    // The app arms its move-drag from the press.
+                    out.press_page_pos = Some(page_pos);
+                } else {
+                    // Empty page: marquee select.
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(mem_marquee, true));
+                }
             }
         }
     }
-    let resizing = ui.ctx().memory(|m| m.data.get_temp::<Corner>(mem_resize));
-    let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
-    #[cfg(debug_assertions)]
-    if resp.drag_stopped() || primary_released {
-        eprintln!(
-            "release frame: resizing={resizing:?} drag_stopped={} primary_released={}",
-            resp.drag_stopped(),
-            primary_released
-        );
-    }
-    if let (Some(corner), true) = (resizing, resp.drag_stopped() && primary_released) {
-        ui.ctx().memory_mut(|m| m.data.remove::<Corner>(mem_resize));
-        // press_origin is gone on the release frame; the start pos was
-        // stored when the drag began.
-        let start = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start));
-        if let (Some(start), Some(end)) = (start, ui.input(|i| i.pointer.interact_pos())) {
-            let (sx, sy) = screen_to_page(start, view, page);
-            let (ex, ey) = screen_to_page(end, view, page);
-            // y-down delta in page inches (screen orientation).
-            out.resize_done = Some((corner, (ex - sx, sy - ey)));
+
+    // Commit an armed handle drag on the release frame. egui's own
+    // drag_stopped() needs the drag to have "officially" started (>6 px
+    // of travel or >0.8 s hold), which tiny precise drags never reach —
+    // so the arm/commit pair is tracked here instead (#59).
+    let armed_handle = ui.ctx().memory(|m| m.data.get_temp::<HandleId>(mem_handle));
+    if primary_released || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.ctx()
+            .memory_mut(|m| m.data.remove::<HandleId>(mem_handle));
+        if let (Some(id), true) = (armed_handle, primary_released) {
+            let start = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start));
+            let end = ui.input(|i| i.pointer.interact_pos());
+            if let (Some(s), Some(e)) = (start, end) {
+                out.handle_drag_done = Some((
+                    id,
+                    screen_to_page(s, view, page),
+                    screen_to_page(e, view, page),
+                ));
+            }
         }
     }
-    // Marquee: primary drag that started on empty page (no shape, no
-    // handle, no stencil placement).
-    if resp.drag_started_by(egui::PointerButton::Primary)
-        && resizing.is_none()
-        && press_origin
-            .map(|s| !hit_shape(screen_to_page(s, view, page)))
-            .unwrap_or(false)
-    {
-        ui.ctx()
-            .memory_mut(|m| m.data.insert_temp(mem_marquee, true));
-    }
+
+    // Marquee: armed on an empty-page press above; live band while the
+    // button is held, committed on release. A degenerate (zero-area)
+    // band is just a click on empty page — the click path already
+    // handles selection, and running an intersection on a point can
+    // MISS zero-height 1D bboxes whose cells were rounded to 6 decimals
+    // (#59), clobbering a fresh placement's selection.
     let marqueeing = ui
         .ctx()
         .memory(|m| m.data.get_temp::<bool>(mem_marquee))
         .unwrap_or(false);
     if marqueeing {
-        if (resp.drag_stopped() && primary_released) || !ui.input(|i| i.pointer.primary_down()) {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
             ui.ctx().memory_mut(|m| m.data.remove::<bool>(mem_marquee));
             let start = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start));
-            if let (Some(start), Some(end)) = (start, ui.input(|i| i.pointer.interact_pos())) {
+            let end = ui.input(|i| i.pointer.interact_pos());
+            if let (Some(start), Some(end)) = (start, end) {
                 let (sx, sy) = screen_to_page(start, view, page);
                 let (ex, ey) = screen_to_page(end, view, page);
-                let (y0, y1) = if sy < ey { (sy, ey) } else { (ey, sy) };
-                out.marquee_done = Some((sx.min(ex), y0, sx.max(ex), y1));
+                if (ex - sx).abs() > 1e-6 || (ey - sy).abs() > 1e-6 {
+                    let (y0, y1) = if sy < ey { (sy, ey) } else { (ey, sy) };
+                    out.marquee_done = Some((sx.min(ex), y0, sx.max(ex), y1));
+                }
             }
         } else if let Some(start) = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start)) {
             if let Some(cur) = ui.input(|i| i.pointer.interact_pos()) {
@@ -311,13 +358,20 @@ pub fn show(
             }
         }
     }
+
     // Handle cursors.
-    if let (Some(sr), Some(hp)) = (sel_rect_screen, resp.hover_pos()) {
-        if let Some(c) = corner_at(hp, sr) {
+    if let Some(hp) = resp.hover_pos() {
+        if let Some(c) = handle_at(hp) {
             ui.output_mut(|o| {
                 o.cursor_icon = match c {
-                    Corner::TopLeft | Corner::BottomRight => egui::CursorIcon::ResizeNwSe,
-                    Corner::TopRight | Corner::BottomLeft => egui::CursorIcon::ResizeNeSw,
+                    HandleId::Corner(Corner::TopLeft | Corner::BottomRight) => {
+                        egui::CursorIcon::ResizeNwSe
+                    }
+                    HandleId::Corner(Corner::TopRight | Corner::BottomLeft) => {
+                        egui::CursorIcon::ResizeNeSw
+                    }
+                    HandleId::LineBegin | HandleId::LineEnd => egui::CursorIcon::Crosshair,
+                    HandleId::LineMid => egui::CursorIcon::AllScroll,
                 }
             });
         }
@@ -387,15 +441,12 @@ pub fn show(
     // Selection frame (page-inch rect → screen).
     let to_screen = |r: Rect| {
         let tl = Pos2::new(
-            view.pan.x + r.left() as f32 * view.px_per_in(),
-            view.pan.y + r.top() as f32 * view.px_per_in(),
+            view.pan.x + r.left() * view.px_per_in(),
+            view.pan.y + r.top() * view.px_per_in(),
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(
-                r.width() as f32 * view.px_per_in(),
-                r.height() as f32 * view.px_per_in(),
-            ),
+            Vec2::new(r.width() * view.px_per_in(), r.height() * view.px_per_in()),
         )
     };
     for er in extra_sel_rects.iter().map(|r| to_screen(*r)) {
@@ -406,30 +457,64 @@ pub fn show(
             egui::StrokeKind::Middle,
         );
     }
-    if let Some(sr) = sel_rect.map(to_screen) {
+    // 1D selection: Visio shows the segment itself plus endpoint
+    // handles, not a bounding box. The handle set tells them apart.
+    let line_handles: Option<(Pos2, Pos2)> = {
+        let beg = handles_screen
+            .iter()
+            .find(|(id, _)| *id == HandleId::LineBegin)
+            .map(|(_, p)| *p);
+        let end = handles_screen
+            .iter()
+            .find(|(id, _)| *id == HandleId::LineEnd)
+            .map(|(_, p)| *p);
+        beg.zip(end)
+    };
+    if let Some((beg, end)) = line_handles {
+        p.line_segment([beg, end], Stroke::new(1.2, t.selection));
+    } else if let Some(sr) = sel_rect.map(to_screen) {
         p.rect_stroke(
             sr,
             0.0,
             Stroke::new(1.2, t.selection),
             egui::StrokeKind::Middle,
         );
-        for corner in [
-            sr.left_top(),
-            sr.right_top(),
-            sr.left_bottom(),
-            sr.right_bottom(),
-        ] {
-            p.rect_filled(
-                Rect::from_center_size(corner, Vec2::splat(7.0)),
-                1.0,
-                Color32::WHITE,
-            );
-            p.rect_stroke(
-                Rect::from_center_size(corner, Vec2::splat(7.0)),
-                1.0,
-                Stroke::new(1.2, t.selection),
-                egui::StrokeKind::Middle,
-            );
+    }
+    // Handles: resize corners are squares; 1D endpoints are Visio's
+    // larger filled squares and the midpoint an open circle.
+    for (id, pos) in &handles_screen {
+        match id {
+            HandleId::Corner(_) => {
+                p.rect_filled(
+                    Rect::from_center_size(*pos, Vec2::splat(7.0)),
+                    1.0,
+                    Color32::WHITE,
+                );
+                p.rect_stroke(
+                    Rect::from_center_size(*pos, Vec2::splat(7.0)),
+                    1.0,
+                    Stroke::new(1.2, t.selection),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            HandleId::LineBegin | HandleId::LineEnd => {
+                p.rect_filled(
+                    Rect::from_center_size(*pos, Vec2::splat(8.0)),
+                    1.5,
+                    Color32::WHITE,
+                );
+                p.rect_stroke(
+                    Rect::from_center_size(*pos, Vec2::splat(8.0)),
+                    1.5,
+                    Stroke::new(1.2, t.selection),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            HandleId::LineMid => {
+                let r = 4.0;
+                p.circle_filled(*pos, r, Color32::WHITE);
+                p.circle_stroke(*pos, r, Stroke::new(1.2, t.selection));
+            }
         }
     }
 
@@ -469,6 +554,7 @@ pub fn show(
     // Clicks / drops: report page position; the app hit-tests.
     if resp.clicked() {
         out.shift_click = ui.input(|i| i.modifiers.shift);
+        out.ctrl_click = ui.input(|i| i.modifiers.ctrl || i.modifiers.command);
         if let Some(mp) = resp.interact_pointer_pos() {
             let x_in = (mp.x - view.pan.x) as f64 / view.px_per_in() as f64;
             let y_up = page.h_in - (mp.y - view.pan.y) as f64 / view.px_per_in() as f64;
@@ -497,7 +583,6 @@ pub fn show(
             }
         }
     }
-    let _ = drag_active;
     out
 }
 
@@ -542,23 +627,41 @@ fn draw_rulers(
     let ppi = view.px_per_in();
     let dupx = view.unit.from_in(1.0) as f32 / ppi; // display units per px
 
-    // Horizontal ruler: ticks over the page extent only.
+    // Tiered ticks (#62): labeled majors (the 1/2/5-decade step) plus
+    // half and quarter subdivisions, each minor tier dropped when its
+    // pixel spacing would smear. Ticks are placed on the finest kept
+    // interval and classified by integer index, so no float-multiple
+    // drift decides tiers.
     let step = tick_step(dupx as f64, 45.0);
+    let px_per_major = step / dupx as f64;
+    let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
+    let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
+    let interval = step / finest as f64;
+    let tier_for = |k: i64| -> TickTier {
+        *tiers
+            .iter()
+            .find(|t| k % (finest / t.div as i64).max(1) == 0)
+            .unwrap_or(&tiers[0])
+    };
+
+    // Horizontal ruler: ticks over the page extent only.
     let x0_in = ((page_rect.left() - view.pan.x) / ppi).max(0.0) as f64;
     let x1_in = ((page_rect.right() - view.pan.x) / ppi).min(page.w_in as f32) as f64;
-    let mut v = (x0_in * view.unit.from_in(1.0) / step as f64).floor() * step as f64;
-    while v <= x1_in * view.unit.from_in(1.0) {
+    let upx = view.unit.from_in(1.0);
+    let k0 = (x0_in * upx / interval).ceil() as i64;
+    let k1 = (x1_in * upx / interval).floor() as i64;
+    for k in k0..=k1 {
+        let v = k as f64 * interval;
         let sx = view.pan.x + (view.unit.to_in(v) as f32) * ppi;
-        let major = (v / step).fract().abs() < 1e-6;
-        let len = if major { 7.0 } else { 4.0 };
+        let tier = tier_for(k);
         p.line_segment(
             [
-                Pos2::new(sx, top.bottom() - len),
+                Pos2::new(sx, top.bottom() - tier.len),
                 Pos2::new(sx, top.bottom()),
             ],
             Stroke::new(0.8, t.ruler_tick),
         );
-        if major && v > 0.0 {
+        if tier.labeled && v > 0.0 {
             p.text(
                 Pos2::new(sx + 2.0, top.top() + 1.0),
                 egui::Align2::LEFT_TOP,
@@ -567,27 +670,27 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step as f64;
     }
 
     // Vertical ruler: values count upward from the page bottom (Visio).
     let y0_in = ((page_rect.top() - view.pan.y) / ppi).max(0.0) as f64;
     let y1_in = ((page_rect.bottom() - view.pan.y) / ppi).min(page.h_in as f32) as f64;
-    let mut v = (y0_in * view.unit.from_in(1.0) / step as f64).floor() * step as f64;
-    while v <= y1_in * view.unit.from_in(1.0) {
+    let k0 = (y0_in * upx / interval).ceil() as i64;
+    let k1 = (y1_in * upx / interval).floor() as i64;
+    for k in k0..=k1 {
+        let v = k as f64 * interval;
         let sy_top = view.pan.y + (view.unit.to_in(v) as f32) * ppi;
         let val_up = page.h_in - view.unit.to_in(v); // label in y-up units
         let disp = view.unit.from_in(val_up);
-        let major = (v / step).fract().abs() < 1e-6;
-        let len = if major { 7.0 } else { 4.0 };
+        let tier = tier_for(k);
         p.line_segment(
             [
-                Pos2::new(left.right() - len, sy_top),
+                Pos2::new(left.right() - tier.len, sy_top),
                 Pos2::new(left.right(), sy_top),
             ],
             Stroke::new(0.8, t.ruler_tick),
         );
-        if major && disp > 0.0 {
+        if tier.labeled && disp > 0.0 {
             p.text(
                 Pos2::new(left.left() + 1.0, sy_top + 2.0),
                 egui::Align2::LEFT_TOP,
@@ -596,7 +699,6 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step as f64;
     }
 }
 
