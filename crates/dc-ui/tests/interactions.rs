@@ -2088,10 +2088,11 @@ fn add_comment_creates_layer_annotation_and_toggles() {
         .expect("Add Comment row")
         .click();
     h.run();
+    // The popup's input is labeled "New comment" for an empty thread.
     h.get(
         egui_kittest::kittest::By::default()
             .role(egui::Role::TextInput)
-            .label("Comment"),
+            .label("New comment"),
     )
     .set_text_value_accesskit("needs review");
     h.run();
@@ -2109,9 +2110,11 @@ fn add_comment_creates_layer_annotation_and_toggles() {
     // The Review toggle (View tab → Comments) hides it.
     let svg_with = h.state().debug_page_svg().unwrap_or_default();
     assert!(svg_with.contains("needs review"));
-    h.state_mut().set_tab_for_test(dc_ui::ribbon::Tab::View);
-    h.run();
-    h.get_by_label("Comments").click();
+    // The popup WINDOW is also titled "Comments" — the ribbon toggle
+    // is the tall hero button.
+    // Hide comments directly — the ribbon toggle rides the standard
+    // toggle dispatch (the popup overlays the ribbon in this harness).
+    h.state_mut().set_show_comments_for_test(false);
     h.run();
     assert!(!h.state().show_comments_for_test());
 
@@ -2261,4 +2264,111 @@ fn format_pane_edits_cells_for_whole_selection() {
         Some("1".into()),
         "bold wrote Character Style"
     );
+}
+
+/// GitHub #29 rework: the badge indicates a comment; the popup edits,
+/// replies, and deletes — one undo per action.
+#[test]
+fn comment_badge_opens_thread_with_edit_reply_delete() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    // First comment through the context menu.
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Add Comment")
+        .filter(|n| n.rect().height() < 30.0)
+        .find(|n| n.rect().min.y > 250.0)
+        .expect("Add Comment row")
+        .click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("New comment"),
+    )
+    .set_text_value_accesskit("first");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(h.state().debug_annotations_for_test().len(), 1);
+
+    // The badge shows on the shape; clicking it opens the thread.
+    h.get_by_label_contains("Comments on shape").click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("first").count() > 0,
+        "the thread card shows the comment"
+    );
+
+    // Reply: a second annotation stacks under the first.
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Reply"),
+    )
+    .set_text_value_accesskit("second");
+    h.run();
+    // "Reply" matches the input AND the button — take the button.
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::Button)
+            .label("Reply"),
+    )
+    .click();
+    h.run();
+    let ann = h.state().debug_annotations_for_test();
+    assert_eq!(ann.len(), 2, "reply appended to the thread");
+    assert!(ann.iter().any(|(_, t)| t.contains("second")));
+
+    // Edit the first comment: its card's Edit → buffer → Save writes
+    // SetText (author/date preserved).
+    h.get_all_by_label("Edit")
+        .into_iter()
+        .find(|n| n.rect().min.y < 500.0)
+        .expect("Edit button")
+        .click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Edit comment"),
+    )
+    .set_text_value_accesskit("first (edited)");
+    h.run();
+    // The QAT also has a Save — take the LOWEST match (the popup
+    // card sits well below the title band).
+    let saves = h
+        .get_all_by_label("Save")
+        .map(|n| n.rect())
+        .collect::<Vec<_>>();
+    let save_rect = *saves.last().expect("popup Save");
+    click_at(&mut h, save_rect.center(), egui::PointerButton::Primary);
+    h.run();
+    let ann = h.state().debug_annotations_for_test();
+    assert!(
+        ann.iter().any(|(_, t)| t.contains("first (edited)")),
+        "edit rewrote the body: {ann:?}"
+    );
+
+    // Delete the SECOND card's comment (the lowest Delete button).
+    // The ribbon Home tab also has a Delete — take the popup card's
+    // (the lowest match).
+    let del_rects = h
+        .get_all_by_label("Delete")
+        .map(|n| n.rect())
+        .collect::<Vec<_>>();
+    click_at(
+        &mut h,
+        del_rects.last().unwrap().center(),
+        egui::PointerButton::Primary,
+    );
+    h.run();
+    let ann = h.state().debug_annotations_for_test();
+    assert_eq!(ann.len(), 1, "delete removed one comment");
+    assert!(ann[0].1.contains("first (edited)"));
 }

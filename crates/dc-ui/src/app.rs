@@ -80,8 +80,13 @@ pub struct App {
     hyperlink_open: Option<i64>,
     /// Draft row being added/edited in the Hyperlinks dialog (#28).
     hyperlink_draft: Option<HyperlinkDraft>,
-    /// The Add Comment editor is open for this shape (#29).
-    comment_draft: Option<(i64, String)>,
+    /// The Comments popup is open for this shape (#29 rework: the
+    /// Visio 2016 thread view — author header, edit/delete/reply).
+    comment_target: Option<i64>,
+    /// The reply / new-comment input body (#29).
+    comment_body: String,
+    /// Inline edit buffer: (annotation id, body) (#29).
+    comment_edit: Option<(i64, String)>,
     /// Annotation visibility (Review ▸ Show Comments, #29).
     show_comments: bool,
     /// The Shape Data dialog is open for this shape (#30).
@@ -293,7 +298,9 @@ impl App {
             reorder_open: false,
             hyperlink_open: None,
             hyperlink_draft: None,
-            comment_draft: None,
+            comment_target: None,
+            comment_body: String::new(),
+            comment_edit: None,
             show_comments: true,
             shape_data_open: None,
             prop_bufs: std::collections::HashMap::new(),
@@ -452,6 +459,8 @@ impl App {
                 self.tab_menu = None;
                 self.tab_rename = None;
                 self.reorder_open = false;
+                self.comment_target = None;
+                self.comment_edit = None;
             }
             Err(e) => self.status = format!("open failed: {e:#}"),
         }
@@ -725,6 +734,8 @@ impl App {
         self.tab_menu = None;
         self.tab_rename = None;
         self.reorder_open = false;
+        self.comment_target = None;
+        self.comment_edit = None;
         self.status = "new blank drawing (unsaved)".into();
     }
 
@@ -3480,6 +3491,95 @@ impl App {
         if let Some((x0, y0, x1, y1)) = out.marquee_done {
             self.apply_marquee(x0, y0, x1, y1);
         }
+        // Comment badges (#29 rework): a small bubble at the top-left
+        // corner of every commented shape — the shipped 2016 indicator,
+        // non-intrusive (an overlay, never part of the drawing), shown
+        // while comments are visible; clicking opens the thread popup.
+        if self.show_comments {
+            let targets: Vec<i64> = self
+                .ed()
+                .map(|ed| {
+                    let page =
+                        &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                    page.shapes
+                        .iter()
+                        .filter(|s| {
+                            s.sheet
+                                .sections_named("User")
+                                .iter()
+                                .find_map(|sec| sec.named_row("AnnotationRef"))
+                                .and_then(|r| r.cell("Value"))
+                                .and_then(|c| c.numeric())
+                                .is_some_and(|v| page.shapes.iter().any(|t| t.id as f64 == v))
+                        })
+                        .filter_map(|s| {
+                            s.sheet
+                                .sections_named("User")
+                                .iter()
+                                .find_map(|sec| sec.named_row("AnnotationRef"))
+                                .and_then(|r| r.cell("Value"))
+                                .and_then(|c| c.numeric())
+                                .map(|v| v as i64)
+                        })
+                        .collect::<Vec<i64>>()
+                })
+                .unwrap_or_default();
+            // Distinct targets, badge per target.
+            let mut seen = std::collections::HashSet::new();
+            for target in targets {
+                if !seen.insert(target) {
+                    continue;
+                }
+                let count = self.comments_for(target).len();
+                let Some(r) = self.shape_screen_rect(target) else {
+                    continue;
+                };
+                let badge = Rect::from_min_size(
+                    r.left_top() + Vec2::new(-9.0, -9.0),
+                    Vec2::new(18.0, 15.0),
+                );
+                #[allow(deprecated)] // Id::new: one badge per shape, stable
+                let resp = ui.interact(
+                    badge,
+                    egui::Id::new(("dc-comment-badge", target)),
+                    Sense::click(),
+                );
+                resp.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::Button,
+                        true,
+                        format!("Comments on shape {target} ({count})"),
+                    )
+                });
+                let t = theme::shell_tokens(ui.visuals());
+                ui.painter().rect_filled(badge, 4.0, t.accent_band);
+                ui.painter().rect_stroke(
+                    badge,
+                    4.0,
+                    Stroke::new(1.0, Color32::WHITE),
+                    egui::StrokeKind::Middle,
+                );
+                crate::ribbon::Icon::Comment.paint(ui, badge, true);
+                let gal = ui.painter().layout_no_wrap(
+                    format!("{count}"),
+                    egui::FontId::proportional(9.0),
+                    Color32::WHITE,
+                );
+                ui.painter().galley(
+                    Pos2::new(
+                        badge.right() - gal.size().x + 2.0,
+                        badge.bottom() - gal.size().y,
+                    ),
+                    gal,
+                    Color32::WHITE,
+                );
+                if resp.clicked() {
+                    self.comment_target = Some(target);
+                    self.comment_body.clear();
+                    self.comment_edit = None;
+                }
+            }
+        }
         if let Some((id, start, end)) = out.handle_drag_done {
             // A press on a handle released without travel is just a
             // click: committing it would create no-op undo steps (or a
@@ -3766,7 +3866,11 @@ impl App {
         let author = std::env::var("USER")
             .or_else(|_| std::env::var("USERNAME"))
             .unwrap_or_else(|_| "user".into());
-        let text = format!("{} — {}: {}", author, format_now_utc(), body.trim());
+        let date = format_now_utc();
+        let text = format!("{} — {}: {}", author, date, body.trim());
+        // Replies stack under the thread's first bubble (#29 rework).
+        let thread_len = self.comments_for(shape_id).len();
+        let stack = 0.55 * thread_len as f64;
 
         let set = |sheet: &mut vsdx::model::Sheet, n: &str, v: &str| {
             sheet.set_cell(n, vsdx::model::Cell::value(v.to_string()));
@@ -3774,7 +3878,11 @@ impl App {
         let (aw, ah) = (1.8_f64, 0.5_f64);
         let mut sheet = vsdx::model::Sheet::default();
         set(&mut sheet, "PinX", &format!("{:.4}", x1 + 0.1));
-        set(&mut sheet, "PinY", &format!("{:.4}", (y1 + 0.1).max(ah)));
+        set(
+            &mut sheet,
+            "PinY",
+            &format!("{:.4}", ((y1 + 0.1) - stack).max(ah)),
+        );
         set(&mut sheet, "Width", &format!("{aw}"));
         set(&mut sheet, "Height", &format!("{ah}"));
         set(&mut sheet, "LocPinX", "0");
@@ -3826,52 +3934,238 @@ impl App {
             parent: None,
             shape: annotation,
         }));
-        cmds.push(Box::new(dc_core::SetRowCell::new(
-            Scope::Shape {
-                page: page_id,
-                shape: id,
-            },
-            "User",
-            0,
-            dc_core::commands::RowSel::Named("AnnotationRef".into()),
-            "Value",
-            vsdx::model::Cell::value(shape_id.to_string()),
-        )));
+        let user_row = |name: &str, val: &str| {
+            Box::new(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: id,
+                },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named(name.into()),
+                "Value",
+                vsdx::model::Cell::value(val.to_string()),
+            )) as Box<dyn dc_core::Command>
+        };
+        cmds.push(user_row("AnnotationRef", &shape_id.to_string()));
+        cmds.push(user_row("AnnotationAuthor", &author));
+        cmds.push(user_row("AnnotationDate", &date));
         self.apply(dc_core::Macro::new("add comment", cmds));
     }
 
-    /// The Add Comment editor (#29): small overlay with the comment
-    /// body; the draft lives outside the closure (the #28 lesson).
+    /// The shape's comment thread (#29): annotation shapes whose
+    /// `User.AnnotationRef` names it, oldest first — (annotation id,
+    /// author, date, body).
+    fn comments_for(&self, shape_id: i64) -> Vec<(i64, String, String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let user_val = |s: &Shape, row: &str| -> Option<String> {
+            s.sheet
+                .sections_named("User")
+                .iter()
+                .find_map(|sec| sec.named_row(row))
+                .and_then(|r| r.cell("Value"))
+                .and_then(|c| c.v.clone())
+        };
+        let mut out: Vec<(i64, String, String, String)> = page
+            .shapes
+            .iter()
+            .filter(|s| {
+                user_val(s, "AnnotationRef").as_deref() == Some(shape_id.to_string().as_str())
+            })
+            .map(|s| {
+                let text = s.sheet.text.clone().unwrap_or_default();
+                let author = user_val(s, "AnnotationAuthor").unwrap_or_default();
+                let date = user_val(s, "AnnotationDate").unwrap_or_default();
+                // Older bubbles carry "author — date: body" in the text
+                // block; strip the header when the cells agree.
+                let body = text
+                    .strip_prefix(&format!("{author} — {date}: "))
+                    .unwrap_or(&text)
+                    .to_string();
+                (s.id, author, date, body)
+            })
+            .collect();
+        out.sort_by_key(|(id, _, _, _)| *id);
+        out
+    }
+
+    /// The Comments popup (#29 rework, after the shipped 2016
+    /// reference): one card per comment — author + date header, body,
+    /// Edit / Delete — with a Reply field at the bottom. The drafts
+    /// live outside the window closure (the #28 lesson).
     fn comment_window(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, mut body)) = self.comment_draft.take() else {
+        let Some(shape_id) = self.comment_target else {
             return;
         };
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.comment_target = None;
+            self.comment_edit = None;
+            self.comment_body.clear();
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let thread = self.comments_for(shape_id);
+        let mut body = std::mem::take(&mut self.comment_body);
+        let mut edit = self.comment_edit.take();
         let mut close = false;
-        let mut committed = false;
-        egui::Window::new("Add Comment")
+        egui::Window::new("Comments")
             .resizable(false)
             .collapsible(false)
             .default_width(320.0)
             .show(ctx, |ui| {
+                if thread.is_empty() {
+                    ui.weak("No comments on this shape yet.");
+                }
+                for (ann_id, author, date, cbody) in &thread {
+                    let card = egui::Frame::new()
+                        .inner_margin(egui::Margin::same(6))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ))
+                        .corner_radius(4.0)
+                        .show(ui, |ui| {
+                            // 2016 header: avatar initial + author + date.
+                            ui.horizontal(|ui| {
+                                let initial = author
+                                    .chars()
+                                    .next()
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "?".into());
+                                let (c, _) =
+                                    ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    c.center(),
+                                    8.0,
+                                    ui.visuals().selection.bg_fill,
+                                );
+                                ui.painter().text(
+                                    c.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    initial,
+                                    egui::FontId::proportional(10.0),
+                                    Color32::WHITE,
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("{author}  {date}"))
+                                        .small()
+                                        .weak(),
+                                );
+                            });
+                            let editing_here = edit.as_ref().is_some_and(|(id, _)| id == ann_id);
+                            let mut edit_buf = edit
+                                .as_mut()
+                                .filter(|(id, _)| id == ann_id)
+                                .map(|(_, b)| std::mem::take(b));
+                            let mut edit_done = false;
+                            if editing_here {
+                                let buf = edit_buf.as_mut().unwrap();
+                                let r = ui.add(
+                                    egui::TextEdit::multiline(buf)
+                                        .desired_rows(2)
+                                        .desired_width(f32::INFINITY),
+                                );
+                                r.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::TextInput,
+                                        true,
+                                        "Edit comment",
+                                    )
+                                });
+                                ui.horizontal(|ui| {
+                                    if ui.button("Save").clicked() && !buf.trim().is_empty() {
+                                        let author = author.clone();
+                                        let date = date.clone();
+                                        let new_text =
+                                            format!("{} — {}: {}", author, date, buf.trim());
+                                        self.apply(dc_core::SetText::new(
+                                            Scope::Shape {
+                                                page: page_id,
+                                                shape: *ann_id,
+                                            },
+                                            new_text,
+                                        ));
+                                        edit_done = true;
+                                    }
+                                    if ui.button("Cancel").clicked() {
+                                        edit_done = true;
+                                    }
+                                });
+                            }
+                            if !editing_here {
+                                ui.label(egui::RichText::new(cbody).size(12.0));
+                                ui.horizontal(|ui| {
+                                    if ui.button("Edit").clicked() {
+                                        edit = Some((*ann_id, cbody.clone()));
+                                    }
+                                    if ui.button("Delete").clicked() {
+                                        self.apply(RemoveShape::new(page_id, *ann_id));
+                                    }
+                                });
+                            }
+                            // Write the (possibly typed-into) buffer
+                            // back unless the editor closed.
+                            if let Some(b) = edit_buf {
+                                if let Some((id, slot)) = edit.as_mut() {
+                                    if id == ann_id && !edit_done {
+                                        *slot = b;
+                                    }
+                                }
+                            }
+                        });
+                    let _ = card;
+                    ui.add_space(4.0);
+                }
+                ui.separator();
+                // Reply (or the first comment when the thread is empty).
                 let r = ui.add(
                     egui::TextEdit::multiline(&mut body)
-                        .desired_rows(3)
-                        .hint_text("Comment"),
+                        .desired_rows(2)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(if thread.is_empty() {
+                            "Add a comment"
+                        } else {
+                            "Reply"
+                        }),
                 );
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Comment"));
+                r.widget_info(|| {
+                    egui::WidgetInfo::labeled(
+                        egui::Role::TextInput,
+                        true,
+                        if thread.is_empty() {
+                            "New comment"
+                        } else {
+                            "Reply"
+                        },
+                    )
+                });
                 ui.horizontal(|ui| {
-                    if ui.button("OK").clicked() && !body.trim().is_empty() {
-                        committed = true;
+                    let caption = if thread.is_empty() { "OK" } else { "Reply" };
+                    if ui.button(caption).clicked() && !body.trim().is_empty() {
+                        self.add_comment(shape_id, &body);
+                        body.clear();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button("Close").clicked() {
                         close = true;
                     }
                 });
             });
-        if committed {
-            self.add_comment(shape_id, &body);
-        } else if !close {
-            self.comment_draft = Some((shape_id, body));
+        if !close {
+            self.comment_body = body;
+            self.comment_edit = edit;
+        } else {
+            self.comment_body = String::new();
         }
     }
 
@@ -4824,7 +5118,9 @@ impl App {
                 self.hyperlink_draft = None;
             }
             Act::AddComment => {
-                self.comment_draft = Some((shape_id, String::new()));
+                self.comment_target = Some(shape_id);
+                self.comment_body.clear();
+                self.comment_edit = None;
             }
             Act::ShapeData => {
                 self.shape_data_open = Some(shape_id);
@@ -5191,6 +5487,12 @@ impl App {
     #[doc(hidden)]
     pub fn show_comments_for_test(&self) -> bool {
         self.show_comments
+    }
+    /// kittest: flip annotation visibility directly (#29) — the ribbon
+    /// button shares the standard toggle dispatch.
+    #[doc(hidden)]
+    pub fn set_show_comments_for_test(&mut self, on: bool) {
+        self.show_comments = on;
     }
     /// kittest: a shape's effective Prop row Value (#30) — instance
     /// first, then the master.
@@ -5815,6 +6117,8 @@ impl App {
         self.tab_menu = None;
         self.tab_rename = None;
         self.reorder_open = false;
+        self.comment_target = None;
+        self.comment_edit = None;
         self.status = "document closed".into();
     }
 
