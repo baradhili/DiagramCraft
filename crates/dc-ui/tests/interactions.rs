@@ -2276,6 +2276,80 @@ fn shape_data_dialog_edits_prop_rows() {
     );
 }
 
+/// GitHub #30: a variable-list (Type 4) Prop field can grow — the "＋"
+/// reveals an add row whose commit writes the row's Value AND appends
+/// the choice to Format, as one undo step. Fixed lists (Type 1) keep
+/// the plain dropdown.
+#[test]
+fn shape_data_variable_list_adds_choice() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    h.state_mut()
+        .debug_add_prop_row_for_test(sid, "Shift", "4", "Day;Night", "Day");
+    h.run();
+
+    // Open Shape Data… — the variable-list field shows the "＋".
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Shape Data")
+        .filter(|n| n.rect().height() < 30.0)
+        .find(|n| n.rect().min.y > 250.0)
+        .expect("Shape Data… row")
+        .click();
+    h.run();
+    // The dialog's "＋" — the status bar carries another "+"-labeled
+    // control, so take the upper one inside the Shape Data window.
+    h.get_all_by_label("+")
+        .find(|n| n.rect().min.y < 500.0)
+        .expect("variable-list add button")
+        .click();
+    h.run();
+    // Type the new choice and commit.
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Shift"),
+    )
+    .set_text_value_accesskit("Swing");
+    h.run();
+    h.get_by_label("Add").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Value"),
+        Some("Swing".into()),
+        "adding a choice writes the Value"
+    );
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Format"),
+        Some("Day;Night;Swing".into()),
+        "adding a choice appends to Format"
+    );
+    // The add row closed after committing (its Add button is gone).
+    assert!(
+        h.query_all_by_label("Add").count() == 0,
+        "the add row closed after committing"
+    );
+    // One Ctrl+Z rolls back both writes.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Value"),
+        Some("Day".into()),
+        "undo restored the previous value"
+    );
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Format"),
+        Some("Day;Night".into()),
+        "undo restored the previous format"
+    );
+}
+
 /// GitHub #31: Format Shape pane writes the renderer's cells; every
 /// change is one undo step; multi-selection applies to all members.
 #[test]

@@ -6,9 +6,11 @@ use vsdx::model::Row;
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
     Str,
-    /// Fixed (1) or variable (4) list: the ";"-separated `Format`
-    /// choices.
+    /// Fixed list (1): exactly the ";"-separated `Format` choices.
     List(Vec<String>),
+    /// Variable list (4): the `Format` choices, and the editor can
+    /// grow the list — a new choice also appends to `Format`.
+    VarList(Vec<String>),
     Number,
     Bool,
     /// Duration (5), date (6), currency (7): free text with a Format
@@ -24,15 +26,17 @@ pub fn field_kind(row: &Row) -> FieldKind {
         .cell("Format")
         .and_then(|c| c.v.clone())
         .unwrap_or_default();
+    let choices = || {
+        format
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
     match cell_num("Type").map(|t| t as i64) {
-        Some(1) | Some(4) => FieldKind::List(
-            format
-                .split(';')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect(),
-        ),
+        Some(1) => FieldKind::List(choices()),
+        Some(4) => FieldKind::VarList(choices()),
         Some(2) => FieldKind::Number,
         Some(3) => FieldKind::Bool,
         Some(5) | Some(6) | Some(7) => FieldKind::Formatted(format),
@@ -97,10 +101,11 @@ mod tests {
             field_kind(&prop(&[("Type", "1"), ("Format", "Sales; Eng ; Ops")])),
             FieldKind::List(vec!["Sales".into(), "Eng".into(), "Ops".into()])
         );
-        // Variable lists (4) share the fixed-list editor.
+        // Variable lists (4) get their own editor: the same choices,
+        // plus a way to add a new one (which grows Format).
         assert_eq!(
             field_kind(&prop(&[("Type", "4"), ("Format", "a;b")])),
-            FieldKind::List(vec!["a".into(), "b".into()])
+            FieldKind::VarList(vec!["a".into(), "b".into()])
         );
         assert_eq!(field_kind(&prop(&[("Type", "2")])), FieldKind::Number);
         assert_eq!(field_kind(&prop(&[("Type", "3")])), FieldKind::Bool);

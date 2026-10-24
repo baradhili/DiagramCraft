@@ -98,6 +98,9 @@ pub struct App {
     /// Text buffers for the Shape Data string fields (#30) — commits
     /// on focus loss, one undo per change.
     prop_bufs: std::collections::HashMap<String, String>,
+    /// The Shape Data "add choice" row is open for this variable-list
+    /// (Type 4) Prop row (#30).
+    prop_add: Option<String>,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -304,6 +307,7 @@ impl App {
             show_comments: true,
             shape_data_open: None,
             prop_bufs: std::collections::HashMap::new(),
+            prop_add: None,
             format_pane_open: false,
             fmt_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
@@ -4230,6 +4234,7 @@ impl App {
         if !alive {
             self.shape_data_open = None;
             self.prop_bufs.clear();
+            self.prop_add = None;
             return;
         }
         let Some(page_id) = self.page_id() else {
@@ -4324,6 +4329,135 @@ impl App {
                                         write_value(self, page_id, shape_id, name, &v);
                                     }
                                 }
+                                crate::props::FieldKind::VarList(choices) => {
+                                    // Variable list (Type 4): the same
+                                    // dropdown over the Format choices,
+                                    // plus "＋" to reveal an add row —
+                                    // adding a choice writes the row's
+                                    // Value AND appends to Format (one
+                                    // undo step), so the list grows
+                                    // the way Visio's variable list
+                                    // does.
+                                    let mut picked: Option<String> = None;
+                                    let mut open_add = false;
+                                    ui.horizontal(|ui| {
+                                        let r =
+                                            ui.button(format!("{current}  ›")).on_hover_text(&tip);
+                                        r.widget_info(|| {
+                                            egui::WidgetInfo::labeled(
+                                                egui::Role::ComboBox,
+                                                true,
+                                                &label,
+                                            )
+                                        });
+                                        egui::Popup::menu(&r)
+                                            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                            .show(|ui| {
+                                                ui.set_min_width(120.0);
+                                                for c in &choices {
+                                                    if ui
+                                                        .selectable_label(*c == current, c)
+                                                        .clicked()
+                                                    {
+                                                        picked = Some(c.clone());
+                                                    }
+                                                }
+                                            });
+                                        if ui.small_button("+").clicked() {
+                                            open_add = true;
+                                        }
+                                    });
+                                    if open_add {
+                                        self.prop_add = Some(name.clone());
+                                    }
+                                    if let Some(v) = picked {
+                                        write_value(self, page_id, shape_id, name, &v);
+                                    }
+                                    // The add row (label column empty).
+                                    if self.prop_add.as_deref() == Some(name.as_str()) {
+                                        ui.end_row();
+                                        ui.label("");
+                                        let add_key = format!("{name}#add");
+                                        let mut commit = false;
+                                        let mut cancel = false;
+                                        {
+                                            let buf = bufs.entry(add_key.clone()).or_default();
+                                            ui.horizontal(|ui| {
+                                                let edit = ui.add(
+                                                    egui::TextEdit::singleline(buf)
+                                                        .hint_text("new choice"),
+                                                );
+                                                edit.widget_info(|| {
+                                                    egui::WidgetInfo::labeled(
+                                                        egui::Role::TextInput,
+                                                        true,
+                                                        &label,
+                                                    )
+                                                });
+                                                if ui.button("Add").clicked()
+                                                    || (edit.lost_focus()
+                                                        && ui.input(|i| {
+                                                            i.key_pressed(egui::Key::Enter)
+                                                        }))
+                                                {
+                                                    commit = true;
+                                                }
+                                                if ui.button("Cancel").clicked() {
+                                                    cancel = true;
+                                                }
+                                            });
+                                        }
+                                        if cancel {
+                                            bufs.remove(&add_key);
+                                            self.prop_add = None;
+                                        } else if commit {
+                                            let v = bufs
+                                                .get(&add_key)
+                                                .map(|b| b.trim().to_string())
+                                                .unwrap_or_default();
+                                            bufs.remove(&add_key);
+                                            self.prop_add = None;
+                                            if !v.is_empty() {
+                                                let fmt = row
+                                                    .cell("Format")
+                                                    .and_then(|c| c.v.clone())
+                                                    .unwrap_or_default();
+                                                let new_fmt = if fmt.trim().is_empty() {
+                                                    v.clone()
+                                                } else {
+                                                    format!("{};{}", fmt.trim_end(), v)
+                                                };
+                                                let scope = Scope::Shape {
+                                                    page: page_id,
+                                                    shape: shape_id,
+                                                };
+                                                let row_sel =
+                                                    dc_core::commands::RowSel::Named(name.clone());
+                                                self.apply(dc_core::Macro::new(
+                                                    format!("add {name} choice {v:?}"),
+                                                    vec![
+                                                        Box::new(dc_core::SetRowCell::new(
+                                                            scope.clone(),
+                                                            "Prop",
+                                                            0,
+                                                            row_sel.clone(),
+                                                            "Value",
+                                                            vsdx::model::Cell::value(v),
+                                                        )),
+                                                        Box::new(dc_core::SetRowCell::new(
+                                                            scope,
+                                                            "Prop",
+                                                            0,
+                                                            row_sel,
+                                                            "Format",
+                                                            vsdx::model::Cell::value(new_fmt),
+                                                        )),
+                                                    ],
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
                                 crate::props::FieldKind::Number => {
                                     let buf =
                                         bufs.entry(name.clone()).or_insert_with(|| current.clone());
@@ -4386,6 +4520,7 @@ impl App {
         } else {
             self.shape_data_open = None;
             self.prop_bufs.clear();
+            self.prop_add = None;
         }
     }
 
@@ -5207,6 +5342,7 @@ impl App {
             Act::ShapeData => {
                 self.shape_data_open = Some(shape_id);
                 self.prop_bufs.clear();
+                self.prop_add = None;
             }
             Act::FormatShape => {
                 self.format_pane_open = true;
@@ -5575,6 +5711,72 @@ impl App {
     #[doc(hidden)]
     pub fn set_show_comments_for_test(&mut self, on: bool) {
         self.show_comments = on;
+    }
+    /// kittest: one cell of a shape's effective Prop row (#30) —
+    /// instance first, then the master.
+    #[doc(hidden)]
+    pub fn debug_prop_cell_for_test(
+        &self,
+        shape_id: i64,
+        row: &str,
+        cell: &str,
+    ) -> Option<String> {
+        self.prop_rows(shape_id)
+            .iter()
+            .find(|(n, _)| n == row)?
+            .1
+            .cell(cell)
+            .and_then(|c| c.v.clone())
+    }
+    /// kittest: give a placed shape a Prop row through the command
+    /// layer (#30) — one undo step, like a real authoring edit.
+    #[doc(hidden)]
+    pub fn debug_add_prop_row_for_test(
+        &mut self,
+        shape_id: i64,
+        name: &str,
+        type_: &str,
+        format: &str,
+        value: &str,
+    ) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let row = dc_core::commands::RowSel::Named(name.to_string());
+        let cell = |v: &str| vsdx::model::Cell::value(v.to_string());
+        self.apply(dc_core::Macro::new(
+            format!("add {name} prop row (test)"),
+            vec![
+                Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Prop",
+                    0,
+                    row.clone(),
+                    "Type",
+                    cell(type_),
+                )),
+                Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Prop",
+                    0,
+                    row.clone(),
+                    "Format",
+                    cell(format),
+                )),
+                Box::new(dc_core::SetRowCell::new(
+                    scope,
+                    "Prop",
+                    0,
+                    row,
+                    "Value",
+                    cell(value),
+                )),
+            ],
+        ));
     }
     /// kittest: a shape's effective Prop row Value (#30) — instance
     /// first, then the master.
