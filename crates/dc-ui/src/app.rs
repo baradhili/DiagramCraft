@@ -4236,11 +4236,7 @@ impl App {
             return;
         };
         let mut rows = self.prop_rows(shape_id);
-        rows.sort_by(|a, b| {
-            crate::props::sort_key(&a.1)
-                .partial_cmp(&crate::props::sort_key(&b.1))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        rows.sort_by(|a, b| crate::props::cmp_sort_key(&a.1, &b.1));
         let mut bufs = std::mem::take(&mut self.prop_bufs);
         // Closable (live report on #30): the title-bar X AND a labeled
         // Close button in an always-visible action bar — the same

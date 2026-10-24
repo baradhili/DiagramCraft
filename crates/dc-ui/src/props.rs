@@ -40,9 +40,25 @@ pub fn field_kind(row: &Row) -> FieldKind {
     }
 }
 
-/// Sort props for display: SortKey then row order (stable).
-pub fn sort_key(row: &Row) -> f64 {
-    row.cell("SortKey").and_then(|c| c.numeric()).unwrap_or(0.0)
+/// The row's `SortKey` as text (Visio's ShapeSheet SortKey cell is a
+/// string); None when absent or blank.
+pub fn sort_key(row: &Row) -> Option<&str> {
+    row.cell("SortKey")
+        .and_then(|c| c.v.as_deref())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Order Prop rows for display: string SortKey ascending, rows without
+/// a SortKey after the keyed ones, original row order preserved when
+/// keys are equal (the dialog's stable sort supplies that half).
+pub fn cmp_sort_key(a: &Row, b: &Row) -> std::cmp::Ordering {
+    match (sort_key(a), sort_key(b)) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
 }
 
 pub fn invisible(row: &Row) -> bool {
@@ -99,9 +115,24 @@ mod tests {
     #[test]
     fn display_helpers() {
         let row = prop(&[("SortKey", "3"), ("Invisible", "1"), ("Label", "Dept")]);
-        assert_eq!(sort_key(&row), 3.0);
+        assert_eq!(sort_key(&row), Some("3"));
         assert!(invisible(&row));
         assert_eq!(label(&row, "Department"), "Dept");
         assert_eq!(label(&prop(&[]), "Department"), "Department");
+    }
+
+    #[test]
+    fn sort_key_is_text_and_unkeyed_rows_sort_last() {
+        let k10 = prop(&[("SortKey", "10")]);
+        let k2 = prop(&[("SortKey", "2")]);
+        let unkeyed = prop(&[]);
+        // Text ordering: "10" sorts before "2" (a SortKey is a string
+        // cell), and a blank key is no key at all.
+        assert_eq!(sort_key(&prop(&[("SortKey", "  ")])), None);
+        assert_eq!(cmp_sort_key(&k10, &k2), std::cmp::Ordering::Less);
+        assert_eq!(cmp_sort_key(&k2, &k10), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_sort_key(&k2, &unkeyed), std::cmp::Ordering::Less);
+        assert_eq!(cmp_sort_key(&unkeyed, &k2), std::cmp::Ordering::Greater);
+        assert_eq!(cmp_sort_key(&unkeyed, &unkeyed), std::cmp::Ordering::Equal);
     }
 }
