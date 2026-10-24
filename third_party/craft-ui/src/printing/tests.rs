@@ -1,4 +1,5 @@
 use super::*;
+use crate::testing::TestResult;
 
 fn queue(name: &str, default: bool) -> Printer {
     Printer {
@@ -7,28 +8,28 @@ fn queue(name: &str, default: bool) -> Printer {
     }
 }
 
+/// A discovery answer delivered synchronously: the same closure that
+/// sends returns the receiver, so the send cannot fail (and the
+/// Discover signature takes no Result).
+fn delivered<T: Send + 'static>(value: T) -> std::sync::mpsc::Receiver<T> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let _ = sender.send(value);
+    receiver
+}
+
 #[test]
 fn discovery_preserves_choice_and_blocks_stale_or_removed_queues() {
     let ctx = egui::Context::default();
     let mut state = State::default();
     state.settings.printer = "Chosen".into();
-    let discover: Discover = Box::new(|| {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender
-            .send(vec![queue("Default", true), queue("Chosen", false)])
-            .unwrap();
-        receiver
-    });
+    let discover: Discover =
+        Box::new(|| delivered(vec![queue("Default", true), queue("Chosen", false)]));
     assert!(state.refresh(&discover));
     assert!(!state.ready());
     state.poll(&ctx);
     assert_eq!(state.settings.printer, "Chosen");
     assert!(state.ready());
-    let empty: Discover = Box::new(|| {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender.send(Vec::new()).unwrap();
-        receiver
-    });
+    let empty: Discover = Box::new(|| delivered(Vec::new()));
     assert!(state.refresh(&empty));
     assert!(!state.ready());
     state.poll(&ctx);
@@ -53,7 +54,7 @@ fn failed_discovery_cannot_reuse_a_previously_available_queue() {
 }
 
 #[test]
-fn active_jobs_keep_their_receiver_and_report_receipt_refusal_or_worker_failure() {
+fn active_jobs_keep_their_receiver_and_report_receipt_refusal_or_worker_failure() -> TestResult {
     let ctx = egui::Context::default();
     let mut state = State::default();
     state.printers.push(queue("Queue", true));
@@ -66,13 +67,13 @@ fn active_jobs_keep_their_receiver_and_report_receipt_refusal_or_worker_failure(
     drop(other_sender);
     state.poll(&ctx);
     assert!(state.busy());
-    sender.send(Ok("Queue-42".into())).unwrap();
+    sender.send(Ok("Queue-42".into()))?;
     state.poll(&ctx);
     assert_eq!(state.message, Some(Feedback::Submitted("Queue-42".into())));
     assert!(state.ready());
     let (sender, receiver) = std::sync::mpsc::channel();
     assert!(state.begin(receiver).is_ok());
-    sender.send(Err("queue refused the job".into())).unwrap();
+    sender.send(Err("queue refused the job".into()))?;
     state.poll(&ctx);
     assert_eq!(
         state.message,
@@ -84,16 +85,13 @@ fn active_jobs_keep_their_receiver_and_report_receipt_refusal_or_worker_failure(
     state.poll(&ctx);
     assert_eq!(state.message, Some(Feedback::WorkerStopped));
     assert!(state.ready());
+    Ok(())
 }
 
 #[test]
 fn discovery_and_controls_do_not_submit_a_job() {
     let mut state = State::default();
-    let discover: Discover = Box::new(|| {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender.send(vec![queue("Office", true)]).unwrap();
-        receiver
-    });
+    let discover: Discover = Box::new(|| delivered(vec![queue("Office", true)]));
     let labels = Labels {
         printer: "Drucker",
         select_printer: "Wählen",
@@ -120,19 +118,15 @@ fn discovery_and_controls_do_not_submit_a_job() {
 }
 
 #[test]
-fn localized_controls_fit_narrow_ui_and_disable_while_submitting() {
+fn localized_controls_fit_narrow_ui_and_disable_while_submitting() -> TestResult {
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
     let mut state = State::default();
     let discover: Discover = Box::new(|| {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        sender
-            .send(vec![queue(
-                "Office printer with a very long destination name",
-                true,
-            )])
-            .unwrap();
-        receiver
+        delivered(vec![queue(
+            "Office printer with a very long destination name",
+            true,
+        )])
     });
     let labels = Labels {
         printer: "Drucker",
@@ -162,16 +156,19 @@ fn localized_controls_fit_narrow_ui_and_disable_while_submitting() {
         output
     };
     let output = frame(&mut state, Vec::new());
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let checkbox = tree
         .nodes
         .iter()
         .find(|(_, node)| node.label() == Some("Graustufen"))
-        .unwrap()
+        .ok_or("no Graustufen checkbox node")?
         .1
         .clone();
     assert!(!checkbox.is_disabled());
-    let bounds = checkbox.bounds().unwrap();
+    let bounds = checkbox.bounds().ok_or("no checkbox bounds")?;
     assert!(
         bounds.x0 >= 0.0 && bounds.x1 <= 220.0 && bounds.y1 <= 360.0,
         "control stays reachable in a narrow pane"
@@ -198,12 +195,12 @@ fn localized_controls_fit_narrow_ui_and_disable_while_submitting() {
     let (_sender, receiver) = std::sync::mpsc::channel();
     assert!(state.begin(receiver).is_ok());
     let output = frame(&mut state, Vec::new());
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     assert!(
-        output
-            .platform_output
-            .accesskit_update
-            .unwrap()
-            .nodes
+        tree.nodes
             .iter()
             .any(|(_, node)| node.label() == Some("Graustufen") && node.is_disabled())
     );
@@ -216,4 +213,5 @@ fn localized_controls_fit_narrow_ui_and_disable_while_submitting() {
         state.settings.grayscale,
         "pending work disables editing its settings"
     );
+    Ok(())
 }

@@ -91,6 +91,7 @@ pub fn fit_toolbar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::TestResult;
 
     #[test]
     fn exact_fit_keeps_every_natural_width_and_needs_no_overflow() {
@@ -150,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn tiny_rows_require_a_real_fallback_instead_of_an_inaccessible_button() {
+    fn tiny_rows_require_a_real_fallback_instead_of_an_inaccessible_button() -> TestResult {
         for available in [0.0, 1.0, 19.999] {
             assert_eq!(fit_toolbar(&[30.0, 30.0], available, 4.0, 20.0), None);
         }
@@ -162,12 +163,9 @@ mod tests {
                 overflow_width: 20.0
             })
         );
-        assert!(
-            fit_toolbar(&[10.0], 10.0, 4.0, 20.0)
-                .unwrap()
-                .overflow
-                .is_empty()
-        );
+        let fit = fit_toolbar(&[10.0], 10.0, 4.0, 20.0).ok_or("tiny row fit failed")?;
+        assert!(fit.overflow.is_empty());
+        Ok(())
     }
 
     #[test]
@@ -195,11 +193,12 @@ mod tests {
     }
 
     #[test]
-    fn every_group_remains_reachable_and_every_accepted_fit_stays_within_budget() {
+    fn every_group_remains_reachable_and_every_accepted_fit_stays_within_budget() -> TestResult {
         let widths = [12.5, 28.0, 24.25, 58.0, 32.0];
         for available in [20.0, 31.5, 37.0, 55.0, 93.5, 156.0, 500.0, MAX_EXTENT] {
             for spacing in [0.0, 0.5, 4.0, 12.0] {
-                let fit = fit_toolbar(&widths, available, spacing, 20.0).unwrap();
+                let fit = fit_toolbar(&widths, available, spacing, 20.0)
+                    .ok_or("reachable fit expected")?;
                 let indices: Vec<_> = fit
                     .shown
                     .iter()
@@ -224,5 +223,6 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::testing::TestResult;
 use egui::{Context, Event, FullOutput, Key, Modifiers, PointerButton, Pos2, RawInput, pos2, vec2};
 
 fn style() -> IconButtonStyle {
@@ -49,7 +50,10 @@ impl ButtonTest {
         }
     }
 
-    fn frame(&mut self, events: Vec<Event>) -> (Response, FullOutput) {
+    fn frame(
+        &mut self,
+        events: Vec<Event>,
+    ) -> Result<(Response, FullOutput), Box<dyn std::error::Error>> {
         let ctx = self.ctx.clone();
         let mut response = None;
         self.tint = None;
@@ -75,12 +79,12 @@ impl ButtonTest {
             },
         );
         output.textures_delta.clear();
-        (response.unwrap(), output)
+        Ok((response.ok_or("the button did not run")?, output))
     }
 
-    fn settle(&mut self) -> Response {
-        self.frame(vec![]);
-        self.frame(vec![]).0
+    fn settle(&mut self) -> Result<Response, Box<dyn std::error::Error>> {
+        self.frame(vec![])?;
+        self.frame(vec![]).map(|(r, _)| r)
     }
 }
 
@@ -104,30 +108,31 @@ fn key(key: Key, pressed: bool) -> Event {
 }
 
 #[test]
-fn click_activates_once_and_selection_stays_caller_owned() {
+fn click_activates_once_and_selection_stays_caller_owned() -> TestResult {
     let mut h = ButtonTest::new();
-    let center = h.settle().rect.center();
-    h.frame(vec![Event::PointerMoved(center)]);
+    let center = h.settle()?.rect.center();
+    h.frame(vec![Event::PointerMoved(center)])?;
     assert_eq!(h.tint, Some(Color32::GREEN));
-    h.frame(vec![pointer(center, true)]);
+    h.frame(vec![pointer(center, true)])?;
     assert_eq!(h.tint, Some(Color32::RED));
     assert_eq!(h.clicks, 0);
-    h.frame(vec![pointer(center, false)]);
-    h.frame(vec![]);
+    h.frame(vec![pointer(center, false)])?;
+    h.frame(vec![])?;
     assert_eq!(h.clicks, 1);
     assert!(!h.selected);
+    Ok(())
 }
 
 #[test]
-fn both_pressed_styles_cancel_activation_after_dragging_away() {
+fn both_pressed_styles_cancel_activation_after_dragging_away() -> TestResult {
     for separate_pressed in [false, true] {
         let mut h = ButtonTest::new();
         if !separate_pressed {
             h.style.pressed = None;
         }
-        let inside = h.settle().rect.center();
-        h.frame(vec![Event::PointerMoved(inside)]);
-        h.frame(vec![pointer(inside, true)]);
+        let inside = h.settle()?.rect.center();
+        h.frame(vec![Event::PointerMoved(inside)])?;
+        h.frame(vec![pointer(inside, true)])?;
         assert_eq!(
             h.tint,
             Some(if separate_pressed {
@@ -138,35 +143,40 @@ fn both_pressed_styles_cancel_activation_after_dragging_away() {
         );
         // egui cancels the click candidate once the pointer exceeds its drag threshold.
         let outside = pos2(300.0, 150.0);
-        h.frame(vec![Event::PointerMoved(outside)]);
+        h.frame(vec![Event::PointerMoved(outside)])?;
         assert_eq!(h.tint, Some(Color32::WHITE));
-        h.frame(vec![pointer(outside, false)]);
+        h.frame(vec![pointer(outside, false)])?;
         assert_eq!(h.clicks, 0, "releasing outside must not invoke a command");
     }
+    Ok(())
 }
 
 #[test]
-fn selection_takes_precedence_and_is_exposed_to_accessibility() {
+fn selection_takes_precedence_and_is_exposed_to_accessibility() -> TestResult {
     let mut h = ButtonTest::new();
     h.selected = true;
-    let center = h.settle().rect.center();
-    let (_, output) = h.frame(vec![Event::PointerMoved(center), pointer(center, true)]);
+    let center = h.settle()?.rect.center();
+    let (_, output) = h.frame(vec![Event::PointerMoved(center), pointer(center, true)])?;
     assert_eq!(h.tint, Some(Color32::YELLOW));
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let (_, node) = tree
         .nodes
         .iter()
         .find(|(_, n)| n.label() == Some("Inspect layers"))
-        .unwrap();
+        .ok_or("no Inspect layers button node")?;
     assert_eq!(node.role(), egui::accesskit::Role::Button);
     assert_eq!(node.toggled(), Some(egui::accesskit::Toggled::True));
     assert!(!node.is_disabled());
+    Ok(())
 }
 
 #[test]
-fn disabled_buttons_ignore_pointer_and_keyboard_activation() {
+fn disabled_buttons_ignore_pointer_and_keyboard_activation() -> TestResult {
     let mut h = ButtonTest::new();
-    let response = h.settle();
+    let response = h.settle()?;
     h.ctx.memory_mut(|m| m.request_focus(response.id));
     h.enabled = false;
     let center = response.rect.center();
@@ -174,39 +184,44 @@ fn disabled_buttons_ignore_pointer_and_keyboard_activation() {
         Event::PointerMoved(center),
         pointer(center, true),
         key(Key::Enter, true),
-    ]);
-    let (r, output) = h.frame(vec![pointer(center, false), key(Key::Enter, false)]);
+    ])?;
+    let (r, output) = h.frame(vec![pointer(center, false), key(Key::Enter, false)])?;
     assert_eq!(h.clicks, 0);
     assert!(!r.enabled());
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let (_, node) = tree
         .nodes
         .iter()
         .find(|(_, n)| n.label() == Some("Inspect layers"))
-        .unwrap();
+        .ok_or("no Inspect layers button node")?;
     assert!(node.is_disabled());
+    Ok(())
 }
 
 #[test]
-fn enter_and_space_activate_once_per_press() {
+fn enter_and_space_activate_once_per_press() -> TestResult {
     for key_code in [Key::Enter, Key::Space] {
         let mut h = ButtonTest::new();
-        let response = h.settle();
+        let response = h.settle()?;
         h.ctx.memory_mut(|m| m.request_focus(response.id));
-        h.frame(vec![]);
-        h.frame(vec![key(key_code, true)]);
-        h.frame(vec![key(key_code, false)]);
-        h.frame(vec![]);
+        h.frame(vec![])?;
+        h.frame(vec![key(key_code, true)])?;
+        h.frame(vec![key(key_code, false)])?;
+        h.frame(vec![])?;
         assert_eq!(h.clicks, 1, "{key_code:?}");
     }
+    Ok(())
 }
 
 #[test]
-fn focus_has_an_inset_visible_outline() {
+fn focus_has_an_inset_visible_outline() -> TestResult {
     let mut h = ButtonTest::new();
-    let response = h.settle();
+    let response = h.settle()?;
     h.ctx.memory_mut(|m| m.request_focus(response.id));
-    let (r, output) = h.frame(vec![]);
+    let (r, output) = h.frame(vec![])?;
     assert!(r.has_focus());
     assert!(
         output
@@ -215,26 +230,28 @@ fn focus_has_an_inset_visible_outline() {
             .any(|s| matches!(&s.shape, egui::epaint::Shape::Rect(shape)
         if shape.rect == r.rect.shrink(2.0) && shape.stroke == h.style.focus_stroke))
     );
+    Ok(())
 }
 
 #[test]
-fn translating_a_label_preserves_id_and_focus() {
+fn translating_a_label_preserves_id_and_focus() -> TestResult {
     let mut h = ButtonTest::new();
-    let first = h.settle();
+    let first = h.settle()?;
     h.ctx.memory_mut(|m| m.request_focus(first.id));
     h.label = "Inspecter les calques".into();
-    let (second, output) = h.frame(vec![]);
+    let (second, output) = h.frame(vec![])?;
     assert_eq!(first.id, second.id);
     assert!(second.has_focus());
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     assert!(
-        output
-            .platform_output
-            .accesskit_update
-            .unwrap()
-            .nodes
+        tree.nodes
             .iter()
             .any(|(_, n)| n.label() == Some("Inspecter les calques"))
     );
+    Ok(())
 }
 
 #[test]
@@ -270,7 +287,7 @@ fn duplicate_labels_have_distinct_ids_and_tab_visits_both() {
 }
 
 #[test]
-fn hostile_sizes_are_inert_and_strokes_stay_finite() {
+fn hostile_sizes_are_inert_and_strokes_stay_finite() -> TestResult {
     for size in [
         vec2(f32::NAN, 24.0),
         vec2(24.0, f32::INFINITY),
@@ -280,7 +297,7 @@ fn hostile_sizes_are_inert_and_strokes_stay_finite() {
     ] {
         let mut h = ButtonTest::new();
         h.size = size;
-        let (r, _) = h.frame(vec![key(Key::Enter, true)]);
+        let (r, _) = h.frame(vec![key(Key::Enter, true)])?;
         assert_eq!(r.rect.size(), Vec2::ZERO);
         assert_eq!(h.tint, None);
         assert_eq!(h.clicks, 0);
@@ -297,17 +314,22 @@ fn hostile_sizes_are_inert_and_strokes_stay_finite() {
         bounded_stroke(Stroke::new(f32::MAX, Color32::WHITE), rect).width,
         10.0
     );
+    Ok(())
 }
 
 #[test]
-fn single_shape_frame_preserves_original_rectangle_tessellation() {
+fn single_shape_frame_preserves_original_rectangle_tessellation() -> TestResult {
     #[derive(Debug, PartialEq)]
     struct DrawMesh {
         clip: Rect,
         indices: Vec<u32>,
         vertices: Vec<(Pos2, Pos2, Color32)>,
     }
-    fn meshes(mode: Option<bool>, enabled: bool, scale: f32) -> Vec<DrawMesh> {
+    fn meshes(
+        mode: Option<bool>,
+        enabled: bool,
+        scale: f32,
+    ) -> Result<Vec<DrawMesh>, Box<dyn std::error::Error>> {
         let ctx = Context::default();
         ctx.set_pixels_per_point(scale);
         let mut style = style();
@@ -346,13 +368,14 @@ fn single_shape_frame_preserves_original_rectangle_tessellation() {
             );
             output.textures_delta.clear();
         }
-        ctx.tessellate(output.shapes, output.pixels_per_point)
+        let meshes = ctx
+            .tessellate(output.shapes, output.pixels_per_point)
             .into_iter()
-            .map(|clipped| {
+            .map(|clipped| -> Result<DrawMesh, Box<dyn std::error::Error>> {
                 let egui::epaint::Primitive::Mesh(mesh) = clipped.primitive else {
-                    panic!("unexpected paint callback")
+                    return Err("unexpected paint callback".into());
                 };
-                DrawMesh {
+                Ok(DrawMesh {
                     clip: clipped.clip_rect,
                     indices: mesh.indices,
                     vertices: mesh
@@ -360,23 +383,25 @@ fn single_shape_frame_preserves_original_rectangle_tessellation() {
                         .into_iter()
                         .map(|v| (v.pos, v.uv, v.color))
                         .collect(),
-                }
+                })
             })
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(meshes)
     }
     for scale in [1.0, 1.5, 2.0] {
         for enabled in [false, true] {
-            let original = meshes(None, enabled, scale);
+            let original = meshes(None, enabled, scale)?;
             assert_eq!(
-                meshes(Some(true), enabled, scale),
+                meshes(Some(true), enabled, scale)?,
                 original,
                 "enabled={enabled}, scale={scale}"
             );
             assert_ne!(
-                meshes(Some(false), enabled, scale),
+                meshes(Some(false), enabled, scale)?,
                 original,
                 "separate shapes have a different edge mesh"
             );
         }
     }
+    Ok(())
 }

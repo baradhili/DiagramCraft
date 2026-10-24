@@ -1,4 +1,5 @@
 use super::*;
+use crate::testing::TestResult;
 use egui::{
     Color32, Context, Event, FullOutput, Id, Key, Modifiers, PointerButton, Pos2, RawInput, Rect,
     Vec2, accesskit, pos2, vec2,
@@ -9,13 +10,14 @@ fn sample() -> Rect {
 }
 
 #[test]
-fn ordinary_splits_keep_relative_and_fixed_point_sizes() {
+fn ordinary_splits_keep_relative_and_fixed_point_sizes() -> TestResult {
     for (request, first, second) in [
         (SplitSize::Ratio(0.25), 99.0, 297.0),
         (SplitSize::FixedFirst(150.0), 150.0, 246.0),
         (SplitSize::FixedSecond(150.0), 246.0, 150.0),
     ] {
-        let layout = split_rect(sample(), SplitAxis::Horizontal, request, 4.0, 20.0).unwrap();
+        let layout = split_rect(sample(), SplitAxis::Horizontal, request, 4.0, 20.0)
+            .ok_or("ordinary split failed")?;
         assert_eq!(layout.first.width(), first);
         assert_eq!(layout.second.width(), second);
         assert_eq!(layout.divider.width(), 4.0);
@@ -31,14 +33,15 @@ fn ordinary_splits_keep_relative_and_fixed_point_sizes() {
         2.0,
         0.0,
     )
-    .unwrap();
+    .ok_or("vertical split failed")?;
     assert_eq!(layout.first.height(), 99.0);
     assert_eq!(layout.second.height(), 99.0);
     assert_eq!(layout.divider.height(), 2.0);
+    Ok(())
 }
 
 #[test]
-fn tiny_panes_never_invert_clamp_bounds_or_escape_the_parent() {
+fn tiny_panes_never_invert_clamp_bounds_or_escape_the_parent() -> TestResult {
     for span in [0.0, 1.0, 15.0, 20.0, 35.0, 39.9, 40.0, 80.0, 1000.0] {
         for axis in [SplitAxis::Horizontal, SplitAxis::Vertical] {
             let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(span));
@@ -50,7 +53,8 @@ fn tiny_panes_never_invert_clamp_bounds_or_escape_the_parent() {
                     SplitSize::FixedFirst(300.0),
                     SplitSize::FixedSecond(300.0),
                 ] {
-                    let layout = split_rect(rect, axis, size, gap, 20.0).unwrap();
+                    let layout =
+                        split_rect(rect, axis, size, gap, 20.0).ok_or("tiny-pane split failed")?;
                     for child in [layout.first, layout.divider, layout.second] {
                         assert!(rect.contains_rect(child), "{rect:?}: {child:?}");
                         assert!(child.width() >= 0.0 && child.height() >= 0.0);
@@ -60,10 +64,11 @@ fn tiny_panes_never_invert_clamp_bounds_or_escape_the_parent() {
             }
         }
     }
+    Ok(())
 }
 
 #[test]
-fn invalid_inputs_return_none_and_extreme_finite_requests_stay_bounded() {
+fn invalid_inputs_return_none_and_extreme_finite_requests_stay_bounded() -> TestResult {
     for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
         for size in [
             SplitSize::Ratio(invalid),
@@ -155,16 +160,18 @@ fn invalid_inputs_return_none_and_extreme_finite_requests_stay_bounded() {
         SplitSize::FixedFirst(f32::MAX),
         SplitSize::FixedSecond(-f32::MAX),
     ] {
-        let layout = split_rect(huge, SplitAxis::Horizontal, request, 4.0, 20.0).unwrap();
+        let layout = split_rect(huge, SplitAxis::Horizontal, request, 4.0, 20.0)
+            .ok_or("extreme finite split failed")?;
         for child in [layout.first, layout.divider, layout.second] {
             assert!(huge.contains_rect(child));
             assert!(child.min.is_finite() && child.max.is_finite());
         }
     }
+    Ok(())
 }
 
 #[test]
-fn resizing_retains_sizing_mode_and_bounded_minima() {
+fn resizing_retains_sizing_mode_and_bounded_minima() -> TestResult {
     let layout = split_rect(
         sample(),
         SplitAxis::Horizontal,
@@ -172,7 +179,7 @@ fn resizing_retains_sizing_mode_and_bounded_minima() {
         4.0,
         20.0,
     )
-    .unwrap();
+    .ok_or("initial split failed")?;
     assert_eq!(
         layout.resized(SplitSize::Ratio(0.25), 20.0, 40.0),
         Some(SplitSize::Ratio(120.0 / 396.0))
@@ -200,7 +207,7 @@ fn resizing_retains_sizing_mode_and_bounded_minima() {
         4.0,
         20.0,
     )
-    .unwrap();
+    .ok_or("tiny split failed")?;
     assert_eq!(
         tiny.resized(SplitSize::FixedFirst(7.5), 100.0, 40.0),
         Some(SplitSize::FixedFirst(7.5))
@@ -220,8 +227,9 @@ fn resizing_retains_sizing_mode_and_bounded_minima() {
         4.0,
         20.0,
     )
-    .unwrap();
+    .ok_or("zero split failed")?;
     assert!(zero.resized(SplitSize::Ratio(0.5), 10.0, 40.0).is_none());
+    Ok(())
 }
 
 fn handle_style() -> ResizeHandleStyle {
@@ -255,7 +263,10 @@ impl HandleTest {
         }
     }
 
-    fn frame(&mut self, events: Vec<Event>) -> (ResizeResponse, FullOutput) {
+    fn frame(
+        &mut self,
+        events: Vec<Event>,
+    ) -> Result<(ResizeResponse, FullOutput), Box<dyn std::error::Error>> {
         let ctx = self.ctx.clone();
         let mut result = None;
         let mut output = ctx.run_ui(
@@ -282,12 +293,12 @@ impl HandleTest {
             },
         );
         output.textures_delta.clear();
-        (result.unwrap(), output)
+        Ok((result.ok_or("the handle did not run")?, output))
     }
 
-    fn settle(&mut self) -> ResizeResponse {
-        self.frame(vec![]);
-        self.frame(vec![]).0
+    fn settle(&mut self) -> Result<ResizeResponse, Box<dyn std::error::Error>> {
+        self.frame(vec![])?;
+        self.frame(vec![]).map(|(r, _)| r)
     }
 }
 
@@ -324,36 +335,37 @@ fn accesskit_event(
 }
 
 #[test]
-fn resize_handle_preserves_pointer_drag_lifecycle_and_reports_per_frame_delta() {
+fn resize_handle_preserves_pointer_drag_lifecycle_and_reports_per_frame_delta() -> TestResult {
     let mut h = HandleTest::new();
     let center = h.rect.center();
-    h.settle();
-    h.frame(vec![Event::PointerMoved(center)]);
-    h.frame(vec![pointer(center, true)]);
-    let (response, _) = h.frame(vec![Event::PointerMoved(center + vec2(12.0, 0.0))]);
+    h.settle()?;
+    h.frame(vec![Event::PointerMoved(center)])?;
+    h.frame(vec![pointer(center, true)])?;
+    let (response, _) = h.frame(vec![Event::PointerMoved(center + vec2(12.0, 0.0))])?;
     assert!(response.response.dragged());
     assert_eq!(response.delta, 12.0);
-    let (response, _) = h.frame(vec![Event::PointerMoved(center + vec2(16.0, 0.0))]);
+    let (response, _) = h.frame(vec![Event::PointerMoved(center + vec2(16.0, 0.0))])?;
     assert_eq!(response.delta, 4.0);
-    let (response, _) = h.frame(vec![pointer(center + vec2(16.0, 0.0), false)]);
+    let (response, _) = h.frame(vec![pointer(center + vec2(16.0, 0.0), false)])?;
     assert!(response.response.drag_stopped());
     assert_eq!(response.delta, 0.0);
     assert_eq!(h.value, 100.0, "the component never owns pane state");
+    Ok(())
 }
 
 #[test]
-fn focused_handle_resizes_with_axis_arrows_and_draws_visible_focus() {
+fn focused_handle_resizes_with_axis_arrows_and_draws_visible_focus() -> TestResult {
     for (axis, forward, back) in [
         (SplitAxis::Horizontal, Key::ArrowRight, Key::ArrowLeft),
         (SplitAxis::Vertical, Key::ArrowDown, Key::ArrowUp),
     ] {
         let mut h = HandleTest::new();
         h.axis = axis;
-        let response = h.settle();
+        let response = h.settle()?;
         h.ctx
             .memory_mut(|memory| memory.request_focus(response.response.id));
-        h.frame(vec![]);
-        let (response, output) = h.frame(vec![key(forward)]);
+        h.frame(vec![])?;
+        let (response, output) = h.frame(vec![key(forward)])?;
         assert_eq!(response.delta, 8.0);
         assert!(response.response.has_focus());
         assert!(
@@ -362,47 +374,55 @@ fn focused_handle_resizes_with_axis_arrows_and_draws_visible_focus() {
                 .iter()
                 .any(|shape| matches!(&shape.shape, egui::epaint::Shape::Rect(rect) if rect.rect == h.rect && rect.fill == Color32::BLUE))
         );
-        assert_eq!(h.frame(vec![key(back)]).0.delta, -8.0);
+        assert_eq!(h.frame(vec![key(back)])?.0.delta, -8.0);
     }
+    Ok(())
 }
 
 #[test]
-fn unfocused_disabled_and_invalid_handles_do_not_resize() {
+fn unfocused_disabled_and_invalid_handles_do_not_resize() -> TestResult {
     let mut h = HandleTest::new();
-    let response = h.settle();
-    assert_eq!(h.frame(vec![key(Key::ArrowRight)]).0.delta, 0.0);
+    let response = h.settle()?;
+    assert_eq!(h.frame(vec![key(Key::ArrowRight)])?.0.delta, 0.0);
     h.ctx
         .memory_mut(|memory| memory.request_focus(response.response.id));
     h.enabled = false;
-    let (response, output) = h.frame(vec![key(Key::ArrowRight)]);
+    let (response, output) = h.frame(vec![key(Key::ArrowRight)])?;
     assert_eq!(response.delta, 0.0);
     assert!(!response.response.enabled());
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let (_, node) = tree
         .nodes
         .iter()
         .find(|(_, node)| node.label() == Some("Resize panels"))
-        .unwrap();
+        .ok_or("no Resize panels splitter node")?;
     assert!(node.is_disabled());
     h.enabled = true;
     h.rect.min.x = f32::NAN;
-    assert_eq!(h.frame(vec![key(Key::ArrowRight)]).0.delta, 0.0);
+    assert_eq!(h.frame(vec![key(Key::ArrowRight)])?.0.delta, 0.0);
+    Ok(())
 }
 
 #[test]
-fn accessible_splitter_has_identity_orientation_value_and_actions() {
+fn accessible_splitter_has_identity_orientation_value_and_actions() -> TestResult {
     let mut h = HandleTest::new();
-    let response = h.settle();
+    let response = h.settle()?;
     let id = response.response.id;
     h.label = "パネル幅を変更".into();
-    let (response, output) = h.frame(vec![]);
+    let (response, output) = h.frame(vec![])?;
     assert_eq!(response.response.id, id);
-    let tree = output.platform_output.accesskit_update.unwrap();
+    let tree = output
+        .platform_output
+        .accesskit_update
+        .ok_or("no accesskit update")?;
     let (_, node) = tree
         .nodes
         .iter()
         .find(|(_, node)| node.label() == Some(h.label.as_str()))
-        .unwrap();
+        .ok_or("no localized splitter node")?;
     assert_eq!(node.role(), accesskit::Role::Splitter);
     assert_eq!(node.orientation(), Some(accesskit::Orientation::Vertical));
     assert_eq!(node.numeric_value(), Some(100.0));
@@ -416,7 +436,7 @@ fn accessible_splitter_has_identity_orientation_value_and_actions() {
             id,
             accesskit::Action::Increment,
             None
-        )])
+        )])?
         .0
         .delta,
         8.0
@@ -426,7 +446,7 @@ fn accessible_splitter_has_identity_orientation_value_and_actions() {
             id,
             accesskit::Action::Decrement,
             None
-        )])
+        )])?
         .0
         .delta,
         -8.0
@@ -436,7 +456,7 @@ fn accessible_splitter_has_identity_orientation_value_and_actions() {
             id,
             accesskit::Action::SetValue,
             Some(accesskit::ActionData::NumericValue(250.0))
-        )])
+        )])?
         .0
         .delta,
         150.0
@@ -446,9 +466,10 @@ fn accessible_splitter_has_identity_orientation_value_and_actions() {
             id,
             accesskit::Action::SetValue,
             Some(accesskit::ActionData::NumericValue(f64::NAN))
-        )])
+        )])?
         .0
         .delta,
         0.0
     );
+    Ok(())
 }
