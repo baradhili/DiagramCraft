@@ -2126,3 +2126,57 @@ fn add_comment_creates_layer_annotation_and_toggles() {
         "undo removed the comment"
     );
 }
+
+/// GitHub #30: Shape Data… edits Prop rows through the command layer.
+#[test]
+fn shape_data_dialog_edits_prop_rows() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    assert_eq!(
+        h.state().debug_prop_value_for_test(sid, "Department"),
+        Some("Engineering".into()),
+        "master Prop row resolves"
+    );
+
+    // Open Shape Data… — the dialog lists Department (a list field)
+    // with its current choice; pick another from the combo.
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Shape Data")
+        .filter(|n| n.rect().height() < 30.0)
+        .find(|n| n.rect().min.y > 250.0)
+        .expect("Shape Data… row")
+        .click();
+    h.run();
+    // The combo is labeled by its field name; open it and pick
+    // "Sales".
+    // The grid label "Department" and the combo share the name — take
+    // the clickable one (the combo on the value column).
+    let combo = h
+        .get_all_by_label("Department")
+        .filter(|n| n.rect().min.x > 90.0)
+        .collect::<Vec<_>>();
+    combo[combo.len() - 1].click();
+    h.run();
+    h.get_by_label("Sales").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_prop_value_for_test(sid, "Department"),
+        Some("Sales".into()),
+        "the combo wrote the row's Value"
+    );
+    // One Ctrl+Z restores the previous value.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_prop_value_for_test(sid, "Department"),
+        Some("Engineering".into()),
+        "undo restored the Prop value"
+    );
+}

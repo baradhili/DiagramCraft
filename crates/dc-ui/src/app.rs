@@ -84,6 +84,11 @@ pub struct App {
     comment_draft: Option<(i64, String)>,
     /// Annotation visibility (Review ▸ Show Comments, #29).
     show_comments: bool,
+    /// The Shape Data dialog is open for this shape (#30).
+    shape_data_open: Option<i64>,
+    /// Text buffers for the Shape Data string fields (#30) — commits
+    /// on focus loss, one undo per change.
+    prop_bufs: std::collections::HashMap<String, String>,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -285,6 +290,8 @@ impl App {
             hyperlink_draft: None,
             comment_draft: None,
             show_comments: true,
+            shape_data_open: None,
+            prop_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -3525,6 +3532,196 @@ impl App {
         }
     }
 
+    /// The shape's Prop rows for the Shape Data dialog (#30):
+    /// instance rows, then the master's (effective view); edits always
+    /// target the instance scope by row name.
+    fn prop_rows(&self, shape_id: i64) -> Vec<(String, vsdx::model::Row)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        let collect = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .flat_map(|s| s.sheet.sections_named("Prop"))
+                .flat_map(|sec| sec.rows.iter())
+                .filter_map(|r| r.n.as_deref().map(|n| (n.to_string(), r.clone())))
+                .collect::<Vec<_>>()
+        };
+        let mut out = collect(std::slice::from_ref(sh));
+        if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
+            out.extend(collect(&m.shapes));
+        }
+        out
+    }
+
+    /// Shape Data… (#30): one field per visible Prop row, ordered by
+    /// SortKey; the editor follows the row's Type/Format. Edits write
+    /// the row's Value through SetRowCell (one undo per change).
+    fn shape_data_window(&mut self, ctx: &egui::Context) {
+        fn write_value(app: &mut App, page_id: i64, shape_id: i64, name: &str, val: &str) {
+            app.apply(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: shape_id,
+                },
+                "Prop",
+                0,
+                dc_core::commands::RowSel::Named(name.to_string()),
+                "Value",
+                vsdx::model::Cell::value(val.to_string()),
+            ));
+        }
+        let Some(shape_id) = self.shape_data_open else {
+            return;
+        };
+        let alive = self
+            .ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .is_some_and(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id).is_some());
+        if !alive {
+            self.shape_data_open = None;
+            self.prop_bufs.clear();
+            return;
+        }
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let mut rows = self.prop_rows(shape_id);
+        rows.sort_by(|a, b| {
+            crate::props::sort_key(&a.1)
+                .partial_cmp(&crate::props::sort_key(&b.1))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut bufs = std::mem::take(&mut self.prop_bufs);
+        egui::Window::new("Shape Data")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(340.0)
+            .show(ctx, |ui| {
+                egui::Grid::new("dc-shape-data")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 6.0))
+                    .show(ui, |ui| {
+                        for (name, row) in &rows {
+                            if crate::props::invisible(row) {
+                                continue;
+                            }
+                            let label = crate::props::label(row, name);
+                            let current = row
+                                .cell("Value")
+                                .and_then(|c| c.v.clone())
+                                .unwrap_or_default();
+                            let tip = row
+                                .cell("Prompt")
+                                .and_then(|c| c.v.clone())
+                                .unwrap_or_default();
+                            ui.label(&label).on_hover_text(&tip);
+                            let _field_id = ();
+                            match crate::props::field_kind(row) {
+                                crate::props::FieldKind::Bool => {
+                                    let mut on = current.trim() == "1";
+                                    let r = ui.checkbox(&mut on, "");
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::CheckBox,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.changed() {
+                                        write_value(
+                                            self,
+                                            page_id,
+                                            shape_id,
+                                            name,
+                                            if on { "1" } else { "0" },
+                                        );
+                                    }
+                                }
+                                crate::props::FieldKind::List(choices) => {
+                                    // A manual dropdown: the stock
+                                    // ComboBox's arrow glyph is missing
+                                    // from the pinned font set.
+                                    let r = ui.button(format!("{current}  ›")).on_hover_text(&tip);
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::ComboBox,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    let mut picked: Option<String> = None;
+                                    egui::Popup::menu(&r)
+                                        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                                        .show(|ui| {
+                                            ui.set_min_width(120.0);
+                                            for c in &choices {
+                                                if ui.selectable_label(*c == current, c).clicked() {
+                                                    picked = Some(c.clone());
+                                                }
+                                            }
+                                        });
+                                    if let Some(v) = picked {
+                                        write_value(self, page_id, shape_id, name, &v);
+                                    }
+                                }
+                                crate::props::FieldKind::Number => {
+                                    let buf =
+                                        bufs.entry(name.clone()).or_insert_with(|| current.clone());
+                                    let r =
+                                        ui.add(egui::TextEdit::singleline(buf).hint_text("0.0"));
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::TextInput,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.lost_focus() && buf.as_str() != current {
+                                        match buf.trim().parse::<f64>() {
+                                            Ok(_) => {
+                                                let v = buf.trim().to_string();
+                                                write_value(self, page_id, shape_id, name, &v);
+                                            }
+                                            Err(_) => {
+                                                self.status = format!("{label}: not a number");
+                                            }
+                                        }
+                                        bufs.remove(name);
+                                    }
+                                }
+                                crate::props::FieldKind::Str
+                                | crate::props::FieldKind::Formatted(_) => {
+                                    let buf =
+                                        bufs.entry(name.clone()).or_insert_with(|| current.clone());
+                                    let r = ui.add(egui::TextEdit::singleline(buf));
+                                    r.widget_info(|| {
+                                        egui::WidgetInfo::labeled(
+                                            egui::Role::TextInput,
+                                            true,
+                                            &label,
+                                        )
+                                    });
+                                    if r.lost_focus() && buf.as_str() != current {
+                                        let v = buf.trim().to_string();
+                                        write_value(self, page_id, shape_id, name, &v);
+                                        bufs.remove(name);
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+            });
+        self.prop_bufs = bufs;
+    }
+
     fn hyperlink_window(&mut self, ctx: &egui::Context) {
         let Some(shape_id) = self.hyperlink_open else {
             return;
@@ -4037,6 +4234,7 @@ impl App {
             Container,
             Hyperlink,
             AddComment,
+            ShapeData,
             Cut,
             Copy,
             Paste,
@@ -4226,7 +4424,9 @@ impl App {
             if ctx_item(ui, None, "Add Comment", "", true) {
                 act = Some(Act::AddComment);
             }
-            ctx_item(ui, None, "Shape Data…", "(v0.5)", false);
+            if ctx_item(ui, None, "Shape Data…", "", true) {
+                act = Some(Act::ShapeData);
+            }
             ctx_item(ui, None, "Format Shape…", "(v0.5)", false);
             ui.separator();
             if ctx_item(ui, None, "Edit Text…", "F2", true) {
@@ -4278,6 +4478,10 @@ impl App {
             }
             Act::AddComment => {
                 self.comment_draft = Some((shape_id, String::new()));
+            }
+            Act::ShapeData => {
+                self.shape_data_open = Some(shape_id);
+                self.prop_bufs.clear();
             }
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
@@ -4637,6 +4841,17 @@ impl App {
     pub fn show_comments_for_test(&self) -> bool {
         self.show_comments
     }
+    /// kittest: a shape's effective Prop row Value (#30) — instance
+    /// first, then the master.
+    #[doc(hidden)]
+    pub fn debug_prop_value_for_test(&self, shape_id: i64, row: &str) -> Option<String> {
+        let rows = self.prop_rows(shape_id);
+        rows.iter()
+            .find(|(n, _)| n == row)?
+            .1
+            .cell("Value")
+            .and_then(|c| c.v.clone())
+    }
     /// kittest: the active page's name (#54).
     #[doc(hidden)]
     pub fn debug_active_page_name(&self) -> String {
@@ -4956,6 +5171,7 @@ impl App {
         self.reorder_pages_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
+        self.shape_data_window(&ctx);
         self.color_palette_window(&ctx);
 
         // The eframe root Ui paints no background and eframe's clear
