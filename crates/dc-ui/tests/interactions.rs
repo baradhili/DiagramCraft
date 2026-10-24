@@ -269,6 +269,71 @@ fn right_click_menu_flips_near_right_edge() {
     );
 }
 
+/// A Ctrl/Cmd press starts a pan (canvas.rs pan_drag): it must not arm
+/// a marquee or a move-drag, or panning clobbers the selection with an
+/// empty marquee band and drags the shape under the press along.
+#[test]
+fn ctrl_drag_pans_without_marquee_or_move() {
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    let to = canvas.center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    let pin_before = h.state().debug_cell_for_test(sid, "PinX");
+
+    // Ctrl as the platform integrations deliver it: on Linux/Windows
+    // `command` mirrors `ctrl` (egui's Modifiers::CTRL leaves the
+    // command field false), and the canvas keys the pan off `command`.
+    let ctrl = egui::Modifiers {
+        ctrl: true,
+        command: true,
+        ..Default::default()
+    };
+    let ctrl_drag = |h: &mut Harness<'_, App>, a: egui::Pos2, b: egui::Pos2| {
+        // Hold Ctrl across the gesture: ModifiersChanged persists in
+        // the input state until cleared.
+        h.event(egui::Event::ModifiersChanged(ctrl));
+        h.hover_at(a);
+        h.event(egui::Event::PointerButton {
+            pos: a,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: ctrl,
+        });
+        h.hover_at(a + (b - a) * 0.5);
+        h.run();
+        h.hover_at(b);
+        h.event(egui::Event::PointerButton {
+            pos: b,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: ctrl,
+        });
+        h.run();
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    };
+
+    // Ctrl+drag over empty page: a pan — no marquee commits, so the
+    // selection survives.
+    let a = egui::pos2(canvas.left() + 15.0, canvas.bottom() - 15.0);
+    ctrl_drag(&mut h, a, canvas.center() + egui::vec2(60.0, -30.0));
+    assert!(
+        h.state().debug_sel().is_some(),
+        "pan did not commit a selection-clobbering marquee"
+    );
+
+    // Ctrl+drag ON the shape: still a pan — no move-drag armed.
+    ctrl_drag(&mut h, to, to + egui::vec2(50.0, -25.0));
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "PinX"),
+        pin_before,
+        "pan did not move the shape under the press"
+    );
+}
+
 #[test]
 fn marquee_selects_multiple_and_delete_removes_all() {
     let mut h = harness_with_blank();

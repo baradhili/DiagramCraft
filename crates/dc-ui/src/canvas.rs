@@ -292,13 +292,18 @@ pub fn show(
             .or_else(|| ui.input(|i| i.pointer.interact_pos()));
         if let Some(p) = p {
             ui.ctx().memory_mut(|m| m.data.insert_temp(mem_start, p));
+            // A Ctrl/Cmd press starts a pan gesture (see pan_drag
+            // above): it must not arm a marquee or a move-drag, or the
+            // release commits a selection clobbering pan. A press on a
+            // selection handle still wins (#59) — handles keep
+            // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
-            } else {
-                let page_pos = screen_to_page(p, view, page);
-                if hit_shape(page_pos) {
+            } else if !ui.input(|i| i.modifiers.command) {
+                let pagePos = screen_to_page(p, view, page);
+                if hit_shape(pagePos) {
                     // The app arms its move-drag from the press.
-                    out.press_page_pos = Some(page_pos);
+                    out.press_page_pos = Some(pagePos);
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()
