@@ -2120,9 +2120,23 @@ fn add_comment_creates_layer_annotation_and_toggles() {
         ann[0].1
     );
 
-    // The Review toggle (View tab → Comments) hides it.
+    // The Review toggle (View tab → Comments) hides it. The SVG wraps
+    // text into per-line <tspan>s, and where the wrap falls depends on
+    // the author name (runneradmin on Windows CI vs a short $USER
+    // locally) — join the tspan lines before asserting on the phrase.
     let svg_with = h.state().debug_page_svg().unwrap_or_default();
-    assert!(svg_with.contains("needs review"));
+    let joined: String = svg_with
+        .split("<tspan")
+        .skip(1)
+        .filter_map(|seg| seg.split_once('>'))
+        .filter_map(|(_, rest)| rest.split_once("</tspan>"))
+        .map(|(t, _)| t)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("needs review"),
+        "comment text renders (wrapped): {joined:?}"
+    );
     // The popup WINDOW is also titled "Comments" — the ribbon toggle
     // is the tall hero button.
     // Hide comments directly — the ribbon toggle rides the standard
