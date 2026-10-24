@@ -47,7 +47,7 @@ impl Scope {
             }
         };
         let shape_of = |tail: &str| -> Result<i64> {
-            let (k, v) = tail.split_once(':').ok_or_else(&bad)?;
+            let (k, v) = tail.split_once(':').ok_or_else(bad)?;
             if k != "shape" {
                 return Err(bad());
             }
