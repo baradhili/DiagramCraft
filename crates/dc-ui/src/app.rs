@@ -80,6 +80,10 @@ pub struct App {
     hyperlink_open: Option<i64>,
     /// Draft row being added/edited in the Hyperlinks dialog (#28).
     hyperlink_draft: Option<HyperlinkDraft>,
+    /// The Add Comment editor is open for this shape (#29).
+    comment_draft: Option<(i64, String)>,
+    /// Annotation visibility (Review ▸ Show Comments, #29).
+    show_comments: bool,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -279,6 +283,8 @@ impl App {
             reorder_open: false,
             hyperlink_open: None,
             hyperlink_draft: None,
+            comment_draft: None,
+            show_comments: true,
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -1884,6 +1890,7 @@ impl App {
             Action::FitPage => self.view.fit_pending = true,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
+            Action::ToggleComments => self.show_comments = !self.show_comments,
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -2512,6 +2519,8 @@ impl App {
                                 .selected(self.view.show_grid),
                         ],
                         vec![
+                            RibbonButton::new(Icon::Comment, "Comments", Action::ToggleComments)
+                                .selected(self.show_comments),
                             RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros)
                                 .enabled(false)
                                 .tip("Connection points — planned"),
@@ -3026,10 +3035,26 @@ impl App {
         }
         let npages = self.ed.as_ref().unwrap().doc.pages.len();
         self.page_idx = self.page_idx.min(npages.saturating_sub(1));
+        // Annotation visibility (#29): hide the Annotation layer's
+        // members when the Review toggle is off.
+        let mut hidden: Vec<i64> = Vec::new();
+        if !self.show_comments {
+            if let Some(ed) = self.ed.as_ref() {
+                if let Some(page) = ed.doc.pages.get(self.page_idx) {
+                    if let Ok(rows) = dc_core::layers::layer_rows(&ed.doc, page.id) {
+                        for r in &rows {
+                            if dc_core::layers::layer_name(r) == Some("Annotation") {
+                                hidden.push(r.ix);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let (svg, part) = {
             let ed = self.ed.as_ref().unwrap();
             let page = &ed.doc.pages[self.page_idx];
-            match dc::svg::render_page(&ed.doc, page) {
+            match dc::svg::render_page_with(&ed.doc, page, &hidden) {
                 Ok(s) => (s, page.part.clone()),
                 Err(e) => {
                     ui.label(format!("render failed: {e:#}"));
@@ -3349,6 +3374,157 @@ impl App {
     /// change) and Go to follow a link. The draft lives OUTSIDE the
     /// window closure (a per-frame clone would drop typed text — the
     /// text_edit_window pattern).
+    fn add_comment(&mut self, shape_id: i64, body: &str) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let g = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        let (px, py) = (g("PinX"), g("PinY"));
+        let (w, h) = (g("Width"), g("Height"));
+        let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+        let (x1, y1) = (px - lx + w, py - ly + h);
+
+        // The Annotation layer, created on first use; LayerMember
+        // references the layer row's IX (Visio's convention).
+        let rows = dc_core::layers::layer_rows(&ed.doc, page_id).unwrap_or_default();
+        let (layer_cmd, layer_ix) = match rows
+            .iter()
+            .find(|r| dc_core::layers::layer_name(r) == Some("Annotation"))
+        {
+            Some(r) => (None, r.ix),
+            None => (
+                Some(dc_core::commands::AddLayer::new(page_id, "Annotation")),
+                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1,
+            ),
+        };
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let author = std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "user".into());
+        let text = format!("{} — {}: {}", author, format_now_utc(), body.trim());
+
+        let set = |sheet: &mut vsdx::model::Sheet, n: &str, v: &str| {
+            sheet.set_cell(n, vsdx::model::Cell::value(v.to_string()));
+        };
+        let (aw, ah) = (1.8_f64, 0.5_f64);
+        let mut sheet = vsdx::model::Sheet::default();
+        set(&mut sheet, "PinX", &format!("{:.4}", x1 + 0.1));
+        set(&mut sheet, "PinY", &format!("{:.4}", (y1 + 0.1).max(ah)));
+        set(&mut sheet, "Width", &format!("{aw}"));
+        set(&mut sheet, "Height", &format!("{ah}"));
+        set(&mut sheet, "LocPinX", "0");
+        set(&mut sheet, "LocPinY", "0");
+        set(&mut sheet, "LayerMember", &layer_ix.to_string());
+        set(&mut sheet, "FillForegnd", "#FFF3C2");
+        sheet.text = Some(text.clone());
+        sheet.text_raw = Some(
+            text.replace('&', "&amp;")
+                .replace('<', "&lt;")
+                .replace('>', "&gt;"),
+        );
+        let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+            ix,
+            t: Some(t.into()),
+            cells: vec![
+                ("X".into(), vsdx::model::Cell::value(x.to_string())),
+                ("Y".into(), vsdx::model::Cell::value(y.to_string())),
+            ],
+            ..vsdx::model::Row::default()
+        };
+        sheet
+            .children
+            .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+                name: "Geometry".into(),
+                ix: 0,
+                rows: vec![
+                    row(1, "MoveTo", "0", "0"),
+                    row(2, "LineTo", &format!("{aw}"), "0"),
+                    row(3, "LineTo", &format!("{aw}"), &format!("{ah}")),
+                    row(4, "LineTo", "0", &format!("{ah}")),
+                    row(5, "LineTo", "0", "0"),
+                ],
+                ..vsdx::model::Section::default()
+            }));
+        let annotation = Shape {
+            id,
+            name_u: Some(format!("Comment.{id}")),
+            type_: Some("Shape".into()),
+            sheet,
+            ..Shape::default()
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        if let Some(c) = layer_cmd {
+            cmds.push(Box::new(c));
+        }
+        cmds.push(Box::new(AddShape {
+            page: page_id,
+            parent: None,
+            shape: annotation,
+        }));
+        cmds.push(Box::new(dc_core::SetRowCell::new(
+            Scope::Shape {
+                page: page_id,
+                shape: id,
+            },
+            "User",
+            0,
+            dc_core::commands::RowSel::Named("AnnotationRef".into()),
+            "Value",
+            vsdx::model::Cell::value(shape_id.to_string()),
+        )));
+        self.apply(dc_core::Macro::new("add comment", cmds));
+    }
+
+    /// The Add Comment editor (#29): small overlay with the comment
+    /// body; the draft lives outside the closure (the #28 lesson).
+    fn comment_window(&mut self, ctx: &egui::Context) {
+        let Some((shape_id, mut body)) = self.comment_draft.take() else {
+            return;
+        };
+        let mut close = false;
+        let mut committed = false;
+        egui::Window::new("Add Comment")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                let r = ui.add(
+                    egui::TextEdit::multiline(&mut body)
+                        .desired_rows(3)
+                        .hint_text("Comment"),
+                );
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Comment"));
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() && !body.trim().is_empty() {
+                        committed = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        if committed {
+            self.add_comment(shape_id, &body);
+        } else if !close {
+            self.comment_draft = Some((shape_id, body));
+        }
+    }
+
     fn hyperlink_window(&mut self, ctx: &egui::Context) {
         let Some(shape_id) = self.hyperlink_open else {
             return;
@@ -3860,6 +4036,7 @@ impl App {
             Ungroup,
             Container,
             Hyperlink,
+            AddComment,
             Cut,
             Copy,
             Paste,
@@ -4046,7 +4223,9 @@ impl App {
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
             }
-            ctx_item(ui, None, "Add Comment", "(v0.5)", false);
+            if ctx_item(ui, None, "Add Comment", "", true) {
+                act = Some(Act::AddComment);
+            }
             ctx_item(ui, None, "Shape Data…", "(v0.5)", false);
             ctx_item(ui, None, "Format Shape…", "(v0.5)", false);
             ui.separator();
@@ -4096,6 +4275,9 @@ impl App {
             Act::Hyperlink => {
                 self.hyperlink_open = Some(shape_id);
                 self.hyperlink_draft = None;
+            }
+            Act::AddComment => {
+                self.comment_draft = Some((shape_id, String::new()));
             }
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
@@ -4424,6 +4606,37 @@ impl App {
             .map(|(a, s, _)| (a, s))
             .collect()
     }
+    /// kittest: annotation shapes on the Annotation layer (#29) as
+    /// (shape id, text).
+    #[doc(hidden)]
+    pub fn debug_annotations_for_test(&self) -> Vec<(i64, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let layer_ix = dc_core::layers::layer_rows(&ed.doc, page.id)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|r| dc_core::layers::layer_name(r) == Some("Annotation"))
+            .map(|r| r.ix);
+        let Some(layer_ix) = layer_ix else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                s.sheet.cell("LayerMember").and_then(|c| c.numeric()) == Some(layer_ix as f64)
+            })
+            .map(|s| (s.id, s.sheet.text.clone().unwrap_or_default()))
+            .collect()
+    }
+    /// kittest: annotation visibility state (#29).
+    #[doc(hidden)]
+    pub fn show_comments_for_test(&self) -> bool {
+        self.show_comments
+    }
     /// kittest: the active page's name (#54).
     #[doc(hidden)]
     pub fn debug_active_page_name(&self) -> String {
@@ -4742,6 +4955,7 @@ impl App {
         self.text_edit_window(&ctx);
         self.reorder_pages_window(&ctx);
         self.hyperlink_window(&ctx);
+        self.comment_window(&ctx);
         self.color_palette_window(&ctx);
 
         // The eframe root Ui paints no background and eframe's clear
@@ -5584,6 +5798,27 @@ fn write_png(path: &std::path::Path, img: &egui::ColorImage) -> anyhow::Result<(
     .ok_or_else(|| anyhow::anyhow!("pixmap from frame"))?;
     std::fs::write(path, pm.encode_png()?)?;
     Ok(())
+}
+
+/// Current UTC date as `YYYY-MM-DD` — zero-dep civil-from-days
+/// (Hinnant's algorithm) over the Unix epoch seconds.
+fn format_now_utc() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {

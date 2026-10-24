@@ -190,6 +190,18 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
 }
 
 pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> {
+    render_page_with(doc, page, &[])
+}
+
+/// [`render_page`] with hidden layer members: shapes whose
+/// `LayerMember` names one of `hidden` (Visio layer row indexes, the
+/// LayerMember cell convention) are skipped entirely — the annotation
+/// toggle (#29) and friends.
+pub fn render_page_with(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
 
@@ -214,7 +226,16 @@ pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> 
         svg,
         r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
     );
+    let hidden_member = |s: &Shape| -> bool {
+        s.sheet
+            .cell("LayerMember")
+            .and_then(|c| c.numeric())
+            .is_some_and(|m| hidden.contains(&(m as i64)))
+    };
     for shape in &page.shapes {
+        if hidden_member(shape) {
+            continue;
+        }
         render_shape(doc, shape, h, &[], &page.part, &mut svg);
     }
     let _ = writeln!(svg, "</svg>");

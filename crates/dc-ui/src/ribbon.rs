@@ -24,6 +24,7 @@ pub enum Action {
     FitPage,
     ToggleGrid,
     ToggleRulers,
+    ToggleComments,
     ToggleUnits,
     ShowShapeSheet,
     Macros,

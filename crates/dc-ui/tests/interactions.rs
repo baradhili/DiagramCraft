@@ -2066,3 +2066,63 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
         "undo removed the hyperlink row"
     );
 }
+
+/// GitHub #29: Add Comment creates an annotation shape on the
+/// Annotation layer; the Review toggle hides it; undo removes it.
+#[test]
+fn add_comment_creates_layer_annotation_and_toggles() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_shape_count(), 1);
+    // Right-click → Add Comment → type → OK.
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Add Comment")
+        .filter(|n| n.rect().height() < 30.0)
+        .find(|n| n.rect().min.y > 250.0)
+        .expect("Add Comment row")
+        .click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Comment"),
+    )
+    .set_text_value_accesskit("needs review");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+
+    let ann = h.state().debug_annotations_for_test();
+    assert_eq!(ann.len(), 1, "one annotation on the Annotation layer");
+    assert!(
+        ann[0].1.contains("needs review"),
+        "author/date/body in the text block: {:?}",
+        ann[0].1
+    );
+
+    // The Review toggle (View tab → Comments) hides it.
+    let svg_with = h.state().debug_page_svg().unwrap_or_default();
+    assert!(svg_with.contains("needs review"));
+    h.state_mut().set_tab_for_test(dc_ui::ribbon::Tab::View);
+    h.run();
+    h.get_by_label("Comments").click();
+    h.run();
+    assert!(!h.state().show_comments_for_test());
+
+    // Undo removes the annotation (+ its layer).
+    h.get_by_label("Home").click();
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_annotations_for_test().len(),
+        0,
+        "undo removed the comment"
+    );
+}
