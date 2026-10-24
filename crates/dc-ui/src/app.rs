@@ -51,6 +51,8 @@ pub struct App {
     /// Scroll the tab strip to the active tab once, after a switch
     /// (#54) — consumed by the next strip paint.
     tab_scroll_to_active: bool,
+    /// The Reorder Pages dialog is open (#54, Visio mechanism).
+    reorder_open: bool,
     tab: Tab,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
@@ -247,6 +249,7 @@ impl App {
             tab_menu: None,
             tab_rename: None,
             tab_scroll_to_active: false,
+            reorder_open: false,
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -399,6 +402,7 @@ impl App {
                 self.page_states.clear();
                 self.tab_menu = None;
                 self.tab_rename = None;
+                self.reorder_open = false;
             }
             Err(e) => self.status = format!("open failed: {e:#}"),
         }
@@ -603,8 +607,18 @@ impl App {
         if idx >= n || to >= n {
             return;
         }
+        let active = self.page_id();
         self.apply(MovePage { from: idx, to });
-        self.page_idx = to;
+        // The ACTIVE page stays active wherever it lands (Visio's
+        // reorder dialog never moves your view).
+        if let Some(id) = active {
+            if let Some(p) = self
+                .ed()
+                .and_then(|e| e.doc.pages.iter().position(|p| p.id == id))
+            {
+                self.page_idx = p;
+            }
+        }
         self.tab_scroll_to_active = true;
     }
 
@@ -661,6 +675,7 @@ impl App {
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
+        self.reorder_open = false;
         self.status = "new blank drawing (unsaved)".into();
     }
 
@@ -2464,14 +2479,56 @@ impl App {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Many pages scroll instead of pushing the status bar (#54);
-            // the + stays pinned at the strip's end, always visible.
+            if tabs.is_empty() {
+                return; // no document: Visio shows no strip at all
+            }
+            // The Visio 2010 navigation cluster at the strip's left end:
+            // << first, < previous, > next, >> last (page navigation, not
+            // strip scrolling — owner-confirmed against the shipped
+            // reference, #54).
+            let n = tabs.len();
+            let page_idx = self.page_idx.min(n.saturating_sub(1));
+            let mut nav = |ui: &mut Ui, glyph: &str, tip: &str, enabled: bool, to: usize| {
+                let b =
+                    egui::Button::new(egui::RichText::new(glyph).size(10.0).color(if enabled {
+                        t.tab_text_active
+                    } else {
+                        t.tab_text_inactive
+                    }))
+                    .small()
+                    .fill(egui::Color32::TRANSPARENT)
+                    .frame(false);
+                let clicked = ui.add_enabled(enabled, b).on_hover_text(tip).clicked();
+                if clicked {
+                    self.switch_page(to);
+                }
+            };
+            nav(ui, "<<", "First page", page_idx > 0, 0);
+            nav(
+                ui,
+                "<",
+                "Previous page",
+                page_idx > 0,
+                page_idx.saturating_sub(1),
+            );
+            nav(
+                ui,
+                ">",
+                "Next page",
+                page_idx + 1 < n,
+                (page_idx + 1).min(n - 1),
+            );
+            nav(ui, ">>", "Last page", page_idx + 1 < n, n - 1);
+            ui.separator();
+            // Tabs fill the strip; overflow clips and the nav cluster /
+            // wheel scrolling reach the rest (Visio shows no scrollbar).
             let scroll_to_active = self.tab_scroll_to_active;
             self.tab_scroll_to_active = false;
             egui::ScrollArea::horizontal()
                 .id_salt("dc-page-tabs")
                 .max_height(24.0)
                 .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for (i, (name, id)) in tabs.iter().enumerate() {
@@ -2947,7 +3004,10 @@ impl App {
 
     /// The page-tab context menu (#54): Visio's tab affordances —
     /// insert, duplicate, delete (never the last page), rename, and
-    /// reorder — all through the undoable command layer.
+    /// The page-tab context menu (#54), copying the shipped Visio
+    /// reference (owner screenshots 2026-10-24): Insert, Delete, Rename,
+    /// Duplicate, then Page Setup (later milestone) and Reorder Pages….
+    /// All live items run through the undoable command layer.
     #[allow(deprecated)] // Id::new: one tab menu, stable identity wanted
     fn tab_context_menu(&mut self, ctx: &egui::Context) {
         let Some((idx, anchor)) = self.tab_menu else {
@@ -2961,11 +3021,10 @@ impl App {
         #[derive(Clone, Copy, PartialEq)]
         enum Act {
             Insert,
-            Duplicate,
             Delete,
             Rename,
-            Up,
-            Down,
+            Duplicate,
+            Reorder,
         }
         let mut act: Option<Act> = None;
         let menu = egui::Popup::new(
@@ -2986,9 +3045,6 @@ impl App {
             if ctx_item(ui, None, "Insert Page…", "", true) {
                 act = Some(Act::Insert);
             }
-            if ctx_item(ui, None, "Duplicate Page", "", true) {
-                act = Some(Act::Duplicate);
-            }
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::Delete),
@@ -2998,15 +3054,16 @@ impl App {
             ) {
                 act = Some(Act::Delete);
             }
-            ui.separator();
             if ctx_item(ui, None, "Rename Page", "", true) {
                 act = Some(Act::Rename);
             }
-            if ctx_item(ui, None, "Move Page Up", "", idx > 0) {
-                act = Some(Act::Up);
+            if ctx_item(ui, None, "Duplicate Page", "", true) {
+                act = Some(Act::Duplicate);
             }
-            if ctx_item(ui, None, "Move Page Down", "", idx + 1 < n) {
-                act = Some(Act::Down);
+            ui.separator();
+            ctx_item(ui, None, "Page Setup…", "(later milestone)", false);
+            if ctx_item(ui, None, "Reorder Pages…", "", true) {
+                act = Some(Act::Reorder);
             }
         });
         // Close on an outside primary click (the shape menu's idiom).
@@ -3025,7 +3082,6 @@ impl App {
         self.tab_menu = None;
         match a {
             Act::Insert => self.tab_cmd_insert(idx),
-            Act::Duplicate => self.tab_cmd_duplicate(idx),
             Act::Delete => self.tab_cmd_delete(idx),
             Act::Rename => {
                 let id = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id);
@@ -3037,8 +3093,57 @@ impl App {
                     self.tab_rename = Some((id, name));
                 }
             }
-            Act::Up => self.tab_cmd_reorder(idx, idx - 1),
-            Act::Down => self.tab_cmd_reorder(idx, idx + 1),
+            Act::Duplicate => self.tab_cmd_duplicate(idx),
+            Act::Reorder => self.reorder_open = true,
+        }
+    }
+
+    /// Visio's Reorder Pages dialog (#54): the page list with Move Up /
+    /// Move Down buttons; every click is one undoable MovePage command,
+    /// and the active page stays active wherever it lands.
+    fn reorder_pages_window(&mut self, ctx: &egui::Context) {
+        if !self.reorder_open {
+            return;
+        }
+        let mut close = false;
+        egui::Window::new("Reorder Pages")
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                let n = self.ed().map(|e| e.doc.pages.len()).unwrap_or(0);
+                let names: Vec<String> = self
+                    .ed()
+                    .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+                    .unwrap_or_default();
+                egui::Grid::new("dc-reorder-list")
+                    .num_columns(3)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for (i, name) in names.iter().enumerate() {
+                            ui.label(egui::RichText::new(name.clone()).size(12.0));
+                            if ui
+                                .add_enabled(i > 0, egui::Button::new("Move Up").small())
+                                .clicked()
+                            {
+                                self.tab_cmd_reorder(i, i - 1);
+                            }
+                            if ui
+                                .add_enabled(i + 1 < n, egui::Button::new("Move Down").small())
+                                .clicked()
+                            {
+                                self.tab_cmd_reorder(i, i + 1);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(8.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            self.reorder_open = false;
         }
     }
 
@@ -3984,6 +4089,7 @@ impl App {
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.text_edit_window(&ctx);
+        self.reorder_pages_window(&ctx);
         self.color_palette_window(&ctx);
 
         // The eframe root Ui paints no background and eframe's clear
@@ -4231,6 +4337,7 @@ impl App {
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
+        self.reorder_open = false;
         self.status = "document closed".into();
     }
 

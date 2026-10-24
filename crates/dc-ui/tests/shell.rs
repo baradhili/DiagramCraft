@@ -537,10 +537,26 @@ fn page_tabs_switch_restore_selection_and_name_status() {
         h.state().debug_sel().is_some(),
         "switching back restores the page's selection"
     );
+
+    // The Visio 2010 nav cluster (#54, owner-confirmed): >> last,
+    // << first, < > step.
+    h.get_by_label(">>").click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "Three");
+    h.get_by_label("<<").click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "One");
+    h.get_by_label(">").click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "Two");
+    h.get_by_label("<").click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "One");
 }
 
 #[test]
 fn page_tab_context_menu_manages_pages() {
+    use egui_kittest::kittest::Queryable;
     let tmp = tempfile::tempdir().unwrap();
     let doc = fixture_pages(tmp.path(), &["One", "Two", "Three"]);
     dc_ui::svgimg::pin_embedded_fonts_for_tests();
@@ -568,10 +584,26 @@ fn page_tab_context_menu_manages_pages() {
     tab_menu_pick(&mut h, "Page-4", "Delete Page");
     assert_eq!(h.state().debug_page_names(), vec!["One", "Two", "Three"]);
 
-    // Reorder: Move Page Up on Three.
-    tab_menu_pick(&mut h, "Three", "Move Page Up");
+    // Reorder Pages… is Visio's dialog mechanism: Move Down on row 2
+    // (Two), then Close.
+    tab_menu_pick(&mut h, "Three", "Reorder Pages");
+    assert!(
+        h.query_all_by_label_contains("Reorder Pages").count() > 0,
+        "the Reorder Pages dialog opened"
+    );
+    h.get_all_by_label("Move Down")
+        .nth(1)
+        .expect("row 2 Move Down")
+        .click();
+    h.run();
     assert_eq!(h.state().debug_page_names(), vec!["One", "Three", "Two"]);
-    assert_eq!(h.state().debug_active_page_name(), "Three");
+    assert_eq!(
+        h.state().debug_active_page_name(),
+        "Three",
+        "the active page follows its position, not the moved row"
+    );
+    h.get_by_label("Close").click();
+    h.run();
 
     // Undo rolls the reorder back (everything went through the
     // command layer).
