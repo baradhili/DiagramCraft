@@ -1390,3 +1390,74 @@ fn group_and_ungroup_round_trip_with_undo() {
     assert_eq!(g.type_.as_deref(), Some("Group"));
     assert_eq!(g.sub_shapes.len(), 2, "nested tree survives save/reload");
 }
+
+// ---------------------------------------------------------------------------
+// Containers (GitHub #27)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_container_records_membership_and_survives_reload() {
+    use dc_core::commands::{add_container, next_shape_id};
+
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    let id = next_shape_id(&ed.doc, 0);
+    // Wrap shapes 1 and 2 (fixture rect at (3.25,5)-(5.25,6) and the
+    // master instance around (2,2)) with a rect of our own.
+    ed.apply(add_container(
+        0,
+        id,
+        &[1, 2],
+        (1.0, 1.0, 6.0, 6.0),
+        "Legend",
+    ))
+    .unwrap();
+
+    // Container at the BACK of the z-order, members still top-level.
+    assert_eq!(ed.doc.pages[0].shapes[0].id, id);
+    assert_eq!(ed.doc.pages[0].shapes.len(), 3);
+    let member_row = |ed: &dc_core::Editor, sid: i64| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == sid)
+            .unwrap()
+            .sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row("msvSDContainerShape"))
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.v.clone())
+    };
+    assert_eq!(member_row(&ed, 1).as_deref(), Some(id.to_string().as_str()));
+    assert_eq!(member_row(&ed, 2).as_deref(), Some(id.to_string().as_str()));
+
+    // One undo removes container AND membership rows.
+    ed.undo().unwrap();
+    assert_eq!(ed.doc.pages[0].shapes.len(), 2);
+    assert!(
+        member_row(&ed, 1).is_none(),
+        "membership row removed with the container"
+    );
+
+    // Re-apply, save, reparse: membership rides along.
+    ed.redo().unwrap();
+    let out = tmp.path().join("container.vsdx");
+    ed.save_as(&out).unwrap();
+    let re = vsdx::parse::parse(&out).unwrap();
+    let c = &re.pages[0].shapes[0];
+    assert_eq!(c.id, id);
+    assert_eq!(c.sheet.text.as_deref(), Some("Legend"));
+    let m = re.pages[0]
+        .shapes
+        .iter()
+        .find(|s| s.id == 1)
+        .unwrap()
+        .sheet
+        .sections_named("User")
+        .iter()
+        .find_map(|sec| sec.named_row("msvSDContainerShape"))
+        .and_then(|r| r.cell("Value"))
+        .and_then(|c| c.v.clone());
+    assert_eq!(m.as_deref(), Some(id.to_string().as_str()));
+}

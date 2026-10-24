@@ -679,6 +679,109 @@ impl crate::Command for DuplicateShape {
     }
 }
 
+/// A plain container around the given members (GitHub #27): a
+/// rectangle frame shape with a top-left heading text block, inserted
+/// at the BACK of the z-order, with membership recorded the Visio way
+/// — each member carries `User.msvSDContainerShape` = the container's
+/// shape ID. Returned as one Macro (one undo step); `id` comes from
+/// [`next_shape_id`] at the call site.
+pub fn add_container(
+    page: i64,
+    id: i64,
+    members: &[i64],
+    rect: (f64, f64, f64, f64), // x0, y0, w, h (page coords, y-up)
+    heading: &str,
+) -> Macro {
+    let mut sheet = vsdx::model::Sheet::default();
+    let set = |sh: &mut vsdx::model::Sheet, n: &str, v: &str| {
+        sh.set_cell(n, vsdx::model::Cell::value(v.to_string()));
+    };
+    set(&mut sheet, "PinX", &fmt_num(rect.0));
+    set(&mut sheet, "PinY", &fmt_num(rect.1));
+    set(&mut sheet, "Width", &fmt_num(rect.2));
+    set(&mut sheet, "Height", &fmt_num(rect.3));
+    set(&mut sheet, "LocPinX", "0");
+    set(&mut sheet, "LocPinY", "0");
+    // Heading text: the standard text block, pinned into the top-left
+    // corner strip (Visio's Plain container look).
+    set(&mut sheet, "TxtPinX", "0.2");
+    set(&mut sheet, "TxtLocPinX", "0");
+    sheet.set_cell(
+        "TxtPinY",
+        vsdx::model::Cell {
+            v: None,
+            f: Some("Height-TxtHeight".into()),
+            ..vsdx::model::Cell::default()
+        },
+    );
+    set(&mut sheet, "TxtLocPinY", "0");
+    set(&mut sheet, "FillForegnd", "#FFFFFF");
+    let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+        ix,
+        t: Some(t.into()),
+        cells: vec![
+            ("X".into(), vsdx::model::Cell::value(x.to_string())),
+            ("Y".into(), vsdx::model::Cell::value(y.to_string())),
+        ],
+        ..vsdx::model::Row::default()
+    };
+    let (w, h) = (fmt_num(rect.2), fmt_num(rect.3));
+    let container = Shape {
+        id,
+        name_u: Some(format!("Container.{id}")),
+        type_: Some("Shape".into()),
+        sheet,
+        ..Shape::default()
+    };
+    let mut container = container;
+    container.sheet.text = Some(heading.to_string());
+    // The writer emits <Text> from text_raw (verbatim), so seed the
+    // escaped form too — the SetText convention.
+    container.sheet.text_raw = Some(
+        heading
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
+    );
+    container
+        .sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                row(1, "MoveTo", "0", "0"),
+                row(2, "LineTo", &w, "0"),
+                row(3, "LineTo", &w, &h),
+                row(4, "LineTo", "0", &h),
+                row(5, "LineTo", "0", "0"),
+            ],
+            ..vsdx::model::Section::default()
+        }));
+    let mut cmds: Vec<Box<dyn crate::Command>> = vec![
+        Box::new(AddShape {
+            page,
+            parent: None,
+            shape: container,
+        }),
+        Box::new(ReorderShape::new(page, id, false)),
+    ];
+    for m in members {
+        cmds.push(Box::new(SetRowCell::new(
+            Scope::Shape { page, shape: *m },
+            "User",
+            0,
+            RowSel::Named("msvSDContainerShape".into()),
+            "Value",
+            vsdx::model::Cell::value(id.to_string()),
+        )));
+    }
+    Macro::new(
+        format!("add container around {} shape(s)", members.len()),
+        cmds,
+    )
+}
+
 /// Undo payload for [`GroupShapes`]: member id, original z-position,
 /// and the pre-group PinX/PinY cells.
 type GroupUndo = Vec<(

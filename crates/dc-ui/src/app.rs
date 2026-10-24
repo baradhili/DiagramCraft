@@ -1422,6 +1422,90 @@ impl App {
     /// Apply a pre-boxed command (the multi-shape move paths build
     /// commands per member); wrapped in a one-step Macro so the status
     /// and history behave like every other apply.
+    /// Shapes whose `User.msvSDContainerShape` names `container_id`
+    /// (Visio's membership convention, #27).
+    fn container_member_ids(&self, page_id: i64, container_id: i64) -> Vec<i64> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                s.sheet.sections_named("User").iter().any(|sec| {
+                    sec.named_row("msvSDContainerShape")
+                        .and_then(|r| r.cell("Value"))
+                        .and_then(|c| c.numeric())
+                        == Some(container_id as f64)
+                })
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Context-menu Container (#27): wrap the current selection's
+    /// union bbox (padded) in a plain container shape at the back of
+    /// the z-order; membership rides on the members. One undo step.
+    fn wrap_selection_in_container(&mut self) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for sid in &members {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0)
+            };
+            let (px, py) = (g("PinX"), g("PinY"));
+            let (w, h) = (g("Width"), g("Height"));
+            let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        if x0 > x1 {
+            return;
+        }
+        const PAD: f64 = 0.25;
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let rect = (x0 - PAD, y0 - PAD, x1 - x0 + 2.0 * PAD, y1 - y0 + 2.0 * PAD);
+        self.apply(dc_core::commands::add_container(
+            page_id,
+            id,
+            &members,
+            rect,
+            "Container",
+        ));
+        self.set_selection(Some((page_id, id)));
+    }
+
     fn apply_boxed(&mut self, label: &str, cmd: Box<dyn dc_core::Command>) {
         self.apply(Macro::new(label, vec![cmd]));
     }
@@ -1512,9 +1596,42 @@ impl App {
                     // through `move_cmd_for`: 1D members translate their
                     // endpoints too, not just the pin.
                     if d.group.is_empty() {
-                        let label = format!("move shape {}", d.shape);
-                        let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
-                        self.apply_boxed(&label, cmd);
+                        // A container drag carries its members (Visio,
+                        // #27): one undo step.
+                        let member_ids = self.container_member_ids(page_id, d.shape);
+                        if member_ids.is_empty() {
+                            let label = format!("move shape {}", d.shape);
+                            let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
+                            self.apply_boxed(&label, cmd);
+                        } else {
+                            let (dx, dy) =
+                                (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                            let mut cmds: Vec<Box<dyn dc_core::Command>> =
+                                vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
+                            if let Some(ed) = self.ed() {
+                                let page = &ed.doc.pages[self.page_idx];
+                                for sid in member_ids {
+                                    let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                                        continue;
+                                    };
+                                    let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                    else {
+                                        continue;
+                                    };
+                                    let g = |n: &str| {
+                                        ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
+                                    };
+                                    if let (Some(px), Some(py)) = (g("PinX"), g("PinY")) {
+                                        cmds.push(self.move_cmd_for(
+                                            page_id,
+                                            sid,
+                                            (px + dx, py + dy),
+                                        ));
+                                    }
+                                }
+                            }
+                            self.apply(Macro::new("move container and members", cmds));
+                        }
                     } else {
                         let Some(ed) = self.ed() else { return };
                         let dx = d.last_pin.0 - d.start_pin.0;
@@ -3461,6 +3578,7 @@ impl App {
             Master(usize),
             Group,
             Ungroup,
+            Container,
             Cut,
             Copy,
             Paste,
@@ -3641,7 +3759,9 @@ impl App {
             if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
                 act = Some(Act::Ungroup);
             }
-            ctx_item(ui, None, "Container", "(v0.5)", false);
+            if ctx_item(ui, None, "Container", "", !self.sel_set.is_empty()) {
+                act = Some(Act::Container);
+            }
             ctx_item(ui, None, "Hyperlink…", "(v0.5)", false);
             ctx_item(ui, None, "Add Comment", "(v0.5)", false);
             ctx_item(ui, None, "Shape Data…", "(v0.5)", false);
@@ -3689,6 +3809,7 @@ impl App {
                     self.set_selection(Some((page_id, nid)));
                 }
             }
+            Act::Container => self.wrap_selection_in_container(),
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
                     ed.doc.pages.get(self.page_idx).and_then(|p| {

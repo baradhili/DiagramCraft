@@ -1882,3 +1882,93 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     h.run();
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
+
+/// GitHub #27: Container from the context menu wraps the selection;
+/// dragging the container carries its members; delete orphans them in
+/// place.
+#[test]
+fn context_menu_container_wraps_and_carries_members() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2);
+    let (_, s1) = h.state().debug_sel().expect("second placed shape selected");
+    let r1_before = h.state().debug_shape_screen_rect(s1).expect("member rect");
+
+    // Marquee both, right-click, Container.
+    let c = canvas.center();
+    let a = c + egui::vec2(-120.0, -120.0);
+    let b = c + egui::vec2(120.0, 120.0);
+    h.hover_at(a);
+    h.event(egui::Event::PointerButton {
+        pos: a,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(a + (b - a) * 0.5);
+    h.run();
+    h.hover_at(b);
+    h.event(egui::Event::PointerButton {
+        pos: b,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(
+        &mut h,
+        c + egui::vec2(-40.0, 40.0),
+        egui::PointerButton::Secondary,
+    );
+    h.run();
+    h.get_all_by_label_contains("Container")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container row in the context menu")
+        .click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 3, "members stay top-level");
+    let (_, cid) = h.state().debug_sel().expect("container selected");
+
+    // Drag the container by (60, 0): both members move with it.
+    let cr = h
+        .state()
+        .debug_shape_screen_rect(cid)
+        .expect("container rect");
+    drag_naturally(&mut h, cr.center(), egui::vec2(60.0, 0.0));
+    let r1_after = h.state().debug_shape_screen_rect(s1).expect("member rect");
+    assert!(
+        (r1_after.min.x - r1_before.min.x - 60.0).abs() < 1.5,
+        "member followed the container: {:?} → {:?}",
+        r1_before,
+        r1_after
+    );
+
+    // Undo restores the member (one step for the whole move).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let r1_back = h.state().debug_shape_screen_rect(s1).expect("member rect");
+    assert!((r1_back.min.x - r1_before.min.x).abs() < 0.5, "move undone");
+
+    // Deleting the container leaves the members in place (Visio).
+    click_at(&mut h, cr.center(), egui::PointerButton::Primary);
+    h.run();
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        2,
+        "members orphaned in place"
+    );
+    assert!(h.state().debug_shape_screen_rect(s1).is_some());
+}
