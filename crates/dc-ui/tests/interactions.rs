@@ -2180,3 +2180,85 @@ fn shape_data_dialog_edits_prop_rows() {
         "undo restored the Prop value"
     );
 }
+
+/// GitHub #31: Format Shape pane writes the renderer's cells; every
+/// change is one undo step; multi-selection applies to all members.
+#[test]
+fn format_pane_edits_cells_for_whole_selection() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes for the multi-selection leg.
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    let (_, sid) = h.state().debug_sel().expect("second placed shape selected");
+
+    // Right-click → Format Shape….
+    click_at(
+        &mut h,
+        canvas.center() + egui::vec2(40.0, -40.0),
+        egui::PointerButton::Secondary,
+    );
+    h.run();
+    h.get_all_by_label_contains("Format Shape")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Format Shape… row")
+        .click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Format Shape").count() > 0,
+        "the pane opened"
+    );
+
+    // Line weight: the slider writes LineWeight (0.75pt default → drag
+    // is awkward headless; use the Fill pattern dropdown instead for a
+    // precise assert, then weight via its slider API).
+    // FillPattern: Solid → None (0).
+    // The FillPattern dropdown button reads "Solid  ›" (a pane label
+    // "Solid" alone would be ambiguous) — take the button on the pane's
+    // right column.
+    h.get_all_by_label_contains("Solid")
+        .filter(|n| n.rect().min.x > 1050.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("FillPattern dropdown")
+        .click();
+    h.run();
+    h.get_by_label("None").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "FillPattern"),
+        Some("0".into()),
+        "FillPattern wrote through"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "FillPattern"),
+        Some("1".into()),
+        "one undo restored Solid"
+    );
+
+    // Undo clears the selection (and with it the pane); reselect the
+    // shape for the Text section leg.
+    click_at(
+        &mut h,
+        canvas.center() + egui::vec2(40.0, -40.0),
+        egui::PointerButton::Primary,
+    );
+    h.run();
+    h.get_by_label("Bold").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Style"),
+        Some("1".into()),
+        "bold wrote Character Style"
+    );
+}

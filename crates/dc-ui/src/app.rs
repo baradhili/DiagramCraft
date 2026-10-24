@@ -86,6 +86,10 @@ pub struct App {
     show_comments: bool,
     /// The Shape Data dialog is open for this shape (#30).
     shape_data_open: Option<i64>,
+    /// The Format Shape pane is open (#31).
+    format_pane_open: bool,
+    /// Text buffers for the Format pane's numeric/text fields (#31).
+    fmt_bufs: std::collections::HashMap<String, String>,
     /// Text buffers for the Shape Data string fields (#30) — commits
     /// on focus loss, one undo per change.
     prop_bufs: std::collections::HashMap<String, String>,
@@ -178,6 +182,7 @@ pub struct App {
 #[derive(Clone, Copy, PartialEq)]
 enum ColorTarget {
     Fill,
+    FillBkgnd,
     Line,
 }
 
@@ -292,6 +297,8 @@ impl App {
             show_comments: true,
             shape_data_open: None,
             prop_bufs: std::collections::HashMap::new(),
+            format_pane_open: false,
+            fmt_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
             sel: None,
             sel_set: Vec::new(),
@@ -2863,6 +2870,342 @@ impl App {
         });
     }
 
+    /// Effective cell value of the primary selection (instance →
+    /// master) as a trimmed string (#31).
+    fn eff_cell_str(&self, name: &str) -> Option<String> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .resolve_cell(sh, &chain, name)
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
+
+    fn eff_cell_num(&self, name: &str) -> Option<f64> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .resolve_cell(sh, &chain, name)
+            .and_then(|c| c.numeric())
+    }
+
+    /// Effective first-row cell of a section (Character/Paragraph, #31).
+    fn eff_row_str(&self, section: &str, cell: &str) -> Option<String> {
+        let (ed, (page_id, sid)) = (self.ed()?, self.sel?);
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+        let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+        ed.doc
+            .effective_sheet(sh, &chain)
+            .sections_named(section)
+            .first()
+            .and_then(|sec| sec.rows.first())
+            .and_then(|r| r.cell(cell))
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
+
+    /// Write one cell on every selected shape — one Macro, one undo
+    /// step (#31 requirement 2).
+    fn fmt_set_cell(&mut self, name: &str, value: &str) {
+        let targets = self.sel_set.clone();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
+                name,
+                vsdx::Cell::value(value.to_owned()),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(format!("set {name}"), cmds));
+        }
+    }
+
+    fn fmt_set_row(&mut self, section: &str, cell: &str, value: &str) {
+        let targets = self.sel_set.clone();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (page_id, sid) in targets {
+            cmds.push(Box::new(dc_core::SetRowCell::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: sid,
+                },
+                section,
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                cell,
+                vsdx::Cell::value(value.to_owned()),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(format!("set {section}.{cell}"), cmds));
+        }
+    }
+
+    /// A named-choice dropdown (the manual popup — the stock ComboBox
+    /// glyph is missing from the pinned fonts). Returns the chosen
+    /// value's key when the user picks one.
+    fn fmt_dropdown(
+        ui: &mut Ui,
+        current: &str,
+        key_of: &dyn Fn(&str) -> String,
+        choices: &[(&str, &str)], // (key, display)
+    ) -> Option<String> {
+        let display = choices
+            .iter()
+            .find(|(k, _)| *k == current)
+            .map(|(_, d)| d.to_string())
+            .unwrap_or_else(|| current.to_string());
+        let r = ui.button(format!("{display}  ›"));
+        let mut picked = None;
+        egui::Popup::menu(&r)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            .show(|ui| {
+                ui.set_min_width(130.0);
+                for (k, d) in choices {
+                    if ui.selectable_label(*k == current, *d).clicked() {
+                        picked = Some(key_of(k));
+                    }
+                }
+            });
+        picked
+    }
+
+    /// The Format Shape pane (#31): Fill / Line / Text for the current
+    /// selection, writing the same cells the renderer reads — WYSIWYG
+    /// by construction. Values seed from the effective sheet; writes
+    /// are instance-local overrides (never the master).
+    fn format_pane(&mut self, ui: &mut Ui) {
+        let t = theme::shell_tokens(ui.visuals());
+        ui.set_min_width(200.0);
+        ui.heading(
+            egui::RichText::new("Format Shape")
+                .size(13.0)
+                .color(t.label),
+        );
+        ui.add_space(4.0);
+        let mut bufs = std::mem::take(&mut self.fmt_bufs);
+        let mut color_pick: Option<ColorTarget> = None;
+        let mut set_cell: Option<(String, String)> = None;
+        let mut set_row: Option<(String, String, String)> = None;
+
+        egui::CollapsingHeader::new("Fill")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Foreground");
+                    if ui
+                        .button(
+                            self.eff_cell_str("FillForegnd")
+                                .unwrap_or_else(|| "—".into()),
+                        )
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Fill);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Background");
+                    if ui
+                        .button(self.eff_cell_str("FillBkgnd").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::FillBkgnd);
+                    }
+                });
+                let cur = self
+                    .eff_cell_str("FillPattern")
+                    .unwrap_or_else(|| "1".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[
+                        ("0", "None"),
+                        ("1", "Solid"),
+                        ("2", "5%"),
+                        ("3", "10%"),
+                        ("4", "20%"),
+                        ("5", "30%"),
+                        ("6", "40%"),
+                        ("24", "Gradient horiz."),
+                        ("25", "Gradient vert."),
+                        ("28", "Gradient radial"),
+                    ],
+                ) {
+                    set_cell = Some(("FillPattern".into(), v));
+                }
+            });
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new("Line")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui
+                        .button(self.eff_cell_str("LineColor").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Line);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Weight");
+                    let cur_pt = self.eff_cell_num("LineWeight").unwrap_or(0.0104) * 72.0;
+                    let mut pt = cur_pt;
+                    let r = ui.add(
+                        egui::Slider::new(&mut pt, 0.25..=12.0)
+                            .show_value(true)
+                            .custom_formatter(|v, _| format!("{v:.2} pt")),
+                    );
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::Slider, true, "Line weight")
+                    });
+                    if r.drag_stopped() && (pt - cur_pt).abs() > 1e-6 {
+                        set_cell = Some(("LineWeight".into(), format!("{:.6}", pt / 72.0)));
+                    }
+                });
+                let cur = self
+                    .eff_cell_str("LinePattern")
+                    .unwrap_or_else(|| "1".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[
+                        ("0", "None"),
+                        ("1", "Solid"),
+                        ("2", "Dotted"),
+                        ("3", "Dash-dot"),
+                        ("4", "Dashed"),
+                        ("9", "Long dash"),
+                    ],
+                ) {
+                    set_cell = Some(("LinePattern".into(), v));
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Rounding");
+                    let cur = self.eff_cell_str("Rounding").unwrap_or_else(|| "0".into());
+                    let buf = bufs.entry("rounding".into()).or_insert(cur);
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Rounding")
+                    });
+                    if r.lost_focus() {
+                        if let Ok(v) = buf.trim().parse::<f64>() {
+                            set_cell = Some(("Rounding".into(), format!("{v:.6}")));
+                        }
+                        bufs.remove("rounding");
+                    }
+                });
+            });
+        ui.add_space(2.0);
+        egui::CollapsingHeader::new("Text")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Font");
+                    let cur = self.eff_row_str("Character", "Font").unwrap_or_default();
+                    let buf = bufs.entry("font".into()).or_insert(cur);
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(120.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Font")
+                    });
+                    if r.lost_focus() {
+                        let v = buf.trim().to_string();
+                        if !v.is_empty() {
+                            set_row = Some(("Character".into(), "Font".into(), v));
+                        }
+                        bufs.remove("font");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Size (pt)");
+                    let cur = self
+                        .eff_row_str("Character", "Size")
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(10.0)
+                        * 72.0;
+                    let buf = bufs.entry("size".into()).or_insert(format!("{cur:.1}"));
+                    let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
+                    r.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Size (pt)")
+                    });
+                    if r.lost_focus() {
+                        if let Ok(pt) = buf.trim().parse::<f64>() {
+                            set_row = Some((
+                                "Character".into(),
+                                "Size".into(),
+                                format!("{:.6}", pt / 72.0),
+                            ));
+                        }
+                        bufs.remove("size");
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Style");
+                    let bits = self
+                        .eff_row_str("Character", "Style")
+                        .and_then(|v| v.parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let mut bold = bits & 1 != 0;
+                    let mut italic = bits & 2 != 0;
+                    let rb = ui.checkbox(&mut bold, "B");
+                    rb.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Bold")
+                    });
+                    if rb.changed() {
+                        set_row = Some((
+                            "Character".into(),
+                            "Style".into(),
+                            format!("{}", (bits & !1) | bold as i64),
+                        ));
+                    }
+                    let ri = ui.checkbox(&mut italic, "I");
+                    ri.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Italic")
+                    });
+                    if ri.changed() {
+                        set_row = Some((
+                            "Character".into(),
+                            "Style".into(),
+                            format!("{}", (bits & !2) | ((italic as i64) * 2)),
+                        ));
+                    }
+                });
+                let cur = self
+                    .eff_row_str("Paragraph", "HorzAlign")
+                    .unwrap_or_else(|| "0".into());
+                if let Some(v) = Self::fmt_dropdown(
+                    ui,
+                    &cur,
+                    &|k: &str| k.to_string(),
+                    &[("0", "Left"), ("1", "Center"), ("2", "Right")],
+                ) {
+                    set_row = Some(("Paragraph".into(), "HorzAlign".into(), v));
+                }
+            });
+
+        self.fmt_bufs = bufs;
+        if let Some(target) = color_pick {
+            self.color_pick = Some(target);
+        }
+        if let Some((name, v)) = set_cell {
+            self.fmt_set_cell(&name, &v);
+        }
+        if let Some((sec, cell, v)) = set_row {
+            self.fmt_set_row(&sec, &cell, &v);
+        }
+    }
+
     fn shapesheet_panel(&mut self, ui: &mut Ui) {
         ui.vertical(|ui| {
             ui.strong("ShapeSheet");
@@ -4194,6 +4537,7 @@ impl App {
     fn apply_color(&mut self, target: ColorTarget, color: &str) {
         let cell_name = match target {
             ColorTarget::Fill => "FillForegnd",
+            ColorTarget::FillBkgnd => "FillBkgnd",
             ColorTarget::Line => "LineColor",
         };
         let targets = self.sel_set.clone();
@@ -4235,6 +4579,7 @@ impl App {
             Hyperlink,
             AddComment,
             ShapeData,
+            FormatShape,
             Cut,
             Copy,
             Paste,
@@ -4427,7 +4772,9 @@ impl App {
             if ctx_item(ui, None, "Shape Data…", "", true) {
                 act = Some(Act::ShapeData);
             }
-            ctx_item(ui, None, "Format Shape…", "(v0.5)", false);
+            if ctx_item(ui, None, "Format Shape…", "", true) {
+                act = Some(Act::FormatShape);
+            }
             ui.separator();
             if ctx_item(ui, None, "Edit Text…", "F2", true) {
                 act = Some(Act::EditText);
@@ -4482,6 +4829,10 @@ impl App {
             Act::ShapeData => {
                 self.shape_data_open = Some(shape_id);
                 self.prop_bufs.clear();
+            }
+            Act::FormatShape => {
+                self.format_pane_open = true;
+                self.fmt_bufs.clear();
             }
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
@@ -4852,6 +5203,43 @@ impl App {
             .cell("Value")
             .and_then(|c| c.v.clone())
     }
+    /// kittest: a shape's effective cell value (#31).
+    #[doc(hidden)]
+    pub fn debug_cell_for_test(&self, shape_id: i64, cell: &str) -> Option<String> {
+        let ed = self.ed()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        // Char.X / Para.X read the effective first Character/Paragraph
+        // row cell.
+        if let Some(row_cell) = cell.strip_prefix("Char.") {
+            return ed
+                .doc
+                .effective_sheet(sh, &chain)
+                .sections_named("Character")
+                .first()
+                .and_then(|sec| sec.rows.first())
+                .and_then(|r| r.cell(row_cell))
+                .and_then(|c| c.v.clone())
+                .map(|v| v.trim().to_string());
+        }
+        if let Some(row_cell) = cell.strip_prefix("Para.") {
+            return ed
+                .doc
+                .effective_sheet(sh, &chain)
+                .sections_named("Paragraph")
+                .first()
+                .and_then(|sec| sec.rows.first())
+                .and_then(|r| r.cell(row_cell))
+                .and_then(|c| c.v.clone())
+                .map(|v| v.trim().to_string());
+        }
+        ed.doc
+            .resolve_cell(sh, &chain, cell)
+            .and_then(|c| c.v.clone())
+            .map(|v| v.trim().to_string())
+    }
     /// kittest: the active page's name (#54).
     #[doc(hidden)]
     pub fn debug_active_page_name(&self) -> String {
@@ -5039,6 +5427,7 @@ impl App {
         let mut open = true;
         egui::Window::new(match target {
             ColorTarget::Fill => "Fill Color",
+            ColorTarget::FillBkgnd => "Fill Background",
             ColorTarget::Line => "Line Color",
         })
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
@@ -5267,6 +5656,12 @@ impl App {
                 .default_size(260.0)
                 .resizable(true)
                 .show(ui, |ui| self.shapesheet_panel(ui));
+        }
+        if self.format_pane_open && self.sel.is_some() {
+            egui::Panel::right("format_pane")
+                .default_size(240.0)
+                .resizable(true)
+                .show(ui, |ui| self.format_pane(ui));
         }
         self.central(ui);
         self.stencil_carry(&ctx);
