@@ -13,7 +13,7 @@
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::theme::{self, ShellTokens};
-use crate::units::{tick_step, Unit};
+use crate::units::{tick_step, tick_tiers, TickTier, Unit};
 
 /// View state for the active page.
 #[derive(Debug, Clone)]
@@ -82,6 +82,13 @@ pub struct PageGeom {
 }
 
 pub const RULER: f32 = 22.0;
+
+/// Ruler subdivision depth (#62): 4 = half + quarter ticks (the Visio
+/// default); the Ruler & Grid Fine/Normal/Coarse setting can lower it.
+const RULER_SUBDIV: u32 = 4;
+/// Minor ruler tiers drop out below this pixel spacing (#62) so ticks
+/// never smear together when zooming out.
+const RULER_MIN_TICK_PX: f64 = 6.0;
 
 /// Outcome of interacting with the canvas this frame.
 pub struct CanvasOut {
@@ -616,23 +623,41 @@ fn draw_rulers(
     let ppi = view.px_per_in();
     let dupx = view.unit.from_in(1.0) as f32 / ppi; // display units per px
 
-    // Horizontal ruler: ticks over the page extent only.
+    // Tiered ticks (#62): labeled majors (the 1/2/5-decade step) plus
+    // half and quarter subdivisions, each minor tier dropped when its
+    // pixel spacing would smear. Ticks are placed on the finest kept
+    // interval and classified by integer index, so no float-multiple
+    // drift decides tiers.
     let step = tick_step(dupx as f64, 45.0);
+    let px_per_major = step / dupx as f64;
+    let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
+    let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
+    let interval = step / finest as f64;
+    let tier_for = |k: i64| -> TickTier {
+        *tiers
+            .iter()
+            .find(|t| k % (finest / t.div as i64).max(1) == 0)
+            .unwrap_or(&tiers[0])
+    };
+
+    // Horizontal ruler: ticks over the page extent only.
     let x0_in = ((page_rect.left() - view.pan.x) / ppi).max(0.0) as f64;
     let x1_in = ((page_rect.right() - view.pan.x) / ppi).min(page.w_in as f32) as f64;
-    let mut v = (x0_in * view.unit.from_in(1.0) / step).floor() * step;
-    while v <= x1_in * view.unit.from_in(1.0) {
+    let upx = view.unit.from_in(1.0);
+    let k0 = (x0_in * upx / interval).ceil() as i64;
+    let k1 = (x1_in * upx / interval).floor() as i64;
+    for k in k0..=k1 {
+        let v = k as f64 * interval;
         let sx = view.pan.x + (view.unit.to_in(v) as f32) * ppi;
-        let major = (v / step).fract().abs() < 1e-6;
-        let len = if major { 7.0 } else { 4.0 };
+        let tier = tier_for(k);
         p.line_segment(
             [
-                Pos2::new(sx, top.bottom() - len),
+                Pos2::new(sx, top.bottom() - tier.len),
                 Pos2::new(sx, top.bottom()),
             ],
             Stroke::new(0.8, t.ruler_tick),
         );
-        if major && v > 0.0 {
+        if tier.labeled && v > 0.0 {
             p.text(
                 Pos2::new(sx + 2.0, top.top() + 1.0),
                 egui::Align2::LEFT_TOP,
@@ -641,27 +666,27 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step;
     }
 
     // Vertical ruler: values count upward from the page bottom (Visio).
     let y0_in = ((page_rect.top() - view.pan.y) / ppi).max(0.0) as f64;
     let y1_in = ((page_rect.bottom() - view.pan.y) / ppi).min(page.h_in as f32) as f64;
-    let mut v = (y0_in * view.unit.from_in(1.0) / step).floor() * step;
-    while v <= y1_in * view.unit.from_in(1.0) {
+    let k0 = (y0_in * upx / interval).ceil() as i64;
+    let k1 = (y1_in * upx / interval).floor() as i64;
+    for k in k0..=k1 {
+        let v = k as f64 * interval;
         let sy_top = view.pan.y + (view.unit.to_in(v) as f32) * ppi;
         let val_up = page.h_in - view.unit.to_in(v); // label in y-up units
         let disp = view.unit.from_in(val_up);
-        let major = (v / step).fract().abs() < 1e-6;
-        let len = if major { 7.0 } else { 4.0 };
+        let tier = tier_for(k);
         p.line_segment(
             [
-                Pos2::new(left.right() - len, sy_top),
+                Pos2::new(left.right() - tier.len, sy_top),
                 Pos2::new(left.right(), sy_top),
             ],
             Stroke::new(0.8, t.ruler_tick),
         );
-        if major && disp > 0.0 {
+        if tier.labeled && disp > 0.0 {
             p.text(
                 Pos2::new(left.left() + 1.0, sy_top + 2.0),
                 egui::Align2::LEFT_TOP,
@@ -670,7 +695,6 @@ fn draw_rulers(
                 t.ruler_text,
             );
         }
-        v += step;
     }
 }
 

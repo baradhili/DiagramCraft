@@ -161,6 +161,17 @@ fn shell_snapshot_home() {
     run_shell("dc_ui_shell_home", App::with_doc(&fixture(tmp.path())));
 }
 
+/// #62: tiered ruler ticks at a second density — zoomed in 2×, the
+/// major steps halve and quarter subdivisions stay legible (the fit-
+/// mode goldens above cover the default density).
+#[test]
+fn shell_snapshot_rulers_zoomed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::with_doc(&fixture(tmp.path()));
+    app.set_zoom_for_test(2.0);
+    run_shell("dc_ui_shell_rulers_zoom", app);
+}
+
 /// GitHub #52: the same home shell under the dark mode the OS watcher
 /// selects when the desktop is dark — dark chrome (ribbon, rulers,
 /// desk, tabs, status), white page paper, brand-green bands.

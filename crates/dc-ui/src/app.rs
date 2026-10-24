@@ -3319,6 +3319,14 @@ impl App {
     pub fn debug_zoom(&self) -> f32 {
         self.view.zoom
     }
+    /// kittest: a manual zoom (#62's second ruler density) — leaves fit
+    /// mode like the real control so the zoom actually applies.
+    #[doc(hidden)]
+    pub fn set_zoom_for_test(&mut self, z: f32) {
+        self.view.zoom = z.clamp(0.1, 8.0);
+        self.view.fit_mode = false;
+        self.view.fit_pending = false;
+    }
     /// A shape's current text (double-click edit tests).
     #[doc(hidden)]
     pub fn debug_shape_text(&self, shape_id: i64) -> Option<String> {
