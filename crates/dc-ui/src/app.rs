@@ -4079,7 +4079,6 @@ impl App {
         // so an idle app still wakes to pick a flip up.
         if let Some(watcher) = &self.os_theme {
             if let Some(pref) = watcher.poll() {
-                eprintln!("os_theme: OS preference changed → {pref:?}");
                 ctx.set_theme(pref);
             }
             ctx.request_repaint_after(Duration::from_secs(2));

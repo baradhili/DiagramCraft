@@ -85,25 +85,15 @@ pub fn probe_os() -> Option<(&'static str, ThemePreference)> {
     None
 }
 
-/// One-shot startup detection with a debug line reporting the source
-/// (or that nothing was detected) and the resulting preference. On
-/// non-Linux targets eframe follows the OS theme natively, so the
-/// preference is `System` and nothing is probed.
+/// One-shot startup detection. On non-Linux targets eframe follows the
+/// OS theme natively, so the preference is `System` and nothing is
+/// probed.
 pub fn detect() -> ThemePreference {
     #[cfg(target_os = "linux")]
     {
-        match probe_os() {
-            Some((source, pref)) => {
-                eprintln!("os_theme: {source} → {pref:?}");
-                pref
-            }
-            None => {
-                eprintln!(
-                    "os_theme: no OS color-scheme detected (gsettings and portal silent) → Light"
-                );
-                ThemePreference::Light
-            }
-        }
+        probe_os()
+            .map(|(_, pref)| pref)
+            .unwrap_or(ThemePreference::Light)
     }
     #[cfg(not(target_os = "linux"))]
     {
