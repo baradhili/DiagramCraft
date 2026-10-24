@@ -4165,6 +4165,10 @@ impl App {
             self.comment_body = body;
             self.comment_edit = edit;
         } else {
+            // Close means Close: drop the target too, or the window
+            // re-renders next frame (#29 live report).
+            self.comment_target = None;
+            self.comment_edit = None;
             self.comment_body = String::new();
         }
     }

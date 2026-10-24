@@ -2371,4 +2371,11 @@ fn comment_badge_opens_thread_with_edit_reply_delete() {
     let ann = h.state().debug_annotations_for_test();
     assert_eq!(ann.len(), 1, "delete removed one comment");
     assert!(ann[0].1.contains("first (edited)"));
+
+    // Close actually closes (live report: it didn't): the popup's
+    // labeled inputs disappear with it (the stencil search remains).
+    h.get_by_label("Close").click();
+    h.run();
+    let reply_inputs = h.query_all_by_label_contains("Reply").count();
+    assert_eq!(reply_inputs, 0, "the Comments popup closed on Close");
 }
