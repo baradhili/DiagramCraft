@@ -124,7 +124,15 @@ Bypass a single commit with `COMMITLINT_SKIP=1`.
 
 ## Roadmap
 
-### M6 — Ecosystem - current
+### M5 - GUI - Current
+
+Working on getting the GUI to a usable point
+Key Items remaining:
+
+- Stop full page re-renders of svg to screen.
+- Clean up ribbon
+
+### M6 — Ecosystem 
 
 - Data linking (`data` crate): CSV/SQLite recordsets → shape data (URS category "Data Linking"; spec'd in VeeTrace).
 
