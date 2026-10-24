@@ -2355,6 +2355,59 @@ fn shape_data_variable_list_adds_choice() {
         Some("Day;Night".into()),
         "undo restored the previous format"
     );
+
+    // An EXISTING choice selects instead of duplicating in Format.
+    let open_add = |h: &mut Harness<'_, App>| {
+        h.get_all_by_label("+")
+            .find(|n| n.rect().min.y < 500.0)
+            .expect("variable-list add button")
+            .click();
+        h.run();
+    };
+    let set_choice = |h: &mut Harness<'_, App>, text: &str| {
+        h.get(
+            egui_kittest::kittest::By::default()
+                .role(egui::Role::TextInput)
+                .label("Shift"),
+        )
+        .set_text_value_accesskit(text);
+        h.run();
+        h.get_by_label("Add").click();
+        h.run();
+    };
+    open_add(&mut h);
+    set_choice(&mut h, "Night");
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Value"),
+        Some("Night".into()),
+        "an existing choice selects"
+    );
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Format"),
+        Some("Day;Night".into()),
+        "an existing choice does not duplicate in Format"
+    );
+
+    // A choice containing ';' is refused with a status note; the add
+    // row stays open and nothing is written.
+    open_add(&mut h);
+    set_choice(&mut h, "a;b");
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Value"),
+        Some("Night".into()),
+        "a ';' choice writes nothing"
+    );
+    assert_eq!(
+        h.state().debug_prop_cell_for_test(sid, "Shift", "Format"),
+        Some("Day;Night".into()),
+        "a ';' choice leaves Format alone"
+    );
+    assert!(
+        h.query_all_by_label("Add").count() > 0,
+        "the add row stayed open for correction"
+    );
+    h.get_by_label("Cancel").click();
+    h.run();
 }
 
 /// GitHub #31: Format Shape pane writes the renderer's cells; every

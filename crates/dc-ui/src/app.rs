@@ -4423,45 +4423,65 @@ impl App {
                                                 .get(&add_key)
                                                 .map(|b| b.trim().to_string())
                                                 .unwrap_or_default();
-                                            bufs.remove(&add_key);
-                                            self.prop_add = None;
-                                            if !v.is_empty() {
+                                            if v.contains(';') {
+                                                // A choice is one ";"-separated
+                                                // Format entry — an embedded
+                                                // separator would split into
+                                                // phantom choices. Keep the add
+                                                // row open for correction.
+                                                self.status = format!(
+                                                    "{label}: a choice cannot contain ';'"
+                                                );
+                                            } else if !v.is_empty() {
+                                                bufs.remove(&add_key);
+                                                self.prop_add = None;
                                                 let fmt = row
                                                     .cell("Format")
                                                     .and_then(|c| c.v.clone())
                                                     .unwrap_or_default();
-                                                let new_fmt = if fmt.trim().is_empty() {
-                                                    v.clone()
+                                                if fmt.split(';').any(|c| c.trim() == v) {
+                                                    // Already a choice: select it,
+                                                    // don't duplicate it in Format.
+                                                    write_value(self, page_id, shape_id, name, &v);
                                                 } else {
-                                                    format!("{};{}", fmt.trim_end(), v)
-                                                };
-                                                let scope = Scope::Shape {
-                                                    page: page_id,
-                                                    shape: shape_id,
-                                                };
-                                                let row_sel =
-                                                    dc_core::commands::RowSel::Named(name.clone());
-                                                self.apply(dc_core::Macro::new(
-                                                    format!("add {name} choice {v:?}"),
-                                                    vec![
-                                                        Box::new(dc_core::SetRowCell::new(
-                                                            scope.clone(),
-                                                            "Prop",
-                                                            0,
-                                                            row_sel.clone(),
-                                                            "Value",
-                                                            vsdx::model::Cell::value(v),
-                                                        )),
-                                                        Box::new(dc_core::SetRowCell::new(
-                                                            scope,
-                                                            "Prop",
-                                                            0,
-                                                            row_sel,
-                                                            "Format",
-                                                            vsdx::model::Cell::value(new_fmt),
-                                                        )),
-                                                    ],
-                                                ));
+                                                    let new_fmt = if fmt.trim().is_empty() {
+                                                        v.clone()
+                                                    } else {
+                                                        format!("{};{}", fmt.trim_end(), v)
+                                                    };
+                                                    let scope = Scope::Shape {
+                                                        page: page_id,
+                                                        shape: shape_id,
+                                                    };
+                                                    let row_sel =
+                                                        dc_core::commands::RowSel::Named(
+                                                            name.clone(),
+                                                        );
+                                                    self.apply(dc_core::Macro::new(
+                                                        format!("add {name} choice {v:?}"),
+                                                        vec![
+                                                            Box::new(dc_core::SetRowCell::new(
+                                                                scope.clone(),
+                                                                "Prop",
+                                                                0,
+                                                                row_sel.clone(),
+                                                                "Value",
+                                                                vsdx::model::Cell::value(v),
+                                                            )),
+                                                            Box::new(dc_core::SetRowCell::new(
+                                                                scope,
+                                                                "Prop",
+                                                                0,
+                                                                row_sel,
+                                                                "Format",
+                                                                vsdx::model::Cell::value(new_fmt),
+                                                            )),
+                                                        ],
+                                                    ));
+                                                }
+                                            } else {
+                                                bufs.remove(&add_key);
+                                                self.prop_add = None;
                                             }
                                         }
                                     }
