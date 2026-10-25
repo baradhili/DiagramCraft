@@ -10,6 +10,7 @@ pub mod icontex;
 pub mod os_theme;
 pub mod perf;
 pub mod props;
+mod rasterpool;
 pub mod recent;
 pub mod ribbon;
 pub mod stencil;

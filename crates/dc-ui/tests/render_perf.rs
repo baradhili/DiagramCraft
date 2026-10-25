@@ -179,6 +179,11 @@ fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usize) 
 }
 
 fn mount(app: App) -> Harness<'static, App> {
+    // Sync rasters (fonts NOT pinned — the bench measures the
+    // production font path): stage attribution stays deterministic,
+    // and `idle_frames_skip_the_page_pipeline` never depends on
+    // worker timing (#92).
+    dc_ui::svgimg::force_sync_raster_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(

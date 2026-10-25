@@ -6,7 +6,6 @@ use dc::svg;
 use dc_core::Editor;
 use egui::{Color32, Pos2, Rect, Sense, Ui, Vec2};
 
-use crate::svgimg;
 use crate::theme;
 
 /// One master cell: a 64×64 thumbnail plus a caption strip below it.
@@ -46,6 +45,8 @@ pub struct Stencil {
     /// The stencil list entry is collapsed (master grid hidden).
     pub collapsed: bool,
     textures: Vec<(i64, egui::TextureHandle)>,
+    /// First-use thumbnails queued on the raster pool (#92).
+    inflight: std::collections::HashSet<i64>,
     loaded_for: Option<u64>, // doc identity (master count + first ids hash)
 }
 
@@ -66,7 +67,13 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
 }
 
 impl Stencil {
-    pub fn show(&mut self, ui: &mut Ui, ed: &Editor, stencil_title: &str) -> Option<i64> {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        ed: &Editor,
+        stencil_title: &str,
+        pool: &mut crate::rasterpool::RasterPool,
+    ) -> Option<i64> {
         // Pane chrome follows the active visual mode (GitHub #52);
         // thumbnails keep their own light raster (paper-like tiles).
         let t = theme::shell_tokens(ui.visuals());
@@ -83,6 +90,7 @@ impl Stencil {
         };
         if self.loaded_for != Some(fingerprint) {
             self.textures.clear();
+            self.inflight.clear();
             self.loaded_for = Some(fingerprint);
         }
 
@@ -154,7 +162,7 @@ impl Stencil {
                     self.cell_rects.clear();
                     let n = ordered.len();
                     for (i, m) in ordered.into_iter().enumerate() {
-                        let tex = self.texture(ui.ctx(), ed, m.id);
+                        let tex = self.texture(ui.ctx(), ed, m.id, pool);
                         let armed = self.armed == Some(m.id);
                         // one grid cell: 64×78 (thumb + caption strip)
                         let size = Vec2::new(CELL_W, CELL_H);
@@ -185,12 +193,27 @@ impl Stencil {
                             p.rect_filled(r, 2.0, mix(t.stencil_bg, t.caption, 0.10));
                         }
                         let thumb = Rect::from_min_size(r.left_top(), Vec2::new(CELL_W, CELL_W));
-                        p.image(
-                            tex.id(),
-                            thumb.shrink(2.0),
-                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                            Color32::WHITE,
-                        );
+                        match tex {
+                            Some(tex) => {
+                                p.image(
+                                    tex.id(),
+                                    thumb.shrink(2.0),
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                            }
+                            // Placeholder (#92): a neutral tile while a
+                            // worker rasterizes the thumbnail — never a
+                            // blank pane flash. The sync seam means the
+                            // goldens never take this branch.
+                            None => {
+                                p.rect_filled(
+                                    thumb.shrink(2.0),
+                                    2.0,
+                                    mix(t.stencil_bg, t.caption, 0.30),
+                                );
+                            }
+                        }
                         // caption
                         let gal = p.layout_no_wrap(
                             short(m.name_u.as_deref().unwrap_or("-")),
@@ -237,24 +260,52 @@ impl Stencil {
         clicked
     }
 
-    /// Thumbnail texture for a master, building it on first use
-    /// (also used for the drag ghost).
+    /// Thumbnail texture for a master, building it on first use (also
+    /// used for the drag ghost). The raster runs on the pool (#92):
+    /// while a first-use thumbnail is on a worker the caller gets
+    /// `None` and paints the neutral placeholder — the sync seam makes
+    /// this never-`None` for the kittest goldens.
     pub fn texture(
         &mut self,
         ctx: &egui::Context,
         ed: &Editor,
         master_id: i64,
-    ) -> egui::TextureHandle {
+        pool: &mut crate::rasterpool::RasterPool,
+    ) -> Option<egui::TextureHandle> {
         if let Some(tex) = self.textures.iter().find(|(id, _)| *id == master_id) {
-            return tex.1.clone();
+            return Some(tex.1.clone());
+        }
+        if self.inflight.contains(&master_id) {
+            return None; // on a worker; lands in a later drain
         }
         let m = ed.doc.master(master_id).expect("master exists");
         let svg = {
             let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Thumb));
             svg::render_master(&ed.doc, m).unwrap_or_default()
         };
-        let img = svgimg::rasterize(&svg, 64.0, crate::perf::Kind::Thumb)
-            .unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
+        match pool.post(
+            crate::rasterpool::RasterKey::Thumb(master_id),
+            crate::rasterpool::RasterJob::Parse { svg, width: 64.0 },
+        ) {
+            crate::rasterpool::Posted::Sync(img, _) => Some(self.insert(ctx, master_id, img)),
+            crate::rasterpool::Posted::Queued => {
+                self.inflight.insert(master_id);
+                None
+            }
+            crate::rasterpool::Posted::Capped => None, // retry next frame
+        }
+    }
+
+    /// Upload a finished thumbnail (gray fallback tile on failure) and
+    /// cache it by master id.
+    fn insert(
+        &mut self,
+        ctx: &egui::Context,
+        master_id: i64,
+        img: anyhow::Result<egui::ColorImage>,
+    ) -> egui::TextureHandle {
+        let img =
+            img.unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
         let tex = {
             let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Thumb));
             ctx.load_texture(
@@ -265,6 +316,24 @@ impl Stencil {
         };
         self.textures.push((master_id, tex.clone()));
         tex
+    }
+
+    /// Land a worker completion for a master thumbnail (#92) — called
+    /// from `App`'s pool drain.
+    pub(crate) fn on_thumb_done(
+        &mut self,
+        ctx: &egui::Context,
+        master_id: i64,
+        img: anyhow::Result<egui::ColorImage>,
+    ) {
+        self.inflight.remove(&master_id);
+        let _ = self.insert(ctx, master_id, img);
+    }
+
+    /// kittest (#92): how many master thumbnails have landed.
+    #[doc(hidden)]
+    pub fn thumb_count_for_test(&self) -> usize {
+        self.textures.len()
     }
 }
 

@@ -116,6 +116,11 @@ pub struct App {
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
     tex: TextureCache,
+    /// Background rasterization (#92): the parse/render jobs for page
+    /// textures and stencil thumbnails run here; completions land in
+    /// `draw`'s pool drain (see `svgimg::force_sync_raster_for_tests`
+    /// for the kittest determinism seam).
+    pool: crate::rasterpool::RasterPool,
     /// Test-only: force the Info thumbnail's render to fail (#58).
     info_render_fail_for_test: bool,
     mouse_page: Option<(f64, f64)>,
@@ -323,6 +328,7 @@ impl App {
             stencil: Stencil::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
+            pool: crate::rasterpool::RasterPool::default(),
             info_render_fail_for_test: false,
             mouse_page: None,
             status: String::new(),
@@ -3550,13 +3556,16 @@ impl App {
         let drag_rect = self.drag_preview_rect();
         let handles = self.selection_handles();
         let armed = self.stencil.armed.is_some();
-        // #90: the page SVG is built by the cache's miss closure — only
-        // when the (part, version, ppi-bucket) texture is actually
-        // missing. An idle/hover/drag frame with a valid texture never
-        // serializes the page; a render failure surfaces here (and is
-        // retried next frame, since failures are not cached).
+        // #90/#91/#92: the page SVG is built by the cache's miss
+        // closure — only when the (part, version, ppi-bucket) texture
+        // is actually missing — and the parse/render runs on the raster
+        // pool. Until a first raster lands, `None` paints the page as
+        // its natural white paper (canvas::show's None path); a render
+        // failure surfaces as the error label (and is retried next
+        // frame, since failures are not cached).
         let tex = self.tex.get(
             ui.ctx(),
+            &mut self.pool,
             geom.w_in,
             &part.replace('/', "_"),
             self.version,
@@ -3575,7 +3584,7 @@ impl App {
             },
         );
         let tex = match tex {
-            Ok(t) => t.clone(),
+            Ok(t) => t.cloned(),
             Err(e) => {
                 ui.label(format!("render failed: {e:#}"));
                 return;
@@ -3603,7 +3612,7 @@ impl App {
             ui,
             view,
             &geom,
-            Some(&tex),
+            tex.as_ref(),
             sel_rect,
             &extra_rects,
             &handles,
@@ -5855,6 +5864,22 @@ impl App {
             .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
             .unwrap_or_default()
     }
+
+    /// kittest: the live page texture id at the current zoom (#92) —
+    /// `None` while the first raster is still on a worker.
+    #[doc(hidden)]
+    pub fn debug_page_tex_id_for_test(&self) -> Option<egui::TextureId> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let key = page.part.replace('/', "_");
+        self.tex.id_for(&key, self.version, self.view.px_per_in())
+    }
+
+    /// kittest: how many stencil master thumbnails have landed (#92).
+    #[doc(hidden)]
+    pub fn debug_stencil_thumb_count_for_test(&self) -> usize {
+        self.stencil.thumb_count_for_test()
+    }
     /// kittest: a shape's INSTANCE-LOCAL User row value (#25) — None
     /// while the row is inherited from the master.
     #[doc(hidden)]
@@ -6284,7 +6309,7 @@ impl App {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
             // Ghost: the master thumbnail drawn at the shape's real
             // on-page size, semi-transparent, pinned at the cursor.
-            let App { ed, stencil, .. } = self;
+            let App { ed, stencil, pool, .. } = self;
             if let Some(ed) = ed.as_ref() {
                 let (w, h) = master_size(&ed.doc, master);
                 let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
@@ -6292,13 +6317,16 @@ impl App {
                 let layer =
                     egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
                 let painter = ctx.layer_painter(layer);
-                let tex = stencil.texture(ctx, ed, master);
-                painter.image(
-                    tex.id(),
-                    r,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::from_white_alpha(150),
-                );
+                // While the first-use thumbnail is still on a worker
+                // (#92) the ghost carries just its outline.
+                if let Some(tex) = stencil.texture(ctx, ed, master, pool) {
+                    painter.image(
+                        tex.id(),
+                        r,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::from_white_alpha(150),
+                    );
+                }
                 let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
                 painter.rect_stroke(
                     r,
@@ -6331,6 +6359,32 @@ impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
         let _frame = crate::perf::span(crate::perf::Stage::Frame);
+        // Off-thread rasters (#92): land worker completions before
+        // layout so this frame uses fresh textures; anything landing
+        // (or a post deferred by the per-frame cap) schedules the
+        // repaint that shows it. The UI thread only pays load_texture.
+        let landed = self.pool.drain();
+        if !landed.is_empty() || self.pool.take_deferred() {
+            ui.ctx().request_repaint();
+        }
+        for done in landed {
+            match done.key {
+                crate::rasterpool::RasterKey::Page { part, version, bucket } => {
+                    self.tex.on_page_done(
+                        ui.ctx(),
+                        part,
+                        version,
+                        bucket,
+                        done.image,
+                        done.tree,
+                        done.was_parse,
+                    );
+                }
+                crate::rasterpool::RasterKey::Thumb(id) => {
+                    self.stencil.on_thumb_done(ui.ctx(), id, done.image);
+                }
+            }
+        }
         // Group-edit stack coherence (#78): drop open levels that no
         // longer resolve to a Group on the active page (ungroup, undo,
         // page switch, document change — one check covers them all).
@@ -6440,9 +6494,9 @@ impl App {
                         self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
                         let title = stencil_title(&self.path);
-                        let App { ed, stencil, .. } = self;
+                        let App { ed, stencil, pool, .. } = self;
                         if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed, &title) {
+                            if let Some(id) = stencil.show(ui, ed, &title, pool) {
                                 armed = Some(id);
                             }
                         }
@@ -6868,8 +6922,9 @@ impl App {
                                     // derives its height from the page.
                                     let ppi = (img_w / thumb_w_in) as f32;
                                     let key = format!("info-{}", thumb_part.replace('/', "_"));
-                                    if let Ok(tex) = self.tex.get(
+                                    if let Ok(Some(tex)) = self.tex.get(
                                         ui.ctx(),
+                                        &mut self.pool,
                                         thumb_w_in,
                                         &key,
                                         self.version,

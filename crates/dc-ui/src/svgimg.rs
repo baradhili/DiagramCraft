@@ -22,6 +22,31 @@ pub fn pin_embedded_fonts_for_tests() {
     PIN_EMBEDDED.store(true, Ordering::Relaxed);
 }
 
+/// Kittest/snapshot mode #2 (GitHub #92): force ALL rasterization
+/// synchronous — the raster pool runs jobs inline on the calling
+/// thread, so goldens never depend on worker timing (a miss either
+/// has its texture this frame or the version genuinely changed,
+/// never because a worker was slow). Set once by the kittest
+/// harnesses; there is deliberately no way to unset it.
+static FORCE_SYNC: AtomicBool = AtomicBool::new(false);
+
+/// Test hook for the kittest harnesses (see `FORCE_SYNC`).
+#[doc(hidden)]
+pub fn force_sync_raster_for_tests() {
+    FORCE_SYNC.store(true, Ordering::Relaxed);
+}
+
+pub(crate) fn sync_forced() -> bool {
+    FORCE_SYNC.load(Ordering::Relaxed)
+}
+
+/// One-call kittest determinism: pinned fonts + synchronous rasters.
+#[doc(hidden)]
+pub fn pin_determinism_for_tests() {
+    pin_embedded_fonts_for_tests();
+    force_sync_raster_for_tests();
+}
+
 /// Rasterize an SVG string to a `target_width`-pixel-wide RGBA image
 /// (height follows the viewBox aspect).
 ///
@@ -246,11 +271,20 @@ pub fn rasterize(
 /// The parsed `usvg::Tree` is cached per (part, version) — the
 /// width-independent half of the raster (#91) — so a ppi-bucket change
 /// (a zoom step) re-RENDERS the held tree instead of re-resolving and
-/// re-parsing the SVG.
+/// re-parsing the SVG. The parse/render itself runs on the raster pool
+/// (#92): a miss posts a job and returns `None` (paint the
+/// placeholder) until the completion lands in `App`'s pool drain.
 #[derive(Default)]
 pub struct TextureCache {
     map: HashMap<(String, u64, u32), TextureHandle>,
-    trees: HashMap<(String, u64), resvg::usvg::Tree>,
+    trees: HashMap<(String, u64), crate::rasterpool::Tree>,
+    /// Raster misses queued on the pool, not yet landed (#92).
+    inflight_rasters: std::collections::HashSet<(String, u64, u32)>,
+    /// (part, version) whose parse job is on the pool (#92).
+    inflight_trees: std::collections::HashSet<(String, u64)>,
+    /// Landed worker failures — surfaced once as the `Err`, then
+    /// retried by re-posting (the pre-#92 per-frame retry semantics).
+    failures: HashMap<(String, u64, u32), String>,
 }
 
 impl TextureCache {
@@ -260,42 +294,76 @@ impl TextureCache {
     /// parsed. A texture miss with a live tree (a ppi-bucket change)
     /// re-renders that tree at the new width; the build closure and the
     /// resolve/parse stages run at most once per (part, version), never
-    /// per frame. A failed build or parse inserts nothing, so the next
-    /// frame retries it.
+    /// per frame. Under the async pool (#92) a miss returns `Ok(None)`
+    /// until the worker's result lands (`on_page_done`); with the sync
+    /// seam (kittest) the job runs inline and the handle is back this
+    /// frame. A failed build/parse inserts nothing (the failure shows
+    /// once, then the next frame retries).
     pub fn get(
         &mut self,
         ctx: &Context,
+        pool: &mut crate::rasterpool::RasterPool,
         page_w_in: f64,
         key_part: &str,
         version: u64,
         px_per_in: f32,
         mut build_svg: impl FnMut() -> anyhow::Result<String>,
-    ) -> anyhow::Result<&TextureHandle> {
+    ) -> anyhow::Result<Option<&TextureHandle>> {
         let bucket = (px_per_in * 4.0).round().max(4.0) as u32; // ±0.25 ppi
         let key = (key_part.to_string(), version, bucket);
         if !self.map.contains_key(&key) {
-            let tree_key = (key_part.to_string(), version);
-            if !self.trees.contains_key(&tree_key) {
-                let svg = build_svg()?;
-                let tree = parse_svg(&svg, crate::perf::Kind::Page)?;
-                self.trees.insert(tree_key, tree);
+            if let Some(msg) = self.failures.remove(&key) {
+                return Err(anyhow::anyhow!(msg));
             }
-            // Bucket change with a live tree: render only — no rebuild,
-            // no resolve, no parse (#91).
-            let image = render_tree(
-                &self.trees[&(key_part.to_string(), version)],
-                page_w_in as f32 * px_per_in,
-                crate::perf::Kind::Page,
-            )?;
-            let tex = {
-                let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Page));
-                ctx.load_texture(
-                    format!("page-{key_part}-{version}"),
-                    image,
-                    TextureOptions::LINEAR,
-                )
+            if self.inflight_rasters.contains(&key) {
+                return Ok(None); // on a worker; lands in a later drain
+            }
+            let tree_key = (key_part.to_string(), version);
+            let width = page_w_in as f32 * px_per_in;
+            let job = if let Some(tree) = self.trees.get(&tree_key).cloned() {
+                // Bucket change with a live tree: render only — no
+                // rebuild, no resolve, no parse (#91).
+                crate::rasterpool::RasterJob::Render { tree, width }
+            } else if self.inflight_trees.contains(&tree_key) {
+                // The parse is on a worker; this bucket's render posts
+                // on a later frame, once the tree has landed.
+                return Ok(None);
+            } else {
+                let svg = build_svg()?;
+                self.inflight_trees.insert(tree_key.clone());
+                crate::rasterpool::RasterJob::Parse { svg, width }
             };
-            self.map.insert(key.clone(), tex);
+            use crate::rasterpool::Posted;
+            match pool.post(
+                crate::rasterpool::RasterKey::Page {
+                    part: key_part.to_string(),
+                    version,
+                    bucket,
+                },
+                job,
+            ) {
+                Posted::Sync(image, tree) => {
+                    // The job already ran — clear the pre-post mark so a
+                    // failed parse (which never inserts a tree) is not
+                    // parked in-flight forever, and surface failures
+                    // directly: the sync seam keeps the pre-#92
+                    // semantics of one inline attempt per get.
+                    self.inflight_trees.remove(&tree_key);
+                    if let Err(e) = &image {
+                        return Err(anyhow::anyhow!("{e:#}"));
+                    }
+                    self.finish(ctx, key.clone(), tree_key, image, tree);
+                }
+                Posted::Queued => {
+                    self.inflight_rasters.insert(key.clone());
+                }
+                Posted::Capped => {
+                    // The job never ran; undo the tree mark so the
+                    // retry next frame reposts it.
+                    self.inflight_trees.remove(&tree_key);
+                    return Ok(None);
+                }
+            }
         }
         // Keep at most a few live entries per page; drop stale versions —
         // the trees with the same policy (one live tree per page entry).
@@ -303,12 +371,68 @@ impl TextureCache {
             .retain(|(p, v, _), _| p != key_part || *v == version);
         self.trees
             .retain(|(p, v), _| p != key_part || *v == version);
-        Ok(&self.map[&key])
+        Ok(self.map.get(&key))
+    }
+
+    /// Upload a finished image (or record its failure) and cache a
+    /// landed tree.
+    fn finish(
+        &mut self,
+        ctx: &Context,
+        key: (String, u64, u32),
+        tree_key: (String, u64),
+        image: anyhow::Result<ColorImage>,
+        tree: Option<crate::rasterpool::Tree>,
+    ) {
+        if let Some(t) = tree {
+            self.trees.insert(tree_key, t);
+        }
+        match image {
+            Ok(image) => {
+                let tex = {
+                    let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Page));
+                    ctx.load_texture(
+                        format!("page-{}-{}", key.0, key.1),
+                        image,
+                        TextureOptions::LINEAR,
+                    )
+                };
+                self.map.insert(key, tex);
+            }
+            Err(e) => {
+                self.failures.insert(key, format!("{e:#}"));
+            }
+        }
+    }
+
+    /// Land a worker completion for a page key (#92) — called from
+    /// `App`'s pool drain. Results for stale versions insert
+    /// harmlessly and are evicted by the next `get`'s retain.
+    pub(crate) fn on_page_done(
+        &mut self,
+        ctx: &Context,
+        part: String,
+        version: u64,
+        bucket: u32,
+        done: anyhow::Result<ColorImage>,
+        tree: Option<crate::rasterpool::Tree>,
+        was_parse: bool,
+    ) {
+        let key = (part, version, bucket);
+        self.inflight_rasters.remove(&key);
+        let tree_key = (key.0.clone(), key.1);
+        if was_parse {
+            self.inflight_trees.remove(&tree_key);
+        }
+        self.finish(ctx, key, tree_key, done, tree);
     }
 
     pub fn clear(&mut self) {
         self.map.clear();
         self.trees.clear();
+        self.inflight_rasters.clear();
+        self.inflight_trees.clear();
+        self.failures.clear();
     }
 
     /// The live texture id for a cache key, if it has been rasterized
@@ -443,6 +567,7 @@ mod tests {
     fn build_closure_runs_once_per_key() {
         use std::cell::Cell;
         let ctx = Context::default();
+        let mut pool = crate::rasterpool::RasterPool::new(0); // inline, no threads
         let mut cache = TextureCache::default();
         // The closure owns the counter (Cell so asserts can read it
         // between calls).
@@ -454,30 +579,30 @@ mod tests {
         // Same key three times — the third inside the same ±0.25 ppi
         // bucket — one build.
         for &ppi in &[96.0f32, 96.0, 96.05] {
-            cache.get(&ctx, 4.0, "page1", 1, ppi, &mut build).unwrap();
+            cache.get(&ctx, &mut pool, 4.0, "page1", 1, ppi, &mut build).unwrap().unwrap();
         }
         assert_eq!(calls.get(), 1, "cached gets must not rebuild the SVG");
         // Version bump → rebuild (the SVG may have changed).
-        cache.get(&ctx, 4.0, "page1", 2, 96.0, &mut build).unwrap();
+        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 96.0, &mut build).unwrap().unwrap();
         assert_eq!(calls.get(), 2);
         // New ppi bucket, same version → NO rebuild: the parsed tree is
         // reused and only re-rendered (#91).
-        cache.get(&ctx, 4.0, "page1", 2, 300.0, &mut build).unwrap();
+        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 300.0, &mut build).unwrap().unwrap();
         assert_eq!(calls.get(), 2, "a bucket change must not re-serialize");
         // Another page part builds under its own key.
-        cache.get(&ctx, 4.0, "page2", 2, 300.0, &mut build).unwrap();
+        cache.get(&ctx, &mut pool, 4.0, "page2", 2, 300.0, &mut build).unwrap().unwrap();
         assert_eq!(calls.get(), 3);
         // The v1 page1 entry was evicted by the retain on the v2 get, so
         // asking for it again rebuilds (eviction policy unchanged, #90).
-        cache.get(&ctx, 4.0, "page1", 1, 96.0, &mut build).unwrap();
+        cache.get(&ctx, &mut pool, 4.0, "page1", 1, 96.0, &mut build).unwrap().unwrap();
         assert_eq!(calls.get(), 4);
         // A failed build inserts nothing: the very next get retries.
         let mut failing = || -> anyhow::Result<String> {
             calls.set(calls.get() + 1);
             Err(anyhow::anyhow!("boom"))
         };
-        assert!(cache.get(&ctx, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
-        assert!(cache.get(&ctx, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
         assert_eq!(calls.get(), 6, "failed builds are not cached");
         assert!(
             cache.id_for("badpage", 1, 96.0).is_none(),
@@ -489,8 +614,8 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok("<not-svg".into())
         };
-        assert!(cache.get(&ctx, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
-        assert!(cache.get(&ctx, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
+        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
+        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
         assert_eq!(calls.get(), 8, "failed parses are not cached");
     }
 
@@ -503,6 +628,7 @@ mod tests {
     fn bucket_sweep_parses_once() {
         use std::cell::Cell;
         let ctx = Context::default();
+        let mut pool = crate::rasterpool::RasterPool::new(0); // inline, no threads
         let mut cache = TextureCache::default();
         let calls = Cell::new(0u32);
         let mut build = || {
@@ -510,13 +636,14 @@ mod tests {
             tiny_svg()
         };
         for &ppi in &[96.0f32, 192.0, 300.0] {
-            cache.get(&ctx, 4.0, "page1", 7, ppi, &mut build).unwrap();
+            cache.get(&ctx, &mut pool, 4.0, "page1", 7, ppi, &mut build).unwrap().unwrap();
         }
         assert_eq!(calls.get(), 1, "three buckets, one build+parse");
         // Each bucket rasterized at its own width: 4 in × ppi.
         let mut width = |ppi: f32, build: &mut dyn FnMut() -> anyhow::Result<String>| {
             cache
-                .get(&ctx, 4.0, "page1", 7, ppi, build)
+                .get(&ctx, &mut pool, 4.0, "page1", 7, ppi, build)
+                .unwrap()
                 .unwrap()
                 .size()[0]
         };

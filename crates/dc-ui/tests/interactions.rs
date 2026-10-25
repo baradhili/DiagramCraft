@@ -11,7 +11,7 @@ use egui_kittest::Harness;
 fn harness_with_blank() -> Harness<'static, App> {
     // Goldens/steps must be machine-independent: pin text to the
     // embedded Carlito rather than this machine's installed fonts.
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -29,7 +29,7 @@ fn harness_with_blank() -> Harness<'static, App> {
 /// pair's releases 0.5 s apart, so these tests step at 0.05 s (and may
 /// then need more steps to settle the same frames).
 fn dblclick_harness_with_blank() -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .with_step_dt(0.05)
@@ -183,7 +183,7 @@ fn right_click_menu_duplicate_creates_shape() {
 /// by its master-Actions rows, and the beside-the-shape anchoring
 /// tests need room for the full menu below the anchor.
 fn tall_harness_with_blank() -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 1100.0))
         .build_ui_state(
@@ -1039,7 +1039,7 @@ fn double_click_on_empty_page_is_a_no_op() {
 /// menu stays readable when the shell runs under dark visuals, not
 /// just the installed Visio-light ones.
 fn open_menu_harness(dark: bool) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -1288,7 +1288,7 @@ fn context_menu_snapshot_dark_visuals() {
 /// Harness for the File backstage (#55): same shell builder, app state
 /// supplied by the caller.
 fn backstage_harness(app: App) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -1605,7 +1605,7 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         );
     }
 
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(

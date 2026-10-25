@@ -156,7 +156,7 @@ fn group_fixture(dir: &std::path::Path) -> std::path::PathBuf {
 }
 
 fn harness_with(dir: &std::path::Path, dark: bool) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
