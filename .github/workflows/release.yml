@@ -4,13 +4,23 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      linux_only:
+        description: "Run only the linux job (glibc-floor verification)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
   linux:
-    runs-on: ubuntu-26.04
+    # glibc floor: the shipped AppImage/deb/rpm must run on Ubuntu
+    # 24.04 / Mint 22.x (glibc 2.39). The ubuntu-26.04 image's glibc
+    # 2.43 made every binary it linked refuse to start there (#98) —
+    # do not "upgrade" this runner; the glibc-floor step below fails
+    # the build if this ever drifts above the floor.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -19,6 +29,24 @@ jobs:
         run: cargo install cargo-deb cargo-generate-rpm --locked
       - name: Build release binary
         run: cargo build --release -p dc-ui --locked
+      - name: Enforce glibc floor
+        env:
+          # Newest glibc symbol version the shipped binary may require.
+          # 2.39 = Ubuntu 24.04 / Mint 22.x. Raise only with an explicit
+          # compat decision; to support OLDER distros, build with an
+          # older-baseline linker (e.g. cargo-zigbuild) instead.
+          GLIBC_FLOOR: "2.39"
+        run: |
+          BIN=target/release/diagramcraft
+          MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
+          MAXN="${MAXV#GLIBC_}"
+          echo "highest GLIBC symbol version required: ${MAXV:-none}"
+          if [ -n "$MAXN" ] && [ "$(printf '%s\n' "$GLIBC_FLOOR" "$MAXN" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
+            echo "::error::binary requires $MAXV, above the release floor $GLIBC_FLOOR — the build environment linked against a newer glibc than the supported baseline (#98)"
+            echo "symbols requiring the newest versions:"
+            objdump -T "$BIN" | grep -F "($MAXV)" | head -10
+            exit 1
+          fi
       - name: Version
         id: ver
         run: |
@@ -57,6 +85,7 @@ jobs:
           path: dist/*
 
   windows:
+    if: ${{ !inputs.linux_only }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -94,6 +123,7 @@ jobs:
           path: dist/*
 
   macos:
+    if: ${{ !inputs.linux_only }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
