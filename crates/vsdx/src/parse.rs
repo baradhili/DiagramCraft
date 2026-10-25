@@ -267,7 +267,7 @@ fn read_raw_inner(r: &mut quick_xml::Reader<&[u8]>) -> Result<String> {
                 }
                 depth -= 1;
                 out.push_str("</");
-                out.push_str(&e.name().as_ref().to_string());
+                out.push_str(e.name().as_ref());
                 out.push('>');
             }
             Event::Empty(e) => push_reconstructed_open(&mut out, &e, true),
@@ -294,7 +294,7 @@ fn read_raw_inner(r: &mut quick_xml::Reader<&[u8]>) -> Result<String> {
 /// re-quoted with double quotes (safe: raw `"` bytes are escaped).
 fn push_reconstructed_open(out: &mut String, e: &quick_xml::events::BytesStart<'_>, empty: bool) {
     out.push('<');
-    out.push_str(&e.name().as_ref().to_string());
+    out.push_str(e.name().as_ref());
     for a in e.attributes().flatten() {
         out.push(' ');
         out.push_str(a.key.as_ref());

@@ -141,7 +141,7 @@ fn parses_synthetic_package() {
     let path = write_package(tmp.path());
 
     let pkg = vsdx::Package::open(&path).unwrap();
-    let names: Vec<&str> = pkg.part_names().into();
+    let names: Vec<&str> = pkg.part_names();
     assert!(names.contains(&"visio/document.xml"));
     assert_eq!(
         pkg.content_type_of("visio/document.xml").unwrap(),

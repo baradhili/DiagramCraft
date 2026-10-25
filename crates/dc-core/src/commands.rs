@@ -531,6 +531,86 @@ impl crate::Command for AddShape {
     }
 }
 
+/// Remove one row from a sheet section (GitHub #28: deleting a
+/// Hyperlink row). Undo reinserts it at its original position.
+#[derive(Debug, Clone)]
+pub struct RemoveSectionRow {
+    pub scope: Scope,
+    pub section: String,
+    pub section_ix: i64,
+    pub row: RowSel,
+    removed: Option<(vsdx::model::Row, usize)>,
+}
+
+impl RemoveSectionRow {
+    pub fn new(
+        scope: Scope,
+        section: impl Into<String>,
+        section_ix: i64,
+        row: RowSel,
+    ) -> RemoveSectionRow {
+        RemoveSectionRow {
+            scope,
+            section: section.into(),
+            section_ix,
+            row,
+            removed: None,
+        }
+    }
+}
+
+impl crate::Command for RemoveSectionRow {
+    fn label(&self) -> String {
+        format!(
+            "remove {} row {:?} on {}",
+            self.section, self.row, self.scope
+        )
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("section {}:{} not found", self.section, self.section_ix)
+            })?;
+        let ri = row_index(&sec.rows, &self.row)
+            .with_context(|| format!("row {:?} not found", self.row))?;
+        self.removed = Some((sec.rows.remove(ri), ri));
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let (row, pos) = self
+            .removed
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("section vanished before undo"))?;
+        let at = pos.min(sec.rows.len());
+        sec.rows.insert(at, row);
+        Ok(())
+    }
+}
+
 /// Remove a shape (any depth), storing it with its position for undo.
 #[derive(Debug, Clone)]
 pub struct RemoveShape {
@@ -675,6 +755,444 @@ impl crate::Command for DuplicateShape {
         if removed.is_none() {
             bail!("duplicate shape {} vanished", clone.id);
         }
+        Ok(())
+    }
+}
+
+/// A plain container around the given members (GitHub #27): a
+/// rectangle frame shape with a top-left heading text block, inserted
+/// at the BACK of the z-order, with membership recorded the Visio way
+/// — each member carries `User.msvSDContainerShape` = the container's
+/// shape ID. Returned as one Macro (one undo step); `id` comes from
+/// [`next_shape_id`] at the call site.
+pub fn add_container(
+    page: i64,
+    id: i64,
+    members: &[i64],
+    rect: (f64, f64, f64, f64), // x0, y0, w, h (page coords, y-up)
+    heading: &str,
+) -> Macro {
+    let mut sheet = vsdx::model::Sheet::default();
+    let set = |sh: &mut vsdx::model::Sheet, n: &str, v: &str| {
+        sh.set_cell(n, vsdx::model::Cell::value(v.to_string()));
+    };
+    set(&mut sheet, "PinX", &fmt_num(rect.0));
+    set(&mut sheet, "PinY", &fmt_num(rect.1));
+    set(&mut sheet, "Width", &fmt_num(rect.2));
+    set(&mut sheet, "Height", &fmt_num(rect.3));
+    set(&mut sheet, "LocPinX", "0");
+    set(&mut sheet, "LocPinY", "0");
+    // Heading text: the standard text block, pinned into the top-left
+    // corner strip (Visio's Plain container look).
+    set(&mut sheet, "TxtPinX", "0.2");
+    set(&mut sheet, "TxtLocPinX", "0");
+    sheet.set_cell(
+        "TxtPinY",
+        vsdx::model::Cell {
+            v: None,
+            f: Some("Height-TxtHeight".into()),
+            ..vsdx::model::Cell::default()
+        },
+    );
+    set(&mut sheet, "TxtLocPinY", "0");
+    set(&mut sheet, "FillForegnd", "#FFFFFF");
+    let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+        ix,
+        t: Some(t.into()),
+        cells: vec![
+            ("X".into(), vsdx::model::Cell::value(x.to_string())),
+            ("Y".into(), vsdx::model::Cell::value(y.to_string())),
+        ],
+        ..vsdx::model::Row::default()
+    };
+    let (w, h) = (fmt_num(rect.2), fmt_num(rect.3));
+    let container = Shape {
+        id,
+        name_u: Some(format!("Container.{id}")),
+        type_: Some("Shape".into()),
+        sheet,
+        ..Shape::default()
+    };
+    let mut container = container;
+    container.sheet.text = Some(heading.to_string());
+    // The writer emits <Text> from text_raw (verbatim), so seed the
+    // escaped form too — the SetText convention.
+    container.sheet.text_raw = Some(
+        heading
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
+    );
+    container
+        .sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                row(1, "MoveTo", "0", "0"),
+                row(2, "LineTo", &w, "0"),
+                row(3, "LineTo", &w, &h),
+                row(4, "LineTo", "0", &h),
+                row(5, "LineTo", "0", "0"),
+            ],
+            ..vsdx::model::Section::default()
+        }));
+    let mut cmds: Vec<Box<dyn crate::Command>> = vec![
+        Box::new(AddShape {
+            page,
+            parent: None,
+            shape: container,
+        }),
+        Box::new(ReorderShape::new(page, id, false)),
+    ];
+    for m in members {
+        cmds.push(Box::new(SetRowCell::new(
+            Scope::Shape { page, shape: *m },
+            "User",
+            0,
+            RowSel::Named("msvSDContainerShape".into()),
+            "Value",
+            vsdx::model::Cell::value(id.to_string()),
+        )));
+    }
+    Macro::new(
+        format!("add container around {} shape(s)", members.len()),
+        cmds,
+    )
+}
+
+/// Undo payload for [`GroupShapes`]: member id, original z-position, and
+/// the pre-group cells of every Xform cell grouping rewrote (PinX/PinY,
+/// plus a 1D member's endpoints).
+type GroupUndo = Vec<(
+    i64,
+    usize,
+    Vec<(&'static str, Option<vsdx::model::Cell>)>,
+)>;
+
+/// Group top-level shapes into one `Type='Group'` shape (GitHub #26).
+/// The group's XForm is the members' union bbox with `LocPin` at its
+/// bottom-left, and each member's Pin is rewritten into the group's
+/// local frame — the renderer places sub-shapes relative to the
+/// group's LocPin origin, so the drawing renders identically and the
+/// members follow the group's moves. A 1D member's endpoints
+/// (BeginX/BeginY/EndX/EndY) are parent-frame points too and are
+/// offset alongside the Pin; an endpoint a formula owns cannot be
+/// offset safely, so grouping a member with formula-driven endpoints
+/// is refused.
+#[derive(Debug, Clone)]
+pub struct GroupShapes {
+    pub page: i64,
+    /// Member ids, any order; the group preserves ascending z-order.
+    pub members: Vec<i64>,
+    id: Option<i64>,
+    /// (member id, original z-position, rewritten cells with their
+    /// originals) for undo.
+    undo: Option<GroupUndo>,
+}
+
+impl GroupShapes {
+    pub fn new(page: i64, members: Vec<i64>) -> GroupShapes {
+        GroupShapes {
+            page,
+            members,
+            id: None,
+            undo: None,
+        }
+    }
+}
+
+impl crate::Command for GroupShapes {
+    fn label(&self) -> String {
+        format!("group {} shapes on page {}", self.members.len(), self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        // Resolve members (top-level only) with their z-positions.
+        let mut found: Vec<(usize, i64)> = self
+            .members
+            .iter()
+            .filter_map(|id| {
+                doc.pages[pi]
+                    .shapes
+                    .iter()
+                    .position(|s| s.id == *id)
+                    .map(|p| (p, *id))
+            })
+            .collect();
+        if found.len() < 2 {
+            bail!("grouping needs at least two member shapes");
+        }
+        found.sort();
+        // Union bbox from each member's absolute rect.
+        let num = |s: &Shape, n: &str| -> f64 {
+            doc.resolve_cell(s, &[], n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for (_, id) in &found {
+            let s = doc.pages[pi].shapes.iter().find(|s| s.id == *id).unwrap();
+            let (px, py) = (num(s, "PinX"), num(s, "PinY"));
+            let (w, h) = (num(s, "Width"), num(s, "Height"));
+            let (lx, ly) = (num(s, "LocPinX"), num(s, "LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        let gid = next_shape_id(doc, self.page);
+        self.id = Some(gid);
+        let mut undo = Vec::new();
+        // Rewrite members' Pins into the group frame and detach. A 1D
+        // member's endpoints are parent-frame points as well (Visio
+        // keeps sub-shape cells in the group's coordinate system):
+        // offset them alongside the Pin, or the next endpoint drag or
+        // derivation would snap the shape back to its pre-grouping page
+        // position. An endpoint a formula owns cannot be offset safely
+        // — refuse grouping that member (nothing has been mutated yet).
+        let mut members: Vec<Shape> = Vec::new();
+        for (pos, id) in &found {
+            let s = doc.pages[pi].shapes.iter().find(|s| s.id == *id).unwrap();
+            let (px, py) = (num(s, "PinX"), num(s, "PinY"));
+            let mut undo_cells: Vec<(&'static str, Option<vsdx::model::Cell>)> = vec![
+                ("PinX", s.sheet.cell("PinX").cloned()),
+                ("PinY", s.sheet.cell("PinY").cloned()),
+            ];
+            let mut m = s.clone();
+            m.sheet
+                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(px - x0)));
+            m.sheet
+                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(py - y0)));
+            for name in ["BeginX", "BeginY", "EndX", "EndY"] {
+                let Some(c) = doc.resolve_cell(s, &[], name) else {
+                    continue;
+                };
+                if c
+                    .f
+                    .as_deref()
+                    .is_some_and(|f| !f.is_empty() && f != "Inh" && f != "No Formula")
+                {
+                    bail!("cannot group shape {id}: {name} is formula-driven");
+                }
+                let Some(v) = c.numeric() else {
+                    bail!("cannot group shape {id}: {name} has no numeric value");
+                };
+                undo_cells.push((name, s.sheet.cell(name).cloned()));
+                let off = if name.ends_with('X') { x0 } else { y0 };
+                m.sheet
+                    .set_cell(name, vsdx::model::Cell::value(fmt_num(v - off)));
+            }
+            undo.push((*id, *pos, undo_cells));
+            members.push(m);
+        }
+        self.undo = Some(undo);
+        // Remove back-to-front so earlier positions stay valid.
+        for (pos, _) in found.iter().rev() {
+            doc.pages[pi].shapes.remove(*pos);
+        }
+        let group = Shape {
+            id: gid,
+            name_u: Some(format!("Group.{gid}")),
+            type_: Some("Group".into()),
+            sheet: {
+                let mut sh = vsdx::model::Sheet::default();
+                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(x0)));
+                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(y0)));
+                sh.set_cell("Width", vsdx::model::Cell::value(fmt_num(x1 - x0)));
+                sh.set_cell("Height", vsdx::model::Cell::value(fmt_num(y1 - y0)));
+                sh.set_cell("LocPinX", vsdx::model::Cell::value("0"));
+                sh.set_cell("LocPinY", vsdx::model::Cell::value("0"));
+                sh
+            },
+            sub_shapes: members,
+            flow: vec![vsdx::model::ShapeFlow::Shapes],
+            ..Shape::default()
+        };
+        let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.insert(at, group);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let gid = self.id.ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let undo = self
+            .undo
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let gpos = doc.pages[pi]
+            .shapes
+            .iter()
+            .position(|s| s.id == gid)
+            .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
+        let mut extracted = doc.pages[pi].shapes.remove(gpos).sub_shapes;
+        // Restore original absolute Xform cells and z-positions.
+        for (id, pos, cells) in &undo {
+            let m = extracted
+                .iter_mut()
+                .find(|s| s.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("member {id} vanished from group"))?;
+            for (name, old) in cells {
+                match old {
+                    Some(c) => m.sheet.set_cell(name, c.clone()),
+                    None => m.sheet.children.retain(|c| {
+                        !matches!(c, vsdx::model::SheetChild::Cell(k, _) if k.as_str() == *name)
+                    }),
+                }
+            }
+            let at = (*pos).min(doc.pages[pi].shapes.len());
+            doc.pages[pi].shapes.insert(at, m.clone());
+        }
+        Ok(())
+    }
+}
+
+/// Dissolve a group one level (GitHub #26): members are promoted to
+/// the group's z-position with their Pins — and a 1D member's
+/// endpoints — translated back to absolute page coordinates using the
+/// group's live Xform.
+#[derive(Debug, Clone)]
+pub struct UngroupShape {
+    pub page: i64,
+    pub group: i64,
+    /// The removed group (members still in local-frame state) — undo
+    /// reinserts it verbatim.
+    removed: Option<Shape>,
+    old_pos: Option<usize>,
+}
+
+impl UngroupShape {
+    pub fn new(page: i64, group: i64) -> UngroupShape {
+        UngroupShape {
+            page,
+            group,
+            removed: None,
+            old_pos: None,
+        }
+    }
+}
+
+impl crate::Command for UngroupShape {
+    fn label(&self) -> String {
+        format!("ungroup shape {} on page {}", self.group, self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let pos = doc.pages[pi]
+            .shapes
+            .iter()
+            .position(|s| s.id == self.group)
+            .ok_or_else(|| anyhow::anyhow!("shape {} not found", self.group))?;
+        if doc.pages[pi].shapes[pos].sub_shapes.is_empty() {
+            bail!("shape {} has no members to ungroup", self.group);
+        }
+        let num = |s: &Shape, n: &str| -> f64 {
+            doc.resolve_cell(s, &[], n)
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0)
+        };
+        // The group's live Xform maps member-local points to the page:
+        // Pin + R(Angle)·(p − LocPin). Angle 0 (every group
+        // GroupShapes builds) reduces to the plain Pin−LocPin offset;
+        // a rotated group promotes its members around the arc.
+        let (gpx, gpy, glx, gly, ang) = {
+            let g = &doc.pages[pi].shapes[pos];
+            (
+                num(g, "PinX"),
+                num(g, "PinY"),
+                num(g, "LocPinX"),
+                num(g, "LocPinY"),
+                num(g, "Angle"),
+            )
+        };
+        let (sin, cos) = ang.sin_cos();
+        let to_page = |x: f64, y: f64| -> (f64, f64) {
+            let (dx, dy) = (x - glx, y - gly);
+            (gpx + dx * cos - dy * sin, gpy + dx * sin + dy * cos)
+        };
+        let group_shape = doc.pages[pi].shapes.remove(pos);
+        self.old_pos = Some(pos);
+        self.removed = Some(group_shape.clone());
+        let mut promoted = group_shape.sub_shapes;
+        for m in promoted.iter_mut() {
+            let (px, py) = (
+                m.sheet
+                    .cell("PinX")
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0),
+                m.sheet
+                    .cell("PinY")
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0),
+            );
+            let (ppx, ppy) = to_page(px, py);
+            m.sheet
+                .set_cell("PinX", vsdx::model::Cell::value(fmt_num(ppx)));
+            m.sheet
+                .set_cell("PinY", vsdx::model::Cell::value(fmt_num(ppy)));
+            // A 1D member's endpoints are points in the group frame —
+            // map them back with the same transform so they stay
+            // consistent with the promoted Pin.
+            for (xn, yn) in [("BeginX", "BeginY"), ("EndX", "EndY")] {
+                if let (Some(x), Some(y)) = (
+                    m.sheet.cell(xn).and_then(|c| c.numeric()),
+                    m.sheet.cell(yn).and_then(|c| c.numeric()),
+                ) {
+                    let (ex, ey) = to_page(x, y);
+                    m.sheet
+                        .set_cell(xn, vsdx::model::Cell::value(fmt_num(ex)));
+                    m.sheet
+                        .set_cell(yn, vsdx::model::Cell::value(fmt_num(ey)));
+                }
+            }
+            // Compose the group's rotation into the member's own Angle:
+            // a member's page orientation is the group angle plus its
+            // own (the nested render transforms compose), so skipping
+            // this would orbit a rotated group's members into position
+            // but leave them pointing the old way.
+            if ang != 0.0 {
+                let a = m.sheet.cell("Angle").and_then(|c| c.numeric()).unwrap_or(0.0);
+                m.sheet
+                    .set_cell("Angle", vsdx::model::Cell::value(fmt_num(a + ang)));
+            }
+        }
+        let at = pos.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.splice(at..at, promoted);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let removed = self
+            .removed
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pos = self
+            .old_pos
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let pi = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        let ids: Vec<i64> = removed.sub_shapes.iter().map(|s| s.id).collect();
+        doc.pages[pi].shapes.retain(|s| !ids.contains(&s.id));
+        let at = pos.min(doc.pages[pi].shapes.len());
+        doc.pages[pi].shapes.insert(at, removed);
         Ok(())
     }
 }
@@ -1102,6 +1620,71 @@ fn move_page(doc: &mut Document, from: usize, to: usize) -> Result<()> {
     Ok(())
 }
 
+/// Duplicate a page by ID (#54): a deep clone (shapes, sheet, index
+/// children) inserted directly after the source, carrying a fresh page
+/// ID, part name, and relationship ID so the writer materializes it as
+/// its own part. The name is kept from the source; the caller renames
+/// (Visio's UI assigns the next sequential name).
+#[derive(Debug, Clone)]
+pub struct DuplicatePage {
+    pub page: i64,
+    id: Option<i64>,
+}
+
+impl DuplicatePage {
+    pub fn new(page: i64) -> DuplicatePage {
+        DuplicatePage { page, id: None }
+    }
+}
+
+impl crate::Command for DuplicatePage {
+    fn label(&self) -> String {
+        format!("duplicate page {}", self.page)
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let pos = doc
+            .pages
+            .iter()
+            .position(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        // Fresh identity for the copy; allocations consider the doc
+        // before insertion, exactly like AddPage.
+        let id = next_page_id(doc);
+        let rid = next_page_rid(doc);
+        let mut copy = doc.pages[pos].clone();
+        copy.id = id;
+        copy.part = next_page_part(doc);
+        match copy.attrs.iter_mut().find(|(k, _)| k == "ID") {
+            Some(slot) => slot.1 = id.to_string(),
+            None => copy.attrs.insert(0, ("ID".to_string(), id.to_string())),
+        }
+        for child in copy.children.iter_mut() {
+            if let IndexChild::Rel(attrs) = child {
+                for (k, v) in attrs.iter_mut() {
+                    if k == "r:id" {
+                        *v = rid.clone();
+                    }
+                }
+            }
+        }
+        self.id = Some(id);
+        doc.pages.insert(pos + 1, copy);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let id = self
+            .id
+            .ok_or_else(|| anyhow::anyhow!("page not yet applied"))?;
+        match doc.pages.iter().position(|p| p.id == id) {
+            Some(pos) => {
+                doc.pages.remove(pos);
+                Ok(())
+            }
+            None => bail!("duplicate page {id} vanished"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Connection commands
 // ---------------------------------------------------------------------------
@@ -1186,6 +1769,211 @@ impl crate::Command for RemoveConnect {
         self.owner.host(doc)?.set_connects(&list);
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// ShapeSheet Actions execution (GitHub #25)
+// ---------------------------------------------------------------------------
+
+/// Split a formula on top-level `&` (Visio's action chaining),
+/// respecting parentheses and double-quoted strings.
+fn split_top_level_amp(expr: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut cur = String::new();
+    for ch in expr.chars() {
+        match ch {
+            '"' => {
+                in_str = !in_str;
+                cur.push(ch);
+            }
+            '(' if !in_str => {
+                depth += 1;
+                cur.push(ch);
+            }
+            ')' if !in_str => {
+                depth -= 1;
+                cur.push(ch);
+            }
+            '&' if !in_str && depth == 0 => {
+                out.push(cur.clone());
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    out.push(cur);
+    out
+}
+
+/// Format a numeric cell value the way Visio writes flags and small
+/// numbers: integral → no decimal point.
+fn fmt_num(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+/// Build the commands for one ShapeSheet `Actions` row's `Action`
+/// formula (GitHub #25): a `SETF(GetRef(target), value)` chain, each
+/// term becoming one `SetCell`/`SetRowCell` against `scope` (the
+/// instance — masters are never mutated). Values evaluate against
+/// `env` (the instance's effective cells). `No Formula` and empty
+/// actions return an empty vec (display-only rows); anything else
+/// (RUNADDON, RUNMACRO, …) returns `Err` so the caller can defer with
+/// a status note.
+pub fn shape_action_commands(
+    scope: Scope,
+    formula: &str,
+    env: &vsdx::formula::Env,
+) -> Result<Vec<Box<dyn crate::Command>>, String> {
+    let f = formula.trim();
+    if f.is_empty() || f.eq_ignore_ascii_case("no formula") {
+        return Ok(Vec::new());
+    }
+    let mut cmds: Vec<Box<dyn crate::Command>> = Vec::new();
+    for term in split_top_level_amp(f) {
+        let term = term.trim();
+        let Some(inner) = term
+            .strip_prefix("SETF(")
+            .or_else(|| term.strip_prefix("setf("))
+            .and_then(|rest| rest.strip_suffix(')'))
+        else {
+            return Err(format!("unsupported action term {term:?}"));
+        };
+        // First top-level comma splits target from value; the target
+        // is GetRef(<cell>) or a bare cell name.
+        let inner = inner.trim();
+        let (first, rest) = split_top_level_comma(inner);
+        let Some(value_str) = rest else {
+            return Err(format!("action term has no value: {term:?}"));
+        };
+        let first = first.trim();
+        let target = if let Some(g) = first
+            .strip_prefix("GetRef(")
+            .or_else(|| first.strip_prefix("getref("))
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            g.trim().to_string()
+        } else {
+            first.to_string()
+        };
+        let value = match vsdx::formula::eval(value_str.trim(), env) {
+            Ok(vsdx::formula::Value::Num(n)) if n.is_finite() => fmt_num(n),
+            Ok(vsdx::formula::Value::Str(s)) => s,
+            _ => {
+                // Only a plain quoted string literal may be stored as a
+                // value (quotes stripped); anything else would persist
+                // formula text into the cell's V — defer instead.
+                let t = value_str.trim();
+                t.strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("unsupported action value {t:?}"))?
+            }
+        };
+        let cell = vsdx::model::Cell::value(value.clone());
+        // Map the reference spelling to a command. Named-row sections:
+        // User/Prop/Scratch — the bare row name (`User.Style`) is the
+        // row's Value cell; a trailing cell suffix (`User.Style.Prompt`)
+        // targets that row's named cell. Row-0 sections: Para→Paragraph,
+        // Char→Character. Anything else is a plain sheet cell
+        // (VerticalAlign, Width, …); a dotted or sheet-qualified target
+        // (`Actions.Menu`, `ThePage!PageWidth`) no branch maps defers
+        // instead of writing a bogus cell name.
+        let named_target = |rest: &str| -> Result<(String, String), String> {
+            // Row names carry no dots: `Row.Cell`, defaulting the cell
+            // to Value. Anything else is not a row we can name.
+            match rest.rsplit_once('.') {
+                Some((row, cellname)) => {
+                    if row.is_empty() || cellname.is_empty() || row.contains('.') {
+                        Err(format!("unsupported action target {target:?}"))
+                    } else {
+                        Ok((row.to_string(), cellname.to_string()))
+                    }
+                }
+                None => Ok((rest.to_string(), "Value".to_string())),
+            }
+        };
+        let cmd: Box<dyn crate::Command> = (|| -> Result<Box<dyn crate::Command>, String> {
+            if let Some(rest) = target.strip_prefix("User.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "User",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )) as Box<dyn crate::Command>)
+            } else if let Some(rest) = target.strip_prefix("Prop.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Property",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )))
+            } else if let Some(rest) = target.strip_prefix("Scratch.") {
+                let (row, cellname) = named_target(rest)?;
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Scratch",
+                    0,
+                    RowSel::Named(row),
+                    cellname,
+                    cell,
+                )))
+            } else if let Some(cellname) = target.strip_prefix("Para.") {
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Paragraph",
+                    0,
+                    RowSel::Ix(0),
+                    cellname.to_string(),
+                    cell,
+                )))
+            } else if let Some(cellname) = target.strip_prefix("Char.") {
+                Ok(Box::new(SetRowCell::new(
+                    scope.clone(),
+                    "Character",
+                    0,
+                    RowSel::Ix(0),
+                    cellname.to_string(),
+                    cell,
+                )))
+            } else if target.contains('.') || target.contains('!') {
+                Err(format!("unsupported action target {target:?}"))
+            } else {
+                Ok(Box::new(SetCell::new(scope.clone(), target.clone(), cell)))
+            }
+        })()?;
+        cmds.push(cmd);
+    }
+    Ok(cmds)
+}
+
+/// Split `a,b` on the first top-level comma (parens/quotes respected).
+fn split_top_level_comma(s: &str) -> (String, Option<&str>) {
+    let mut depth = 0i32;
+    let mut in_str = false;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '"' => in_str = !in_str,
+            '(' if !in_str => depth += 1,
+            ')' if !in_str => depth -= 1,
+            ',' if !in_str && depth == 0 => {
+                return (s[..i].to_string(), Some(&s[i + 1..]));
+            }
+            _ => {}
+        }
+    }
+    (s.to_string(), None)
 }
 
 // ---------------------------------------------------------------------------

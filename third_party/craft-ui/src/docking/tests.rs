@@ -1,5 +1,6 @@
 use super::*;
 use crate::layout::{SplitAxis, SplitSize};
+use crate::testing::TestResult;
 use egui::{Context, Event, Id, Modifiers, PointerButton, RawInput, Rect, pos2, vec2};
 
 fn tabs(panels: &[u32], active: usize) -> Node<u32> {
@@ -34,49 +35,48 @@ fn move_to(panel: u32, anchor: u32, zone: Zone) -> Action<u32> {
 }
 
 #[test]
-fn floating_brush_panel_joins_main_tabs_without_losing_other_panels() {
+fn floating_brush_panel_joins_main_tabs_without_losing_other_panels() -> TestResult {
     let mut layout = sample();
-    layout
-        .apply(Action::Move {
-            panel: 5,
-            anchor: 3,
-            placement: Placement::Tab { before: Some(4) },
-        })
-        .unwrap();
-    let Node::Split { size, second, .. } = layout.root.as_ref().unwrap() else {
-        panic!()
+    layout.apply(Action::Move {
+        panel: 5,
+        anchor: 3,
+        placement: Placement::Tab { before: Some(4) },
+    })?;
+    let node1 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Split { size, second, .. } = node1 else {
+        return Err("unexpected root node".into());
     };
     assert_eq!(*size, SplitSize::FixedSecond(240.0));
     assert_eq!(**second, tabs(&[2, 3, 5, 4], 2));
     assert_eq!(layout.floating[0].panels, vec![6]);
     assert_eq!(layout.floating[0].active, 0);
-    layout.validate().unwrap();
+    layout.validate()?;
     assert_eq!(layout.panels().len(), 6);
+    Ok(())
 }
 
 #[test]
-fn detach_redock_merge_and_collapse_empty_source_containers() {
+fn detach_redock_merge_and_collapse_empty_source_containers() -> TestResult {
     let mut layout = sample();
-    layout
-        .apply(Action::Float {
-            panel: 1,
-            rect: [30.0, 40.0, 250.0, 200.0],
-        })
-        .unwrap();
+    layout.apply(Action::Float {
+        panel: 1,
+        rect: [30.0, 40.0, 250.0, 200.0],
+    })?;
     assert_eq!(layout.root, Some(tabs(&[2, 3, 4], 1)));
-    layout.apply(move_to(1, 2, Zone::Left)).unwrap();
+    layout.apply(move_to(1, 2, Zone::Left))?;
     assert_eq!(layout.floating.len(), 1);
-    layout.apply(move_to(5, 6, Zone::Center)).unwrap();
+    layout.apply(move_to(5, 6, Zone::Center))?;
     assert_eq!(layout.floating[0].panels, vec![6, 5]);
     assert_eq!(layout.floating[0].active, 1);
-    layout.apply(move_to(6, 3, Zone::Center)).unwrap();
-    layout.apply(move_to(5, 3, Zone::Center)).unwrap();
+    layout.apply(move_to(6, 3, Zone::Center))?;
+    layout.apply(move_to(5, 3, Zone::Center))?;
     assert!(layout.floating.is_empty());
     assert_eq!(layout.panels().len(), 6);
+    Ok(())
 }
 
 #[test]
-fn invalid_moves_are_atomic_including_after_a_source_would_have_been_removed() {
+fn invalid_moves_are_atomic_including_after_a_source_would_have_been_removed() -> TestResult {
     let layout = sample();
     for action in [
         move_to(5, 99, Zone::Center),
@@ -105,55 +105,52 @@ fn invalid_moves_are_atomic_including_after_a_source_would_have_been_removed() {
         assert!(changed.apply(action).is_err());
         assert_eq!(changed, layout);
     }
+    Ok(())
 }
 
 #[test]
-fn removing_an_earlier_tab_preserves_selected_identity() {
+fn removing_an_earlier_tab_preserves_selected_identity() -> TestResult {
     let mut layout = Layout {
         root: Some(tabs(&[1, 2, 3, 4], 2)),
         floating: Vec::new(),
     };
-    layout.apply(Action::Close { panel: 1 }).unwrap();
+    layout.apply(Action::Close { panel: 1 })?;
     assert_eq!(layout.root, Some(tabs(&[2, 3, 4], 1)));
-    layout.apply(Action::Close { panel: 3 }).unwrap();
+    layout.apply(Action::Close { panel: 3 })?;
     assert_eq!(layout.root, Some(tabs(&[2, 4], 1)));
+    Ok(())
 }
 
 #[test]
-fn reordering_tabs_uses_destination_identity_after_removal() {
+fn reordering_tabs_uses_destination_identity_after_removal() -> TestResult {
     let mut layout = Layout {
         root: Some(tabs(&[1, 2, 3], 0)),
         floating: Vec::new(),
     };
-    layout
-        .apply(Action::Move {
-            panel: 1,
-            anchor: 2,
-            placement: Placement::Tab { before: None },
-        })
-        .unwrap();
+    layout.apply(Action::Move {
+        panel: 1,
+        anchor: 2,
+        placement: Placement::Tab { before: None },
+    })?;
     assert_eq!(layout.root, Some(tabs(&[2, 3, 1], 2)));
-    layout
-        .apply(Action::Move {
-            panel: 1,
-            anchor: 2,
-            placement: Placement::Tab { before: Some(2) },
-        })
-        .unwrap();
+    layout.apply(Action::Move {
+        panel: 1,
+        anchor: 2,
+        placement: Placement::Tab { before: Some(2) },
+    })?;
     assert_eq!(layout.root, Some(tabs(&[1, 2, 3], 0)));
     let before = layout.clone();
-    layout
-        .apply(Action::Move {
-            panel: 1,
-            anchor: 2,
-            placement: Placement::Tab { before: Some(1) },
-        })
-        .unwrap();
+    layout.apply(Action::Move {
+        panel: 1,
+        anchor: 2,
+        placement: Placement::Tab { before: Some(1) },
+    })?;
     assert_eq!(layout, before);
+    Ok(())
 }
 
 #[test]
-fn accordion_open_state_and_custom_height_survive_reorder() {
+fn accordion_open_state_and_custom_height_survive_reorder() -> TestResult {
     let mut layout = Layout {
         root: Some(Node::Stack {
             entries: vec![
@@ -171,15 +168,14 @@ fn accordion_open_state_and_custom_height_survive_reorder() {
         }),
         floating: Vec::new(),
     };
-    layout
-        .apply(Action::Move {
-            panel: 1,
-            anchor: 2,
-            placement: Placement::Tab { before: None },
-        })
-        .unwrap();
-    let Node::Stack { entries } = layout.root.as_ref().unwrap() else {
-        panic!()
+    layout.apply(Action::Move {
+        panel: 1,
+        anchor: 2,
+        placement: Placement::Tab { before: None },
+    })?;
+    let node2 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Stack { entries } = node2 else {
+        return Err("unexpected root node".into());
     };
     assert_eq!(
         entries[1],
@@ -189,11 +185,12 @@ fn accordion_open_state_and_custom_height_survive_reorder() {
             height: Some(123.0)
         }
     );
-    let location = layout.location(&1).unwrap();
-    layout.apply(Action::Close { panel: 1 }).unwrap();
-    layout.restore(1, &location).unwrap();
-    let Node::Stack { entries } = layout.root.as_ref().unwrap() else {
-        panic!()
+    let location = layout.location(&1)?;
+    layout.apply(Action::Close { panel: 1 })?;
+    layout.restore(1, &location)?;
+    let node3 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Stack { entries } = node3 else {
+        return Err("unexpected root node".into());
     };
     assert_eq!(
         entries[1],
@@ -203,10 +200,11 @@ fn accordion_open_state_and_custom_height_survive_reorder() {
             height: Some(123.0)
         }
     );
+    Ok(())
 }
 
 #[test]
-fn protected_canvas_remains_present_and_cannot_be_grouped_with_panels() {
+fn protected_canvas_remains_present_and_cannot_be_grouped_with_panels() -> TestResult {
     let permissions = |panel: &u32| {
         if *panel == 1 {
             Permissions::PROTECTED
@@ -244,13 +242,13 @@ fn protected_canvas_remains_present_and_cannot_be_grouped_with_panels() {
             placement: Placement::Split(Zone::Left),
         },
         permissions,
-    )
-    .unwrap();
+    )?;
     assert!(next.contains(&1) && next.contains(&7));
+    Ok(())
 }
 
 #[test]
-fn close_and_restore_preserve_fixed_side_and_floating_geometry() {
+fn close_and_restore_preserve_fixed_side_and_floating_geometry() -> TestResult {
     let mut layout = Layout {
         root: Some(Node::Split {
             axis: SplitAxis::Horizontal,
@@ -265,25 +263,26 @@ fn close_and_restore_preserve_fixed_side_and_floating_geometry() {
         }],
     };
     let saved = layout.clone();
-    let first = layout.location(&1).unwrap();
-    let float = layout.location(&3).unwrap();
-    layout.apply(Action::Close { panel: 1 }).unwrap();
-    layout.apply(Action::Close { panel: 3 }).unwrap();
-    layout.restore(1, &first).unwrap();
-    layout.restore(3, &float).unwrap();
+    let first = layout.location(&1)?;
+    let float = layout.location(&3)?;
+    layout.apply(Action::Close { panel: 1 })?;
+    layout.apply(Action::Close { panel: 3 })?;
+    layout.restore(1, &first)?;
+    layout.restore(3, &float)?;
     assert_eq!(layout, saved);
     let invalid = Location {
         anchor: Some(99),
         ..first
     };
-    layout.apply(Action::Close { panel: 1 }).unwrap();
+    layout.apply(Action::Close { panel: 1 })?;
     let before = layout.clone();
     assert_eq!(layout.restore(1, &invalid), Err(DockError::MissingTarget));
     assert_eq!(layout, before);
+    Ok(())
 }
 
 #[test]
-fn closing_and_reopening_an_entire_accordion_restores_its_kind_and_heights() {
+fn closing_and_reopening_an_entire_accordion_restores_its_kind_and_heights() -> TestResult {
     let mut layout = Layout {
         root: Some(Node::Split {
             axis: SplitAxis::Horizontal,
@@ -307,17 +306,18 @@ fn closing_and_reopening_an_entire_accordion_restores_its_kind_and_heights() {
         floating: Vec::new(),
     };
     let before = layout.clone();
-    let second = layout.location(&2).unwrap();
-    layout.apply(Action::Close { panel: 2 }).unwrap();
-    let third = layout.location(&3).unwrap();
-    layout.apply(Action::Close { panel: 3 }).unwrap();
-    layout.restore(3, &third).unwrap();
-    layout.restore(2, &second).unwrap();
+    let second = layout.location(&2)?;
+    layout.apply(Action::Close { panel: 2 })?;
+    let third = layout.location(&3)?;
+    layout.apply(Action::Close { panel: 3 })?;
+    layout.restore(3, &third)?;
+    layout.restore(2, &second)?;
     assert_eq!(layout, before);
+    Ok(())
 }
 
 #[test]
-fn invalid_saved_layouts_reject_duplicates_selection_depth_and_nonfinite_geometry() {
+fn invalid_saved_layouts_reject_duplicates_selection_depth_and_nonfinite_geometry() -> TestResult {
     let mut duplicate = sample();
     duplicate.floating[0].panels.push(1);
     assert_eq!(duplicate.validate(), Err(DockError::DuplicatePanel));
@@ -353,6 +353,7 @@ fn invalid_saved_layouts_reject_duplicates_selection_depth_and_nonfinite_geometr
         floating: Vec::new(),
     };
     assert_eq!(oversized.validate(), Err(DockError::LimitExceeded));
+    Ok(())
 }
 
 fn target(anchor: u32, members: &[u32], rect: Rect) -> DropTarget<u32> {
@@ -377,21 +378,22 @@ fn target(anchor: u32, members: &[u32], rect: Rect) -> DropTarget<u32> {
 }
 
 #[test]
-fn pointer_targets_distinguish_reorder_center_split_and_occlusion() {
+fn pointer_targets_distinguish_reorder_center_split_and_occlusion() -> TestResult {
     let rect = Rect::from_min_size(pos2(10.0, 20.0), vec2(300.0, 200.0));
     let group = target(2, &[2, 3], rect);
-    let placement = resolve_drop(&5, pos2(90.0, 30.0), std::slice::from_ref(&group)).unwrap();
+    let placement = resolve_drop(&5, pos2(90.0, 30.0), std::slice::from_ref(&group))
+        .ok_or("no drop resolved")?;
     assert_eq!(placement.placement, Placement::Tab { before: Some(3) });
-    assert!(placement.insertion.unwrap().is_finite());
+    assert!(placement.insertion.ok_or("no insertion")?.is_finite());
     assert_eq!(
         resolve_drop(&5, rect.center(), std::slice::from_ref(&group))
-            .unwrap()
+            .ok_or("no drop resolved")?
             .placement,
         Placement::Split(Zone::Center)
     );
     assert_eq!(
         resolve_drop(&5, pos2(11.0, 90.0), std::slice::from_ref(&group))
-            .unwrap()
+            .ok_or("no drop resolved")?
             .placement,
         Placement::Split(Zone::Left)
     );
@@ -403,10 +405,11 @@ fn pointer_targets_distinguish_reorder_center_split_and_occlusion() {
     assert!(resolve_drop(&3, rect.center(), &[group, overlay]).is_none());
     assert!(drop_zone(Rect::NOTHING, 24.0, pos2(0.0, 0.0)).is_none());
     assert!(drop_zone(rect, 24.0, pos2(f32::NAN, 0.0)).is_none());
+    Ok(())
 }
 
 #[test]
-fn long_action_sequence_never_loses_or_duplicates_a_panel() {
+fn long_action_sequence_never_loses_or_duplicates_a_panel() -> TestResult {
     let mut layout = sample();
     let mut seed = 72u64;
     for step in 0..800 {
@@ -435,32 +438,34 @@ fn long_action_sequence_never_loses_or_duplicates_a_panel() {
         if layout.apply(action).is_err() {
             assert_eq!(layout, before);
         }
-        layout.validate().unwrap();
+        layout.validate()?;
         let mut panels: Vec<u32> = layout.panels().into_iter().copied().collect();
         panels.sort_unstable();
         assert_eq!(panels, vec![1, 2, 3, 4, 5, 6]);
     }
+    Ok(())
 }
 
 #[cfg(feature = "serde")]
 #[test]
-fn saved_layout_and_hidden_location_round_trip() {
+fn saved_layout_and_hidden_location_round_trip() -> TestResult {
     let layout = sample();
-    let value = serde_json::to_string(&layout).unwrap();
-    let restored: Layout<u32> = serde_json::from_str(&value).unwrap();
-    restored.validate().unwrap();
+    let value = serde_json::to_string(&layout)?;
+    let restored: Layout<u32> = serde_json::from_str(&value)?;
+    restored.validate()?;
     assert_eq!(restored, layout);
-    let location = layout.location(&3).unwrap();
-    let encoded = serde_json::to_string(&location).unwrap();
+    let location = layout.location(&3)?;
+    let encoded = serde_json::to_string(&location)?;
     assert_eq!(
         serde_json::from_str::<Location<u32>>(&encoded).unwrap(),
         location
     );
+    Ok(())
 }
 
 #[cfg(feature = "serde")]
 #[test]
-fn old_hidden_locations_accept_panel_ids_without_a_default_identity() {
+fn old_hidden_locations_accept_panel_ids_without_a_default_identity() -> TestResult {
     #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
     enum Panel {
         Layers,
@@ -469,10 +474,10 @@ fn old_hidden_locations_accept_panel_ids_without_a_default_identity() {
     let location: Location<Panel> = serde_json::from_value(serde_json::json!({
         "floating": null, "anchor": "Layers", "placement": {"Tab": {"before": null}},
         "size": null, "stack": null
-    }))
-    .unwrap();
+    }))?;
     assert!(location.sibling.is_empty());
     assert_eq!(location.anchor, Some(Panel::Layers));
+    Ok(())
 }
 
 fn frame(
@@ -509,7 +514,7 @@ fn frame(
 }
 
 #[test]
-fn renderer_keeps_content_identity_when_panel_moves_into_a_float() {
+fn renderer_keeps_content_identity_when_panel_moves_into_a_float() -> TestResult {
     let ctx = Context::default();
     let mut layout = Layout {
         root: Some(tabs(&[1], 0)),
@@ -517,19 +522,18 @@ fn renderer_keeps_content_identity_when_panel_moves_into_a_float() {
     };
     let (output, before) = frame(&ctx, &layout, Vec::new(), true);
     assert!(output.error.is_none());
-    layout
-        .apply(Action::Float {
-            panel: 1,
-            rect: [100.0, 100.0, 320.0, 260.0],
-        })
-        .unwrap();
+    layout.apply(Action::Float {
+        panel: 1,
+        rect: [100.0, 100.0, 320.0, 260.0],
+    })?;
     let (output, after) = frame(&ctx, &layout, Vec::new(), true);
     assert!(output.error.is_none());
     assert_eq!(before, after);
+    Ok(())
 }
 
 #[test]
-fn cancelling_or_losing_focus_during_a_drag_does_not_move_panels() {
+fn cancelling_or_losing_focus_during_a_drag_does_not_move_panels() -> TestResult {
     let ctx = Context::default();
     let layout = sample();
     let source = Rect::from_min_size(pos2(0.0, 0.0), vec2(200.0, 200.0));
@@ -574,15 +578,20 @@ fn cancelling_or_losing_focus_during_a_drag_does_not_move_panels() {
         true,
     );
     assert!(out.actions.is_empty());
+    Ok(())
 }
 
-fn step(ctx: &Context, layout: &mut Layout<u32>, events: Vec<Event>) -> Vec<Action<u32>> {
+fn step(
+    ctx: &Context,
+    layout: &mut Layout<u32>,
+    events: Vec<Event>,
+) -> Result<Vec<Action<u32>>, Box<dyn std::error::Error>> {
     let (out, _) = frame(ctx, layout, events, true);
     assert!(out.error.is_none());
     for action in &out.actions {
-        layout.apply(action.clone()).unwrap();
+        layout.apply(action.clone())?;
     }
-    out.actions
+    Ok(out.actions)
 }
 
 fn pointer_button(pos: egui::Pos2, pressed: bool) -> Event {
@@ -595,34 +604,34 @@ fn pointer_button(pos: egui::Pos2, pressed: bool) -> Event {
 }
 
 #[test]
-fn actual_pointer_drag_docks_a_floating_panel_into_the_main_tab_strip() {
+fn actual_pointer_drag_docks_a_floating_panel_into_the_main_tab_strip() -> TestResult {
     let ctx = Context::default();
     let mut layout = sample();
     for _ in 0..3 {
-        step(&ctx, &mut layout, Vec::new());
+        step(&ctx, &mut layout, Vec::new())?;
     }
     let source = ctx
         .read_response(Id::unique("test-area").with(("tab", &5u32)))
-        .unwrap()
+        .ok_or("no response for tab 5")?
         .rect
         .center();
     let target = ctx
         .read_response(Id::unique("test-area").with(("tab", &3u32)))
-        .unwrap()
+        .ok_or("no response for tab 3")?
         .rect
         .center();
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(source), pointer_button(source, true)],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(source + vec2(8.0, 0.0))],
-    );
-    step(&ctx, &mut layout, vec![Event::PointerMoved(target)]);
-    let actions = step(&ctx, &mut layout, vec![pointer_button(target, false)]);
+    )?;
+    step(&ctx, &mut layout, vec![Event::PointerMoved(target)])?;
+    let actions = step(&ctx, &mut layout, vec![pointer_button(target, false)])?;
     assert!(
         actions
             .iter()
@@ -631,17 +640,19 @@ fn actual_pointer_drag_docks_a_floating_panel_into_the_main_tab_strip() {
     );
     assert!(!layout.floating.iter().any(|g| g.panels.contains(&5)));
     assert_eq!(layout.panels().len(), 6);
-    let Node::Split { second, .. } = layout.root.as_ref().unwrap() else {
-        panic!()
+    let node4 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Split { second, .. } = node4 else {
+        return Err("unexpected root node".into());
     };
     let Node::Tabs { panels, active } = second.as_ref() else {
-        panic!()
+        return Err("unexpected node kind".into());
     };
     assert_eq!(panels.get(*active), Some(&5));
+    Ok(())
 }
 
 #[test]
-fn panel_size_limits_clamp_geometry_without_overwriting_preferred_widths() {
+fn panel_size_limits_clamp_geometry_without_overwriting_preferred_widths() -> TestResult {
     let layout = Layout {
         root: Some(Node::Split {
             axis: SplitAxis::Horizontal,
@@ -717,14 +728,15 @@ fn panel_size_limits_clamp_geometry_without_overwriting_preferred_widths() {
     }
     assert_eq!(widths.first(), widths.last());
     assert_eq!(layout, unchanged);
+    Ok(())
 }
 
 #[test]
-fn focused_floating_resize_grip_accepts_both_arrow_axes_and_releases_tab() {
+fn focused_floating_resize_grip_accepts_both_arrow_axes_and_releases_tab() -> TestResult {
     let ctx = Context::default();
     let mut layout = sample();
     for _ in 0..3 {
-        step(&ctx, &mut layout, Vec::new());
+        step(&ctx, &mut layout, Vec::new())?;
     }
     let id = Id::unique("test-area")
         .with(("floating", &5u32))
@@ -741,14 +753,15 @@ fn focused_floating_resize_grip_accepts_both_arrow_axes_and_releases_tab() {
         &ctx,
         &mut layout,
         vec![key(egui::Key::ArrowRight), key(egui::Key::ArrowDown)],
-    );
+    )?;
     assert_eq!(layout.floating[0].rect, [80.0, 70.0, 308.0, 228.0]);
-    step(&ctx, &mut layout, vec![key(egui::Key::Tab)]);
+    step(&ctx, &mut layout, vec![key(egui::Key::Tab)])?;
     assert_ne!(ctx.memory(|memory| memory.focused()), Some(id));
+    Ok(())
 }
 
 #[test]
-fn stack_dividers_resize_adjacent_open_bodies_by_pointer_and_keyboard() {
+fn stack_dividers_resize_adjacent_open_bodies_by_pointer_and_keyboard() -> TestResult {
     let ctx = Context::default();
     let mut layout = Layout {
         root: Some(Node::Stack {
@@ -778,31 +791,36 @@ fn stack_dividers_resize_adjacent_open_bodies_by_pointer_and_keyboard() {
         floating: Vec::new(),
     };
     for _ in 0..3 {
-        step(&ctx, &mut layout, Vec::new());
+        step(&ctx, &mut layout, Vec::new())?;
     }
     let id = Id::unique("test-area").with(("stack-resize", &1u32));
-    let start = ctx.read_response(id).unwrap().rect.center();
+    let start = ctx.read_response(id).ok_or("no response")?.rect.center();
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start), pointer_button(start, true)],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start + vec2(0.0, 24.0))],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![pointer_button(start + vec2(0.0, 24.0), false)],
-    );
-    let Node::Stack { entries } = layout.root.as_ref().unwrap() else {
-        panic!()
+    )?;
+    let node5 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Stack { entries } = node5 else {
+        return Err("unexpected root node".into());
     };
-    let after_pointer = entries[0].height.unwrap();
+    let after_pointer = entries[0].height.ok_or("no height")?;
     assert!(after_pointer > 150.0);
-    assert!((entries[0].height.unwrap() + entries[2].height.unwrap() - 300.0).abs() < 0.001);
+    assert!(
+        (entries[0].height.ok_or("no height")? + entries[2].height.ok_or("no height")? - 300.0)
+            .abs()
+            < 0.001
+    );
     assert_eq!(entries[1].height, Some(91.0));
     assert!(!entries[1].open);
     assert_eq!(entries[3].height, Some(120.0));
@@ -817,16 +835,22 @@ fn stack_dividers_resize_adjacent_open_bodies_by_pointer_and_keyboard() {
             repeat: false,
             modifiers: Modifiers::NONE,
         }],
-    );
-    let Node::Stack { entries } = layout.root.as_ref().unwrap() else {
-        panic!()
+    )?;
+    let node6 = layout.root.as_ref().ok_or("no root")?;
+    let Node::Stack { entries } = node6 else {
+        return Err("unexpected root node".into());
     };
-    assert!(entries[0].height.unwrap() > after_pointer);
-    assert!((entries[0].height.unwrap() + entries[2].height.unwrap() - 300.0).abs() < 0.001);
+    assert!(entries[0].height.ok_or("no height")? > after_pointer);
+    assert!(
+        (entries[0].height.ok_or("no height")? + entries[2].height.ok_or("no height")? - 300.0)
+            .abs()
+            < 0.001
+    );
+    Ok(())
 }
 
 #[test]
-fn split_inner_edge_remains_draggable_beside_a_scrollbar() {
+fn split_inner_edge_remains_draggable_beside_a_scrollbar() -> TestResult {
     let ctx = Context::default();
     let mut layout = Layout {
         root: Some(Node::Split {
@@ -877,7 +901,8 @@ fn split_inner_edge_remains_draggable_beside_a_scrollbar() {
         .clear();
         assert!(output.error.is_none());
         for action in output.actions {
-            layout.apply(action).unwrap();
+            // The dock never refuses the actions it just emitted.
+            assert!(layout.apply(action).is_ok(), "dock action failed");
         }
         sidebar
     };
@@ -898,21 +923,23 @@ fn split_inner_edge_remains_draggable_beside_a_scrollbar() {
         &mut layout,
         vec![pointer_button(start + vec2(40.0, 0.0), false)],
     );
+    let root = layout.root.as_ref().ok_or("no root")?;
     let Node::Split {
         size: SplitSize::FixedFirst(width),
         ..
-    } = layout.root.unwrap()
+    } = root
     else {
-        panic!()
+        return Err("expected a FixedFirst split root".into());
     };
     assert!(
         (width - 260.0).abs() < 0.001,
         "sidebar width after inner-edge drag: {width}"
     );
+    Ok(())
 }
 
 #[test]
-fn restoring_a_panel_beside_a_nested_subtree_preserves_the_complete_workspace() {
+fn restoring_a_panel_beside_a_nested_subtree_preserves_the_complete_workspace() -> TestResult {
     let mut layout = Layout {
         root: Some(Node::Split {
             axis: SplitAxis::Vertical,
@@ -928,14 +955,15 @@ fn restoring_a_panel_beside_a_nested_subtree_preserves_the_complete_workspace() 
         floating: Vec::new(),
     };
     let expected = layout.clone();
-    let location = layout.location(&1).unwrap();
-    layout.apply(Action::Close { panel: 1 }).unwrap();
-    layout.restore(1, &location).unwrap();
+    let location = layout.location(&1)?;
+    layout.apply(Action::Close { panel: 1 })?;
+    layout.restore(1, &location)?;
     assert_eq!(layout, expected);
+    Ok(())
 }
 
 #[test]
-fn floating_only_surface_does_not_allocate_the_callers_document_region() {
+fn floating_only_surface_does_not_allocate_the_callers_document_region() -> TestResult {
     let ctx = Context::default();
     let layout = Layout {
         root: None,
@@ -968,27 +996,28 @@ fn floating_only_surface_does_not_allocate_the_callers_document_region() {
     )
     .textures_delta
     .clear();
+    Ok(())
 }
 
 #[test]
-fn floating_group_grip_moves_every_member_while_tab_drag_detaches_one() {
+fn floating_group_grip_moves_every_member_while_tab_drag_detaches_one() -> TestResult {
     let ctx = Context::default();
     let mut layout = sample();
     let original = layout.floating[0].clone();
     for _ in 0..2 {
-        step(&ctx, &mut layout, vec![]);
+        step(&ctx, &mut layout, vec![])?;
     }
     let start = pos2(86.0, 82.0);
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start), pointer_button(start, true)],
-    );
+    )?;
     let actions = step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start + vec2(50.0, 40.0))],
-    );
+    )?;
     assert!(
         actions
             .iter()
@@ -1001,35 +1030,35 @@ fn floating_group_grip_moves_every_member_while_tab_drag_detaches_one() {
         &ctx,
         &mut layout,
         vec![pointer_button(start + vec2(50.0, 40.0), false)],
-    );
+    )?;
     for _ in 0..2 {
-        step(&ctx, &mut layout, vec![]);
+        step(&ctx, &mut layout, vec![])?;
     }
     let tab = ctx
         .read_response(Id::unique("test-area").with(("tab", &5u32)))
-        .unwrap()
+        .ok_or("no response for tab 5")?
         .rect
         .center();
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(tab), pointer_button(tab, true)],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(tab + vec2(8.0, 0.0))],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(tab + vec2(100.0, 100.0))],
-    );
+    )?;
     let detached = step(
         &ctx,
         &mut layout,
         vec![pointer_button(tab + vec2(100.0, 100.0), false)],
-    );
+    )?;
     assert!(
         detached
             .iter()
@@ -1037,6 +1066,7 @@ fn floating_group_grip_moves_every_member_while_tab_drag_detaches_one() {
     );
     assert_eq!(layout.floating.len(), 2);
     assert_eq!(layout.floating[0].panels, vec![6]);
+    Ok(())
 }
 
 struct CustomContent {
@@ -1047,20 +1077,20 @@ struct CustomContent {
 }
 
 #[test]
-fn host_cancel_discards_group_drag_before_workspace_replacement() {
+fn host_cancel_discards_group_drag_before_workspace_replacement() -> TestResult {
     let ctx = Context::default();
     let mut layout = sample();
     for _ in 0..2 {
-        step(&ctx, &mut layout, vec![]);
+        step(&ctx, &mut layout, vec![])?;
     }
     let start = pos2(86.0, 82.0);
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start), pointer_button(start, true)],
-    );
+    )?;
     let moved = start + vec2(50.0, 40.0);
-    let actions = step(&ctx, &mut layout, vec![Event::PointerMoved(moved)]);
+    let actions = step(&ctx, &mut layout, vec![Event::PointerMoved(moved)])?;
     assert!(
         actions
             .iter()
@@ -1074,7 +1104,7 @@ fn host_cancel_discards_group_drag_before_workspace_replacement() {
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(moved + vec2(20.0, 10.0))],
-    );
+    )?;
     assert!(actions.is_empty());
     assert_eq!(layout, replacement);
     let mut content = CustomContent {
@@ -1093,6 +1123,7 @@ fn host_cancel_discards_group_drag_before_workspace_replacement() {
     );
     assert!(output.group_drag.is_none());
     assert!(output.group_drop.is_none());
+    Ok(())
 }
 impl DockContent<u32> for CustomContent {
     fn body(&mut self, ui: &mut egui::Ui, _: &u32) {
@@ -1175,7 +1206,7 @@ fn custom_frame(
 }
 
 #[test]
-fn custom_chrome_shaped_labels_and_programmatic_raise_are_available() {
+fn custom_chrome_shaped_labels_and_programmatic_raise_are_available() -> TestResult {
     let ctx = Context::default();
     let layout = sample();
     let mut content = CustomContent {
@@ -1223,10 +1254,11 @@ fn custom_chrome_shaped_labels_and_programmatic_raise_are_available() {
         false,
     );
     assert!(content.menus > 0);
+    Ok(())
 }
 
 #[test]
-fn overlay_appearing_mid_drag_blocks_release_and_float_fallback() {
+fn overlay_appearing_mid_drag_blocks_release_and_float_fallback() -> TestResult {
     let ctx = Context::default();
     let layout = sample();
     let mut content = CustomContent {
@@ -1261,27 +1293,28 @@ fn overlay_appearing_mid_drag_blocks_release_and_float_fallback() {
     assert!(out.actions.is_empty());
     let out = custom_frame(&ctx, &layout, &mut content, vec![], &[], false);
     assert!(out.actions.is_empty());
+    Ok(())
 }
 
 #[test]
-fn group_move_escape_restores_original_geometry() {
+fn group_move_escape_restores_original_geometry() -> TestResult {
     let ctx = Context::default();
     let mut layout = sample();
     let original = layout.floating[0].rect;
     for _ in 0..2 {
-        step(&ctx, &mut layout, vec![]);
+        step(&ctx, &mut layout, vec![])?;
     }
     let start = pos2(86.0, 82.0);
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start), pointer_button(start, true)],
-    );
+    )?;
     step(
         &ctx,
         &mut layout,
         vec![Event::PointerMoved(start + vec2(50.0, 40.0))],
-    );
+    )?;
     assert_ne!(layout.floating[0].rect, original);
     step(
         &ctx,
@@ -1293,12 +1326,13 @@ fn group_move_escape_restores_original_geometry() {
             repeat: false,
             modifiers: Modifiers::NONE,
         }],
-    );
+    )?;
     assert_eq!(layout.floating[0].rect, original);
+    Ok(())
 }
 
 #[test]
-fn custom_headers_and_labels_render_at_small_and_large_scales() {
+fn custom_headers_and_labels_render_at_small_and_large_scales() -> TestResult {
     for scale in [0.75, 1.0, 1.5, 2.0] {
         let ctx = Context::default();
         ctx.set_pixels_per_point(scale);
@@ -1340,10 +1374,11 @@ fn custom_headers_and_labels_render_at_small_and_large_scales() {
         assert!(content.headers > 0 && content.bodies > 0);
         assert!(content.labels.iter().any(|s| s == "Logical 6"));
     }
+    Ok(())
 }
 
 #[test]
-fn protected_group_member_blocks_whole_group_gesture_and_host_drop() {
+fn protected_group_member_blocks_whole_group_gesture_and_host_drop() -> TestResult {
     let ctx = Context::default();
     let layout = sample();
     let start = pos2(86.0, 82.0);
@@ -1390,10 +1425,12 @@ fn protected_group_member_blocks_whole_group_gesture_and_host_drop() {
                 .any(|a| matches!(a, Action::MoveFloating { .. }))
         );
     }
+    Ok(())
 }
 
 #[test]
-fn chrome_focus_classifies_rendered_tab_but_excludes_body_text_field_and_invalid_layout() {
+fn chrome_focus_classifies_rendered_tab_but_excludes_body_text_field_and_invalid_layout()
+-> TestResult {
     let ctx = Context::default();
     let layout = sample();
     let tab = Id::unique("focus-area").with(("tab", 3u32));
@@ -1440,10 +1477,11 @@ fn chrome_focus_classifies_rendered_tab_but_excludes_body_text_field_and_invalid
     );
     ctx.memory_mut(|memory| memory.request_focus(Id::unique("unrendered")));
     assert!(!DockArea::new(Id::unique("focus-area")).chrome_has_focus(&ctx, &layout));
+    Ok(())
 }
 
 #[test]
-fn chrome_focus_classifies_rendered_accordion_and_split_and_floating_resizers() {
+fn chrome_focus_classifies_rendered_accordion_and_split_and_floating_resizers() -> TestResult {
     let ctx = Context::default();
     let area = Id::unique("focus-chrome-controls");
     let accordion = Layout {
@@ -1496,10 +1534,11 @@ fn chrome_focus_classifies_rendered_accordion_and_split_and_floating_resizers() 
         );
         assert!(DockArea::new(area).chrome_has_focus(&ctx, &layout));
     }
+    Ok(())
 }
 
 #[test]
-fn workspace_cancel_stops_owned_resize_controls_until_new_press() {
+fn workspace_cancel_stops_owned_resize_controls_until_new_press() -> TestResult {
     let area = Id::unique("test-area");
     let fixtures = [
         (
@@ -1537,15 +1576,15 @@ fn workspace_cancel_stops_owned_resize_controls_until_new_press() {
     for (mut layout, id, delta) in fixtures {
         let ctx = Context::default();
         for _ in 0..3 {
-            step(&ctx, &mut layout, vec![]);
+            step(&ctx, &mut layout, vec![])?;
         }
-        let start = ctx.read_response(id).unwrap().rect.center();
+        let start = ctx.read_response(id).ok_or("no response")?.rect.center();
         step(
             &ctx,
             &mut layout,
             vec![Event::PointerMoved(start), pointer_button(start, true)],
-        );
-        let actions = step(&ctx, &mut layout, vec![Event::PointerMoved(start + delta)]);
+        )?;
+        let actions = step(&ctx, &mut layout, vec![Event::PointerMoved(start + delta)])?;
         assert!(
             !actions.is_empty(),
             "gesture fixture must actually resize: {id:?}"
@@ -1560,7 +1599,7 @@ fn workspace_cancel_stops_owned_resize_controls_until_new_press() {
                 &ctx,
                 &mut layout,
                 vec![Event::PointerMoved(start + delta * multiplier)],
-            );
+            )?;
             assert!(actions.is_empty(), "held old gesture produced {actions:?}");
             assert_eq!(layout, replacement);
         }
@@ -1568,22 +1607,23 @@ fn workspace_cancel_stops_owned_resize_controls_until_new_press() {
             &ctx,
             &mut layout,
             vec![pointer_button(start + delta * 3.0, false)],
-        );
+        )?;
         for _ in 0..2 {
-            step(&ctx, &mut layout, vec![]);
+            step(&ctx, &mut layout, vec![])?;
         }
-        let start = ctx.read_response(id).unwrap().rect.center();
+        let start = ctx.read_response(id).ok_or("no response")?.rect.center();
         step(
             &ctx,
             &mut layout,
             vec![Event::PointerMoved(start), pointer_button(start, true)],
-        );
-        assert!(!step(&ctx, &mut layout, vec![Event::PointerMoved(start + delta)]).is_empty());
+        )?;
+        assert!(!step(&ctx, &mut layout, vec![Event::PointerMoved(start + delta)])?.is_empty());
     }
+    Ok(())
 }
 
 #[test]
-fn workspace_cancel_preserves_other_area_and_body_drag_ownership() {
+fn workspace_cancel_preserves_other_area_and_body_drag_ownership() -> TestResult {
     for body_drag in [false, true] {
         let ctx = Context::default();
         let area = Id::unique("cancel-area");
@@ -1648,7 +1688,7 @@ fn workspace_cancel_preserves_other_area_and_body_drag_ownership() {
         } else {
             other.with(("split", Vec::<bool>::new()))
         };
-        let start = ctx.read_response(owned).unwrap().rect.center();
+        let start = ctx.read_response(owned).ok_or("no response")?.rect.center();
         run(vec![
             Event::PointerMoved(start),
             pointer_button(start, true),
@@ -1665,10 +1705,11 @@ fn workspace_cancel_preserves_other_area_and_body_drag_ownership() {
             assert!(!outputs[1].actions.is_empty());
         }
     }
+    Ok(())
 }
 
 #[test]
-fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
+fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() -> TestResult {
     use egui_kittest::{Harness, kittest::Queryable};
     fn paints(shape: &egui::Shape, text: &str) -> bool {
         match shape {
@@ -1701,7 +1742,7 @@ fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
         );
     h.run_steps(2);
     let tab = Id::unique("action-label-test").with(("tab", &5_u32));
-    let at = h.ctx.read_response(tab).unwrap().rect.center();
+    let at = h.ctx.read_response(tab).ok_or("no response")?.rect.center();
     h.input_mut().events.extend([
         Event::PointerMoved(at),
         Event::PointerButton {
@@ -1742,4 +1783,5 @@ fn popup_action_labels_use_custom_visual_text_and_logical_accessibility() {
             "visual substitution must not replace logical accessibility"
         );
     }
+    Ok(())
 }

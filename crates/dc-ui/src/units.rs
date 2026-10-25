@@ -73,6 +73,45 @@ pub fn tick_step(display_units_per_px: f64, min_px_per_tick: f32) -> f64 {
     step * mag
 }
 
+/// One ruler tick tier (#62): ticks at `major_step / div` intervals,
+/// drawn `len` px long from the ruler's inner edge; numbers appear at
+/// the labeled (major) tier only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TickTier {
+    pub div: f64,
+    pub len: f32,
+    pub labeled: bool,
+}
+
+/// Visio-style tiered ruler ticks (#62): the labeled major tier plus
+/// half and quarter subdivisions (lengths ≈ 2/3 and 1/3 of the major
+/// tick — unit marks tallest and numbered, half marks medium, quarter
+/// marks short, all unlabeled). A minor tier is dropped when its pixel
+/// spacing would smear (below `min_px`) so zoom-outs degrade
+/// gracefully. `subdiv` caps the depth: 4 = halves + quarters (the
+/// Visio default), 2 = halves, 1 = majors only — the Ruler & Grid
+/// Fine/Normal/Coarse setting can hook in later.
+pub fn tick_tiers(major_step: f64, px_per_major: f64, subdiv: u32, min_px: f64) -> Vec<TickTier> {
+    debug_assert!(major_step.is_finite() && major_step > 0.0);
+    const MAJOR_LEN: f32 = 7.0;
+    let mut tiers = vec![TickTier {
+        div: 1.0,
+        len: MAJOR_LEN,
+        labeled: true,
+    }];
+    for &(div, frac) in &[(2.0_f64, 2.0_f32), (4.0, 1.0)] {
+        if div as u32 > subdiv.max(1) || px_per_major / div < min_px {
+            continue;
+        }
+        tiers.push(TickTier {
+            div,
+            len: MAJOR_LEN * frac / 3.0,
+            labeled: false,
+        });
+    }
+    tiers
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +135,29 @@ mod tests {
         assert_eq!(tick_step(0.1, 50.0), 5.0);
         assert_eq!(tick_step(0.5, 50.0), 50.0); // 25 is not a 1/2/5 decade step — rounds to 50
         assert_eq!(tick_step(1.0, 50.0), 50.0);
+    }
+
+    #[test]
+    fn tick_tiers_tier_presence_and_skipping() {
+        let divs = |t: &[TickTier]| t.iter().map(|x| x.div).collect::<Vec<_>>();
+        // Default density (majors ≥ 45 px): majors + halves + quarters.
+        let t = tick_tiers(10.0, 45.0, 4, 6.0);
+        assert_eq!(divs(&t), vec![1.0, 2.0, 4.0]);
+        assert!(t[0].labeled, "numbers only at the major tier");
+        assert!(!t[1].labeled && !t[2].labeled);
+        assert!(
+            t[0].len > t[1].len && t[1].len > t[2].len,
+            "unit > half > quarter"
+        );
+        // Proportions per the #62 reference: ~2/3 and ~1/3 of the major.
+        assert!((t[1].len - t[0].len * 2.0 / 3.0).abs() < 1e-3);
+        assert!((t[2].len - t[0].len / 3.0).abs() < 1e-3);
+        // Coarser subdivision depth: halves only / majors only.
+        assert_eq!(divs(&tick_tiers(10.0, 45.0, 2, 6.0)), vec![1.0, 2.0]);
+        assert_eq!(divs(&tick_tiers(10.0, 45.0, 1, 6.0)), vec![1.0]);
+        // Zoom-outs drop tiers whose spacing smears: 20 px per major →
+        // quarters at 5 px < 6 px floor; 10 px → halves drop too.
+        assert_eq!(divs(&tick_tiers(10.0, 20.0, 4, 6.0)), vec![1.0, 2.0]);
+        assert_eq!(divs(&tick_tiers(10.0, 10.0, 4, 6.0)), vec![1.0]);
     }
 }

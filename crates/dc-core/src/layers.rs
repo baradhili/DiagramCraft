@@ -32,7 +32,7 @@ pub fn layer_name(row: &Row) -> Option<&str> {
     row.cell("Name").and_then(|c| c.v.as_deref())
 }
 
-fn layer_section_mut<'a>(doc: &'a mut Document, page: i64) -> Result<(&'a mut Section, bool)> {
+fn layer_section_mut(doc: &mut Document, page: i64) -> Result<(&mut Section, bool)> {
     let sheet = sheet_mut(doc, &Scope::PageSheet { page })?;
     if let Some(i) = sheet
         .children

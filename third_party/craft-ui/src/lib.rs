@@ -19,3 +19,6 @@ pub mod layout;
 pub mod printing;
 pub mod tabs;
 pub mod theme;
+
+#[cfg(test)]
+pub(crate) mod testing;

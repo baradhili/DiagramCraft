@@ -24,6 +24,7 @@ pub enum Action {
     FitPage,
     ToggleGrid,
     ToggleRulers,
+    ToggleComments,
     ToggleUnits,
     ShowShapeSheet,
     Macros,
@@ -1164,6 +1165,11 @@ impl RibbonButton {
     pub fn show_big(self, ui: &mut Ui) -> bool {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+        // The caption is a painted galley — attach its text for
+        // screen readers and keyboard focus (GitHub #56).
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+        });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r =
@@ -1201,6 +1207,10 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+        // Painted galley caption — name the control (GitHub #56).
+        resp.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+        });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r = Rect::from_min_size(r.left_top() + Vec2::new(1.0, 2.0), Vec2::splat(18.0));
@@ -1299,7 +1309,7 @@ const LABEL_H: f32 = 18.0;
 fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
     match col {
         Col::Big(b) => {
-            if b.clone().show_big(ui) {
+            if (*b).show_big(ui) {
                 on_action(b.action);
             }
         }
@@ -1308,7 +1318,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.vertical(|ui| {
                     for b in v {
-                        if b.clone().show_small(ui) {
+                        if (*b).show_small(ui) {
                             on_action(b.action);
                         }
                     }
@@ -1322,7 +1332,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                     for row in rows {
                         ui.horizontal(|ui| {
                             for b in row {
-                                if b.clone().show_small(ui) {
+                                if (*b).show_small(ui) {
                                     on_action(b.action);
                                 }
                             }

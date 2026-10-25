@@ -190,6 +190,18 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
 }
 
 pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> {
+    render_page_with(doc, page, &[])
+}
+
+/// [`render_page`] with hidden layer members: shapes whose
+/// `LayerMember` names one of `hidden` (Visio layer row indexes, the
+/// LayerMember cell convention) are skipped entirely — the annotation
+/// toggle (#29) and friends.
+pub fn render_page_with(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
 
@@ -214,7 +226,16 @@ pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> 
         svg,
         r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
     );
+    let hidden_member = |s: &Shape| -> bool {
+        s.sheet
+            .cell("LayerMember")
+            .and_then(|c| c.numeric())
+            .is_some_and(|m| hidden.contains(&(m as i64)))
+    };
     for shape in &page.shapes {
+        if hidden_member(shape) {
+            continue;
+        }
         render_shape(doc, shape, h, &[], &page.part, &mut svg);
     }
     let _ = writeln!(svg, "</svg>");
@@ -452,77 +473,12 @@ fn mirror_master(
 }
 
 /// Evaluation environment for re-evaluating a master root's sub-shape
-/// XForms at instance size (issue #15): the group's effective Width /
-/// Height under both the bare and the `Sheet.N!` spellings master
-/// formulas use, plus the root's User cells — their formulas re-evaluate
-/// too, because layout cells like `User.IconY` reference the (instance)
-/// `Height`. Instance-local User rows override the master's.
+/// XForms at instance size (issue #15). Shared implementation in
+/// `vsdx::model::instance_env` — the editor's cache refresh (dc-ui,
+/// issue #59) computes from the same environment, so a refreshed cache
+/// and a mirrored placement agree.
 fn mirror_env(root: &Shape, instance: &Shape, width: f64, height: f64) -> vsdx::formula::Env {
-    let mut env = vsdx::formula::Env::new();
-    env.insert("Width".into(), width);
-    env.insert("Height".into(), height);
-    env.insert(format!("Sheet.{}!Width", root.id), width);
-    env.insert(format!("Sheet.{}!Height", root.id), height);
-    // User rows: master root's, overridden by the instance's own (an
-    // instance can override editable User rows such as ShapeLayout).
-    let mut users: Vec<(String, &Cell)> = Vec::new();
-    for user in root.sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(c) = row.cell("Value") {
-                users.push((row.n.clone().unwrap(), c));
-            }
-        }
-    }
-    for user in instance.sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(c) = row.cell("Value") {
-                if let Some(slot) = users
-                    .iter_mut()
-                    .find(|(n, _)| n == row.n.as_deref().unwrap())
-                {
-                    slot.1 = c;
-                } else {
-                    users.push((row.n.clone().unwrap(), c));
-                }
-            }
-        }
-    }
-    let set = |env: &mut vsdx::formula::Env, name: &str, v: f64| {
-        env.insert(format!("User.{name}"), v);
-        env.insert(format!("Sheet.{}!User.{name}", root.id), v);
-    };
-    for (name, c) in &users {
-        if let Some(v) = c.numeric().filter(|v| v.is_finite()) {
-            set(&mut env, name, v);
-        }
-    }
-    // User formulas re-evaluate against the instance dims (e.g. IconY =
-    // IF(OR(User.ShapeLayout<>1), Height - User.InfoPanelHeight/2, …)).
-    // Two passes let a User formula reference another User formula.
-    for _ in 0..2 {
-        let mut changed = false;
-        for (name, c) in &users {
-            let Some(f) = c.f.as_deref() else { continue };
-            if f == "Inh" || f == "No Formula" {
-                continue;
-            }
-            if let Some(v) = vsdx::formula::eval(f, &env)
-                .ok()
-                .and_then(|v| v.as_f64())
-                .filter(|v| v.is_finite())
-            {
-                let cur = env.get(&format!("User.{name}")).copied();
-                if cur != Some(v) {
-                    set(&mut env, name, v);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    env
+    vsdx::model::instance_env(root, instance, width, height)
 }
 
 /// Corrective transform for one mirrored sub-shape: maps where
@@ -546,21 +502,16 @@ fn mirror_child_transform(
 
     // Effective values: formula first (Visio re-evaluates against the
     // instance group), then the uniform-scale fallback.
-    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings:
-    // a bare name in a child formula means the child's own cell, so the
-    // root's unqualified Width/Height/User.* must not leak in — without
-    // the filter a bare reference silently reads the group's value and
-    // skips the per-axis fallback below. (Child sheets are not in this
-    // env; bare child-cell references fail to resolve and fall back.)
-    let mut env: vsdx::formula::Env = root_env
-        .iter()
-        .filter(|(k, _)| k.contains('!'))
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
+    // Seed the env with only the root's QUALIFIED `Sheet.N!` spellings
+    // (`vsdx::model::qualified_env`): a bare name in a child formula
+    // means the child's own cell, so the root's unqualified
+    // Width/Height/User.* must not leak in — without the filter a bare
+    // reference silently reads the group's value and skips the per-axis
+    // fallback below. (Child sheets are not in this env; bare
+    // child-cell references fail to resolve and fall back.)
+    let mut env: vsdx::formula::Env = vsdx::model::qualified_env(root_env);
     let eff = |name: &str, axis: f64, env: &vsdx::formula::Env| -> Option<f64> {
-        let Some(c) = sub.sheet.cell(name) else {
-            return None;
-        };
+        let c = sub.sheet.cell(name)?;
         if let Some(f) = c.f.as_deref() {
             if f != "Inh" && f != "No Formula" {
                 if let Some(v) = vsdx::formula::eval(f, env)
@@ -684,6 +635,10 @@ impl Mat {
 /// `TxtAngle = IF(BITXOR(FlipX,FlipY),1,-1)*Angle` against exactly that,
 /// so the page-space net is `Angle + sx*sy*TxtAngle` (0 = horizontal
 /// labels, issue #19).
+// The eight parameters are the full text-emission context; grouping
+// them would just move the long call sites into a struct nobody else
+// shares.
+#[allow(clippy::too_many_arguments)]
 fn emit_text(
     doc: &Document,
     s: &Shape,
@@ -716,7 +671,7 @@ fn emit_text(
     // Char.Size lives in the Character section's first row, stored in
     // inches (0.13889 in = 10 pt); the viewBox unit is inches, so the
     // value is the SVG font-size directly.
-    let size = char_size(doc, s, &chain).unwrap_or(0.13888).max(0.02);
+    let size = char_size(doc, s, chain).unwrap_or(0.13888).max(0.02);
     // First Character row extras: color (palette/theme aware) and the
     // Style bitmask (1 = bold, 2 = italic). Both resolve per-cell through
     // `char_cell`, so a LangID-only instance row picks them up from the
@@ -851,19 +806,11 @@ fn emit_text(
     let mut body = String::new();
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
-        if i == 0 {
-            let _ = write!(
-                body,
-                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-                escape_text(line)
-            );
-        } else {
-            let _ = write!(
-                body,
-                r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-                escape_text(line)
-            );
-        }
+        let _ = write!(
+            body,
+            r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
+            escape_text(line)
+        );
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
     // glyphs un-mirrored inside the caller's flipped frame, and the
@@ -1014,6 +961,18 @@ fn render_all_geometry(
             if let Some(src) = src {
                 let src_secs = src.sheet.sections_named("Geometry");
                 let src_geo = src_secs.get(si);
+                // Section-level cells (Geometry NoFill/NoLine/NoShow)
+                // inherit from the master section just like rows do:
+                // inline copies keep only row caches, and a lost NoShow
+                // draws sections Visio hides — e.g. every heading-band
+                // geometry of the "Plain" container style (#12).
+                if let Some(sg) = src_geo {
+                    for (name, cell) in &sg.cells {
+                        if !m.cells.iter().any(|(n, _)| n == name) {
+                            m.cells.push((name.clone(), cell.clone()));
+                        }
+                    }
+                }
                 let mw = src
                     .sheet
                     .cell("Width")
@@ -1139,7 +1098,7 @@ fn render_all_geometry(
         for geo in &merged {
             // Instance frame: formulas and cached values are both in
             // instance units.
-            render_geometry(doc, s, &chain, geo, (1.0, 1.0), Frame::Instance, out);
+            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, out);
         }
         return;
     }
@@ -1164,7 +1123,7 @@ fn render_all_geometry(
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, &chain, geo, scale, Frame::Master(src), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(src), out);
     }
 }
 
@@ -1183,20 +1142,6 @@ fn render_geometry(
     frame: Frame<'_>,
     out: &mut String,
 ) {
-    // Section-level cells carry NoFill/NoLine/etc.
-    let flag = |name: &str| -> bool {
-        section
-            .cell(name)
-            .and_then(|c| c.numeric())
-            .map(|v| v != 0.0)
-            .unwrap_or(false)
-    };
-    let no_fill = flag("NoFill");
-    let no_show = flag("NoShow");
-    if no_show {
-        return;
-    }
-
     let rows = &section.rows;
     let (width, height) = shape_size(doc, s, chain);
     // Formulas evaluate in the geometry's own frame: instance dims for
@@ -1208,6 +1153,31 @@ fn render_geometry(
         Frame::Instance => shape_env_for(doc, s, chain, rows),
         Frame::Master(src) => shape_env_for(doc, src, &[], rows),
     };
+    // Section-level cells carry NoFill/NoLine/NoShow. Formula first,
+    // cached V as fallback (the row-cell convention): the master's
+    // cache reflects its default style while the formula re-evaluates
+    // per instance — NoShow=OR(User.hidden,User.CStyle<>7) gates the
+    // container heading's geometry bands by container style.
+    let flag = |name: &str| -> bool {
+        section.cell(name).is_some_and(|c| {
+            let by_formula =
+                c.f.as_deref()
+                    .and_then(|f| {
+                        if f == "Inh" || f == "No Formula" {
+                            None
+                        } else {
+                            vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                        }
+                    })
+                    .filter(|v| v.is_finite());
+            by_formula.or_else(|| c.numeric()).is_some_and(|v| v != 0.0)
+        })
+    };
+    let no_fill = flag("NoFill");
+    let no_show = flag("NoShow");
+    if no_show {
+        return;
+    }
     // Visio hides the outline when LinePattern = 0 (e.g. legend label
     // boxes carry THEMEGUARD(0)); the geometry still exists for hit
     // testing but must not stroke.
@@ -2059,16 +2029,29 @@ pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::
     }
     // User-defined cells (master geometry formulas reference
     // `User.Corner` and friends for rounded-corner rectangles).
-    let sheet = doc.effective_sheet(s, chain);
-    for user in sheet.sections_named("User") {
-        for row in user.rows.iter().filter(|r| r.n.is_some()) {
-            if let Some(v) = row.cell("Value").and_then(|c| c.numeric()) {
-                env.insert(format!("User.{}", row.n.as_deref().unwrap_or("")), v);
+    // Instance-local rows override the master's: inline copies keep
+    // only sparse User caches (e.g. a heading's HTxtWidth) while the
+    // rest — CStyle, hidden, … — inherit from the master source, so
+    // style-gated section cells like NoShow re-evaluate per instance.
+    let own = doc.effective_sheet(s, chain);
+    let mut user_sheets: Vec<&Sheet> = Vec::new();
+    if let Some(src) = doc.instance_source(s, chain) {
+        if !std::ptr::eq(&src.sheet, own.as_ref()) {
+            user_sheets.push(&src.sheet);
+        }
+    }
+    user_sheets.push(own.as_ref());
+    for sheet in user_sheets {
+        for user in sheet.sections_named("User") {
+            for row in user.rows.iter().filter(|r| r.n.is_some()) {
+                if let Some(v) = row.cell("Value").and_then(|c| c.numeric()) {
+                    env.insert(format!("User.{}", row.n.as_deref().unwrap_or("")), v);
+                }
             }
         }
     }
     // Geometry row coordinates (Geometry1.X1 style references).
-    for (i, geo) in sheet.sections_named("Geometry").iter().enumerate() {
+    for (i, geo) in own.sections_named("Geometry").iter().enumerate() {
         let gname = format!("Geometry{}", i + 1);
         for row in geo.rows.iter().filter(|r| r.t.is_some()) {
             for (cname, cell) in &row.cells {
@@ -2116,7 +2099,7 @@ mod tests {
     /// ones (`GUARD(4MM)`), driven by User cells whose formulas reference
     /// the group Height.
     fn role_master_fixture() -> (Shape, Shape) {
-        let mut set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
+        let set = |sheet: &mut Sheet, n: &str, v: f64, f: Option<&str>| {
             sheet.set_cell(
                 n,
                 Cell {
@@ -2552,7 +2535,11 @@ mod tests {
         s
     }
 
-    fn text_wrapper_transform(sx: f64, sy: f64, txt_angle_deg: f64) -> Option<(String, (f64, f64))> {
+    fn text_wrapper_transform(
+        sx: f64,
+        sy: f64,
+        txt_angle_deg: f64,
+    ) -> Option<(String, (f64, f64))> {
         let doc = Document::default();
         let s = shape_with_pinned_text(txt_angle_deg);
         let chain = [&s];
@@ -2678,5 +2665,137 @@ mod tests {
         let (r1, r2, a) = transform_ellipse(1.0, 1.0, std::f64::consts::FRAC_PI_2, (2.0, 1.0));
         assert!((r1 - 2.0).abs() < 1e-9 && (r2 - 1.0).abs() < 1e-9);
         assert!(a.abs() < 1e-9);
+    }
+
+    /// #12 specimen class: a container-heading shape whose master
+    /// Geometry section is gated by a section-level `NoShow` cell, and a
+    /// page instance carrying only sparse row caches (no section cells).
+    /// The merge must inherit the flag, and the formula must re-evaluate
+    /// per instance so a restyled instance shows its band again even
+    /// against a stale master cache.
+    #[test]
+    fn geometry_noshow_inherits_and_formula_reevaluates() {
+        let urow = |n: &str, v: f64| Row {
+            n: Some(n.into()),
+            cells: vec![(
+                "Value".into(),
+                Cell {
+                    v: Some(format!("{v}")),
+                    ..Cell::default()
+                },
+            )],
+            ..Row::default()
+        };
+        let grow = |ix: i64, t: &str, x: f64, y: f64| Row {
+            ix,
+            t: Some(t.into()),
+            cells: vec![
+                ("X".into(), Cell::value(format!("{x}"))),
+                ("Y".into(), Cell::value(format!("{y}"))),
+            ],
+            ..Row::default()
+        };
+        // Heading master: band rect 2.0 × 0.5 with a style-gated NoShow.
+        let heading_master = |cstyle: f64, noshow_f: Option<&str>| -> vsdx::Master {
+            let mut sh = Shape {
+                id: 8,
+                ..Shape::default()
+            };
+            let set = |sheet: &mut Sheet, n: &str, v: f64| {
+                sheet.set_cell(n, Cell::value(format!("{v}")));
+            };
+            set(&mut sh.sheet, "Width", 2.0);
+            set(&mut sh.sheet, "Height", 0.5);
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "User".into(),
+                rows: vec![urow("hidden", 0.0), urow("CStyle", cstyle)],
+                ..Section::default()
+            }));
+            sh.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: 0,
+                cells: vec![
+                    ("NoFill".into(), Cell::value("0".to_string())),
+                    ("NoLine".into(), Cell::value("0".to_string())),
+                    (
+                        "NoShow".into(),
+                        Cell {
+                            v: Some("1".into()),
+                            f: noshow_f.map(str::to_string),
+                            ..Cell::default()
+                        },
+                    ),
+                ],
+                rows: vec![
+                    grow(1, "MoveTo", 0.0, 0.0),
+                    grow(2, "LineTo", 2.0, 0.0),
+                    grow(3, "LineTo", 2.0, 0.5),
+                    grow(4, "LineTo", 0.0, 0.5),
+                    grow(5, "LineTo", 0.0, 0.0),
+                ],
+                ..Section::default()
+            }));
+            vsdx::Master {
+                id: 42,
+                shapes: vec![sh],
+                ..Default::default()
+            }
+        };
+        // Sparse instance: only two row caches, no section-level cells —
+        // exactly how Visio writes inline copies of master geometry.
+        let inst = Shape {
+            id: 1228,
+            master: Some(42),
+            master_shape: Some(8),
+            ..Shape::default()
+        };
+        let mut inst = inst;
+        inst.sheet.set_cell("Width", Cell::value("4.0"));
+        inst.sheet.set_cell("Height", Cell::value("0.5"));
+        inst.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![grow(1, "MoveTo", 0.0, 0.0), grow(2, "LineTo", 4.0, 0.0)],
+            ..Section::default()
+        }));
+
+        // Plain style (CStyle=1): the formula hides the band — the
+        // utilisation.vsdx heading case.
+        let doc = Document {
+            masters: vec![heading_master(1.0, Some("OR(User.hidden,User.CStyle<>4)"))],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(
+            !out.contains("<path"),
+            "NoShow'd section must not draw: {out}"
+        );
+
+        // Restyled (CStyle=4): the formula re-evaluates to visible even
+        // though the master's cached NoShow V=1 says hidden.
+        let doc = Document {
+            masters: vec![heading_master(4.0, Some("OR(User.hidden,User.CStyle<>4)"))],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(
+            out.contains("<path"),
+            "formula must beat the stale cache: {out}"
+        );
+        assert!(
+            out.contains("4.00000"),
+            "row merge must scale master X into instance units: {out}"
+        );
+
+        // Cache-only flag (no formula): the cached V=1 still hides.
+        let doc = Document {
+            masters: vec![heading_master(4.0, None)],
+            ..Document::default()
+        };
+        let mut out = String::new();
+        render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
+        assert!(!out.contains("<path"), "cached NoShow must hide: {out}");
     }
 }

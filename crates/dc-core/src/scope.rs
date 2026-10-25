@@ -47,7 +47,7 @@ impl Scope {
             }
         };
         let shape_of = |tail: &str| -> Result<i64> {
-            let (k, v) = tail.split_once(':').ok_or_else(|| bad())?;
+            let (k, v) = tail.split_once(':').ok_or_else(bad)?;
             if k != "shape" {
                 return Err(bad());
             }
@@ -192,7 +192,7 @@ pub fn sheet_mut<'a>(doc: &'a mut Document, scope: &Scope) -> Result<&'a mut She
 
 /// The inheritance chain for a shape scope (ancestors outermost, target
 /// last) — input to [`Document::resolve_cell`].
-pub fn shape_chain<'a>(doc: &'a Document, page: i64, shape: i64) -> Result<Vec<&'a Shape>> {
+pub fn shape_chain(doc: &Document, page: i64, shape: i64) -> Result<Vec<&Shape>> {
     let p = page_by_id(doc, page)?;
     let mut chain = Vec::new();
     if !collect_chain(&p.shapes, shape, &mut chain) {
@@ -215,7 +215,7 @@ fn collect_chain<'a>(shapes: &'a [Shape], id: i64, out: &mut Vec<&'a Shape>) -> 
     false
 }
 
-pub fn page_by_id<'a>(doc: &'a Document, id: i64) -> Result<&'a vsdx::Page> {
+pub fn page_by_id(doc: &Document, id: i64) -> Result<&vsdx::Page> {
     doc.pages
         .iter()
         .find(|p| p.id == id)
@@ -223,7 +223,7 @@ pub fn page_by_id<'a>(doc: &'a Document, id: i64) -> Result<&'a vsdx::Page> {
 }
 
 /// Find a shape by ID anywhere in a nested tree, mutably.
-fn find_mut_recursive<'a>(shapes: &'a mut [Shape], id: i64) -> Option<&'a mut Shape> {
+fn find_mut_recursive(shapes: &mut [Shape], id: i64) -> Option<&mut Shape> {
     for s in shapes {
         if s.id == id {
             return Some(s);
@@ -236,7 +236,7 @@ fn find_mut_recursive<'a>(shapes: &'a mut [Shape], id: i64) -> Option<&'a mut Sh
 }
 
 /// Find a shape by ID anywhere in a nested tree, mutably (public form).
-pub fn find_shape<'a>(shapes: &'a [Shape], id: i64) -> Option<&'a Shape> {
+pub fn find_shape(shapes: &[Shape], id: i64) -> Option<&Shape> {
     for s in shapes {
         if s.id == id {
             return Some(s);
@@ -248,6 +248,6 @@ pub fn find_shape<'a>(shapes: &'a [Shape], id: i64) -> Option<&'a Shape> {
     None
 }
 
-pub fn find_shape_mut<'a>(shapes: &'a mut Vec<Shape>, id: i64) -> Option<&'a mut Shape> {
+pub fn find_shape_mut(shapes: &mut [Shape], id: i64) -> Option<&mut Shape> {
     find_mut_recursive(shapes, id)
 }

@@ -801,17 +801,21 @@ fn build_rels(entries: &[RelEntry]) -> Vec<u8> {
     for e in entries {
         out.push_str(&format!(
             "<Relationship Id=\"{}\" Type=\"{}\" Target=\"{}\"/>",
-            &esc_attr(&e.id),
-            &esc_attr(&e.type_),
-            &esc_attr(&e.target)
+            esc_attr(&e.id),
+            esc_attr(&e.type_),
+            esc_attr(&e.target)
         ));
     }
     out.push_str("</Relationships>");
     out.into_bytes()
 }
 
+/// One (extension-or-part, content type) pair from
+/// `[Content_Types].xml`.
+type ContentTypePair = (String, String);
+
 /// Parse `[Content_Types].xml` into (defaults, overrides).
-fn parse_content_types(bytes: &[u8]) -> (Vec<(String, String)>, Vec<(String, String)>) {
+fn parse_content_types(bytes: &[u8]) -> (Vec<ContentTypePair>, Vec<ContentTypePair>) {
     use quick_xml::events::Event;
     let text = String::from_utf8_lossy(bytes);
     let mut r = quick_xml::Reader::from_str(&text);
@@ -861,15 +865,15 @@ fn build_content_types(defaults: &[(String, String)], overrides: &[(String, Stri
     for (ext, ct) in defaults {
         out.push_str(&format!(
             "<Default Extension=\"{}\" ContentType=\"{}\"/>",
-            &esc_attr(ext),
-            &esc_attr(ct)
+            esc_attr(ext),
+            esc_attr(ct)
         ));
     }
     for (part, ct) in overrides {
         out.push_str(&format!(
             "<Override PartName=\"{}\" ContentType=\"{}\"/>",
-            &esc_attr(part),
-            &esc_attr(ct)
+            esc_attr(part),
+            esc_attr(ct)
         ));
     }
     out.push_str("</Types>");

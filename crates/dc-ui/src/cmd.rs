@@ -4,7 +4,8 @@
 //! (see `units.rs`).
 
 use dc_core::commands::{remove_cell, SetCell};
-use dc_core::{Command, Scope};
+use dc_core::Command;
+use dc_core::Scope;
 use vsdx::model::{Cell, Document, Shape};
 
 /// Move a shape's pin to a new page position (inches).
@@ -87,6 +88,33 @@ impl Command for AddMasterInstance {
         let mut sheet = vsdx::model::Sheet::default();
         sheet.set_cell("PinX", Cell::value(format!("{:.6}", self.pin.0)));
         sheet.set_cell("PinY", Cell::value(format!("{:.6}", self.pin.1)));
+        // A 1D master (line/connector: root shape carries Begin/End
+        // cells) gets XForm1D snapshots on the instance — a horizontal
+        // 1-inch line centered on the drop point — plus the derived
+        // XForm literals the renderer reads, exactly like Visio's
+        // instancing caches (GitHub #59).
+        let one_d = doc.master(self.master).is_some_and(|m| {
+            m.shapes
+                .iter()
+                .any(|s| s.sheet.cell("BeginX").is_some() && s.sheet.cell("EndX").is_some())
+        });
+        if one_d {
+            let (bx, ex) = (self.pin.0 - 0.5, self.pin.0 + 0.5);
+            let by = self.pin.1;
+            for (n, v) in [
+                ("BeginX", bx),
+                ("BeginY", by),
+                ("EndX", ex),
+                ("EndY", by),
+                ("Width", 1.0),
+                ("Height", 0.0),
+                ("LocPinX", 0.5),
+                ("LocPinY", 0.0),
+                ("Angle", 0.0),
+            ] {
+                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
+            }
+        }
         let shape = Shape {
             id,
             type_: Some("Shape".to_string()),
@@ -124,6 +152,344 @@ impl Command for AddMasterInstance {
             page.shapes.remove(pos);
         }
         Ok(())
+    }
+}
+
+/// Refresh a flattened group's inherited cell caches after a resize
+/// (GitHub #59). Visio instances carry `F='Inh'` snapshots of every
+/// formula-driven cell — sub-shape XForms, the Txt* block, Connection
+/// and Geometry row coordinates. Resizing only the top-level sheet
+/// leaves those caches at the old size, and the renderer (which treats
+/// caches as authoritative, like Visio at load) keeps composing the
+/// drawing at it: the selection box grows around a stale shape.
+/// Visio refreshes the caches when an edit changes what they evaluate
+/// to; this emits the same refresh as SetCell/SetRowCell commands,
+/// riding in the resize's Macro so one undo reverts everything.
+///
+/// The refresh re-derives each cache by **evaluating the master's
+/// formula at the instance's new dims** (`vsdx::model::instance_env`,
+/// the same environment the renderer's master mirroring uses) — which
+/// sees through User-cell indirections like `TxtPinX =
+/// GUARD(User.TxtPinX)` where `User.TxtPinX = Width/2` (the substring
+/// heuristic that scaled caches before could not, and the icon/text
+/// drifted as the shape grew). Refreshed cells keep `F='Inh'`, so a
+/// later resize refreshes them again from the master's formula — no
+/// compounding staleness. Ratio scaling (the shape's own size ratio
+/// per axis) remains as the fallback when a formula cannot be
+/// evaluated; fixed formulas (`GUARD(4MM)` icons) evaluate to their
+/// constant and stay put. Cells with a real local formula (GUARD,
+/// functions) are never touched — they re-evaluate, they don't cache.
+pub fn group_cache_refresh(
+    doc: &Document,
+    page: i64,
+    shape: i64,
+    kx: f64,
+    ky: f64,
+) -> Vec<Box<dyn dc_core::Command>> {
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let Some(root) = vsdx::model::find_shape_by_id(&p.shapes, shape) else {
+        return Vec::new();
+    };
+    // Instance environments at the current (pre-resize) and new group
+    // dims: the master root's layout formulas — including User.*
+    // indirections — re-evaluate against them (instance User overrides
+    // such as ShapeLayout win; cached F='Inh' User rows do not).
+    let master_root = doc.instance_source(root, &[]);
+    let dim = |n: &str| {
+        doc.resolve_cell(root, &[], n)
+            .and_then(|c| c.numeric())
+            .filter(|v| v.is_finite() && *v > 1e-9)
+    };
+    let (old_w, old_h) = (dim("Width").unwrap_or(1.0), dim("Height").unwrap_or(1.0));
+    let (env_old, env_new) = match &master_root {
+        Some(m) => (
+            Some(vsdx::model::instance_env(m, root, old_w, old_h)),
+            Some(vsdx::model::instance_env(m, root, old_w * kx, old_h * ky)),
+        ),
+        None => (None, None),
+    };
+    let mut cmds = Vec::new();
+    walk(
+        root,
+        root,
+        page,
+        true,
+        doc,
+        env_old.as_ref(),
+        env_new.as_ref(),
+        (kx, ky),
+        &mut cmds,
+    );
+    cmds
+}
+
+/// One (cell name, axis) pair: the axis variable whose mention in the
+/// master's formula marks the value as proportional (ratio fallback).
+const X_CELLS: &[&str] = &[
+    "PinX",
+    "Width",
+    "LocPinX",
+    "TxtPinX",
+    "TxtWidth",
+    "TxtLocPinX",
+];
+const Y_CELLS: &[&str] = &[
+    "PinY",
+    "Height",
+    "LocPinY",
+    "TxtPinY",
+    "TxtHeight",
+    "TxtLocPinY",
+];
+
+/// Does the master's formula for `name` make the value proportional to
+/// the axis? `None` = no master cell at all (nothing inherited).
+fn scales_with(mcell: Option<&vsdx::model::Cell>, axis: &str) -> Option<bool> {
+    let c = mcell?;
+    Some(match c.f.as_deref() {
+        Some(f) if f != "Inh" => f.contains(axis),
+        // No formula on the master cell: XForm/Txt cells are literal
+        // local values (size-independent); geometry row cells are
+        // proportional by the renderer's convention (handled by the
+        // caller passing `literal_proportional`).
+        _ => false,
+    })
+}
+
+/// The master cell's formula when it is a real (evaluable) one.
+fn real_formula(cell: Option<&vsdx::model::Cell>) -> Option<&str> {
+    cell.and_then(|c| c.f.as_deref())
+        .filter(|f| *f != "Inh" && *f != "No Formula")
+}
+
+/// Evaluate a master-source cell's formula in `env`.
+fn eval_in(cell: Option<&vsdx::model::Cell>, env: &vsdx::formula::Env) -> Option<f64> {
+    let f = real_formula(cell)?;
+    vsdx::formula::eval(f, env)
+        .ok()
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+}
+
+/// A refreshed inherited cache: the new value under a preserved
+/// `F='Inh'`, so the next resize refreshes it from the master's
+/// formula again instead of meeting a frozen literal.
+fn cached(v: f64) -> Cell {
+    Cell {
+        v: Some(format!("{v:.6}")),
+        f: Some("Inh".into()),
+        ..Cell::default()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    root: &Shape,
+    sh: &Shape,
+    page: i64,
+    is_root: bool,
+    doc: &Document,
+    env_old: Option<&vsdx::formula::Env>,
+    env_new: Option<&vsdx::formula::Env>,
+    (kx, ky): (f64, f64),
+    cmds: &mut Vec<Box<dyn dc_core::Command>>,
+) {
+    // The inheritance source for this shape's cells: the master's
+    // corresponding shape (the root's master root, a sub's master sub).
+    let chain: Vec<&Shape> = vec![root];
+    let source = doc.instance_source(sh, &chain);
+
+    // The environment this shape's source cells evaluate in, and the
+    // per-axis size ratio for the fallback path. Root cells evaluate in
+    // the root env (bare Width/Height are the group's own); sub cells
+    // in a child env — qualified root entries only, seeded with the
+    // sub's own effective size (a bare name in a child formula means
+    // the child's own cell, `vsdx::model::qualified_env`).
+    let mut cell_env: Option<vsdx::formula::Env> = None;
+    let mut ratio = (kx, ky);
+    if is_root {
+        cell_env = env_new.cloned();
+    } else if let (Some(src), Some(eo), Some(en)) = (source, env_old, env_new) {
+        let qo = vsdx::model::qualified_env(eo);
+        let mut qn = vsdx::model::qualified_env(en);
+        // The sub's effective size at the old/new dims: its master
+        // formulas re-evaluated (`GUARD(4MM)` stays fixed, a
+        // `Sheet.N!Width*1` container stretches with the group).
+        let eff = |name: &str, env: &vsdx::formula::Env, own: Option<f64>| {
+            eval_in(src.sheet.cell(name), env)
+                .filter(|v| *v > 1e-9)
+                .or(own)
+        };
+        let own = |n: &str| sh.sheet.cell(n).and_then(|c| c.numeric());
+        let w_old = eff("Width", &qo, own("Width"));
+        let h_old = eff("Height", &qo, own("Height"));
+        let w_new = eff("Width", &qn, w_old.map(|v| v * kx));
+        let h_new = eff("Height", &qn, h_old.map(|v| v * ky));
+        ratio = (
+            match (w_old, w_new) {
+                (Some(a), Some(b)) if a > 1e-9 => b / a,
+                _ => kx,
+            },
+            match (h_old, h_new) {
+                (Some(a), Some(b)) if a > 1e-9 => b / a,
+                _ => ky,
+            },
+        );
+        if let (Some(w), Some(h)) = (w_new, h_new) {
+            qn.insert("Width".into(), w);
+            qn.insert("Height".into(), h);
+        }
+        cell_env = Some(qn);
+    }
+
+    for (names, axis) in [(X_CELLS, "Width"), (Y_CELLS, "Height")] {
+        for name in names {
+            // The root's own XForm cells are written by the resize
+            // itself; only its Txt* block is cache-refreshed.
+            if is_root && !name.starts_with("Txt") {
+                continue;
+            }
+            let Some(cell) = sh.sheet.cell(name) else {
+                continue;
+            };
+            if cell.f.as_deref() != Some("Inh") {
+                continue;
+            }
+            let Some(v) = cell.numeric() else { continue };
+            let scope = Scope::Shape { page, shape: sh.id };
+            // Authoritative path: re-evaluate the master's formula at
+            // the instance's new dims.
+            if let Some(env) = cell_env.as_ref() {
+                if let Some(nv) = source.and_then(|src| eval_in(src.sheet.cell(name), env)) {
+                    cmds.push(Box::new(SetCell::new(scope, *name, cached(nv))));
+                    // Seed the derived text sizes so later TxtLocPin
+                    // formulas (`TxtWidth*0.5`) evaluate too.
+                    if is_root && matches!(*name, "TxtWidth" | "TxtHeight") {
+                        if let Some(env) = cell_env.as_mut() {
+                            env.insert((*name).to_string(), nv);
+                        }
+                    }
+                    continue;
+                }
+            }
+            // Fallback: ratio scaling, gated by the axis mention in the
+            // master's formula (a fixed formula keeps its value).
+            // LocPin follows the shape's own size: evaluation already
+            // handled indirect size formulas here, so this gate only
+            // keeps ratio scaling off a fixed-size shape's LocPin.
+            if name.starts_with("LocPin") || name.starts_with("TxtLocPin") {
+                let tsize = if name.starts_with("Txt") {
+                    format!("Txt{axis}")
+                } else {
+                    axis.to_string()
+                };
+                let size_scales = source
+                    .and_then(|src| scales_with(src.sheet.cell(&tsize), axis))
+                    .unwrap_or(true);
+                if !size_scales {
+                    continue;
+                }
+            }
+            let proportional = source
+                .and_then(|src| scales_with(src.sheet.cell(name), axis))
+                .unwrap_or(true);
+            if !proportional {
+                continue;
+            }
+            let k = if axis == "Width" { ratio.0 } else { ratio.1 };
+            cmds.push(Box::new(SetCell::new(scope, *name, cached(v * k))));
+        }
+    }
+    // Row coordinates (Geometry, Connection): X/A/C follow Width,
+    // Y/B/D follow Height — by formula evaluation when the master row
+    // has one, else by the shape's own size ratio (a master cell
+    // without a formula is proportional by the renderer's convention).
+    if let Some(source) = source {
+        const ROW_X: &[&str] = &["X", "A", "C"];
+        const ROW_Y: &[&str] = &["Y", "B", "D"];
+        for (own_secs, src_secs) in [
+            (
+                sh.sheet.sections_named("Geometry"),
+                source.sheet.sections_named("Geometry"),
+            ),
+            (
+                sh.sheet.sections_named("Connection"),
+                source.sheet.sections_named("Connection"),
+            ),
+        ] {
+            for (si, sec) in own_secs.iter().enumerate() {
+                let src_sec = src_secs.get(si);
+                for row in &sec.rows {
+                    use dc_core::commands::RowSel;
+                    let sel = match &row.n {
+                        Some(n) => RowSel::Named(n.clone()),
+                        None => RowSel::Ix(row.ix),
+                    };
+                    let src_row = src_sec.and_then(|ss| {
+                        ss.rows.iter().find(|r| match &sel {
+                            RowSel::Ix(ix) => r.ix == *ix,
+                            RowSel::Named(n) => r.n.as_deref() == Some(n.as_str()),
+                        })
+                    });
+                    for (name, axis) in ROW_X
+                        .iter()
+                        .map(|n| (*n, "Width"))
+                        .chain(ROW_Y.iter().map(|n| (*n, "Height")))
+                    {
+                        let Some(cell) = row.cell(name) else { continue };
+                        if cell.f.as_deref() != Some("Inh") {
+                            continue;
+                        }
+                        let Some(v) = cell.numeric() else { continue };
+                        let scope = Scope::Shape { page, shape: sh.id };
+                        if let Some(env) = cell_env.as_ref() {
+                            if let Some(nv) = src_row.and_then(|r| eval_in(r.cell(name), env)) {
+                                cmds.push(Box::new(dc_core::commands::SetRowCell::new(
+                                    scope,
+                                    &sec.name,
+                                    sec.ix,
+                                    sel.clone(),
+                                    name,
+                                    cached(nv),
+                                )));
+                                continue;
+                            }
+                        }
+                        let proportional = src_row
+                            .and_then(|r| real_formula(r.cell(name)))
+                            .map(|f| f.contains(axis))
+                            .unwrap_or(true);
+                        if !proportional {
+                            continue;
+                        }
+                        let k = if axis == "Width" { ratio.0 } else { ratio.1 };
+                        cmds.push(Box::new(dc_core::commands::SetRowCell::new(
+                            scope,
+                            &sec.name,
+                            sec.ix,
+                            sel.clone(),
+                            name,
+                            cached(v * k),
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    for sub in &sh.sub_shapes {
+        walk(
+            root,
+            sub,
+            page,
+            false,
+            doc,
+            env_old,
+            env_new,
+            (kx, ky),
+            cmds,
+        );
     }
 }
 
