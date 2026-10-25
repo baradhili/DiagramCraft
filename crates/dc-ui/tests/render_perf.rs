@@ -295,8 +295,9 @@ fn render_perf_stage_split() {
         report("resize commit (mutation frame)", &perf::diff(&mid, &perf::snapshot()), t.elapsed());
 
         // --- zoom bucket: a fresh harness mounted at 200% pays the new
-        //     bucket's raster (same work a mid-session bucket change
-        //     pays: same version, new bucket → parse+render+upload) ---
+        // bucket's raster (same work a mid-session bucket change
+        // pays: same version, new bucket → render+upload only, the
+        // parsed tree is reused) ---
         let mut app = App::with_doc(&path);
         app.set_zoom_for_test(2.0);
         perf::reset();
@@ -305,6 +306,22 @@ fn render_perf_stage_split() {
         h2.run();
         h2.run();
         report("open at 200% zoom (new bucket raster)", &perf::snapshot(), t.elapsed());
+
+        // --- zoom sweep (#91): one harness, several bucket crossings
+        //     without a model change — the tree cache must show ONE
+        //     svg build + parse (the warm-up) and a render per bucket,
+        //     never a parse per bucket ---
+        let mut app = App::with_doc(&path);
+        let mut h3 = mount(app);
+        h3.run();
+        h3.run(); // warm the tree at the fit zoom
+        let base = perf::snapshot();
+        let t = Instant::now();
+        for &z in &[1.25f32, 1.5, 1.75, 2.0] {
+            h3.state_mut().set_zoom_for_test(z);
+            h3.run();
+        }
+        report("zoom sweep x4 buckets (tree reuse)", &perf::diff(&base, &perf::snapshot()), t.elapsed());
     }
     println!("\n(done)");
 }
