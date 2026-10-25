@@ -127,6 +127,8 @@ pub struct App {
     layers: crate::layers::ShapeLayers,
     /// Test-only: force the Info thumbnail's render to fail (#58).
     info_render_fail_for_test: bool,
+    /// Live drag ghosts drawn on the last frame (#96, test hook).
+    last_drag_ghosts: usize,
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
@@ -335,6 +337,7 @@ impl App {
             pool: crate::rasterpool::RasterPool::default(),
             layers: crate::layers::ShapeLayers::default(),
             info_render_fail_for_test: false,
+            last_drag_ghosts: 0,
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
@@ -1054,23 +1057,6 @@ impl App {
         ))
     }
 
-    fn drag_preview_rect(&self) -> Option<Rect> {
-        let d = self.drag.as_ref()?;
-        let ed = self.ed()?;
-        let (page_id, sel_shape) = self.sel?;
-        if page_id != self.page_id()? || d.shape != sel_shape {
-            return None;
-        }
-        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
-        let shape = vsdx::model::find_shape_by_id(&page.shapes, d.shape)?;
-        let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
-        let geom = self.page_geom();
-        let (dx, dy) = (d.last_pin.0 - x, d.last_pin.1 - y);
-        Some(Rect::from_min_size(
-            Pos2::new((x + dx) as f32, (geom.h_in - y - h - dy) as f32),
-            Vec2::new(w as f32, h as f32),
-        ))
-    }
 
     // -- interaction ------------------------------------------------------
 
@@ -3560,8 +3546,76 @@ impl App {
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
-        let drag_rect = self.drag_preview_rect();
-        let handles = self.selection_handles();
+        // Live move feedback (#96): during a moved drag the dragged
+        // shapes' static layers are suppressed and ghosted at the live
+        // position — Visio moves the shape under the cursor for the
+        // whole gesture, and a move ghost is a quad translation, never
+        // a re-raster (the #93 O(0)-move guarantee holds).
+        let mut drag_fx = canvas::DragFx::default();
+        let mut hide_layers: Vec<i64> = Vec::new();
+        let mut live_drag = false;
+        if let Some(d) = self.drag.as_ref().filter(|d| d.moved) {
+            if self.sel.is_some_and(|(p, _)| Some(p) == self.page_id()) {
+                live_drag = true;
+                // y-up pin delta → y-down bbox delta flips y.
+                let (dx, dy) = (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                let mut ids: Vec<i64> = vec![d.shape];
+                ids.extend(d.group.iter().copied());
+                let ed = self.ed.as_ref().unwrap();
+                let page = &ed.doc.pages[self.page_idx];
+                for id in ids {
+                    hide_layers.push(id);
+                    match self.layers.quad_for(id) {
+                        Some(q) => {
+                            let bbox = (q.bbox.0 + dx, q.bbox.1 - dy, q.bbox.2, q.bbox.3);
+                            drag_fx.ghosts.push(crate::layers::ShapeQuad { id, tex: q.tex, bbox });
+                            // The primary carries its selection frame
+                            // along (Visio keeps the outline on the
+                            // moving shape).
+                            if id == d.shape {
+                                let tl = canvas::page_to_screen(
+                                    bbox.0,
+                                    geom.h_in - bbox.1,
+                                    &self.view,
+                                    &geom,
+                                );
+                                let br = canvas::page_to_screen(
+                                    bbox.0 + bbox.2,
+                                    geom.h_in - (bbox.1 + bbox.3),
+                                    &self.view,
+                                    &geom,
+                                );
+                                drag_fx.outlines.push(Rect::from_two_pos(tl, br));
+                            }
+                        }
+                        None => {
+                            // Texture still rasterizing (or a sub-shape
+                            // selection): a dashed outline at the live
+                            // position keeps the gesture visible.
+                            if let Some(shape) =
+                                vsdx::model::find_shape_by_id(&page.shapes, id)
+                            {
+                                if let Some((x, y, w, h)) =
+                                    Self::shape_rect_static(&ed.doc, page.id, shape)
+                                {
+                                    let tl = canvas::page_to_screen(x + dx, y + h + dy, &self.view, &geom);
+                                    let br = canvas::page_to_screen(x + w + dx, y + dy, &self.view, &geom);
+                                    drag_fx.outlines.push(Rect::from_two_pos(tl, br));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.last_drag_ghosts = drag_fx.ghosts.len();
+        // The moved selection frame follows the gesture; static chrome
+        // (frame, members, handles) hides while it moves (Visio look).
+        let (sel_rect, extra_rects, handles) = if live_drag {
+            (None, Vec::new(), Vec::new())
+        } else {
+            (sel_rect, extra_rects, self.selection_handles())
+        };
         let armed = self.stencil.armed.is_some();
         // #90/#91/#92: the page SVG is built by the cache's miss
         // closure — only when the (part, version, ppi-bucket) texture
@@ -3579,7 +3633,7 @@ impl App {
         // positions through the normal group transforms, the same
         // content the scoped monolith drew. `render_page_with` stays
         // the export/print path (and the Info thumbnail's).
-        let (quads, layer_status) = {
+        let (mut quads, layer_status) = {
             let ed = self.ed.as_ref().unwrap();
             let page = &ed.doc.pages[self.page_idx];
             // Viewport (visible page rect, y-down inches) from the
@@ -3614,6 +3668,7 @@ impl App {
         if let Some(msg) = layer_status {
             self.status = msg;
         }
+        quads.retain(|q| !hide_layers.contains(&q.id));
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -3640,7 +3695,7 @@ impl App {
             sel_rect,
             &extra_rects,
             &handles,
-            drag_rect,
+            &drag_fx,
             armed,
             &hit,
             &mut mouse,
@@ -5904,6 +5959,12 @@ impl App {
     #[doc(hidden)]
     pub fn debug_layer_tex_id_for_test(&self, shape_id: i64) -> Option<egui::TextureId> {
         self.layers.tex_id_for_test(shape_id)
+    }
+
+    /// kittest: how many live drag ghosts the last frame drew (#96).
+    #[doc(hidden)]
+    pub fn debug_drag_ghosts_for_test(&self) -> usize {
+        self.last_drag_ghosts
     }
 
     /// kittest: how many shape layers have landed (#93) — the post cap

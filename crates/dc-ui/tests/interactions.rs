@@ -2692,3 +2692,57 @@ fn shape_data_dialog_close_dismisses() {
         "the Shape Data window closed on Close"
     );
 }
+
+// ------------------------------------------------------------------
+// GitHub #96: live drag feedback.
+
+/// During a move drag the shape itself follows the cursor — live
+/// layer ghosts, never a re-raster — replacing the old dashed-only
+/// preview (which drew at inch coordinates as pixels and was
+/// invisible). The ghost must disappear when the release commits the
+/// move exactly where the ghost showed.
+#[test]
+fn drag_moves_the_shape_live_under_the_cursor() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (master, _) = h.state().debug_master_cells()[0];
+    let (page, shape) = place_master(&mut h, master);
+    h.run();
+    // Select the placed shape (placement may not carry selection).
+    let r = h.state().debug_shape_screen_rect(shape).expect("placed");
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_sel().map(|(p, s)| (p, s)), Some((page, shape)));
+    let from = r.center();
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(b(from, true));
+    h.run(); // press frame arms the drag
+    h.hover_at(from + egui::vec2(60.0, -40.0));
+    h.run(); // mid-gesture frame
+    assert_eq!(
+        h.state().debug_drag_ghosts_for_test(),
+        1,
+        "the dragged shape must ghost live under the cursor (#96)"
+    );
+    ctx_menu_snapshot(&mut h, "dc_ui_drag_live_feedback");
+    h.event(b(from + egui::vec2(60.0, -40.0), false));
+    h.run();
+    assert_eq!(
+        h.state().debug_drag_ghosts_for_test(),
+        0,
+        "ghosts vanish once the release commits"
+    );
+    let r2 = h.state().debug_shape_screen_rect(shape).expect("after move");
+    assert!(
+        (r2.center().x - (from.x + 60.0)).abs() <= 1.5
+            && (r2.center().y - (from.y - 40.0)).abs() <= 1.5,
+        "the shape must land where the ghost showed: {:?} vs {:?}",
+        r2.center(),
+        from + egui::vec2(60.0, -40.0)
+    );
+}

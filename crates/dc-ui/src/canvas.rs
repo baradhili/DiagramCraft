@@ -181,6 +181,22 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
     )
 }
 
+/// Live drag feedback (#96) — drawn above the layers, under nothing:
+/// ghost layer quads (moved/stretched textures; a move preview is a
+/// quad translation, never a re-raster), dashed screen-space outline
+/// fallbacks (also used for the moved selection frame), and live 1D
+/// line previews. Default/empty = no drag in progress.
+#[derive(Default)]
+pub struct DragFx {
+    /// Layer textures at their live positions (page bbox space).
+    pub ghosts: Vec<crate::layers::ShapeQuad>,
+    /// Dashed outlines (screen px) — texture-missing fallbacks and the
+    /// selection frame following the gesture.
+    pub outlines: Vec<Rect>,
+    /// Live 1D endpoint previews (screen px segment).
+    pub lines: Vec<(Pos2, Pos2)>,
+}
+
 /// Draw the whole canvas area (fills `ui`).
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -191,7 +207,7 @@ pub fn show(
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
     handles: &[Handle],       // grab points for the primary selection
-    drag_rect: Option<Rect>,  // preview while dragging (screen already applied)
+    drag: &DragFx,           // live gesture feedback (#96)
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
@@ -538,9 +554,158 @@ pub fn show(
     }
 
     // Drag preview.
-    if let Some(dr) = drag_rect {
+    // Live drag feedback (#96): ghost layer quads at their live
+    // positions (same mapping as the static layers), dashed outline
+    // fallbacks, and live 1D endpoint previews. Visio moves the shape
+    // under the cursor for the whole gesture; the old dashed-only
+    // preview also drew at INCH coordinates as pixels — invisible.
+    let quad_to_screen = |q: &crate::layers::ShapeQuad| {
+        let tl = page_to_screen(q.bbox.0, page.h_in - q.bbox.1, view, page);
+        let br = page_to_screen(
+            q.bbox.0 + q.bbox.2,
+            page.h_in - (q.bbox.1 + q.bbox.3),
+            view,
+            page,
+        );
+        Rect::from_two_pos(tl, br)
+    };
+    let draw_ghost = |q: &crate::layers::ShapeQuad| {
+        p.image(
+            q.tex,
+            quad_to_screen(q),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    };
+    // Handle-drag previews are computed here (the gesture state —
+    // armed handle, pointer, handles — lives in this scope); the app
+    // supplies the move-drag ghosts through `drag`.
+    let mut outlines: Vec<Rect> = drag.outlines.clone();
+    let mut lines: Vec<(Pos2, Pos2)> = drag.lines.clone();
+    let mut handle_ghosts: Vec<crate::layers::ShapeQuad> = Vec::new();
+    if let (Some(hid), Some(ptr)) = (
+        armed_handle,
+        ui.input(|i| i.pointer.interact_pos()),
+    ) {
+        let ptr_page = screen_to_page(ptr, view, page); // y-up inches
+        let ptr_y_down = page.h_in - ptr_page.1;
+        // The primary's landed layer quad (matched by bbox center —
+        // the ink bbox and the selection rect share it).
+        let primary_quad = sel_rect.and_then(|sr| {
+            let (cx, cy) = (sr.center().x as f64, sr.center().y as f64);
+            layers.iter().find(|q| {
+                (q.bbox.0 + q.bbox.2 / 2.0 - cx).abs() < 0.1
+                    && (q.bbox.1 + q.bbox.3 / 2.0 - cy).abs() < 0.1
+            })
+        });
+        match hid {
+            HandleId::Corner(c) => {
+                if let Some(sr) = sel_rect {
+                    let (mut x0, mut y0, mut x1, mut y1) = (
+                        sr.left() as f64,
+                        sr.top() as f64,
+                        sr.right() as f64,
+                        sr.bottom() as f64,
+                    );
+                    match c {
+                        Corner::TopLeft => {
+                            x0 = ptr_page.0;
+                            y0 = ptr_y_down;
+                        }
+                        Corner::TopRight => {
+                            x1 = ptr_page.0;
+                            y0 = ptr_y_down;
+                        }
+                        Corner::BottomLeft => {
+                            x0 = ptr_page.0;
+                            y1 = ptr_y_down;
+                        }
+                        Corner::BottomRight => {
+                            x1 = ptr_page.0;
+                            y1 = ptr_y_down;
+                        }
+                    }
+                    // Keep a sane minimum size, anchored at the still
+                    // corner.
+                    if x1 - x0 < 0.05 {
+                        if matches!(c, Corner::TopLeft | Corner::BottomLeft) {
+                            x0 = x1 - 0.05;
+                        } else {
+                            x1 = x0 + 0.05;
+                        }
+                    }
+                    if y1 - y0 < 0.05 {
+                        if matches!(c, Corner::TopLeft | Corner::TopRight) {
+                            y0 = y1 - 0.05;
+                        } else {
+                            y1 = y0 + 0.05;
+                        }
+                    }
+                    let target = Rect::from_min_max(
+                        Pos2::new(x0 as f32, y0 as f32),
+                        Pos2::new(x1 as f32, y1 as f32),
+                    );
+                    outlines.push(to_screen(target));
+                    if let Some(q) = primary_quad {
+                        handle_ghosts.push(crate::layers::ShapeQuad {
+                            id: q.id,
+                            tex: q.tex,
+                            bbox: (x0, y0, x1 - x0, y1 - y0),
+                        });
+                    }
+                }
+            }
+            HandleId::LineBegin | HandleId::LineEnd => {
+                // Live line: the OTHER endpoint stays put, this one
+                // follows the cursor (Visio stretches the segment).
+                let other = if matches!(hid, HandleId::LineBegin) {
+                    HandleId::LineEnd
+                } else {
+                    HandleId::LineBegin
+                };
+                if let Some((_, o)) = handles_screen.iter().find(|(id, _)| *id == other) {
+                    lines.push((*o, ptr));
+                }
+            }
+            HandleId::LineMid => {
+                // Translate the shape by the gesture delta, like a move.
+                let start = ui.ctx().memory(|m| m.data.get_temp::<Pos2>(mem_start));
+                if let Some(st) = start {
+                    let st_page = screen_to_page(st, view, page);
+                    let (dx, dy) = (
+                        (ptr_page.0 - st_page.0) as f32,
+                        -(ptr_page.1 - st_page.1) as f32,
+                    );
+                    if let Some(q) = primary_quad {
+                        handle_ghosts.push(crate::layers::ShapeQuad {
+                            id: q.id,
+                            tex: q.tex,
+                            bbox: (
+                                q.bbox.0 + dx as f64,
+                                q.bbox.1 + dy as f64,
+                                q.bbox.2,
+                                q.bbox.3,
+                            ),
+                        });
+                    }
+                    if let Some(sr) = sel_rect {
+                        outlines.push(to_screen(sr.translate(Vec2::new(dx, dy))));
+                    }
+                }
+            }
+        }
+    }
+    for q in drag.ghosts.iter().chain(handle_ghosts.iter()) {
+        draw_ghost(q);
+    }
+    {
         let dashed = Stroke::new(1.2, t.selection);
-        p.rect_stroke(dr, 0.0, dashed, egui::StrokeKind::Middle);
+        for r in &outlines {
+            p.rect_stroke(*r, 0.0, dashed, egui::StrokeKind::Middle);
+        }
+        for (a, b) in &lines {
+            p.line_segment([*a, *b], Stroke::new(1.4, t.selection));
+        }
     }
 
     // Marquee (live rubber band while selecting on empty page).

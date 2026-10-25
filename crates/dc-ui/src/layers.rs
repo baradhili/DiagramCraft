@@ -33,6 +33,8 @@ use std::collections::HashMap;
 /// page coordinates (inches, y-down viewBox space — `canvas::show`
 /// maps it to the screen).
 pub struct ShapeQuad {
+    /// The top-level shape id (drag feedback suppresses/ghosts by id).
+    pub id: i64,
     pub tex: TextureId,
     pub bbox: (f64, f64, f64, f64),
 }
@@ -153,6 +155,18 @@ impl ShapeLayers {
                 Some(format!("layer {id}: {e:#}"))
             }
         }
+    }
+
+    /// The landed quad for a shape — the drag feedback ghosts these
+    /// (#96): a move preview is the texture translated, no re-raster.
+    pub fn quad_for(&self, id: i64) -> Option<ShapeQuad> {
+        let e = self.entries.get(&id)?;
+        let tex = e.tex.as_ref()?;
+        Some(ShapeQuad {
+            id,
+            tex: tex.id(),
+            bbox: self.bboxes.get(&id).copied()?,
+        })
     }
 
     /// kittest (#93): the layer texture id for a shape, if landed.
@@ -322,6 +336,7 @@ impl ShapeLayers {
             // keeps showing (scaled) until the new raster lands.
             if let Some(tex) = entry.tex.as_ref() {
                 quads.push(ShapeQuad {
+                    id: shape.id,
                     tex: tex.id(),
                     bbox,
                 });
