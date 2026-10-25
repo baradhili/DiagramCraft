@@ -150,7 +150,11 @@ fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> Strin
     out
 }
 
-pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
+pub fn rasterize(
+    svg: &str,
+    target_width: f32,
+    kind: crate::perf::Kind,
+) -> anyhow::Result<ColorImage> {
     let db = font_db();
     let opts = resvg::usvg::Options {
         fontdb: db.clone(),
@@ -161,9 +165,17 @@ pub fn rasterize(svg: &str, target_width: f32) -> anyhow::Result<ColorImage> {
         font_family: "Carlito".to_string(),
         ..Default::default()
     };
-    let resolved = resolve_font_families(svg, &db);
-    let tree = resvg::usvg::Tree::from_str(&resolved, &opts)
-        .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
+    let resolved = {
+        let _s = crate::perf::span(crate::perf::Stage::Resolve(kind));
+        resolve_font_families(svg, &db)
+    };
+    let tree = {
+        let _s = crate::perf::span(crate::perf::Stage::Parse(kind));
+        resvg::usvg::Tree::from_str(&resolved, &opts)
+    }
+    .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))?;
+    // The raster half: pixmap alloc, transform, render, RGBA copy.
+    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
     let size = tree.size();
     let aspect = size.height().max(1e-3) / size.width().max(1e-3);
     let w = target_width.ceil().clamp(1.0, MAX_TEX as f32) as u32;
@@ -203,12 +215,15 @@ impl TextureCache {
         let bucket = (px_per_in * 4.0).round().max(4.0) as u32; // ±0.25 ppi
         let key = (key_part.to_string(), version, bucket);
         if !self.map.contains_key(&key) {
-            let image = rasterize(svg, page_w_in as f32 * px_per_in)?;
-            let tex = ctx.load_texture(
-                format!("page-{key_part}-{version}"),
-                image,
-                TextureOptions::LINEAR,
-            );
+            let image = rasterize(svg, page_w_in as f32 * px_per_in, crate::perf::Kind::Page)?;
+            let tex = {
+                let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Page));
+                ctx.load_texture(
+                    format!("page-{key_part}-{version}"),
+                    image,
+                    TextureOptions::LINEAR,
+                )
+            };
             self.map.insert(key.clone(), tex);
         }
         // Keep at most a few live entries per page; drop stale versions.
@@ -318,9 +333,9 @@ mod tests {
             format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
         let explicit = format!(r#"{head} font-family="Carlito"{tail}"#);
         let bare = format!(r#"{head}{tail}"#);
-        let a = rasterize(&doc_chain, 200.0).unwrap();
-        let b = rasterize(&explicit, 200.0).unwrap();
-        let c = rasterize(&bare, 200.0).unwrap();
+        let a = rasterize(&doc_chain, 200.0, crate::perf::Kind::Page).unwrap();
+        let b = rasterize(&explicit, 200.0, crate::perf::Kind::Page).unwrap();
+        let c = rasterize(&bare, 200.0, crate::perf::Kind::Page).unwrap();
         assert_eq!(a.size, b.size);
         assert_eq!(a.pixels, b.pixels, "resolved chain == explicit Carlito");
         assert_eq!(a.pixels, c.pixels, "no-family default == Carlito");

@@ -119,7 +119,7 @@ pub fn texture(ctx: &Context, name: &'static str, color: Color32) -> Option<Text
         return Some(t);
     }
     let tinted = tint(source, color);
-    let img = crate::svgimg::rasterize(&tinted, ICON_PX).ok()?;
+    let img = crate::svgimg::rasterize(&tinted, ICON_PX, crate::perf::Kind::Icon).ok()?;
     let handle = ctx.load_texture(format!("icon-{name}"), img, egui::TextureOptions::LINEAR);
     ctx.memory_mut(|m| {
         m.data

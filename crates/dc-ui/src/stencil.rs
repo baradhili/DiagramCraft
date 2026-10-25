@@ -249,14 +249,20 @@ impl Stencil {
             return tex.1.clone();
         }
         let m = ed.doc.master(master_id).expect("master exists");
-        let svg = svg::render_master(&ed.doc, m).unwrap_or_default();
-        let img = svgimg::rasterize(&svg, 64.0)
+        let svg = {
+            let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Thumb));
+            svg::render_master(&ed.doc, m).unwrap_or_default()
+        };
+        let img = svgimg::rasterize(&svg, 64.0, crate::perf::Kind::Thumb)
             .unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
-        let tex = ctx.load_texture(
-            format!("master-{master_id}"),
-            img,
-            egui::TextureOptions::LINEAR,
-        );
+        let tex = {
+            let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Thumb));
+            ctx.load_texture(
+                format!("master-{master_id}"),
+                img,
+                egui::TextureOptions::LINEAR,
+            )
+        };
         self.textures.push((master_id, tex.clone()));
         tex
     }

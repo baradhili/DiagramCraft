@@ -3429,7 +3429,11 @@ impl App {
         let (svg, part) = {
             let ed = self.ed.as_ref().unwrap();
             let page = &ed.doc.pages[self.page_idx];
-            match dc::svg::render_page_with(&ed.doc, page, &hidden) {
+            let svg = {
+                let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
+                dc::svg::render_page_with(&ed.doc, page, &hidden)
+            };
+            match svg {
                 Ok(s) => (s, page.part.clone()),
                 Err(e) => {
                     ui.label(format!("render failed: {e:#}"));
@@ -6155,6 +6159,7 @@ impl eframe::App for App {
 impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
+        let _frame = crate::perf::span(crate::perf::Stage::Frame);
         let ctx = ui.ctx().clone();
         // OS theme flips (GitHub #52): the watcher thread re-probes the
         // OS preference on its period; switch the active style slot when
