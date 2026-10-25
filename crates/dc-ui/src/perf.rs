@@ -39,9 +39,8 @@ pub enum Stage {
 }
 
 const SLOTS: usize = 1 + 5 * 3;
-const ZERO: AtomicU64 = AtomicU64::new(0);
-static COUNT: [AtomicU64; SLOTS] = [ZERO; SLOTS];
-static NS: [AtomicU64; SLOTS] = [ZERO; SLOTS];
+static COUNT: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
+static NS: [AtomicU64; SLOTS] = [const { AtomicU64::new(0) }; SLOTS];
 
 fn kind_idx(kind: Kind) -> usize {
     match kind {

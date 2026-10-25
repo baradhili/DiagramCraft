@@ -1918,15 +1918,23 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button, and the menu shows Ungroup
-    // right below Group — take the topmost "…Group…" row in the menu
-    // (below the ribbon bands).
+    // The ribbon also has a Group button — take the topmost "…Group…"
+    // row in the menu (below the ribbon bands). GitHub #78: that row is
+    // the Group ▸ flyout parent; the action lives in its submenu.
     let group_row = h
         .get_all_by_label_contains("Group")
         .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
         .min_by_key(|n| n.rect().min.y as i64)
-        .expect("Group row in the context menu");
+        .expect("Group ▸ flyout row in the context menu");
     group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .find(|n| !menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Group item in the flyout submenu");
+    group_item.click();
     h.run();
     assert_eq!(h.state().debug_shape_count(), 1, "one top-level group");
     let (_, gid) = h.state().debug_sel().expect("group selected");

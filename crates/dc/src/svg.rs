@@ -202,6 +202,28 @@ pub fn render_page_with(
     page: &vsdx::Page,
     hidden: &[i64],
 ) -> anyhow::Result<String> {
+    render_page_opts(doc, page, hidden, None)
+}
+
+/// [`render_page_with`] restricted to one top-level shape's subtree —
+/// the GUI's group-edit mode (GitHub #78): every other top-level shape
+/// is skipped; the group renders with its members at their page
+/// positions through the normal group transforms.
+pub fn render_page_scoped(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+    only: i64,
+) -> anyhow::Result<String> {
+    render_page_opts(doc, page, hidden, Some(only))
+}
+
+fn render_page_opts(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+    only: Option<i64>,
+) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
 
@@ -236,10 +258,234 @@ pub fn render_page_with(
         if hidden_member(shape) {
             continue;
         }
+        if let Some(only) = only {
+            if shape.id != only {
+                continue;
+            }
+        }
         render_shape(doc, shape, h, &[], &page.part, &mut svg);
     }
     let _ = writeln!(svg, "</svg>");
     Ok(svg)
+}
+
+/// An SVG-order affine: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`
+/// (y-down SVG space; the composition order matches the `transform=`
+/// strings this module emits, so geometry derived here lands on the
+/// same pixels the renderer draws).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Affine {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub d: f64,
+    pub e: f64,
+    pub f: f64,
+}
+
+impl Affine {
+    pub const IDENTITY: Affine = Affine {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        e: 0.0,
+        f: 0.0,
+    };
+
+    fn translate(tx: f64, ty: f64) -> Affine {
+        Affine {
+            e: tx,
+            f: ty,
+            ..Affine::IDENTITY
+        }
+    }
+
+    /// SVG rotate(deg): clockwise on screen (y grows down).
+    fn rotate_deg(deg: f64) -> Affine {
+        let (s, c) = deg.to_radians().sin_cos();
+        Affine {
+            a: c,
+            b: s,
+            c: -s,
+            d: c,
+            ..Affine::IDENTITY
+        }
+    }
+
+    fn scale(sx: f64, sy: f64) -> Affine {
+        Affine {
+            a: sx,
+            d: sy,
+            ..Affine::IDENTITY
+        }
+    }
+
+    /// Matrix product `self · next` — `next` applies to points first.
+    /// This is the reading order of an SVG `transform="A B C"` list
+    /// (the leftmost matrix is the outermost).
+    fn then(&self, next: &Affine) -> Affine {
+        Affine {
+            a: self.a * next.a + self.c * next.b,
+            b: self.b * next.a + self.d * next.b,
+            c: self.a * next.c + self.c * next.d,
+            d: self.b * next.c + self.d * next.d,
+            e: self.a * next.e + self.c * next.f + self.e,
+            f: self.b * next.e + self.d * next.f + self.f,
+        }
+    }
+
+    pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            self.a * x + self.c * y + self.e,
+            self.b * x + self.d * y + self.f,
+        )
+    }
+
+    /// Inverse (undefined on singular matrices — callers use XForm
+    /// chains, which carry non-zero scales).
+    pub fn invert(&self) -> Affine {
+        let det = self.a * self.d - self.b * self.c;
+        let (a, b, c, d) = (
+            self.d / det,
+            -self.b / det,
+            -self.c / det,
+            self.a / det,
+        );
+        Affine {
+            a,
+            b,
+            c,
+            d,
+            e: -(a * self.e + c * self.f),
+            f: -(b * self.e + d * self.f),
+        }
+    }
+}
+
+/// The SVG-space affine the renderer composes for one level of the
+/// `chain` (root-first, from `render_shape`/`render_shape_local`): a
+/// top-level shape maps its local frame into page SVG space
+/// (y-down, origin top-left); a nested shape maps into its parent's
+/// local SVG frame with no flip scale of its own.
+fn level_affine(doc: &Document, chain: &[&Shape], idx: usize, page_h: f64) -> Affine {
+    let s = chain[idx];
+    let env = shape_env(doc, s, &chain[..=idx]);
+    let get = |n: &str| -> Option<f64> {
+        doc.resolve_cell(s, &chain[..=idx], n)
+            .and_then(|c| cell_num(&c, &env))
+    };
+    let width = get("Width").unwrap_or(1.0);
+    let height = get("Height").unwrap_or(1.0);
+    let (px, py) = (get("PinX").unwrap_or(0.0), get("PinY").unwrap_or(0.0));
+    let (lx, ly) = (
+        get("LocPinX").unwrap_or(width / 2.0),
+        get("LocPinY").unwrap_or(height / 2.0),
+    );
+    let deg = -get("Angle").unwrap_or(0.0).to_degrees();
+    let t = Affine::translate(px, if idx == 0 { page_h - py } else { -py }).then(&Affine::rotate_deg(
+        deg,
+    ));
+    // Flip scale exists only at the page root (group-local rendering
+    // applies no flip of its own).
+    let t = if idx == 0 {
+        let fx = if get("FlipX").unwrap_or(0.0) != 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        let fy = if get("FlipY").unwrap_or(0.0) != 0.0 {
+            -1.0
+        } else {
+            1.0
+        };
+        t.then(&Affine::scale(fx, fy))
+    } else {
+        t
+    };
+    t.then(&Affine::translate(-lx, ly))
+}
+
+/// The composed SVG-space affine mapping the LAST chain entry's
+/// PARENT-LOCAL frame to page SVG space: `T(root) · … · T(parent)`,
+/// the same nesting the renderer emits. An empty/root chain yields
+/// identity (a top-level shape's parent frame IS the page).
+fn ancestors_affine(doc: &Document, chain: &[&Shape], page_h: f64) -> Affine {
+    let mut m = Affine::IDENTITY;
+    for idx in 0..chain.len().saturating_sub(1) {
+        m = m.then(&level_affine(doc, chain, idx, page_h));
+    }
+    m
+}
+
+/// A shape's bounding box in PAGE coordinates (inches, y-up, origin
+/// bottom-left): the shape's parent-local rect mapped through the
+/// ancestor XForm chain — the same math the renderer composes, so
+/// hit-testing and selection frames land on the drawn pixels.
+/// `chain` is root-first and ends with the shape itself.
+pub fn shape_page_rect(
+    doc: &Document,
+    chain: &[&Shape],
+    page_h: f64,
+) -> Option<(f64, f64, f64, f64)> {
+    let s = *chain.last()?;
+    let env = shape_env(doc, s, chain);
+    let get = |n: &str| -> Option<f64> {
+        doc.resolve_cell(s, chain, n)
+            .and_then(|c| cell_num(&c, &env))
+    };
+    let (pin_x, pin_y) = (get("PinX")?, get("PinY")?);
+    let w = get("Width").unwrap_or(1.0);
+    let h = get("Height").unwrap_or(1.0);
+    let lx = get("LocPinX").unwrap_or(w / 2.0);
+    let ly = get("LocPinY").unwrap_or(h / 2.0);
+    let m = ancestors_affine(doc, chain, page_h);
+    // Parent-local y-up → SVG (y-down) → page y-up. With at least one
+    // ancestor group the parent frame is a group-local y-down frame
+    // (a y-up value enters it as -y); with none the parent frame IS
+    // the page, whose own SVG conversion applies on the way in.
+    let nested = chain.len() >= 2;
+    let corner = |x: f64, y: f64| -> (f64, f64) {
+        let iy = if nested { -y } else { page_h - y };
+        let (sx, sy) = m.apply(x, iy);
+        (sx, page_h - sy)
+    };
+    let pts = [
+        corner(pin_x - lx, pin_y - ly),
+        corner(pin_x - lx + w, pin_y - ly),
+        corner(pin_x - lx, pin_y - ly + h),
+        corner(pin_x - lx + w, pin_y - ly + h),
+    ];
+    let xs = pts.iter().map(|p| p.0);
+    let ys = pts.iter().map(|p| p.1);
+    let (min_x, max_x) = (
+        xs.clone().fold(f64::INFINITY, f64::min),
+        xs.fold(f64::NEG_INFINITY, f64::max),
+    );
+    let (min_y, max_y) = (
+        ys.clone().fold(f64::INFINITY, f64::min),
+        ys.fold(f64::NEG_INFINITY, f64::max),
+    );
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+/// Map a PAGE point (inches, y-up) into the last chain entry's
+/// PARENT-LOCAL y-up frame — the inverse of [`shape_page_rect`]'s
+/// mapping, used to write PinX/PinY of a nested shape during drags
+/// (a member's Pin cells are parent-local by definition).
+pub fn page_point_to_parent_local(
+    doc: &Document,
+    chain: &[&Shape],
+    page_h: f64,
+    p: (f64, f64),
+) -> (f64, f64) {
+    let inv = ancestors_affine(doc, chain, page_h).invert();
+    let (x, y) = inv.apply(p.0, page_h - p.1);
+    if chain.len() >= 2 {
+        (x, -y)
+    } else {
+        (x, page_h - y)
+    }
 }
 
 fn render_shape<'a>(
@@ -2797,5 +3043,128 @@ mod tests {
         let mut out = String::new();
         render_all_geometry(&doc, &inst, &[], 4.0, 0.5, &mut out);
         assert!(!out.contains("<path"), "cached NoShow must hide: {out}");
+    }
+
+    // ------------------------------------------------------------------
+    // Group XForm composition (GitHub #78): the affine helpers must
+    // reproduce the renderer's nested transform math exactly.
+
+    fn xform_shape(cells: &[(&str, f64)]) -> Shape {
+        let mut s = Shape::default();
+        for (n, v) in cells {
+            s.sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(format!("{v}")),
+                    ..Cell::default()
+                },
+            );
+        }
+        s
+    }
+
+    /// A member at parent-local Pin (1,1), 1×1: parent-local rect
+    /// (0.5, 0.5, 1, 1).
+    fn unit_member() -> Shape {
+        let mut m = xform_shape(&[]);
+        m.id = 10;
+        m
+    }
+
+    #[test]
+    fn member_page_rect_unrotated_group() {
+        // Group 2×4 at Pin (2,3), LocPin centered by default (W=4,H=2
+        // → LocPin (2,1)), on an 11-inch page. A member rect of
+        // (0.5,0.5,1,1) in group-local y-up maps to the same numbers
+        // in page space (translate-only: group-local (0..4, 0..2) ↔
+        // page (0..4, 2..4)).
+        let doc = Document::default();
+        let mut g = xform_shape(&[
+            ("PinX", 2.0),
+            ("PinY", 3.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+        ]);
+        g.id = 9;
+        g.type_ = Some("Group".into());
+        let mut m = unit_member();
+        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+            m.sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(v.to_string()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let chain = vec![&g, &m];
+        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((0.5, 2.5, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn member_page_rect_rotated_group() {
+        // The group rotated +90° (page CCW): a member at group-local
+        // (1,1) has offset (−1,0) from the LocPin (2,1); CCW rotation
+        // maps that to (0,−1), so the member center lands at page
+        // Pin(4,5)+(0,−1) = (4,4) and its axis-aligned unit rect is
+        // (3.5, 3.5, 1, 1).
+        let doc = Document::default();
+        let mut g = xform_shape(&[
+            ("PinX", 4.0),
+            ("PinY", 5.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+            ("Angle", std::f64::consts::FRAC_PI_2),
+        ]);
+        g.id = 9;
+        g.type_ = Some("Group".into());
+        let mut m = unit_member();
+        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+            m.sheet.set_cell(
+                n,
+                Cell {
+                    v: Some(v.to_string()),
+                    ..Cell::default()
+                },
+            );
+        }
+        let chain = vec![&g, &m];
+        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((3.5, 3.5, 1.0, 1.0)));
+    }
+
+    #[test]
+    fn page_point_round_trips_through_parent_local() {
+        let doc = Document::default();
+        let mut g = xform_shape(&[
+            ("PinX", 4.0),
+            ("PinY", 5.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+            ("Angle", std::f64::consts::FRAC_PI_2),
+        ]);
+        g.id = 9;
+        g.type_ = Some("Group".into());
+        let m = unit_member();
+        let chain = vec![&g, &m];
+        for p in [(5.0, 4.0), (0.0, 0.0), (7.5, 9.25)] {
+            let local = page_point_to_parent_local(&doc, &chain, 11.0, p);
+            let (sx, sy) = ancestors_affine(&doc, &chain, 11.0).apply(local.0, -local.1);
+            assert!((sx - p.0).abs() < 1e-9 && (11.0 - sy - p.1).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn top_level_rect_is_identity_composition() {
+        // A top-level shape's parent frame is the page: the affine is
+        // identity and shape_page_rect matches the plain local rect.
+        let doc = Document::default();
+        let s = xform_shape(&[
+            ("PinX", 3.0),
+            ("PinY", 4.0),
+            ("Width", 2.0),
+            ("Height", 1.0),
+        ]);
+        let chain = vec![&s];
+        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((2.0, 3.5, 2.0, 1.0)));
     }
 }

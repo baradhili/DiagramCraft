@@ -106,6 +106,11 @@ pub struct App {
     /// Multi-selection (marquee / shift-click); includes the primary.
     sel_set: Vec<(i64, i64)>,
     drag: Option<DragState>,
+    /// Group-edit mode (GitHub #78): stack of open group ids, outermost
+    /// first — `Open <name>` pushes, Esc/Close pops one level. View
+    /// state only (never written into the document); validated at the
+    /// top of `draw` so undo/ungroup/doc changes leave it coherent.
+    group_edit: Vec<i64>,
     stencil: Stencil,
     /// Stencil panel content rect from the last frame (resize-handle
     /// target for the kittest re-wrap tests).
@@ -314,6 +319,7 @@ impl App {
             sel: None,
             sel_set: Vec::new(),
             drag: None,
+            group_edit: Vec::new(),
             stencil: Stencil::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
@@ -457,6 +463,7 @@ impl App {
                 self.view = View::default();
                 self.page_idx = 0;
                 self.set_selection(None);
+                self.group_edit.clear();
                 self.stencil.armed = None;
                 self.tex.clear();
                 self.page_states.clear();
@@ -732,6 +739,7 @@ impl App {
         self.view = View::default();
         self.page_idx = 0;
         self.set_selection(None);
+        self.group_edit.clear();
         self.stencil = Stencil::default();
         self.tex.clear();
         self.page_states.clear();
@@ -839,9 +847,27 @@ impl App {
 
     // -- hit testing ------------------------------------------------------
 
-    /// AABB in page coords (inches, y-up): (x, y, w, h); rotation ignored.
+    /// AABB in page coords (inches, y-up): (x, y, w, h). Nested-aware
+    /// (#78): a top-level shape keeps its plain local rect (its parent
+    /// frame is the page); a group member maps its parent-local rect
+    /// through the renderer's XForm chain, so frames and hit boxes
+    /// land on the drawn pixels even under rotated/flipped groups.
     fn shape_rect(&self, doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
-        Self::shape_rect_static(doc, page_id, s)
+        let Ok(chain) = shape_chain(doc, page_id, s.id) else {
+            return Self::shape_rect_static(doc, page_id, s);
+        };
+        if chain.len() <= 1 {
+            return Self::shape_rect_static(doc, page_id, s);
+        }
+        let page_h = doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)?
+            .sheet()
+            .and_then(|sh| sh.cell("PageHeight"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(11.0);
+        dc::svg::shape_page_rect(doc, &chain, page_h)
     }
 
     /// Borrow-free bbox (page inches, y-up) for marquee gating.
@@ -859,6 +885,22 @@ impl App {
     fn shape_hit(&self, page_pos: (f64, f64)) -> Option<i64> {
         let ed = self.ed()?;
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        // Group-edit mode (#78): only the innermost open group's
+        // members are on the canvas — clicks resolve against them
+        // (nested-aware rects), never falling through to page shapes.
+        if let Some(g) = self.group_edit.last().copied() {
+            let group = vsdx::model::find_shape_by_id(&page.shapes, g)?;
+            let mut members = Vec::new();
+            collect_members(&group.sub_shapes, &mut members);
+            for m in members.iter().rev() {
+                if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, m) {
+                    if hit_in_rect(page_pos, x, y, w, h) {
+                        return Some(m.id);
+                    }
+                }
+            }
+            return None;
+        }
         for shape in page.shapes.iter().rev() {
             if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
                 if hit_in_rect(page_pos, x, y, w, h) {
@@ -911,6 +953,12 @@ impl App {
     /// handle at each endpoint plus the midpoint; everything else gets
     /// the four resize corners of its bounding box.
     fn selection_handles(&self) -> Vec<Handle> {
+        // Group-edit mode v1 (#78): resize/endpoint handles for nested
+        // members are deferred — the drag-move and edit paths work,
+        // but handle math through group transforms arrives separately.
+        if !self.group_edit.is_empty() {
+            return Vec::new();
+        }
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -1119,7 +1167,17 @@ impl App {
         };
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         let mut picked = Vec::new();
-        for shape in page.shapes.iter() {
+        // Group-edit mode (#78): the marquee selects among the open
+        // group's members only.
+        let mut members = Vec::new();
+        if let Some(g) = self.group_edit.last().copied() {
+            if let Some(group) = vsdx::model::find_shape_by_id(&page.shapes, g) {
+                collect_members(&group.sub_shapes, &mut members);
+            }
+        } else {
+            members.extend(page.shapes.iter());
+        }
+        for shape in members {
             if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
                 // Both the shape rect and the marquee rect (from
                 // canvas::screen_to_page) are y-up page inches.
@@ -1591,6 +1649,23 @@ impl App {
         };
         let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
             return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        // A group member's Pin cells are PARENT-LOCAL (#78): convert
+        // the page-space drag target into the member's parent frame
+        // through the same XForm chain the renderer composes.
+        let new_pin = if chain.len() >= 2 {
+            let page_h = ed
+                .doc
+                .pages
+                .iter()
+                .find(|p| p.id == page_id)
+                .and_then(|p| p.sheet())
+                .and_then(|s| s.cell("PageHeight"))
+                .and_then(|c| c.numeric())
+                .unwrap_or(11.0);
+            dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, new_pin)
+        } else {
+            new_pin
         };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let Some(((bx, by), (ex, ey), (px, py))) = get("BeginX")
@@ -3426,12 +3501,60 @@ impl App {
                 }
             }
         }
+        // Group-edit breadcrumb bar (#78): "Page ▸ <Group> ▸ …" with a
+        // Close Group control — Visio shows the path in the group
+        // window's title; v1 pins a slim bar above the canvas. Esc
+        // pops one level (the same close semantics as Visio's window).
+        if !self.group_edit.is_empty() {
+            let names: Vec<String> = self
+                .group_edit
+                .iter()
+                .map(|gid| {
+                    self.ed()
+                        .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                        .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, *gid))
+                        .and_then(|s| s.name_u.clone())
+                        .unwrap_or_else(|| format!("Group.{gid}"))
+                })
+                .collect();
+            let mut pop = false;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Page › {}", names.join(" › ")))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                if ui.small_button("× Close Group").clicked() {
+                    pop = true;
+                }
+            });
+            if pop {
+                self.group_edit.pop();
+            }
+            // Esc pops one level (after the text editor and any open
+            // menu had their chance — those consume the key first).
+            if self.drag.is_none()
+                && self.text_edit.is_none()
+                && self.ctx_menu.is_none()
+                && ui
+                    .ctx()
+                    .input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                self.group_edit.pop();
+            }
+        }
         let (svg, part) = {
             let ed = self.ed.as_ref().unwrap();
             let page = &ed.doc.pages[self.page_idx];
             let svg = {
                 let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
-                dc::svg::render_page_with(&ed.doc, page, &hidden)
+                // Group-edit mode (#78): render only the innermost open
+                // group's subtree — the members in isolation, at their
+                // page positions through the normal group transforms.
+                match self.group_edit.last() {
+                    Some(g) => dc::svg::render_page_scoped(&ed.doc, page, &hidden, *g),
+                    None => dc::svg::render_page_with(&ed.doc, page, &hidden),
+                }
             };
             match svg {
                 Ok(s) => (s, page.part.clone()),
@@ -5088,6 +5211,8 @@ impl App {
             Master(usize),
             Group,
             Ungroup,
+            /// Enter the selected group's edit mode (#78).
+            OpenGroup(i64),
             Container,
             Hyperlink,
             AddComment,
@@ -5259,24 +5384,51 @@ impl App {
                 act = Some(Act::FlipH);
             }
             ui.separator();
-            // Group needs a multi-selection; Ungroup needs a selected
-            // group (#26).
+            // Group ▸ is a flyout (Visio 2016, #78): Group/Ungroup live
+            // inside it, plus Open <name> to enter group-edit mode.
+            // Group needs a multi-selection; Ungroup/Open need a
+            // selected group (#26).
             let can_group = self.sel_set.len() >= 2;
-            let is_group = self
+            let selected_group = self
                 .ed()
                 .and_then(|ed| ed.doc.pages.get(self.page_idx))
                 .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
-                .is_some_and(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
-            if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
-                act = Some(Act::Group);
-            }
-            if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
-                act = Some(Act::Ungroup);
-            }
+                .filter(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
+            let is_group = selected_group.is_some();
+            let group_label = selected_group
+                .and_then(|s| s.name_u.clone())
+                .unwrap_or_else(|| format!("Group.{shape_id}"));
+            // The flyout parent row: drawn directly so we own its
+            // Response for Popup::menu (the Container ▸ pattern).
+            let tokens = theme::menu_tokens(ui.visuals());
+            let mut group_job = egui::text::LayoutJob::default();
+            group_job.append(
+                "  Group  ›",
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
+            );
+            let group_row = ui.add_enabled(
+                true,
+                egui::Button::new(group_job)
+                    .min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
+            );
+            egui::Popup::menu(&group_row)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(210.0);
+                    if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
+                        act = Some(Act::Group);
+                    }
+                    if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
+                        act = Some(Act::Ungroup);
+                    }
+                    if ctx_item(ui, None, &format!("Open {group_label}"), "", is_group) {
+                        act = Some(Act::OpenGroup(shape_id));
+                    }
+                });
             // Container is a flyout, not an action (Visio 2016): the
             // parent row only opens the submenu. Anchor: draw the row
             // directly so we own its Response for Popup::menu.
-            let tokens = theme::menu_tokens(ui.visuals());
             let mut job = egui::text::LayoutJob::default();
             job.append(
                 "  Container  ›",
@@ -5391,6 +5543,24 @@ impl App {
                 if let Some(m) = first_member {
                     self.set_selection(Some((page_id, m)));
                 }
+            }
+            Act::OpenGroup(gid) => {
+                // Enter (or deepen) group-edit mode (#78): view state
+                // only — members keep editing through the same commands,
+                // one undo each, as on the page.
+                if !self.group_edit.contains(&gid) {
+                    self.group_edit.push(gid);
+                }
+                let name = self.ed().and_then(|ed| {
+                    ed.doc.pages.get(self.page_idx).and_then(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, gid)
+                            .and_then(|s| s.name_u.clone())
+                    })
+                });
+                self.status = format!(
+                    "Opened group {} — Esc or Close Group to return",
+                    name.unwrap_or_else(|| format!("Group.{gid}"))
+                );
             }
             Act::Cut | Act::Copy => {
                 self.copy_selection();
@@ -5566,6 +5736,11 @@ impl App {
     }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
+    }
+    /// The open group-edit stack, outermost first (#78).
+    #[doc(hidden)]
+    pub fn debug_group_edit(&self) -> Vec<i64> {
+        self.group_edit.clone()
     }
     #[doc(hidden)]
     pub fn debug_sel_set(&self) -> Vec<(i64, i64)> {
@@ -6160,6 +6335,22 @@ impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
         let _frame = crate::perf::span(crate::perf::Stage::Frame);
+        // Group-edit stack coherence (#78): drop open levels that no
+        // longer resolve to a Group on the active page (ungroup, undo,
+        // page switch, document change — one check covers them all).
+        if !self.group_edit.is_empty() {
+            let page_groups = |id: i64| -> bool {
+                self.ed()
+                    .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                    .map(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, id)
+                            .is_some_and(|s| s.type_.as_deref() == Some("Group"))
+                    })
+                    .unwrap_or(false)
+            };
+            let ok = self.group_edit.iter().copied().take_while(|id| page_groups(*id)).count();
+            self.group_edit.truncate(ok);
+        }
         let ctx = ui.ctx().clone();
         // OS theme flips (GitHub #52): the watcher thread re-probes the
         // OS preference on its period; switch the active style slot when
@@ -7109,6 +7300,15 @@ fn master_size(doc: &Document, id: i64) -> (f64, f64) {
 fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
     const PAD: f64 = 0.04; // inches
     pos.0 >= x - PAD && pos.0 <= x + w + PAD && pos.1 >= y - PAD && pos.1 <= y + h + PAD
+}
+
+/// Every shape of a subtree, document (z) order, recursive (#78):
+/// the group-edit mode's hit-test and marquee candidate set.
+fn collect_members<'a>(shapes: &'a [Shape], out: &mut Vec<&'a Shape>) {
+    for s in shapes {
+        out.push(s);
+        collect_members(&s.sub_shapes, out);
+    }
 }
 
 /// Whether a Protection-section flag (`LockWidth`, `LockHeight`,
