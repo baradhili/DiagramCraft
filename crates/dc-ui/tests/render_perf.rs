@@ -308,3 +308,34 @@ fn render_perf_stage_split() {
     }
     println!("\n(done)");
 }
+
+/// #90 regression: once the (page, version, ppi-bucket) texture exists,
+/// idle frames must add ZERO page-pipeline work — no SVG build, no
+/// resolve/parse/render, no upload. Before #90 the page SVG was
+/// serialized unconditionally every frame and thrown away on the cache
+/// hit; the counters make that contract checkable headlessly.
+#[test]
+fn idle_frames_skip_the_page_pipeline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = many_shape_fixture(tmp.path(), 40, 4);
+    let mut h = mount(App::with_doc(&path));
+    h.run();
+    h.run(); // let the fit/zoom and textures settle
+    let base = perf::snapshot();
+    for _ in 0..20 {
+        h.run();
+    }
+    let d = perf::diff(&base, &perf::snapshot());
+    for s in &d {
+        if s.stage.starts_with("page/") {
+            assert_eq!(
+                s.count, 0,
+                "{} ran {}× across 20 idle cached frames",
+                s.stage, s.count
+            );
+        }
+    }
+    // And the frames really happened (the harness painted 20 times).
+    let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap();
+    assert_eq!(frames, 20);
+}

@@ -3543,11 +3543,28 @@ impl App {
                 self.group_edit.pop();
             }
         }
-        let (svg, part) = {
-            let ed = self.ed.as_ref().unwrap();
-            let page = &ed.doc.pages[self.page_idx];
-            let svg = {
+        let part = self.ed.as_ref().unwrap().doc.pages[self.page_idx].part.clone();
+        let geom = self.page_geom();
+        let sel_rect = self.sel_page_rect();
+        let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
+        let drag_rect = self.drag_preview_rect();
+        let handles = self.selection_handles();
+        let armed = self.stencil.armed.is_some();
+        // #90: the page SVG is built by the cache's miss closure — only
+        // when the (part, version, ppi-bucket) texture is actually
+        // missing. An idle/hover/drag frame with a valid texture never
+        // serializes the page; a render failure surfaces here (and is
+        // retried next frame, since failures are not cached).
+        let tex = self.tex.get(
+            ui.ctx(),
+            geom.w_in,
+            &part.replace('/', "_"),
+            self.version,
+            self.view.px_per_in(),
+            || {
                 let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
+                let ed = self.ed.as_ref().unwrap();
+                let page = &ed.doc.pages[self.page_idx];
                 // Group-edit mode (#78): render only the innermost open
                 // group's subtree — the members in isolation, at their
                 // page positions through the normal group transforms.
@@ -3555,33 +3572,12 @@ impl App {
                     Some(g) => dc::svg::render_page_scoped(&ed.doc, page, &hidden, *g),
                     None => dc::svg::render_page_with(&ed.doc, page, &hidden),
                 }
-            };
-            match svg {
-                Ok(s) => (s, page.part.clone()),
-                Err(e) => {
-                    ui.label(format!("render failed: {e:#}"));
-                    return;
-                }
-            }
-        };
-        let geom = self.page_geom();
-        let sel_rect = self.sel_page_rect();
-        let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
-        let drag_rect = self.drag_preview_rect();
-        let handles = self.selection_handles();
-        let armed = self.stencil.armed.is_some();
-        let tex = self.tex.get(
-            ui.ctx(),
-            &svg,
-            geom.w_in,
-            &part.replace('/', "_"),
-            self.version,
-            self.view.px_per_in(),
+            },
         );
         let tex = match tex {
             Ok(t) => t.clone(),
             Err(e) => {
-                ui.label(format!("raster failed: {e:#}"));
+                ui.label(format!("render failed: {e:#}"));
                 return;
             }
         };
@@ -6811,8 +6807,11 @@ impl App {
                             // Live thumbnail of the active page (#58):
                             // the same render → rasterize → texture pipeline
                             // the stencil pane uses, cached per (page,
-                            // version) so any edit refreshes it.
-                            let (thumb_svg, thumb_w_in, thumb_h_in, thumb_part) = {
+                            // version) so any edit refreshes it. The SVG
+                            // itself is built lazily by the cache's miss
+                            // closure (#90) — an open Info tab no longer
+                            // re-serializes the page every frame.
+                            let (thumb_w_in, thumb_h_in, thumb_part) = {
                                 let ed = self.ed.as_ref().unwrap();
                                 let page = &ed.doc.pages
                                     [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
@@ -6822,13 +6821,7 @@ impl App {
                                         .and_then(|c| c.numeric())
                                         .unwrap_or(0.0)
                                 };
-                                let svg = if self.info_render_fail_for_test {
-                                    None
-                                } else {
-                                    dc::svg::render_page(&ed.doc, page).ok()
-                                };
                                 (
-                                    svg,
                                     n("PageWidth").max(0.1),
                                     n("PageHeight").max(0.1),
                                     page.part.clone(),
@@ -6870,18 +6863,24 @@ impl App {
                                     Stroke::new(1.0, t.ribbon_group),
                                     egui::StrokeKind::Middle,
                                 );
-                                if let Some(svg) = thumb_svg.as_deref() {
+                                if !self.info_render_fail_for_test {
                                     // ~192 px wide, aspect-true: the raster
                                     // derives its height from the page.
                                     let ppi = (img_w / thumb_w_in) as f32;
                                     let key = format!("info-{}", thumb_part.replace('/', "_"));
                                     if let Ok(tex) = self.tex.get(
                                         ui.ctx(),
-                                        svg,
                                         thumb_w_in,
                                         &key,
                                         self.version,
                                         ppi,
+                                        || {
+                                            let ed = self.ed.as_ref().unwrap();
+                                            let page = &ed.doc.pages[self
+                                                .page_idx
+                                                .min(ed.doc.pages.len().saturating_sub(1))];
+                                            dc::svg::render_page(&ed.doc, page)
+                                        },
                                     ) {
                                         let ir = Rect::from_min_size(
                                             r.min + Vec2::new(8.0, 8.0),

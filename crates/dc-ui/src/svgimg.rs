@@ -203,19 +203,27 @@ pub struct TextureCache {
 }
 
 impl TextureCache {
+    /// Raster for `(key_part, version, px_per_in)`, building the SVG via
+    /// `build_svg` ONLY on a cache miss (#90): the cache — not the
+    /// caller — decides when the page is serialized, so an idle/hover/
+    /// drag frame with a valid texture pays one hashmap lookup instead
+    /// of a full-page `render_page_with`. The closure runs at most once
+    /// per key, never per frame; a failed build inserts nothing, so the
+    /// next frame retries it.
     pub fn get(
         &mut self,
         ctx: &Context,
-        svg: &str,
         page_w_in: f64,
         key_part: &str,
         version: u64,
         px_per_in: f32,
+        mut build_svg: impl FnMut() -> anyhow::Result<String>,
     ) -> anyhow::Result<&TextureHandle> {
         let bucket = (px_per_in * 4.0).round().max(4.0) as u32; // ±0.25 ppi
         let key = (key_part.to_string(), version, bucket);
         if !self.map.contains_key(&key) {
-            let image = rasterize(svg, page_w_in as f32 * px_per_in, crate::perf::Kind::Page)?;
+            let svg = build_svg()?;
+            let image = rasterize(&svg, page_w_in as f32 * px_per_in, crate::perf::Kind::Page)?;
             let tex = {
                 let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Page));
                 ctx.load_texture(
@@ -352,5 +360,61 @@ mod tests {
         let db = font_db();
         assert_eq!(installed_family(&db, "Arial").as_deref(), Some("Arial"));
         assert_eq!(installed_family(&db, "Calibri").as_deref(), Some("Calibri"));
+    }
+
+    /// A minimal parseable page: usvg needs a size to derive the raster
+    /// height from.
+    fn tiny_svg() -> anyhow::Result<String> {
+        Ok(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="red"/></svg>"#.into())
+    }
+
+    /// #90: the build closure runs at most once per cache key — repeated
+    /// `get`s with the same (part, version, ppi bucket) pay only the
+    /// lookup, and only a version bump, bucket change, other page, or
+    /// eviction of the stale version builds again. A failed build must
+    /// not be cached (the next frame retries).
+    #[test]
+    fn build_closure_runs_once_per_key() {
+        use std::cell::Cell;
+        let ctx = Context::default();
+        let mut cache = TextureCache::default();
+        // The closure owns the counter (Cell so asserts can read it
+        // between calls).
+        let calls = Cell::new(0u32);
+        let mut build = || {
+            calls.set(calls.get() + 1);
+            tiny_svg()
+        };
+        // Same key three times — the third inside the same ±0.25 ppi
+        // bucket — one build.
+        for &ppi in &[96.0f32, 96.0, 96.05] {
+            cache.get(&ctx, 4.0, "page1", 1, ppi, &mut build).unwrap();
+        }
+        assert_eq!(calls.get(), 1, "cached gets must not rebuild the SVG");
+        // Version bump → rebuild.
+        cache.get(&ctx, 4.0, "page1", 2, 96.0, &mut build).unwrap();
+        assert_eq!(calls.get(), 2);
+        // New ppi bucket → rebuild.
+        cache.get(&ctx, 4.0, "page1", 2, 300.0, &mut build).unwrap();
+        assert_eq!(calls.get(), 3);
+        // Another page part builds under its own key.
+        cache.get(&ctx, 4.0, "page2", 2, 300.0, &mut build).unwrap();
+        assert_eq!(calls.get(), 4);
+        // The v1 page1 entry was evicted by the retain on the v2 get, so
+        // asking for it again rebuilds (eviction policy unchanged, #90).
+        cache.get(&ctx, 4.0, "page1", 1, 96.0, &mut build).unwrap();
+        assert_eq!(calls.get(), 5);
+        // A failed build inserts nothing: the very next get retries.
+        let mut failing = || -> anyhow::Result<String> {
+            calls.set(calls.get() + 1);
+            Err(anyhow::anyhow!("boom"))
+        };
+        assert!(cache.get(&ctx, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert!(cache.get(&ctx, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert_eq!(calls.get(), 7, "failed builds are not cached");
+        assert!(
+            cache.id_for("badpage", 1, 96.0).is_none(),
+            "no texture may exist for a failed build"
+        );
     }
 }
