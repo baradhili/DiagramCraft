@@ -121,6 +121,10 @@ pub struct App {
     /// `draw`'s pool drain (see `svgimg::force_sync_raster_for_tests`
     /// for the kittest determinism seam).
     pool: crate::rasterpool::RasterPool,
+    /// Per-shape canvas layers (#93): one quad per top-level shape
+    /// subtree, composited in z-order; commits dirty only the touched
+    /// shape (`dc_core::Touch` routed in `apply`/`do_undo`/`do_redo`).
+    layers: crate::layers::ShapeLayers,
     /// Test-only: force the Info thumbnail's render to fail (#58).
     info_render_fail_for_test: bool,
     mouse_page: Option<(f64, f64)>,
@@ -329,6 +333,7 @@ impl App {
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
             pool: crate::rasterpool::RasterPool::default(),
+            layers: crate::layers::ShapeLayers::default(),
             info_render_fail_for_test: false,
             mouse_page: None,
             status: String::new(),
@@ -521,10 +526,11 @@ impl App {
     fn apply<C: dc_core::Command + 'static>(&mut self, cmd: C) {
         if let Some(ed) = self.ed_mut() {
             match ed.apply(cmd) {
-                Ok(label) => {
+                Ok((label, touched)) => {
                     self.status = label;
                     self.dirty = true;
-                    self.version += 1;
+                    self.version += 1; // Info thumbnail (whole page)
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                 }
                 Err(e) => self.status = format!("{e:#}"),
             }
@@ -534,10 +540,11 @@ impl App {
     fn do_undo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.undo() {
-                Ok(Some(l)) => {
+                Ok(Some((l, touched))) => {
                     self.status = format!("undo: {l}");
                     self.dirty = true;
                     self.version += 1;
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                     self.set_selection(None);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
@@ -700,10 +707,11 @@ impl App {
     fn do_redo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.redo() {
-                Ok(Some(l)) => {
+                Ok(Some((l, touched))) => {
                     self.status = format!("redo: {l}");
                     self.dirty = true;
                     self.version += 1;
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                 }
                 Ok(None) => self.status = "nothing to redo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -3549,7 +3557,6 @@ impl App {
                 self.group_edit.pop();
             }
         }
-        let part = self.ed.as_ref().unwrap().doc.pages[self.page_idx].part.clone();
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
@@ -3563,33 +3570,50 @@ impl App {
         // its natural white paper (canvas::show's None path); a render
         // failure surfaces as the error label (and is retried next
         // frame, since failures are not cached).
-        let tex = self.tex.get(
-            ui.ctx(),
-            &mut self.pool,
-            geom.w_in,
-            &part.replace('/', "_"),
-            self.version,
-            self.view.px_per_in(),
-            || {
-                let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
-                let ed = self.ed.as_ref().unwrap();
-                let page = &ed.doc.pages[self.page_idx];
-                // Group-edit mode (#78): render only the innermost open
-                // group's subtree — the members in isolation, at their
-                // page positions through the normal group transforms.
-                match self.group_edit.last() {
-                    Some(g) => dc::svg::render_page_scoped(&ed.doc, page, &hidden, *g),
-                    None => dc::svg::render_page_with(&ed.doc, page, &hidden),
-                }
-            },
-        );
-        let tex = match tex {
-            Ok(t) => t.cloned(),
-            Err(e) => {
-                ui.label(format!("render failed: {e:#}"));
-                return;
-            }
+        // #93: per-shape layers replace the one-page texture. Each
+        // top-level shape subtree is its own layer (same SVG backend
+        // walk, viewBox scoped to its ink bounds), rasterized on the
+        // #92 pool and composited in z-order; only the shapes a
+        // command touched ever re-render. Group-edit mode (#78)
+        // composites only the open group's layer — its subtree at page
+        // positions through the normal group transforms, the same
+        // content the scoped monolith drew. `render_page_with` stays
+        // the export/print path (and the Info thumbnail's).
+        let (quads, layer_status) = {
+            let ed = self.ed.as_ref().unwrap();
+            let page = &ed.doc.pages[self.page_idx];
+            // Viewport (visible page rect, y-down inches) from the
+            // last frame's canvas rect — whole page until it exists.
+            let vp = if self.canvas_rect.is_positive() {
+                let (x0, y0) =
+                    canvas::screen_to_page(self.canvas_rect.left_top(), &self.view, &geom);
+                let (x1, y1) =
+                    canvas::screen_to_page(self.canvas_rect.right_bottom(), &self.view, &geom);
+                let y0 = geom.h_in - y0; // → y-down viewBox space
+                let y1 = geom.h_in - y1;
+                (
+                    x0.min(x1),
+                    y0.min(y1),
+                    (x1 - x0).abs(),
+                    (y1 - y0).abs(),
+                )
+            } else {
+                (0.0, 0.0, geom.w_in, geom.h_in)
+            };
+            self.layers.composite(
+                ui.ctx(),
+                &mut self.pool,
+                &ed.doc,
+                page,
+                self.view.px_per_in(),
+                vp,
+                self.group_edit.last().copied(),
+                &hidden,
+            )
         };
+        if let Some(msg) = layer_status {
+            self.status = msg;
+        }
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -3612,7 +3636,7 @@ impl App {
             ui,
             view,
             &geom,
-            tex.as_ref(),
+            &quads,
             sel_rect,
             &extra_rects,
             &handles,
@@ -5865,14 +5889,28 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// kittest: the live page texture id at the current zoom (#92) —
-    /// `None` while the first raster is still on a worker.
+    /// kittest: the first top-level shape's layer texture id (#92/#93)
+    /// — `None` while its first raster is still on a worker.
     #[doc(hidden)]
     pub fn debug_page_tex_id_for_test(&self) -> Option<egui::TextureId> {
         let ed = self.ed.as_ref()?;
         let page = ed.doc.pages.get(self.page_idx)?;
-        let key = page.part.replace('/', "_");
-        self.tex.id_for(&key, self.version, self.view.px_per_in())
+        let first = page.shapes.first()?;
+        self.layers.tex_id_for_test(first.id)
+    }
+
+    /// kittest: one shape's layer texture id (#93) — stable across a
+    /// pure move (the texture is translation-invariant).
+    #[doc(hidden)]
+    pub fn debug_layer_tex_id_for_test(&self, shape_id: i64) -> Option<egui::TextureId> {
+        self.layers.tex_id_for_test(shape_id)
+    }
+
+    /// kittest: how many shape layers have landed (#93) — the post cap
+    /// keeps the first frame from rasterizing the whole page inline.
+    #[doc(hidden)]
+    pub fn debug_layer_count_for_test(&self) -> usize {
+        self.layers.landed_count_for_test()
     }
 
     /// kittest: how many stencil master thumbnails have landed (#92).
@@ -6382,6 +6420,13 @@ impl App {
                 }
                 crate::rasterpool::RasterKey::Thumb(id) => {
                     self.stencil.on_thumb_done(ui.ctx(), id, done.image);
+                }
+                crate::rasterpool::RasterKey::Shape { page, id } => {
+                    if let Some(msg) =
+                        self.layers.on_shape_done(ui.ctx(), page, id, done.image)
+                    {
+                        self.status = msg;
+                    }
                 }
             }
         }

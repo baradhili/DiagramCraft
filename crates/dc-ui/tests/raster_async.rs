@@ -189,60 +189,121 @@ fn pump_until(h: &mut Harness<'_, App>, mut f: impl FnMut(&App) -> bool, what: &
     }
 }
 
-/// The async contract of #92, in one sequential flow (one fn: the perf
-/// counters are process-global, so parallel tests would smear them).
+/// The async contract of #92/#93, in one sequential flow (one fn: the
+/// perf counters are process-global, so parallel tests would smear
+/// them).
 #[test]
 fn rasters_run_off_thread_and_land_on_later_frames() {
     let tmp = tempfile::tempdir().unwrap();
 
-    // --- Phase 1: a large drawing's open does not block on the page
-    //     raster. 1200 shapes make the parse take seconds — far beyond
-    //     the first run's layout passes — so the absence below is a
-    //     structural guarantee (completions land at frame start), not
-    //     a timing race. ---
+    // --- Phase 1: a large drawing's open does not block on any page
+    //     raster (#92). Completions only land at a frame's drain, so
+    //     after the first step the layers are absent regardless of
+    //     worker speed — a structural guarantee, not a timing race. ---
     let path = fixture(tmp.path(), 1200, 4);
     let mut h = mount(App::with_doc(&path));
     h.step();
+    // The post cap makes this deterministic: at most a few dozen small
+    // layer jobs can land inside one step (a pre-#92 inline render
+    // would have the WHOLE page done).
+    let landed = h.state().debug_layer_count_for_test();
     assert!(
-        h.state().debug_page_tex_id_for_test().is_none(),
-        "first paint must not carry the page raster (#92)"
+        landed < 1200,
+        "first step rasterized all {landed} layers — nothing should run inline/serially"
     );
     pump_until(
         &mut h,
         |a| a.debug_page_tex_id_for_test().is_some(),
-        "the page texture to land",
+        "the first layer to land",
     );
-    // Exactly one page parse across open + zoom-settle: the tree came
-    // back from the worker and bucket re-renders reused it (#91).
-    let parses = perf::snapshot()
+    // No whole-page parse ever runs (#93): every page/parse call is a
+    // per-shape layer — a monolith parse of this document costs ~half
+    // a second; nothing here may come close.
+    let parse = perf::snapshot()
         .into_iter()
         .find(|s| s.stage == "page/parse")
-        .map(|s| s.count)
-        .unwrap_or(0);
-    assert_eq!(parses, 1, "one parse even though buckets changed");
+        .map(|s| (s.count, s.ns))
+        .unwrap_or((0, 0));
+    assert!(parse.0 > 0, "layers did rasterize");
+    let mean_ms = parse.1 as f64 / parse.0 as f64 / 1e6;
+    assert!(
+        mean_ms < 50.0,
+        "mean page/parse {mean_ms:.1}ms — a whole-page parse ran"
+    );
     // The stencil pane (4 masters here) also filled in off-thread.
     pump_until(
         &mut h,
         |a| a.debug_stencil_thumb_count_for_test() == 4,
         "all stencil thumbnails",
     );
+    // Quiesce the page fill before the move measurement: the O(0)
+    // claim below is about the MOVE, not the tail of the fill.
+    pump_until(
+        &mut h,
+        |a| a.debug_layer_count_for_test() == 1200,
+        "all 1200 layers to land",
+    );
+
+    // --- #93 acceptance: a committed MOVE re-renders nothing. Drag
+    //     shape 1 (page center) and drop it elsewhere; the layer
+    //     texture is translation-invariant, so the SAME texture id
+    //     keeps showing and no serialize/parse/render runs. ---
+    let tex_before = h.state().debug_layer_tex_id_for_test(1).expect("layer 1");
+    let center = h.state().debug_canvas_rect().center();
+    let before = perf::snapshot();
+    h.hover_at(center);
+    h.event(egui::Event::PointerButton {
+        pos: center,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.hover_at(center + egui::vec2(40.0, -30.0));
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: center + egui::vec2(40.0, -30.0),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    let d = perf::diff(&before, &perf::snapshot());
+    for s in &d {
+        if s.stage == "page/svg" || s.stage == "page/parse" || s.stage == "page/render" {
+            assert_eq!(
+                s.count, 0,
+                "{} ran {}× for a pure move — moves must be O(0) (#93)",
+                s.stage, s.count
+            );
+        }
+    }
+    let tex_after = h
+        .state()
+        .debug_layer_tex_id_for_test(1)
+        .expect("layer 1 after move");
+    assert_eq!(
+        tex_before, tex_after,
+        "a move must keep the layer texture (translation-invariant ink)"
+    );
     drop(h); // joins the pool's workers
 
-    // --- Phase 2: a 40-master stencil pane populates progressively —
+    // --- Phase 2: a 100-master stencil pane populates progressively —
     //     the per-frame post cap keeps the first run from rasterizing
-    //     every master at once (the pre-#92 serial burst). ---
+    //     every master at once (the pre-#92 serial burst; 100 > cap ×
+    //     the step's layout passes, so the stagger is deterministic). ---
     perf::reset();
-    let path = fixture(tmp.path(), 20, 40);
+    let path = fixture(tmp.path(), 20, 100);
     let mut h = mount(App::with_doc(&path));
     h.step();
     let after_first = h.state().debug_stencil_thumb_count_for_test();
     assert!(
-        after_first < 40,
-        "first run textured {after_first}/40 masters — the cap should stagger them"
+        after_first < 100,
+        "first run textured {after_first}/100 masters — the cap should stagger them"
     );
     pump_until(
         &mut h,
-        |a| a.debug_stencil_thumb_count_for_test() == 40,
-        "all 40 thumbnails",
+        |a| a.debug_stencil_thumb_count_for_test() == 100,
+        "all 100 thumbnails",
     );
 }

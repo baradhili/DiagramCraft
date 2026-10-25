@@ -187,7 +187,7 @@ pub fn show(
     ui: &mut Ui,
     view: &mut View,
     page: &PageGeom,
-    page_tex: Option<&egui::TextureHandle>,
+    layers: &[crate::layers::ShapeQuad],
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
     handles: &[Handle],       // grab points for the primary selection
@@ -408,9 +408,23 @@ pub fn show(
         Stroke::new(1.0, t.page_edge),
         egui::StrokeKind::Middle,
     );
-    if let Some(tex) = page_tex {
-        let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        p.image(tex.id(), out.page_rect, uv, Color32::WHITE);
+    // Per-shape layers (#93), z-order = model order: each quad is the
+    // layer texture at its bounds (y-down viewBox inches —
+    // page_to_screen flips to its y-up convention).
+    for q in layers {
+        let tl = page_to_screen(q.bbox.0, page.h_in - q.bbox.1, view, page);
+        let br = page_to_screen(
+            q.bbox.0 + q.bbox.2,
+            page.h_in - (q.bbox.1 + q.bbox.3),
+            view,
+            page,
+        );
+        p.image(
+            q.tex,
+            Rect::from_two_pos(tl, br),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 
     // Grid (5 mm spacing in display units).

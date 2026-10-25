@@ -62,7 +62,7 @@ pub fn run(file: &Path, out: &Path, args: EditArgs) -> Result<()> {
     apply_all(&mut ed, &args)?;
     for _ in 0..args.undo_count {
         match ed.undo()? {
-            Some(label) => println!("undid: {label}"),
+            Some((label, _touched)) => println!("undid: {label}"),
             None => bail!("--undo: nothing left to undo"),
         }
     }

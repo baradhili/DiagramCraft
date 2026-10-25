@@ -36,12 +36,15 @@ pub(crate) enum RasterKey {
     },
     /// A stencil master thumbnail.
     Thumb(i64),
+    /// A per-shape canvas layer (#93): `RasterKey::Shape { page, id }`.
+    /// Counts as Page work in the perf split (it *is* page content).
+    Shape { page: i64, id: i64 },
 }
 
 impl RasterKey {
     fn kind(&self) -> crate::perf::Kind {
         match self {
-            RasterKey::Page { .. } => crate::perf::Kind::Page,
+            RasterKey::Page { .. } | RasterKey::Shape { .. } => crate::perf::Kind::Page,
             RasterKey::Thumb(_) => crate::perf::Kind::Thumb,
         }
     }
@@ -84,8 +87,10 @@ pub(crate) enum Posted {
 /// At most this many jobs are QUEUED per frame (#92: memory stays
 /// bounded on huge documents; the stencil pane populates
 /// progressively). Sync posts bypass the cap — inline execution is
-/// the deterministic pre-#92 behavior the goldens pin.
-const PER_FRAME_POST_CAP: usize = 8;
+/// the deterministic pre-#92 behavior the goldens pin. 32 since #93:
+/// per-shape layer jobs are small, and a big page's progressive fill
+/// should complete in ~a second, not crawl at 8/frame.
+const PER_FRAME_POST_CAP: usize = 32;
 
 fn run(key: RasterKey, job: RasterJob) -> RasterDone {
     let kind = key.kind();
@@ -207,6 +212,14 @@ impl RasterPool {
     pub fn take_deferred(&mut self) -> bool {
         std::mem::take(&mut self.deferred)
     }
+
+    /// Whether `post` would queue right now (per-frame budget left).
+    /// Callers with expensive job construction (serializing a layer
+    /// SVG) probe this first so the cap defers the WORK, not just the
+    /// post.
+    pub(crate) fn has_budget(&self) -> bool {
+        self.tx.is_none() || svgimg::sync_forced() || self.posted_this_frame < PER_FRAME_POST_CAP
+    }
 }
 
 impl Drop for RasterPool {
@@ -231,16 +244,18 @@ mod tests {
     }
 
     /// Drain with a deadline: worker completions land asynchronously,
-    /// so poll until the expected count arrives (or fail).
+    /// so poll until the expected count arrives (or fail). The budget
+    /// is generous — parallel test threads can starve the worker for
+    /// seconds on a loaded machine.
     fn drain_until(pool: &mut RasterPool, want: usize) -> Vec<RasterDone> {
-        for _ in 0..200 {
+        for _ in 0..600 {
             let got = pool.drain();
             if got.len() >= want {
                 return got;
             }
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        panic!("no completion after 1s");
+        panic!("no completion after 12s");
     }
 
     #[test]
@@ -276,6 +291,10 @@ mod tests {
     #[test]
     fn per_frame_cap_defers_then_clears_on_drain() {
         let mut pool = RasterPool::new(1);
+        // Completions land whenever the worker finishes — accumulate
+        // across every drain instead of assuming none arrive early
+        // (the mid-test budget-reset drain discards what it finds).
+        let mut landed = Vec::new();
         for i in 0..PER_FRAME_POST_CAP {
             assert!(matches!(
                 pool.post(
@@ -294,7 +313,7 @@ mod tests {
         ));
         assert!(pool.take_deferred(), "the capped post flags a repaint");
         assert!(!pool.take_deferred(), "the flag is one-shot");
-        pool.drain(); // resets the budget
+        landed.extend(pool.drain()); // resets the budget
         assert!(matches!(
             pool.post(
                 page_key("over"),
@@ -302,7 +321,18 @@ mod tests {
             ),
             Posted::Queued
         ));
-        drain_until(&mut pool, PER_FRAME_POST_CAP + 1);
+        for _ in 0..600 {
+            landed.extend(pool.drain());
+            if landed.len() >= PER_FRAME_POST_CAP + 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            landed.len(),
+            PER_FRAME_POST_CAP + 1,
+            "every posted job must complete"
+        );
     }
 
     /// The zero-thread pool runs inline — the shape the sync seam

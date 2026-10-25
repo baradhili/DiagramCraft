@@ -236,7 +236,7 @@ fn history_undo_redo_and_labels() {
     assert!(!h.can_redo());
 
     let label = h.undo(&mut doc).unwrap().unwrap();
-    assert!(label.contains("PinX"));
+    assert!(label.0.contains("PinX"));
     assert_eq!(
         doc.pages[0].shapes[0]
             .sheet
@@ -991,7 +991,7 @@ fn new_blank_roundtrips() {
             vsdx::model::Cell::value("6"),
         ))
         .unwrap();
-    assert!(label.contains("PageWidth"));
+    assert!(label.0.contains("PageWidth"));
     ed.undo().unwrap();
 }
 
@@ -1569,7 +1569,6 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
         "Angle",
         vsdx::model::Cell::value(format!("{}", std::f64::consts::FRAC_PI_2)),
     );
-    drop(g);
     ed.apply(UngroupShape::new(0, gid)).unwrap();
     let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
     let rect = ed.doc.pages[0].shapes.iter().find(|s| s.id == 1).unwrap();

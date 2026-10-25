@@ -7,6 +7,7 @@ pub mod app;
 pub mod canvas;
 pub mod cmd;
 pub mod icontex;
+mod layers;
 pub mod os_theme;
 pub mod perf;
 pub mod props;

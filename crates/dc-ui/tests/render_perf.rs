@@ -312,11 +312,11 @@ fn render_perf_stage_split() {
         h2.run();
         report("open at 200% zoom (new bucket raster)", &perf::snapshot(), t.elapsed());
 
-        // --- zoom sweep (#91): one harness, several bucket crossings
-        //     without a model change — the tree cache must show ONE
-        //     svg build + parse (the warm-up) and a render per bucket,
-        //     never a parse per bucket ---
-        let mut app = App::with_doc(&path);
+        // --- zoom sweep (#91/#93): one harness, several bucket
+        //     crossings without a model change — layers re-RENDER at
+        //     the new width and never re-serialize (the strings are
+        //     retained per version) ---
+        let app = App::with_doc(&path);
         let mut h3 = mount(app);
         h3.run();
         h3.run(); // warm the tree at the fit zoom
@@ -331,33 +331,80 @@ fn render_perf_stage_split() {
     println!("\n(done)");
 }
 
-/// #90 regression: once the (page, version, ppi-bucket) texture exists,
-/// idle frames must add ZERO page-pipeline work — no SVG build, no
-/// resolve/parse/render, no upload. Before #90 the page SVG was
-/// serialized unconditionally every frame and thrown away on the cache
-/// hit; the counters make that contract checkable headlessly.
+/// #90 + #93 regression, in one sequential fn (the perf counters are
+/// process-global — parallel test threads would smear them): idle
+/// cached frames add ZERO page work, a drag-release MOVE re-renders
+/// nothing (the layer texture is translation-invariant), and a
+/// resize-handle commit re-renders exactly ONE layer (n=1 per stage)
+/// whether the page holds 500 or 2000 shapes — the flatness #93's
+/// verification asks for, guarded headlessly under the sync seam.
 #[test]
-fn idle_frames_skip_the_page_pipeline() {
-    let tmp = tempfile::tempdir().unwrap();
-    let path = many_shape_fixture(tmp.path(), 40, 4);
-    let mut h = mount(App::with_doc(&path));
-    h.run();
-    h.run(); // let the fit/zoom and textures settle
-    let base = perf::snapshot();
-    for _ in 0..20 {
+fn idle_frames_are_free_and_commits_scale_with_the_shape() {
+    // --- #90: idle frames skip the page pipeline entirely ---
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = many_shape_fixture(tmp.path(), 40, 4);
+        let mut h = mount(App::with_doc(&path));
         h.run();
+        h.run(); // let the fit/zoom and layers settle
+        let base = perf::snapshot();
+        for _ in 0..20 {
+            h.run();
+        }
+        let d = perf::diff(&base, &perf::snapshot());
+        for s in &d {
+            if s.stage.starts_with("page/") {
+                assert_eq!(
+                    s.count, 0,
+                    "{} ran {}× across 20 idle cached frames",
+                    s.stage, s.count
+                );
+            }
+        }
+        let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap();
+        assert_eq!(frames, 20);
     }
-    let d = perf::diff(&base, &perf::snapshot());
-    for s in &d {
-        if s.stage.starts_with("page/") {
-            assert_eq!(
-                s.count, 0,
-                "{} ran {}× across 20 idle cached frames",
-                s.stage, s.count
-            );
+
+    let tmp = tempfile::tempdir().unwrap();
+    for &n in &[500usize, 2000] {
+        let path = many_shape_fixture(tmp.path(), n, 4);
+        let mut h = mount(App::with_doc(&path));
+        h.run();
+        h.run(); // fill + settle (sync seam: everything lands inline)
+
+        // --- move commit: O(0) ---
+        let center = h.state().debug_canvas_rect().center();
+        press(&mut h, center);
+        let base = perf::snapshot();
+        h.hover_at(center + egui::vec2(24.0, -18.0));
+        h.run();
+        release(&mut h, center + egui::vec2(24.0, -18.0));
+        let d = perf::diff(&base, &perf::snapshot());
+        for s in &d {
+            if s.stage.starts_with("page/") {
+                assert_eq!(s.count, 0, "{} ran {}× for a move (n={})", s.stage, s.count, n);
+            }
+        }
+
+        // --- resize commit: exactly one layer ---
+        h.state().debug_sel().expect("shape selected after move");
+        let corners = h.state().debug_sel_corners().expect("handles");
+        press(&mut h, corners[1]);
+        let base = perf::snapshot();
+        h.hover_at(corners[1] + egui::vec2(16.0, -12.0));
+        h.run();
+        release(&mut h, corners[1] + egui::vec2(16.0, -12.0));
+        let d = perf::diff(&base, &perf::snapshot());
+        for s in &d {
+            for stage in ["page/svg", "page/resolve", "page/parse", "page/render", "page/upload"] {
+                if s.stage == stage {
+                    assert_eq!(
+                        s.count, 1,
+                        "{} ran {}× for a one-shape resize (n={}) — must be flat in page size",
+                        s.stage, s.count, n
+                    );
+                }
+            }
         }
     }
-    // And the frames really happened (the harness painted 20 times).
-    let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap();
-    assert_eq!(frames, 20);
 }

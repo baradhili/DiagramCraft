@@ -205,6 +205,178 @@ pub fn render_page_with(
     render_page_opts(doc, page, hidden, None)
 }
 
+/// The ink bounds of one top-level shape's subtree, in page
+/// coordinates (inches, y-down like the SVG viewBox): the union of
+/// every node's transformed [0..w]×[-h..0] box and text box, padded to
+/// absorb stroke bleed, clamped to the page ± 2 in. This is the
+/// viewBox (and the on-canvas quad) of a per-shape layer (#93).
+pub fn shape_ink_bounds(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+) -> Option<(f64, f64, f64, f64)> {
+    let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
+    let root = page.shapes.iter().find(|s| s.id == shape_id)?;
+    let mut acc: Option<(f64, f64, f64, f64)> = None;
+    let mut union = |r: (f64, f64, f64, f64)| {
+        acc = Some(match acc {
+            None => r,
+            Some((ax, ay, aw, ah)) => {
+                let x1 = (ax + aw).max(r.0 + r.2);
+                let y1 = (ay + ah).max(r.1 + r.3);
+                let nx = ax.min(r.0);
+                let ny = ay.min(r.1);
+                (nx, ny, x1 - nx, y1 - ny)
+            }
+        });
+    };
+    fn walk(
+        doc: &Document,
+        s: &Shape,
+        chain: &[&Shape],
+        page_h: f64,
+        top: bool,
+        to_page: Affine,
+        union: &mut dyn FnMut((f64, f64, f64, f64)),
+    ) {
+        let mut chain: Vec<&Shape> = chain.to_vec();
+        chain.push(s);
+        let env = shape_env(doc, s, &chain);
+        let get = |n: &str| -> Option<f64> {
+            doc.resolve_cell(s, &chain, n)
+                .and_then(|c| cell_num(&c, &env))
+        };
+        let width = get("Width").unwrap_or(1.0);
+        let height = get("Height").unwrap_or(1.0);
+        // The exact transform string render_shape/render_shape_local
+        // emit for this node, composed into one affine.
+        let local = if top {
+            let (sx, sy) = (
+                if get("FlipX").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+                if get("FlipY").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+            );
+            Affine::translate(get("PinX").unwrap_or(0.0), page_h - get("PinY").unwrap_or(0.0))
+                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
+                .then(&Affine::scale(sx, sy))
+                .then(&Affine::translate(
+                    -get("LocPinX").unwrap_or(width / 2.0),
+                    get("LocPinY").unwrap_or(height / 2.0),
+                ))
+        } else {
+            Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
+                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
+                .then(&Affine::translate(
+                    -get("LocPinX").unwrap_or(width / 2.0),
+                    get("LocPinY").unwrap_or(height / 2.0),
+                ))
+        };
+        let a = to_page.then(&local);
+        // The node's own ink box (local y-down) — mirrored master
+        // content maps into the instance box, so this bounds it too.
+        let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, union: &mut dyn FnMut((f64, f64, f64, f64))| {
+            let c = [
+                a.apply(x0, y0),
+                a.apply(x1, y0),
+                a.apply(x1, y1),
+                a.apply(x0, y1),
+            ];
+            let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
+            let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
+            union((
+                xs.iter().cloned().fold(f64::INFINITY, f64::min),
+                ys.iter().cloned().fold(f64::INFINITY, f64::min),
+                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - xs.iter().cloned().fold(f64::INFINITY, f64::min),
+                ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ys.iter().cloned().fold(f64::INFINITY, f64::min),
+            ));
+        };
+        box_union(0.0, -height, width, 0.0, &a, union);
+        // Text can overflow the shape box (TxtWidth/TxtHeight are
+        // independent cells); bound it with emit_text's placement math.
+        let has_text = s
+            .sheet
+            .text
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|t| !t.is_empty());
+        if has_text {
+            let tw = get("TxtWidth").unwrap_or(width).max(0.02);
+            let th = get("TxtHeight").unwrap_or(height).max(0.02);
+            let (tlx, tly) = (
+                get("TxtLocPinX").unwrap_or(tw / 2.0),
+                get("TxtLocPinY").unwrap_or(th / 2.0),
+            );
+            let (tx, ty) = (
+                get("TxtPinX").unwrap_or(width / 2.0),
+                get("TxtPinY").unwrap_or(height / 2.0),
+            );
+            if get("TxtAngle").unwrap_or(0.0) != 0.0 {
+                // Rotated text: bound by the circumscribed square.
+                let side = tw.max(th);
+                let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
+                box_union(cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0, &a, union);
+            } else {
+                let (x0, y0) = (tx - tlx, -(ty - tly + th));
+                box_union(x0, y0, x0 + tw, y0 + th, &a, union);
+            }
+        }
+        for sub in &s.sub_shapes {
+            walk(doc, sub, &chain, page_h, false, a, union);
+        }
+    }
+    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut union);
+    let (x, y, w, h) = acc?;
+    // Stroke bleed margin; then clamp to the page ± 2 in so a rogue
+    // formula cannot push a layer off to infinity.
+    let pad = 0.08;
+    let (x, y, w, h) = (x - pad, y - pad, w + 2.0 * pad, h + 2.0 * pad);
+    let pw = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
+    let (min_x, min_y) = (-2.0, -2.0);
+    let (max_x, max_y) = (pw + 2.0, page_h + 2.0);
+    let x = x.max(min_x);
+    let y = y.max(min_y);
+    let w = w.min(max_x - x);
+    let h = h.min(max_y - y);
+    Some((x, y, w.max(0.01), h.max(0.01)))
+}
+
+/// One top-level shape's subtree as a standalone layer SVG (#93): the
+/// same absolute page coordinates and the same `render_shape` walk as
+/// [`render_page_with`] — pixel-identical ink — but the viewBox is the
+/// subtree's [`shape_ink_bounds`] and no page chrome/background is
+/// emitted (the canvas composites its own paper under the layer
+/// quads). The canvas, not the export path, is the consumer.
+pub fn render_shape_layer(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+) -> anyhow::Result<String> {
+    let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
+    let Some(shape) = page.shapes.iter().find(|s| s.id == shape_id) else {
+        anyhow::bail!("shape {shape_id} not found on page {}", page.id);
+    };
+    let hidden_member = |s: &Shape| -> bool {
+        s.sheet
+            .cell("LayerMember")
+            .and_then(|c| c.numeric())
+            .is_some_and(|m| hidden.contains(&(m as i64)))
+    };
+    let mut svg = String::new();
+    let (bx, by, bw, bh) = bounds;
+    let _ = writeln!(
+        svg,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{bx:.5} {by:.5} {bw:.5} {bh:.5}" width="{pw:.0}" height="{ph:.0}">"#,
+        pw = bw * PX_PER_IN,
+        ph = bh * PX_PER_IN,
+    );
+    if !hidden_member(shape) {
+        render_shape(doc, shape, page_h, &[], &page.part, &mut svg);
+    }
+    let _ = writeln!(svg, "</svg>");
+    Ok(svg)
+}
+
 /// [`render_page_with`] restricted to one top-level shape's subtree —
 /// the GUI's group-edit mode (GitHub #78): every other top-level shape
 /// is skipped; the group renders with its members at their page
@@ -2338,6 +2510,7 @@ fn escape_text(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use vsdx::model::{IndexChild, Page};
 
     /// Synthetic Role-callout-shaped master (issue #15 specimen, values
     /// recomputed — no Microsoft content): a root group whose children
@@ -3166,5 +3339,96 @@ mod tests {
         ]);
         let chain = vec![&s];
         assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((2.0, 3.5, 2.0, 1.0)));
+    }
+
+    // ---- #93: per-shape layer bounds + renderer ----
+
+    /// A minimal page: PageWidth/Height sheet plus `shapes`.
+    fn page_fixture(shapes: Vec<Shape>) -> (Document, Page) {
+        let mut sheet = Sheet::default();
+        sheet.set_cell("PageWidth", Cell::value("8.5"));
+        sheet.set_cell("PageHeight", Cell::value("11"));
+        let page = Page {
+            id: 0,
+            name: "T".into(),
+            children: vec![IndexChild::Sheet {
+                tag: "PageSheet".into(),
+                sheet,
+            }],
+            shapes,
+            ..Page::default()
+        };
+        (Document { pages: vec![page.clone()], ..Document::default() }, page)
+    }
+
+    fn shape_at(id: i64, pin: (f64, f64), w: f64, h: f64, angle_deg: f64) -> Shape {
+        let mut sh = Shape { id, ..Shape::default() };
+        for (n, v) in [
+            ("PinX", pin.0),
+            ("PinY", pin.1),
+            ("Width", w),
+            ("Height", h),
+            ("LocPinX", w / 2.0),
+            ("LocPinY", h / 2.0),
+            ("Angle", angle_deg),
+        ] {
+            sh.sheet.set_cell(n, Cell::value(format!("{v}")));
+        }
+        sh
+    }
+
+    const PAD: f64 = 0.08;
+
+    #[test]
+    fn ink_bounds_cover_rotation() {
+        // 2×1 shape rotated 90° about its pin (the Angle cell is
+        // radians, like render_shape reads it): the ink swaps extents —
+        // a plain W×H box (what master_bbox computes) would clip it.
+        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, std::f64::consts::FRAC_PI_2)]);
+        let (x, y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
+        assert!((w - (1.0 + 2.0 * PAD)).abs() < 1e-9, "w={w}");
+        assert!((h - (2.0 + 2.0 * PAD)).abs() < 1e-9, "h={h}");
+        // Same center as the unrotated box: pin (4,5), page_h 11.
+        assert!((x + w / 2.0 - 4.0).abs() < 1e-9);
+        assert!((y + h / 2.0 - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn ink_bounds_union_subshapes_and_text() {
+        // A 2×1 group whose sub-shape sits beyond the group's right
+        // edge (local pin 2.5 of a 2-wide box) and whose text block is
+        // wider than the shape: the union must cover both.
+        let mut group = shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0);
+        group.sub_shapes.push(shape_at(2, (2.5, 0.8), 1.0, 1.0, 0.0));
+        group.sheet.text = Some("hello".into());
+        group.sheet.set_cell("TxtWidth", Cell::value("3"));
+        let (doc, page) = page_fixture(vec![group]);
+        let (x, y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
+        // Group box page x∈[3,5]; sub-shape local x∈[2,3] → page
+        // x∈[5,6]; text 3 wide centered → x∈[2.5,5.5].
+        let right = x + w - PAD;
+        assert!((right - 6.0).abs() < 1e-9, "right={right}");
+        let left = x + PAD;
+        assert!((left - 2.5).abs() < 1e-9, "left={left}");
+        assert!(h > 1.0, "h={h}");
+    }
+
+    #[test]
+    fn layer_svg_scopes_the_viewbox_and_skips_hidden() {
+        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0)]);
+        let bounds = (1.0, 2.0, 3.0, 4.0);
+        let svg = render_shape_layer(&doc, &page, 1, &[], bounds).unwrap();
+        assert!(
+            svg.contains(r#"viewBox="1.00000 2.00000 3.00000 4.00000""#),
+            "viewBox must be the given bounds: {svg}"
+        );
+        assert!(svg.contains("<g transform"), "the shape is drawn");
+        // A hidden root emits the (empty) svg only — same skip the
+        // page renderer applies to hidden members.
+        let mut hidden_shape = shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0);
+        hidden_shape.sheet.set_cell("LayerMember", Cell::value("2"));
+        let (doc, page) = page_fixture(vec![hidden_shape]);
+        let svg = render_shape_layer(&doc, &page, 1, &[2], bounds).unwrap();
+        assert!(!svg.contains("<g transform"), "hidden root must not draw: {svg}");
     }
 }
