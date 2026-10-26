@@ -39,6 +39,12 @@ pub struct ShapeQuad {
     pub bbox: (f64, f64, f64, f64),
 }
 
+/// Past this many inches outside the viewport an entry's GPU texture
+/// is released. Draw culling keeps 0.5in of look-ahead; eviction lags
+/// further out so scrolling along the boundary doesn't thrash
+/// rasterize/evict.
+const EVICT_MARGIN: f64 = 2.0;
+
 struct Entry {
     /// Content version + ppi bucket the current texture renders.
     version: u64,
@@ -256,6 +262,23 @@ impl ShapeLayers {
                 && bbox.1 < vy + vh + m
                 && bbox.1 + bbox.3 > vy - m;
             if !on_screen {
+                // #93's memory bound: culling stopped RASTERIZING
+                // off-screen shapes, but landed textures were kept
+                // forever — texture memory tracked everything ever
+                // visible, not the screen. Release the texture well
+                // past the draw margin; the retained svg/version make
+                // the re-post cheap when the shape scrolls back. (A
+                // job already in flight may still land once more; the
+                // next frame releases it again.)
+                let far = bbox.0 < vx + vw + EVICT_MARGIN
+                    && bbox.0 + bbox.2 > vx - EVICT_MARGIN
+                    && bbox.1 < vy + vh + EVICT_MARGIN
+                    && bbox.1 + bbox.3 > vy - EVICT_MARGIN;
+                if !far {
+                    if let Some(e) = self.entries.get_mut(&shape.id) {
+                        e.tex = None;
+                    }
+                }
                 continue;
             }
             let version = self.versions.get(&shape.id).copied().unwrap_or(0);

@@ -326,3 +326,56 @@ fn rasters_run_off_thread_and_land_on_later_frames() {
         "masters were textured without pool posts — impossible; hook is wrong"
     );
 }
+
+/// #93's memory bound: culling must not just stop RASTERIZING
+/// off-screen shapes — entries scrolled far off the viewport release
+/// their GPU textures (svg/version retained), and scrolling back
+/// restores them. Deterministic: wheel-zoom is applied step by step
+/// and eviction happens synchronously in composite; only the
+/// re-rasters on the way back need the pump.
+#[test]
+fn far_off_screen_layers_release_their_textures() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 40 shapes: the center rectangle (id 1) plus a 2-row grid along
+    // the page bottom (ids 2..=40).
+    let path = fixture(tmp.path(), 40, 1);
+    let mut h = mount(App::with_doc(&path));
+    pump_until(&mut h, |a| a.debug_layer_count_for_test() == 40, "all 40 layers");
+    let center = h.state().debug_canvas_rect().center();
+    h.hover_at(center);
+    h.step();
+    // Zoom in hard — the canvas wheel applies one 1.1x step per frame
+    // (clamped at 8x). At 8x the visible window plus the 2in evict
+    // margin is a couple of inches tall around the page center: the
+    // bottom-row grid (5in below the anchor) must release, the center
+    // shape must keep its texture.
+    for _ in 0..30 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 120.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    let kept = h.state().debug_layer_count_for_test();
+    assert!(kept < 40, "off-screen layers must release their textures (kept {kept}/40)");
+    assert!(
+        h.state().debug_layer_tex_id_for_test(1).is_some(),
+        "the zoom-focus shape keeps its texture"
+    );
+    // Zoom back out through fit and wait: every layer re-rasterizes
+    // (the bucket swept) and the count returns to all 40.
+    for _ in 0..35 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Unknown,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    pump_until(&mut h, |a| a.debug_layer_count_for_test() == 40, "all 40 layers back");
+}
