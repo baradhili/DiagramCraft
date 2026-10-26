@@ -53,12 +53,21 @@ pub fn sort_key(row: &Row) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// Order Prop rows for display: string SortKey ascending, rows without
-/// a SortKey after the keyed ones, original row order preserved when
-/// keys are equal (the dialog's stable sort supplies that half).
+/// Order Prop rows for display: string SortKey ascending
+/// (case-insensitive — Visio's Shape Data dialog follows the UI
+/// locale's collation, under which `"Zebra"` must not precede
+/// `"apple"`), rows without a SortKey after the keyed ones, original
+/// row order preserved when keys are equal (the dialog's stable sort
+/// supplies that half). Case-equal keys compare `Equal` with no byte
+/// tie-break, so case-variant pairs keep document order like
+/// case-insensitive `CompareStringW` equivalence; folding is
+/// locale-independent Unicode lowercase, not full locale collation
+/// (accent folding etc. — GitHub #94).
 pub fn cmp_sort_key(a: &Row, b: &Row) -> std::cmp::Ordering {
     match (sort_key(a), sort_key(b)) {
-        (Some(x), Some(y)) => x.cmp(y),
+        (Some(x), Some(y)) => x
+            .to_lowercase()
+            .cmp(&y.to_lowercase()),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
@@ -139,5 +148,23 @@ mod tests {
         assert_eq!(cmp_sort_key(&k2, &unkeyed), std::cmp::Ordering::Less);
         assert_eq!(cmp_sort_key(&unkeyed, &k2), std::cmp::Ordering::Greater);
         assert_eq!(cmp_sort_key(&unkeyed, &unkeyed), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn sort_key_folds_case_like_the_dialog() {
+        // GitHub #94: Visio's Shape Data dialog orders by the UI
+        // locale's case-insensitive collation — raw ASCII order would
+        // put "Zebra" before "apple".
+        let apple = prop(&[("SortKey", "apple")]);
+        let zebra = prop(&[("SortKey", "Zebra")]);
+        assert_eq!(cmp_sort_key(&apple, &zebra), std::cmp::Ordering::Less);
+        assert_eq!(cmp_sort_key(&zebra, &apple), std::cmp::Ordering::Greater);
+        // Case-equal keys compare Equal (no byte tie-break): the
+        // stable sort in the dialog keeps their document order, like
+        // case-insensitive CompareStringW equivalence.
+        let lower = prop(&[("SortKey", "abc")]);
+        let upper = prop(&[("SortKey", "ABC")]);
+        assert_eq!(cmp_sort_key(&lower, &upper), std::cmp::Ordering::Equal);
+        assert_eq!(cmp_sort_key(&upper, &lower), std::cmp::Ordering::Equal);
     }
 }

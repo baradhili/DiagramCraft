@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
                 .replace(['/', '\\', ' '], "_")
         );
         std::fs::write(outdir.join(format!("{stem}.svg")), &svg)?;
-        let img = dc_ui::svgimg::rasterize(&svg, 128.0)?;
+        let img = dc_ui::svgimg::rasterize(&svg, 128.0, dc_ui::perf::Kind::Thumb)?;
         let png = resvg::tiny_skia::Pixmap::from_vec(
             img.pixels
                 .iter()

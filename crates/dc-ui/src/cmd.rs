@@ -36,6 +36,14 @@ impl MoveShape {
 }
 
 impl Command for MoveShape {
+    fn touched(&self, doc: &Document) -> dc_core::TouchList {
+        // Union of the two PinX/PinY SetCells → a pure Move touch
+        // (#93): the layer texture stays valid under translation.
+        let mut all = self.x.touched(doc);
+        all.merge(self.y.touched(doc));
+        all
+    }
+
     fn label(&self) -> String {
         format!(
             "move shape {} to ({:.3}, {:.3})",
@@ -76,6 +84,22 @@ impl AddMasterInstance {
 }
 
 impl Command for AddMasterInstance {
+    fn touched(&self, _doc: &Document) -> dc_core::TouchList {
+        // A fresh top-level instance (#93): membership only — its
+        // layer renders on demand.
+        match self.id {
+            Some(id) => dc_core::TouchList {
+                pages: vec![],
+                shapes: vec![dc_core::Touched {
+                    page: self.page,
+                    shape: id,
+                    touch: dc_core::Touch::Membership,
+                }],
+            },
+            None => dc_core::TouchList::page(self.page),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "add master {} instance at ({:.3}, {:.3})",

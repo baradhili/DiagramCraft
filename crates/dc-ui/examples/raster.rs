@@ -7,7 +7,7 @@ fn main() {
     let svg = std::fs::read_to_string(args.next().unwrap()).unwrap();
     let out = args.next().unwrap();
     let width: f32 = args.next().map_or(1200.0, |s| s.parse().unwrap());
-    let img = dc_ui::svgimg::rasterize(&svg, width).unwrap();
+    let img = dc_ui::svgimg::rasterize(&svg, width, dc_ui::perf::Kind::Page).unwrap();
     let png = resvg::tiny_skia::Pixmap::from_vec(
         img.pixels
             .iter()

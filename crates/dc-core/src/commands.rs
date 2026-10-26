@@ -173,6 +173,35 @@ impl SetCell {
 }
 
 impl crate::Command for SetCell {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match &self.scope {
+            Scope::Shape { page, shape } => {
+                let Some(root) = crate::scope::top_level_ancestor(doc, *page, *shape) else {
+                    return crate::TouchList::page(*page);
+                };
+                // PinX/PinY on the top-level shape itself is a pure
+                // translation (MoveShape and friends); anything else —
+                // including a sub-shape's pin, which moves ink WITHIN
+                // its group — is ink.
+                let move_only =
+                    root == *shape && (self.name == "PinX" || self.name == "PinY");
+                crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched {
+                        page: *page,
+                        shape: root,
+                        touch: if move_only { crate::Touch::Move } else { crate::Touch::Ink },
+                    }],
+                }
+            }
+            // Page-sheet geometry (PageWidth…); styles and masters are
+            // inherited by every instance — whole-page dirty either way.
+            Scope::PageSheet { page } => crate::TouchList::page(*page),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
+
     fn label(&self) -> String {
         format!("set {}:{} = {:?}", self.scope, self.name, self.new.v)
     }
@@ -235,6 +264,21 @@ impl SetRowCell {
 }
 
 impl crate::Command for SetRowCell {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match &self.scope {
+            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                Some(root) => crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                },
+                None => crate::TouchList::page(*page),
+            },
+            Scope::PageSheet { page } => crate::TouchList::page(*page),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "set {}:{}[{:?}].{} = {:?}",
@@ -397,6 +441,21 @@ impl SetText {
 }
 
 impl crate::Command for SetText {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match &self.scope {
+            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                Some(root) => crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                },
+                None => crate::TouchList::page(*page),
+            },
+            Scope::PageSheet { page } => crate::TouchList::page(*page),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
+
     fn label(&self) -> String {
         format!("set text of {} = {:?}", self.scope, self.text)
     }
@@ -480,6 +539,19 @@ pub struct AddShape {
 }
 
 impl crate::Command for AddShape {
+
+    fn touched(&self, _doc: &Document) -> crate::TouchList {
+        // Added INTO a group: the group's content changed (Ink on its
+        // root); added at top level: new membership.
+        match self.parent {
+            None => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched { page: self.page, shape: self.shape.id, touch: crate::Touch::Membership }],
+            },
+            Some(_) => crate::TouchList::page(self.page),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "add shape {} to page:{}{}",
@@ -560,6 +632,21 @@ impl RemoveSectionRow {
 }
 
 impl crate::Command for RemoveSectionRow {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match &self.scope {
+            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                Some(root) => crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                },
+                None => crate::TouchList::page(*page),
+            },
+            Scope::PageSheet { page } => crate::TouchList::page(*page),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "remove {} row {:?} on {}",
@@ -630,6 +717,50 @@ impl RemoveShape {
 }
 
 impl crate::Command for RemoveShape {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        // `removed`'s index path says where the shape lived. shape_path
+        // numbers EVERY level (its doc: "the last element is the
+        // shape's slot"), so a top-level shape is path.len() == 1 and a
+        // nested one is longer. A len-1 path used to fall into the
+        // nested walk below, which read page.shapes[path[0]] AFTER the
+        // removal — the slot now holds the successor — so a top-level
+        // removal touched an unrelated sibling's Ink and never emitted
+        // the removed shape's own Membership.
+        let path = self.removed.as_ref().map(|(_, p)| p.clone()).unwrap_or_default();
+        if path.len() == 1 {
+            return crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched { page: self.page, shape: self.shape, touch: crate::Touch::Membership }],
+            };
+        }
+        // Empty path: nothing captured yet (touched before apply) —
+        // say nothing precise, invalidate the page.
+        if path.is_empty() {
+            return crate::TouchList::page(self.page);
+        }
+        // Post-apply the shape is gone; walk to its former container
+        // to confirm the path resolves, then roll up to the top-level
+        // root at path[0].
+        if let Some(page) = doc.pages.iter().find(|p| p.id == self.page) {
+            let mut node = page.shapes.get(path[0]);
+            for ix in path.iter().take(path.len().saturating_sub(1)).skip(1) {
+                node = node.and_then(|n| n.sub_shapes.get(*ix));
+            }
+            if node.is_some() {
+                return crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched {
+                        page: self.page,
+                        shape: path_root(page, &path),
+                        touch: crate::Touch::Ink,
+                    }],
+                };
+            }
+        }
+        crate::TouchList::page(self.page)
+    }
+
     fn label(&self) -> String {
         format!("remove shape {} from page:{}", self.shape, self.page)
     }
@@ -698,6 +829,27 @@ impl DuplicateShape {
 }
 
 impl crate::Command for DuplicateShape {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match crate::scope::top_level_ancestor(doc, self.page, self.shape) {
+            // Top-level original ⇒ top-level clone: new membership.
+            Some(root) if root == self.shape => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: self.clone.as_ref().map(|c| c.id).unwrap_or(self.shape),
+                    touch: crate::Touch::Membership,
+                }],
+            },
+            // Sub-shape duplicate: the containing group's ink changed.
+            Some(root) => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink }],
+            },
+            None => crate::TouchList::page(self.page),
+        }
+    }
+
     fn label(&self) -> String {
         format!("duplicate shape {} on page:{}", self.shape, self.page)
     }
@@ -1219,6 +1371,24 @@ impl ReorderShape {
 }
 
 impl crate::Command for ReorderShape {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match crate::scope::top_level_ancestor(doc, self.page, self.shape) {
+            // Z-order among top-level shapes: nothing cached depends
+            // on it. Within a group the subtree's paint order is baked
+            // into the group's texture — ink.
+            Some(root) if root == self.shape => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Order }],
+            },
+            Some(root) => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink }],
+            },
+            None => crate::TouchList::page(self.page),
+        }
+    }
+
     fn label(&self) -> String {
         format!(
             "{} shape {} on page:{}",
@@ -2004,6 +2174,15 @@ impl Macro {
 }
 
 impl crate::Command for Macro {
+
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        let mut all = crate::TouchList::none();
+        for cmd in &self.cmds {
+            all.merge(cmd.touched(doc));
+        }
+        all
+    }
+
     fn label(&self) -> String {
         self.label.clone()
     }
@@ -2028,4 +2207,15 @@ impl crate::Command for Macro {
         }
         Ok(())
     }
+}
+
+
+/// The top-level shape a sub-shape index path lives under: `path[0]`
+/// indexes the page's top-level list (the same convention RemoveShape
+/// captures).
+fn path_root(page: &vsdx::model::Page, path: &[usize]) -> i64 {
+    page.shapes
+        .get(path[0])
+        .map(|s| s.id)
+        .unwrap_or(-1)
 }

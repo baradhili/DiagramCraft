@@ -179,7 +179,7 @@ fn run_shell_mode(name: &str, app: App, dark: bool) {
     let mut app = app;
     // Goldens must render identically on every machine: pin text to
     // the embedded Carlito rather than this machine's installed fonts.
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui(move |ui| {
@@ -283,7 +283,7 @@ fn info_thumbnail_refreshes_after_edit() {
     let mut app = App::with_doc(&fixture(tmp.path()));
     app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
     app.open_backstage_for_test();
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -317,7 +317,7 @@ fn info_thumbnail_placeholder_on_render_failure() {
     app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
     app.force_info_render_failure_for_test(true);
     app.open_backstage_for_test();
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -378,7 +378,7 @@ fn recent_entry_click_reopens() {
     let doc = fixture(tmp.path());
     let mut app = App::with_doc_opt(None);
     app.set_recent_for_test(vec![doc.clone()]);
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -409,7 +409,7 @@ fn recent_entry_click_reopens() {
 #[test]
 fn painted_shell_controls_carry_accessible_labels() {
     use egui_kittest::kittest::Queryable;
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -503,7 +503,7 @@ fn page_tabs_switch_restore_selection_and_name_status() {
     use egui_kittest::kittest::Queryable;
     let tmp = tempfile::tempdir().unwrap();
     let doc = fixture_pages(tmp.path(), &["One", "Two", "Three"]);
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -559,7 +559,7 @@ fn page_tab_context_menu_manages_pages() {
     use egui_kittest::kittest::Queryable;
     let tmp = tempfile::tempdir().unwrap();
     let doc = fixture_pages(tmp.path(), &["One", "Two", "Three"]);
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -634,7 +634,7 @@ fn page_tab_rename_edits_inline() {
     use egui_kittest::kittest::Queryable;
     let tmp = tempfile::tempdir().unwrap();
     let doc = fixture_pages(tmp.path(), &["One", "Two"]);
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(

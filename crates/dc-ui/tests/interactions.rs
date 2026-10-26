@@ -11,7 +11,7 @@ use egui_kittest::Harness;
 fn harness_with_blank() -> Harness<'static, App> {
     // Goldens/steps must be machine-independent: pin text to the
     // embedded Carlito rather than this machine's installed fonts.
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -29,7 +29,7 @@ fn harness_with_blank() -> Harness<'static, App> {
 /// pair's releases 0.5 s apart, so these tests step at 0.05 s (and may
 /// then need more steps to settle the same frames).
 fn dblclick_harness_with_blank() -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .with_step_dt(0.05)
@@ -183,7 +183,7 @@ fn right_click_menu_duplicate_creates_shape() {
 /// by its master-Actions rows, and the beside-the-shape anchoring
 /// tests need room for the full menu below the anchor.
 fn tall_harness_with_blank() -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 1100.0))
         .build_ui_state(
@@ -1039,7 +1039,7 @@ fn double_click_on_empty_page_is_a_no_op() {
 /// menu stays readable when the shell runs under dark visuals, not
 /// just the installed Visio-light ones.
 fn open_menu_harness(dark: bool) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -1288,7 +1288,7 @@ fn context_menu_snapshot_dark_visuals() {
 /// Harness for the File backstage (#55): same shell builder, app state
 /// supplied by the caller.
 fn backstage_harness(app: App) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -1605,7 +1605,7 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
         );
     }
 
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(
@@ -1918,15 +1918,23 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button, and the menu shows Ungroup
-    // right below Group — take the topmost "…Group…" row in the menu
-    // (below the ribbon bands).
+    // The ribbon also has a Group button — take the topmost "…Group…"
+    // row in the menu (below the ribbon bands). GitHub #78: that row is
+    // the Group ▸ flyout parent; the action lives in its submenu.
     let group_row = h
         .get_all_by_label_contains("Group")
         .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
         .min_by_key(|n| n.rect().min.y as i64)
-        .expect("Group row in the context menu");
+        .expect("Group ▸ flyout row in the context menu");
     group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .find(|n| !menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Group item in the flyout submenu");
+    group_item.click();
     h.run();
     assert_eq!(h.state().debug_shape_count(), 1, "one top-level group");
     let (_, gid) = h.state().debug_sel().expect("group selected");
@@ -2682,5 +2690,59 @@ fn shape_data_dialog_close_dismisses() {
         h.query_all_by_label_contains("Department").count(),
         0,
         "the Shape Data window closed on Close"
+    );
+}
+
+// ------------------------------------------------------------------
+// GitHub #96: live drag feedback.
+
+/// During a move drag the shape itself follows the cursor — live
+/// layer ghosts, never a re-raster — replacing the old dashed-only
+/// preview (which drew at inch coordinates as pixels and was
+/// invisible). The ghost must disappear when the release commits the
+/// move exactly where the ghost showed.
+#[test]
+fn drag_moves_the_shape_live_under_the_cursor() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (master, _) = h.state().debug_master_cells()[0];
+    let (page, shape) = place_master(&mut h, master);
+    h.run();
+    // Select the placed shape (placement may not carry selection).
+    let r = h.state().debug_shape_screen_rect(shape).expect("placed");
+    click_at(&mut h, r.center(), egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_sel().map(|(p, s)| (p, s)), Some((page, shape)));
+    let from = r.center();
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(b(from, true));
+    h.run(); // press frame arms the drag
+    h.hover_at(from + egui::vec2(60.0, -40.0));
+    h.run(); // mid-gesture frame
+    assert_eq!(
+        h.state().debug_drag_ghosts_for_test(),
+        1,
+        "the dragged shape must ghost live under the cursor (#96)"
+    );
+    ctx_menu_snapshot(&mut h, "dc_ui_drag_live_feedback");
+    h.event(b(from + egui::vec2(60.0, -40.0), false));
+    h.run();
+    assert_eq!(
+        h.state().debug_drag_ghosts_for_test(),
+        0,
+        "ghosts vanish once the release commits"
+    );
+    let r2 = h.state().debug_shape_screen_rect(shape).expect("after move");
+    assert!(
+        (r2.center().x - (from.x + 60.0)).abs() <= 1.5
+            && (r2.center().y - (from.y - 40.0)).abs() <= 1.5,
+        "the shape must land where the ghost showed: {:?} vs {:?}",
+        r2.center(),
+        from + egui::vec2(60.0, -40.0)
     );
 }

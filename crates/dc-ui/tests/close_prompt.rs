@@ -8,7 +8,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 
 fn harness_with(app: App) -> Harness<'static, App> {
-    dc_ui::svgimg::pin_embedded_fonts_for_tests();
+    dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui_state(

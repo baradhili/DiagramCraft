@@ -106,13 +106,29 @@ pub struct App {
     /// Multi-selection (marquee / shift-click); includes the primary.
     sel_set: Vec<(i64, i64)>,
     drag: Option<DragState>,
+    /// Group-edit mode (GitHub #78): stack of open group ids, outermost
+    /// first — `Open <name>` pushes, Esc/Close pops one level. View
+    /// state only (never written into the document); validated at the
+    /// top of `draw` so undo/ungroup/doc changes leave it coherent.
+    group_edit: Vec<i64>,
     stencil: Stencil,
     /// Stencil panel content rect from the last frame (resize-handle
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
     tex: TextureCache,
+    /// Background rasterization (#92): the parse/render jobs for page
+    /// textures and stencil thumbnails run here; completions land in
+    /// `draw`'s pool drain (see `svgimg::force_sync_raster_for_tests`
+    /// for the kittest determinism seam).
+    pool: crate::rasterpool::RasterPool,
+    /// Per-shape canvas layers (#93): one quad per top-level shape
+    /// subtree, composited in z-order; commits dirty only the touched
+    /// shape (`dc_core::Touch` routed in `apply`/`do_undo`/`do_redo`).
+    layers: crate::layers::ShapeLayers,
     /// Test-only: force the Info thumbnail's render to fail (#58).
     info_render_fail_for_test: bool,
+    /// Live drag ghosts drawn on the last frame (#96, test hook).
+    last_drag_ghosts: usize,
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
@@ -314,10 +330,14 @@ impl App {
             sel: None,
             sel_set: Vec::new(),
             drag: None,
+            group_edit: Vec::new(),
             stencil: Stencil::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
+            pool: crate::rasterpool::RasterPool::default(),
+            layers: crate::layers::ShapeLayers::default(),
             info_render_fail_for_test: false,
+            last_drag_ghosts: 0,
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
@@ -457,8 +477,14 @@ impl App {
                 self.view = View::default();
                 self.page_idx = 0;
                 self.set_selection(None);
+                self.group_edit.clear();
                 self.stencil.armed = None;
                 self.tex.clear();
+                // Per-shape layers are keyed by shape id, which
+                // collides across documents (both number from 1), and
+                // set_page() alone won't clear when the page ids match
+                // — drop the old document's textures/bounds.
+                self.layers.clear();
                 self.page_states.clear();
                 self.tab_menu = None;
                 self.tab_rename = None;
@@ -508,10 +534,11 @@ impl App {
     fn apply<C: dc_core::Command + 'static>(&mut self, cmd: C) {
         if let Some(ed) = self.ed_mut() {
             match ed.apply(cmd) {
-                Ok(label) => {
+                Ok((label, touched)) => {
                     self.status = label;
                     self.dirty = true;
-                    self.version += 1;
+                    self.version += 1; // Info thumbnail (whole page)
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                 }
                 Err(e) => self.status = format!("{e:#}"),
             }
@@ -521,10 +548,11 @@ impl App {
     fn do_undo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.undo() {
-                Ok(Some(l)) => {
+                Ok(Some((l, touched))) => {
                     self.status = format!("undo: {l}");
                     self.dirty = true;
                     self.version += 1;
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                     self.set_selection(None);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
@@ -558,6 +586,12 @@ impl App {
             );
         }
         self.page_idx = to;
+        // Group-edit state does not carry across pages: shape ids
+        // overlap across pages, and the per-frame coherence check only
+        // drops levels that stop resolving to a Group — an id that
+        // happens to be a group on the new page would keep the mode
+        // alive with the wrong scope (#78).
+        self.group_edit.clear();
         self.tab_scroll_to_active = true;
         match self.page_states.remove(&new_id) {
             Some(st) => {
@@ -687,10 +721,11 @@ impl App {
     fn do_redo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.redo() {
-                Ok(Some(l)) => {
+                Ok(Some((l, touched))) => {
                     self.status = format!("redo: {l}");
                     self.dirty = true;
                     self.version += 1;
+                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                 }
                 Ok(None) => self.status = "nothing to redo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -732,8 +767,10 @@ impl App {
         self.view = View::default();
         self.page_idx = 0;
         self.set_selection(None);
+        self.group_edit.clear();
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.layers.clear();
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
@@ -839,9 +876,27 @@ impl App {
 
     // -- hit testing ------------------------------------------------------
 
-    /// AABB in page coords (inches, y-up): (x, y, w, h); rotation ignored.
+    /// AABB in page coords (inches, y-up): (x, y, w, h). Nested-aware
+    /// (#78): a top-level shape keeps its plain local rect (its parent
+    /// frame is the page); a group member maps its parent-local rect
+    /// through the renderer's XForm chain, so frames and hit boxes
+    /// land on the drawn pixels even under rotated/flipped groups.
     fn shape_rect(&self, doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
-        Self::shape_rect_static(doc, page_id, s)
+        let Ok(chain) = shape_chain(doc, page_id, s.id) else {
+            return Self::shape_rect_static(doc, page_id, s);
+        };
+        if chain.len() <= 1 {
+            return Self::shape_rect_static(doc, page_id, s);
+        }
+        let page_h = doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)?
+            .sheet()
+            .and_then(|sh| sh.cell("PageHeight"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(11.0);
+        dc::svg::shape_page_rect(doc, &chain, page_h)
     }
 
     /// Borrow-free bbox (page inches, y-up) for marquee gating.
@@ -859,6 +914,22 @@ impl App {
     fn shape_hit(&self, page_pos: (f64, f64)) -> Option<i64> {
         let ed = self.ed()?;
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        // Group-edit mode (#78): only the innermost open group's
+        // members are on the canvas — clicks resolve against them
+        // (nested-aware rects), never falling through to page shapes.
+        if let Some(g) = self.group_edit.last().copied() {
+            let group = vsdx::model::find_shape_by_id(&page.shapes, g)?;
+            let mut members = Vec::new();
+            collect_members(&group.sub_shapes, &mut members);
+            for m in members.iter().rev() {
+                if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, m) {
+                    if hit_in_rect(page_pos, x, y, w, h) {
+                        return Some(m.id);
+                    }
+                }
+            }
+            return None;
+        }
         for shape in page.shapes.iter().rev() {
             if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
                 if hit_in_rect(page_pos, x, y, w, h) {
@@ -911,6 +982,12 @@ impl App {
     /// handle at each endpoint plus the midpoint; everything else gets
     /// the four resize corners of its bounding box.
     fn selection_handles(&self) -> Vec<Handle> {
+        // Group-edit mode v1 (#78): resize/endpoint handles for nested
+        // members are deferred — the drag-move and edit paths work,
+        // but handle math through group transforms arrives separately.
+        if !self.group_edit.is_empty() {
+            return Vec::new();
+        }
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -992,23 +1069,6 @@ impl App {
         ))
     }
 
-    fn drag_preview_rect(&self) -> Option<Rect> {
-        let d = self.drag.as_ref()?;
-        let ed = self.ed()?;
-        let (page_id, sel_shape) = self.sel?;
-        if page_id != self.page_id()? || d.shape != sel_shape {
-            return None;
-        }
-        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
-        let shape = vsdx::model::find_shape_by_id(&page.shapes, d.shape)?;
-        let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
-        let geom = self.page_geom();
-        let (dx, dy) = (d.last_pin.0 - x, d.last_pin.1 - y);
-        Some(Rect::from_min_size(
-            Pos2::new((x + dx) as f32, (geom.h_in - y - h - dy) as f32),
-            Vec2::new(w as f32, h as f32),
-        ))
-    }
 
     // -- interaction ------------------------------------------------------
 
@@ -1119,7 +1179,17 @@ impl App {
         };
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         let mut picked = Vec::new();
-        for shape in page.shapes.iter() {
+        // Group-edit mode (#78): the marquee selects among the open
+        // group's members only.
+        let mut members = Vec::new();
+        if let Some(g) = self.group_edit.last().copied() {
+            if let Some(group) = vsdx::model::find_shape_by_id(&page.shapes, g) {
+                collect_members(&group.sub_shapes, &mut members);
+            }
+        } else {
+            members.extend(page.shapes.iter());
+        }
+        for shape in members {
             if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
                 // Both the shape rect and the marquee rect (from
                 // canvas::screen_to_page) are y-up page inches.
@@ -1574,6 +1644,18 @@ impl App {
     /// the endpoint cells stale — the handles would sit at the old
     /// positions and the next endpoint drag would snap the line back,
     /// CodeRabbit review of df4a562); 2D shapes move the pin alone.
+    /// Page height in inches — the y-flip anchor of the XForm chains.
+    fn page_height(ed: &Editor, page_id: i64) -> f64 {
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.sheet())
+            .and_then(|sh| sh.cell("PageHeight"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(11.0)
+    }
+
     fn move_cmd_for(
         &self,
         page_id: i64,
@@ -1591,6 +1673,15 @@ impl App {
         };
         let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
             return Box::new(MoveShape::new(page_id, sid, new_pin));
+        };
+        // A group member's Pin cells are PARENT-LOCAL (#78): convert
+        // the page-space drag target into the member's parent frame
+        // through the same XForm chain the renderer composes.
+        let new_pin = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, new_pin)
+        } else {
+            new_pin
         };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let Some(((bx, by), (ex, ey), (px, py))) = get("BeginX")
@@ -1681,10 +1772,29 @@ impl App {
                                         ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                                     };
                                     if let (Some(px), Some(py)) = (g("PinX"), g("PinY")) {
+                                        // Member pins are parent-local
+                                        // (#78): map to page space,
+                                        // apply the page-space delta,
+                                        // and let move_cmd_for convert
+                                        // the target back — a raw
+                                        // local+page sum misplaces
+                                        // members of transformed
+                                        // groups.
+                                        let target = if chain.len() >= 2 {
+                                            let page_h = Self::page_height(ed, page_id);
+                                            dc::svg::parent_local_point_to_page(
+                                                &ed.doc,
+                                                &chain,
+                                                page_h,
+                                                (px, py),
+                                            )
+                                        } else {
+                                            (px, py)
+                                        };
                                         cmds.push(self.move_cmd_for(
                                             page_id,
                                             sid,
-                                            (px + dx, py + dy),
+                                            (target.0 + dx, target.1 + dy),
                                         ));
                                     }
                                 }
@@ -1709,7 +1819,24 @@ impl App {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
                             if let (Some(px), Some(py)) = (get("PinX"), get("PinY")) {
-                                cmds.push(self.move_cmd_for(page_id, sid, (px + dx, py + dy)));
+                                // Parent-local pin → page space (see
+                                // the container path above).
+                                let target = if chain.len() >= 2 {
+                                    let page_h = Self::page_height(ed, page_id);
+                                    dc::svg::parent_local_point_to_page(
+                                        &ed.doc,
+                                        &chain,
+                                        page_h,
+                                        (px, py),
+                                    )
+                                } else {
+                                    (px, py)
+                                };
+                                cmds.push(self.move_cmd_for(
+                                    page_id,
+                                    sid,
+                                    (target.0 + dx, target.1 + dy),
+                                ));
                             }
                         }
                         self.apply(Macro::new("move shapes", cmds));
@@ -1826,6 +1953,17 @@ impl App {
                     .and_then(|c| c.numeric()),
             );
         let Some((px, py)) = pin else { return };
+        // The drag tracks the pin in PAGE space: a nested member's Pin
+        // cells are parent-local (#78), so map them through the XForm
+        // chain — the gesture delta and move_cmd_for's page-space
+        // targets must agree (a mixed-frame pin misplaces members of
+        // translated/rotated groups).
+        let (pin_px, pin_py) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            dc::svg::parent_local_point_to_page(&ed.doc, &chain, page_h, (px, py))
+        } else {
+            (px, py)
+        };
         // Group semantics at press time: pressing a member of the
         // current multi-selection drags the whole set; pressing an
         // unselected shape moves only that shape (its release-click then
@@ -1841,9 +1979,9 @@ impl App {
         };
         self.drag = Some(DragState {
             shape: shape_id,
-            grab_off: (px - page_pos.0, py - page_pos.1),
-            start_pin: (px, py),
-            last_pin: (px, py),
+            grab_off: (pin_px - page_pos.0, pin_py - page_pos.1),
+            start_pin: (pin_px, pin_py),
+            last_pin: (pin_px, pin_py),
             moved: false,
             group,
         });
@@ -3426,38 +3564,182 @@ impl App {
                 }
             }
         }
-        let (svg, part) = {
-            let ed = self.ed.as_ref().unwrap();
-            let page = &ed.doc.pages[self.page_idx];
-            match dc::svg::render_page_with(&ed.doc, page, &hidden) {
-                Ok(s) => (s, page.part.clone()),
-                Err(e) => {
-                    ui.label(format!("render failed: {e:#}"));
-                    return;
+        // Group-edit breadcrumb bar (#78): "Page ▸ <Group> ▸ …" with a
+        // Close Group control — Visio shows the path in the group
+        // window's title; v1 pins a slim bar above the canvas. Esc
+        // pops one level (the same close semantics as Visio's window).
+        if !self.group_edit.is_empty() {
+            let names: Vec<String> = self
+                .group_edit
+                .iter()
+                .map(|gid| {
+                    self.ed()
+                        .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                        .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, *gid))
+                        .and_then(|s| s.name_u.clone())
+                        .unwrap_or_else(|| format!("Group.{gid}"))
+                })
+                .collect();
+            let mut pop = false;
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("Page › {}", names.join(" › ")))
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+                if ui.small_button("× Close Group").clicked() {
+                    pop = true;
                 }
+            });
+            if pop {
+                self.group_edit.pop();
             }
-        };
+            // Esc pops one level (after the text editor and any open
+            // menu had their chance — those consume the key first).
+            if self.drag.is_none()
+                && self.text_edit.is_none()
+                && self.ctx_menu.is_none()
+                && ui
+                    .ctx()
+                    .input(|i| i.key_pressed(egui::Key::Escape))
+            {
+                self.group_edit.pop();
+            }
+        }
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
-        let drag_rect = self.drag_preview_rect();
-        let handles = self.selection_handles();
-        let armed = self.stencil.armed.is_some();
-        let tex = self.tex.get(
-            ui.ctx(),
-            &svg,
-            geom.w_in,
-            &part.replace('/', "_"),
-            self.version,
-            self.view.px_per_in(),
-        );
-        let tex = match tex {
-            Ok(t) => t.clone(),
-            Err(e) => {
-                ui.label(format!("raster failed: {e:#}"));
-                return;
+        // Live move feedback (#96): during a moved drag the dragged
+        // shapes' static layers are suppressed and ghosted at the live
+        // position — Visio moves the shape under the cursor for the
+        // whole gesture, and a move ghost is a quad translation, never
+        // a re-raster (the #93 O(0)-move guarantee holds).
+        let mut drag_fx = canvas::DragFx::default();
+        let mut hide_layers: Vec<i64> = Vec::new();
+        let mut live_drag = false;
+        if let Some(d) = self.drag.as_ref().filter(|d| d.moved) {
+            if self.sel.is_some_and(|(p, _)| Some(p) == self.page_id()) {
+                live_drag = true;
+                // y-up pin delta → y-down bbox delta flips y.
+                let (dx, dy) = (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                let mut ids: Vec<i64> = vec![d.shape];
+                ids.extend(d.group.iter().copied());
+                let ed = self.ed.as_ref().unwrap();
+                let page = &ed.doc.pages[self.page_idx];
+                for id in ids {
+                    hide_layers.push(id);
+                    match self.layers.quad_for(id) {
+                        Some(q) => {
+                            let bbox = (q.bbox.0 + dx, q.bbox.1 - dy, q.bbox.2, q.bbox.3);
+                            drag_fx.ghosts.push(crate::layers::ShapeQuad { id, tex: q.tex, bbox });
+                            // The primary carries its selection frame
+                            // along (Visio keeps the outline on the
+                            // moving shape).
+                            if id == d.shape {
+                                let tl = canvas::page_to_screen(
+                                    bbox.0,
+                                    geom.h_in - bbox.1,
+                                    &self.view,
+                                    &geom,
+                                );
+                                let br = canvas::page_to_screen(
+                                    bbox.0 + bbox.2,
+                                    geom.h_in - (bbox.1 + bbox.3),
+                                    &self.view,
+                                    &geom,
+                                );
+                                drag_fx.outlines.push(Rect::from_two_pos(tl, br));
+                            }
+                        }
+                        None => {
+                            // Texture still rasterizing (or a sub-shape
+                            // selection): a dashed outline at the live
+                            // position keeps the gesture visible.
+                            if let Some(shape) =
+                                vsdx::model::find_shape_by_id(&page.shapes, id)
+                            {
+                                // Nested-aware: a group-edit member
+                                // maps its parent-local rect through
+                                // the XForm chain to page space.
+                                if let Some((x, y, w, h)) =
+                                    self.shape_rect(&ed.doc, page.id, shape)
+                                {
+                                    let tl = canvas::page_to_screen(x + dx, y + h + dy, &self.view, &geom);
+                                    let br = canvas::page_to_screen(x + w + dx, y + dy, &self.view, &geom);
+                                    drag_fx.outlines.push(Rect::from_two_pos(tl, br));
+                                }
+                            }
+                        }
+                    }
+                }
             }
+        }
+        self.last_drag_ghosts = drag_fx.ghosts.len();
+        // The moved selection frame follows the gesture; static chrome
+        // (frame, members, handles) hides while it moves (Visio look).
+        let (sel_rect, extra_rects, handles) = if live_drag {
+            (None, Vec::new(), Vec::new())
+        } else {
+            (sel_rect, extra_rects, self.selection_handles())
         };
+        let armed = self.stencil.armed.is_some();
+        // #90/#91/#92: the page SVG is built by the cache's miss
+        // closure — only when the (part, version, ppi-bucket) texture
+        // is actually missing — and the parse/render runs on the raster
+        // pool. Until a first raster lands, `None` paints the page as
+        // its natural white paper (canvas::show's None path); a render
+        // failure surfaces as the error label (and is retried next
+        // frame, since failures are not cached).
+        // #93: per-shape layers replace the one-page texture. Each
+        // top-level shape subtree is its own layer (same SVG backend
+        // walk, viewBox scoped to its ink bounds), rasterized on the
+        // #92 pool and composited in z-order; only the shapes a
+        // command touched ever re-render. Group-edit mode (#78)
+        // composites only the open group's layer — its subtree at page
+        // positions through the normal group transforms, the same
+        // content the scoped monolith drew. `render_page_with` stays
+        // the export/print path (and the Info thumbnail's).
+        let (mut quads, layer_status) = {
+            let ed = self.ed.as_ref().unwrap();
+            let page = &ed.doc.pages[self.page_idx];
+            // Viewport (visible page rect, y-down inches) from the
+            // last frame's canvas rect — whole page until it exists.
+            let vp = if self.canvas_rect.is_positive() {
+                let (x0, y0) =
+                    canvas::screen_to_page(self.canvas_rect.left_top(), &self.view, &geom);
+                let (x1, y1) =
+                    canvas::screen_to_page(self.canvas_rect.right_bottom(), &self.view, &geom);
+                let y0 = geom.h_in - y0; // → y-down viewBox space
+                let y1 = geom.h_in - y1;
+                (
+                    x0.min(x1),
+                    y0.min(y1),
+                    (x1 - x0).abs(),
+                    (y1 - y0).abs(),
+                )
+            } else {
+                (0.0, 0.0, geom.w_in, geom.h_in)
+            };
+            // The compositing scope is the TOP-LEVEL group on the
+            // group-edit stack: composite iterates page.shapes (top
+            // level), so the innermost id of a nested stack ([G1, G2])
+            // matches nothing and blanked the canvas. Hit-testing
+            // stays scoped to the innermost group (shape_hit).
+            self.layers.composite(
+                ui.ctx(),
+                &mut self.pool,
+                &ed.doc,
+                page,
+                self.view.px_per_in(),
+                vp,
+                self.group_edit.first().copied(),
+                &hidden,
+            )
+        };
+        if let Some(msg) = layer_status {
+            self.status = msg;
+        }
+        quads.retain(|q| !hide_layers.contains(&q.id));
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -3480,11 +3762,11 @@ impl App {
             ui,
             view,
             &geom,
-            Some(&tex),
+            &quads,
             sel_rect,
             &extra_rects,
             &handles,
-            drag_rect,
+            &drag_fx,
             armed,
             &hit,
             &mut mouse,
@@ -5084,6 +5366,8 @@ impl App {
             Master(usize),
             Group,
             Ungroup,
+            /// Enter the selected group's edit mode (#78).
+            OpenGroup(i64),
             Container,
             Hyperlink,
             AddComment,
@@ -5255,24 +5539,51 @@ impl App {
                 act = Some(Act::FlipH);
             }
             ui.separator();
-            // Group needs a multi-selection; Ungroup needs a selected
-            // group (#26).
+            // Group ▸ is a flyout (Visio 2016, #78): Group/Ungroup live
+            // inside it, plus Open <name> to enter group-edit mode.
+            // Group needs a multi-selection; Ungroup/Open need a
+            // selected group (#26).
             let can_group = self.sel_set.len() >= 2;
-            let is_group = self
+            let selected_group = self
                 .ed()
                 .and_then(|ed| ed.doc.pages.get(self.page_idx))
                 .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
-                .is_some_and(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
-            if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
-                act = Some(Act::Group);
-            }
-            if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
-                act = Some(Act::Ungroup);
-            }
+                .filter(|s| s.type_.as_deref() == Some("Group") && !s.sub_shapes.is_empty());
+            let is_group = selected_group.is_some();
+            let group_label = selected_group
+                .and_then(|s| s.name_u.clone())
+                .unwrap_or_else(|| format!("Group.{shape_id}"));
+            // The flyout parent row: drawn directly so we own its
+            // Response for Popup::menu (the Container ▸ pattern).
+            let tokens = theme::menu_tokens(ui.visuals());
+            let mut group_job = egui::text::LayoutJob::default();
+            group_job.append(
+                "  Group  ›",
+                0.0,
+                egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
+            );
+            let group_row = ui.add_enabled(
+                true,
+                egui::Button::new(group_job)
+                    .min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
+            );
+            egui::Popup::menu(&group_row)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    ui.set_min_width(210.0);
+                    if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
+                        act = Some(Act::Group);
+                    }
+                    if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
+                        act = Some(Act::Ungroup);
+                    }
+                    if ctx_item(ui, None, &format!("Open {group_label}"), "", is_group) {
+                        act = Some(Act::OpenGroup(shape_id));
+                    }
+                });
             // Container is a flyout, not an action (Visio 2016): the
             // parent row only opens the submenu. Anchor: draw the row
             // directly so we own its Response for Popup::menu.
-            let tokens = theme::menu_tokens(ui.visuals());
             let mut job = egui::text::LayoutJob::default();
             job.append(
                 "  Container  ›",
@@ -5387,6 +5698,24 @@ impl App {
                 if let Some(m) = first_member {
                     self.set_selection(Some((page_id, m)));
                 }
+            }
+            Act::OpenGroup(gid) => {
+                // Enter (or deepen) group-edit mode (#78): view state
+                // only — members keep editing through the same commands,
+                // one undo each, as on the page.
+                if !self.group_edit.contains(&gid) {
+                    self.group_edit.push(gid);
+                }
+                let name = self.ed().and_then(|ed| {
+                    ed.doc.pages.get(self.page_idx).and_then(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, gid)
+                            .and_then(|s| s.name_u.clone())
+                    })
+                });
+                self.status = format!(
+                    "Opened group {} — Esc or Close Group to return",
+                    name.unwrap_or_else(|| format!("Group.{gid}"))
+                );
             }
             Act::Cut | Act::Copy => {
                 self.copy_selection();
@@ -5563,6 +5892,11 @@ impl App {
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
     }
+    /// The open group-edit stack, outermost first (#78).
+    #[doc(hidden)]
+    pub fn debug_group_edit(&self) -> Vec<i64> {
+        self.group_edit.clone()
+    }
     #[doc(hidden)]
     pub fn debug_sel_set(&self) -> Vec<(i64, i64)> {
         self.sel_set.clone()
@@ -5679,6 +6013,59 @@ impl App {
         self.ed()
             .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// kittest: the first top-level shape's layer texture id (#92/#93)
+    /// — `None` while its first raster is still on a worker.
+    #[doc(hidden)]
+    pub fn debug_page_tex_id_for_test(&self) -> Option<egui::TextureId> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let first = page.shapes.first()?;
+        self.layers.tex_id_for_test(first.id)
+    }
+
+    /// kittest: one shape's layer texture id (#93) — stable across a
+    /// pure move (the texture is translation-invariant).
+    #[doc(hidden)]
+    pub fn debug_layer_tex_id_for_test(&self, shape_id: i64) -> Option<egui::TextureId> {
+        self.layers.tex_id_for_test(shape_id)
+    }
+
+    /// kittest: how many live drag ghosts the last frame drew (#96).
+    #[doc(hidden)]
+    pub fn debug_drag_ghosts_for_test(&self) -> usize {
+        self.last_drag_ghosts
+    }
+
+    /// kittest: how many shape layers have landed (#93) — the post cap
+    /// keeps the first frame from rasterizing the whole page inline.
+    #[doc(hidden)]
+    pub fn debug_layer_count_for_test(&self) -> usize {
+        self.layers.landed_count_for_test()
+    }
+
+    /// kittest: how many stencil master thumbnails have landed (#92).
+    #[doc(hidden)]
+    pub fn debug_stencil_thumb_count_for_test(&self) -> usize {
+        self.stencil.thumb_count_for_test()
+    }
+    /// kittest (#92): the per-frame post cap the async contract asserts
+    /// against.
+    #[doc(hidden)]
+    pub fn debug_pool_post_cap_for_test(&self) -> usize {
+        self.pool.post_cap()
+    }
+    /// kittest (#92): the most raster jobs any single frame ever
+    /// queued — must never exceed the cap (the anti-burst invariant).
+    #[doc(hidden)]
+    pub fn debug_pool_peak_posts_per_frame_for_test(&self) -> usize {
+        self.pool.debug_peak_posts_per_frame()
+    }
+    /// kittest (#92): lifetime queued raster jobs.
+    #[doc(hidden)]
+    pub fn debug_pool_total_posts_for_test(&self) -> u64 {
+        self.pool.debug_total_posts()
     }
     /// kittest: a shape's INSTANCE-LOCAL User row value (#25) — None
     /// while the row is inherited from the master.
@@ -6109,7 +6496,7 @@ impl App {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
             // Ghost: the master thumbnail drawn at the shape's real
             // on-page size, semi-transparent, pinned at the cursor.
-            let App { ed, stencil, .. } = self;
+            let App { ed, stencil, pool, .. } = self;
             if let Some(ed) = ed.as_ref() {
                 let (w, h) = master_size(&ed.doc, master);
                 let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
@@ -6117,13 +6504,16 @@ impl App {
                 let layer =
                     egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
                 let painter = ctx.layer_painter(layer);
-                let tex = stencil.texture(ctx, ed, master);
-                painter.image(
-                    tex.id(),
-                    r,
-                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                    Color32::from_white_alpha(150),
-                );
+                // While the first-use thumbnail is still on a worker
+                // (#92) the ghost carries just its outline.
+                if let Some(tex) = stencil.texture(ctx, ed, master, pool) {
+                    painter.image(
+                        tex.id(),
+                        r,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::from_white_alpha(150),
+                    );
+                }
                 let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
                 painter.rect_stroke(
                     r,
@@ -6155,6 +6545,61 @@ impl eframe::App for App {
 impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
+        let _frame = crate::perf::span(crate::perf::Stage::Frame);
+        // Off-thread rasters (#92): land worker completions before
+        // layout so this frame uses fresh textures; anything landing
+        // (or a post deferred by the per-frame cap) schedules the
+        // repaint that shows it. The UI thread only pays load_texture.
+        let landed = self.pool.drain();
+        if !landed.is_empty() || self.pool.take_deferred() {
+            ui.ctx().request_repaint();
+        }
+        for done in landed {
+            match done.key {
+                crate::rasterpool::RasterKey::Page { part, version, bucket } => {
+                    self.tex.on_page_done(
+                        ui.ctx(),
+                        part,
+                        version,
+                        bucket,
+                        done.image,
+                        done.tree,
+                        done.was_parse,
+                    );
+                }
+                crate::rasterpool::RasterKey::Thumb(id) => {
+                    self.stencil.on_thumb_done(ui.ctx(), id, done.image);
+                }
+                crate::rasterpool::RasterKey::Shape { page, id, version, bucket } => {
+                    if let Some(msg) = self.layers.on_shape_done(
+                        ui.ctx(),
+                        page,
+                        id,
+                        version,
+                        bucket,
+                        done.image,
+                    ) {
+                        self.status = msg;
+                    }
+                }
+            }
+        }
+        // Group-edit stack coherence (#78): drop open levels that no
+        // longer resolve to a Group on the active page (ungroup, undo,
+        // page switch, document change — one check covers them all).
+        if !self.group_edit.is_empty() {
+            let page_groups = |id: i64| -> bool {
+                self.ed()
+                    .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                    .map(|p| {
+                        vsdx::model::find_shape_by_id(&p.shapes, id)
+                            .is_some_and(|s| s.type_.as_deref() == Some("Group"))
+                    })
+                    .unwrap_or(false)
+            };
+            let ok = self.group_edit.iter().copied().take_while(|id| page_groups(*id)).count();
+            self.group_edit.truncate(ok);
+        }
         let ctx = ui.ctx().clone();
         // OS theme flips (GitHub #52): the watcher thread re-probes the
         // OS preference on its period; switch the active style slot when
@@ -6248,9 +6693,9 @@ impl App {
                         self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
                         let title = stencil_title(&self.path);
-                        let App { ed, stencil, .. } = self;
+                        let App { ed, stencil, pool, .. } = self;
                         if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed, &title) {
+                            if let Some(id) = stencil.show(ui, ed, &title, pool) {
                                 armed = Some(id);
                             }
                         }
@@ -6425,6 +6870,7 @@ impl App {
         self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.layers.clear();
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
@@ -6615,8 +7061,11 @@ impl App {
                             // Live thumbnail of the active page (#58):
                             // the same render → rasterize → texture pipeline
                             // the stencil pane uses, cached per (page,
-                            // version) so any edit refreshes it.
-                            let (thumb_svg, thumb_w_in, thumb_h_in, thumb_part) = {
+                            // version) so any edit refreshes it. The SVG
+                            // itself is built lazily by the cache's miss
+                            // closure (#90) — an open Info tab no longer
+                            // re-serializes the page every frame.
+                            let (thumb_w_in, thumb_h_in, thumb_part) = {
                                 let ed = self.ed.as_ref().unwrap();
                                 let page = &ed.doc.pages
                                     [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
@@ -6626,13 +7075,7 @@ impl App {
                                         .and_then(|c| c.numeric())
                                         .unwrap_or(0.0)
                                 };
-                                let svg = if self.info_render_fail_for_test {
-                                    None
-                                } else {
-                                    dc::svg::render_page(&ed.doc, page).ok()
-                                };
                                 (
-                                    svg,
                                     n("PageWidth").max(0.1),
                                     n("PageHeight").max(0.1),
                                     page.part.clone(),
@@ -6674,18 +7117,25 @@ impl App {
                                     Stroke::new(1.0, t.ribbon_group),
                                     egui::StrokeKind::Middle,
                                 );
-                                if let Some(svg) = thumb_svg.as_deref() {
+                                if !self.info_render_fail_for_test {
                                     // ~192 px wide, aspect-true: the raster
                                     // derives its height from the page.
                                     let ppi = (img_w / thumb_w_in) as f32;
                                     let key = format!("info-{}", thumb_part.replace('/', "_"));
-                                    if let Ok(tex) = self.tex.get(
+                                    if let Ok(Some(tex)) = self.tex.get(
                                         ui.ctx(),
-                                        svg,
+                                        &mut self.pool,
                                         thumb_w_in,
                                         &key,
                                         self.version,
                                         ppi,
+                                        || {
+                                            let ed = self.ed.as_ref().unwrap();
+                                            let page = &ed.doc.pages[self
+                                                .page_idx
+                                                .min(ed.doc.pages.len().saturating_sub(1))];
+                                            dc::svg::render_page(&ed.doc, page)
+                                        },
                                     ) {
                                         let ir = Rect::from_min_size(
                                             r.min + Vec2::new(8.0, 8.0),
@@ -7104,6 +7554,15 @@ fn master_size(doc: &Document, id: i64) -> (f64, f64) {
 fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
     const PAD: f64 = 0.04; // inches
     pos.0 >= x - PAD && pos.0 <= x + w + PAD && pos.1 >= y - PAD && pos.1 <= y + h + PAD
+}
+
+/// Every shape of a subtree, document (z) order, recursive (#78):
+/// the group-edit mode's hit-test and marquee candidate set.
+fn collect_members<'a>(shapes: &'a [Shape], out: &mut Vec<&'a Shape>) {
+    for s in shapes {
+        out.push(s);
+        collect_members(&s.sub_shapes, out);
+    }
 }
 
 /// Whether a Protection-section flag (`LockWidth`, `LockHeight`,
