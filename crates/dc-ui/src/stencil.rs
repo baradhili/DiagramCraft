@@ -326,8 +326,13 @@ impl Stencil {
         master_id: i64,
         img: anyhow::Result<egui::ColorImage>,
     ) {
-        self.inflight.remove(&master_id);
-        let _ = self.insert(ctx, master_id, img);
+        // Land only completions that are still expected: the master-set
+        // fingerprint reload (document switch) clears inflight, and a
+        // late worker result from the OLD document must not insert
+        // stale art under the new document's colliding master ids.
+        if self.inflight.remove(&master_id) {
+            let _ = self.insert(ctx, master_id, img);
+        }
     }
 
     /// kittest (#92): how many master thumbnails have landed.
