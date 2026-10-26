@@ -71,6 +71,12 @@ pub struct ShapeLayers {
     /// Content version per shape id (a global counter; Ink bumps it).
     versions: HashMap<i64, u64>,
     next_version: u64,
+    /// Default version for shapes with no touch history. Advances
+    /// monotonically on every clear so entries created after the
+    /// clear never share an identity (version, bucket) with a job
+    /// posted before it — a stale completion landing in a re-created
+    /// entry would otherwise be indistinguishable from the live job's.
+    base_version: u64,
     /// Bounds (page inches, y-down) per shape id; recomputed when
     /// stale (first sight, Ink, Move).
     bboxes: HashMap<i64, (f64, f64, f64, f64)>,
@@ -93,7 +99,7 @@ impl ShapeLayers {
             }
             match t.touch {
                 dc_core::Touch::Ink => {
-                    self.next_version += 1;
+                    self.next_version = self.next_version.max(self.base_version) + 1;
                     self.versions.insert(t.shape, self.next_version);
                     self.stale_bbox.insert(t.shape);
                     self.gone.remove(&t.shape);
@@ -124,6 +130,9 @@ impl ShapeLayers {
         self.bboxes.clear();
         self.stale_bbox.clear();
         self.gone.clear();
+        // Monotonic: past the old base AND every touched version, so
+        // repeated clears with no edits in between still advance.
+        self.base_version = self.base_version.max(self.next_version) + 1;
     }
 
     /// Page/doc switch: layers are per current page.
@@ -151,6 +160,12 @@ impl ShapeLayers {
         bucket: u32,
         image: anyhow::Result<egui::ColorImage>,
     ) -> Option<String> {
+        // A completion for a different page than the one being
+        // composited is stale across a page switch (ids collide across
+        // pages; the store was cleared on the switch).
+        if self.page != Some(page) {
+            return None;
+        }
         let entry = self.entries.get_mut(&id)?;
         if entry.inflight != Some((version, bucket)) {
             return None; // superseded: the live job's landing is still owed
@@ -281,7 +296,11 @@ impl ShapeLayers {
                 }
                 continue;
             }
-            let version = self.versions.get(&shape.id).copied().unwrap_or(0);
+            let version = self
+                .versions
+                .get(&shape.id)
+                .copied()
+                .unwrap_or(self.base_version);
             let entry = self.entries.entry(shape.id).or_insert_with(|| Entry {
                 version: u64::MAX, // never matches a real version
                 bucket,
@@ -391,6 +410,18 @@ mod tests {
         egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4])
     }
 
+    fn entry_inflight(version: u64, bucket: u32) -> Entry {
+        Entry {
+            version: u64::MAX,
+            bucket,
+            tex: None,
+            svg: None,
+            svg_version: u64::MAX,
+            inflight: Some((version, bucket)),
+            failed: None,
+        }
+    }
+
     /// A completion for a job that was superseded while in flight (an
     /// edit bumped the version and composite posted a newer job) is
     /// discarded without consuming the live job's inflight mark —
@@ -399,18 +430,8 @@ mod tests {
     #[test]
     fn superseded_shape_completion_does_not_consume_the_inflight_mark() {
         let mut layers = ShapeLayers::default();
-        layers.entries.insert(
-            7,
-            Entry {
-                version: u64::MAX,
-                bucket: 384,
-                tex: None,
-                svg: None,
-                svg_version: u64::MAX,
-                inflight: Some((2, 384)),
-                failed: None,
-            },
-        );
+        layers.set_page(0); // the page guard requires a current page
+        layers.entries.insert(7, entry_inflight(2, 384));
         let ctx = egui::Context::default();
         // The stale v1 completion lands first (two workers, out of
         // order): discarded, inflight untouched.
@@ -429,5 +450,54 @@ mod tests {
         assert!(e.tex.is_some());
         assert_eq!(e.version, 2);
         assert_eq!(e.bucket, 384);
+    }
+
+    /// Completions that outlive their entry — a page switch (ids
+    /// collide across pages) or a document reload (same page id) —
+    /// must never land in the re-created entry, whose default version
+    /// equals the post-clear base while the stale job carries a
+    /// pre-clear identity. Pre-fix both sides defaulted to version 0
+    /// and were indistinguishable.
+    #[test]
+    fn stale_completions_across_clear_and_page_switch_are_rejected() {
+        let ctx = egui::Context::default();
+        let mut layers = ShapeLayers::default();
+        layers.set_page(0);
+        let old_base = layers.base_version;
+        layers.entries.insert(7, entry_inflight(old_base, 384));
+
+        // Page switch: the store clears and the base advances; the new
+        // page's colliding shape-7 entry gets the NEW base as its
+        // default identity.
+        layers.set_page(1);
+        let new_base = layers.base_version;
+        assert!(new_base > old_base, "clear must advance the version base");
+        layers.entries.insert(7, entry_inflight(new_base, 384));
+        // The old page's completion is rejected by the page guard.
+        layers.on_shape_done(&ctx, 0, 7, old_base, 384, Ok(image()));
+        assert_eq!(
+            layers.entries[&7].inflight,
+            Some((new_base, 384)),
+            "a foreign-page completion must not consume the mark"
+        );
+        assert!(layers.entries[&7].tex.is_none());
+
+        // Same-page reload (App::load clears in place): the page guard
+        // passes, so the version identity must reject the stale job.
+        layers.clear();
+        let re_base = layers.base_version;
+        assert!(re_base > new_base);
+        layers.entries.insert(7, entry_inflight(re_base, 384));
+        layers.on_shape_done(&ctx, 1, 7, new_base, 384, Ok(image()));
+        assert_eq!(
+            layers.entries[&7].inflight,
+            Some((re_base, 384)),
+            "a pre-clear completion must not consume the mark"
+        );
+        assert!(layers.entries[&7].tex.is_none());
+        // The live identity still lands.
+        layers.on_shape_done(&ctx, 1, 7, re_base, 384, Ok(image()));
+        assert!(layers.entries[&7].tex.is_some());
+        assert_eq!(layers.entries[&7].version, re_base);
     }
 }
