@@ -184,6 +184,7 @@ impl Stencil {
         let mut cols = self.last_cols.max(1);
         let q = self.search.to_lowercase();
         let reveal = self.reveal.take();
+        let mut close_requested: Option<usize> = None;
         area.show(ui, |ui| {
             // Live width: masters re-wrap while the pane resize drag is
             // still in motion — no settle step (GitHub #53).
@@ -228,6 +229,16 @@ impl Stencil {
                 if resp.clicked() {
                     set.set_expanded(ix, !expanded);
                 }
+                // Right-click an open stencil to close it (#85): its
+                // textures and in-flight marks are evicted by serial,
+                // so a later stencil at the same pane position can
+                // never inherit stale art.
+                resp.context_menu(|ui| {
+                    if ui.button("Close Stencil...").clicked() {
+                        close_requested = Some(ix);
+                        ui.close();
+                    }
+                });
                 if expanded {
                     let cells = stencil_cells(set, ix, &q);
                     if !cells.is_empty() {
@@ -237,6 +248,25 @@ impl Stencil {
                 ui.add_space(2.0);
             }
         });
+
+        // A close shifts every later entry's pane position — disarm
+        // open-stencil placements rather than mis-place from a stale
+        // index (document placements are unaffected).
+        if let Some(ix) = close_requested {
+            if let Some(serial) = set.close(ix) {
+                self.evict(serial);
+                let open = |k: Option<MasterKey>| {
+                    matches!(k.map(|k| k.0), Some(StencilId::Open(_)))
+                };
+                if open(self.armed) {
+                    self.armed = None;
+                }
+                if open(self.carry) {
+                    self.carry = None;
+                }
+                self.reveal = None;
+            }
+        }
 
         // A resize changed the row structure: re-anchor the scroll so
         // the master that was topmost stays topmost under the new
@@ -448,6 +478,15 @@ impl Stencil {
     #[doc(hidden)]
     pub fn thumb_count_for_test(&self) -> usize {
         self.textures.len()
+    }
+    /// kittest (#85): the landed thumbnail texture id for one pane
+    /// cell, by cache serial + master id.
+    #[doc(hidden)]
+    pub fn thumb_id(&self, serial: u64, master: i64) -> Option<egui::TextureId> {
+        self.textures
+            .iter()
+            .find(|(s, m, _)| (*s, *m) == (serial, master))
+            .map(|(_, _, t)| t.id())
     }
 }
 

@@ -3079,3 +3079,64 @@ fn stencil_master_drop_imports_and_places_as_one_undo() {
     );
     let _ = imported_id;
 }
+
+/// Thumbnails are cached by (stencil serial, master id) — never a bare
+/// master id — and evicted when their stencil closes (#85).
+#[test]
+fn stencil_thumbnails_key_by_source_and_evict_on_close() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let doc_thumbs = h.state().debug_stencil_thumb_count_for_test();
+    let tmp = tempfile::tempdir().unwrap();
+    let a = synth_stencil(tmp.path(), "alpha", &[("Square", 1), ("Circle", 2)]);
+    let b = synth_stencil(tmp.path(), "beta", &[("Star", 1), ("Arrow", 2)]);
+    h.state_mut().open_stencil_for_test(&a);
+    h.state_mut().open_stencil_for_test(&b);
+    h.run();
+    h.run();
+
+    // Master id 1 exists in BOTH stencils — the two cells must never
+    // share a texture.
+    let a1 = h.state().debug_thumb_id_for_test(StencilId::Open(0), 1);
+    let b1 = h.state().debug_thumb_id_for_test(StencilId::Open(1), 1);
+    assert!(a1.is_some() && b1.is_some(), "both thumbnails landed (sync seam)");
+    assert_ne!(a1, b1, "colliding master ids never share a texture");
+    assert_eq!(
+        h.state().debug_stencil_thumb_count_for_test(),
+        doc_thumbs + 4,
+        "document set + both stencils cached independently"
+    );
+
+    // Golden: the pane with two stencils open, thumbnails rendered from
+    // each stencil's own document.
+    ctx_menu_snapshot(&mut h, "dc_ui_stencil_two_open");
+
+    // Close alpha via its entry header's context menu.
+    let header = h
+        .state()
+        .debug_stencil_entry_rects()
+        .into_iter()
+        .find(|(id, _)| *id == StencilId::Open(0))
+        .expect("alpha header")
+        .1;
+    click_at(&mut h, header.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Close Stencil...").click();
+    h.run();
+
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries.len(), 1, "alpha closed");
+    assert_eq!(entries[0].0, "beta", "the surviving entry keeps its identity");
+    assert_eq!(
+        h.state().debug_stencil_thumb_count_for_test(),
+        doc_thumbs + 2,
+        "alpha's textures were evicted with its serial"
+    );
+    assert_eq!(
+        h.state().debug_thumb_id_for_test(StencilId::Open(0), 1),
+        Some(b1.unwrap()),
+        "beta (now entry 0) kept its own art — not a stale alpha texture"
+    );
+}

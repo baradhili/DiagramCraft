@@ -6068,6 +6068,19 @@ impl App {
             })
             .unwrap_or_default()
     }
+    /// kittest (#85): the landed thumbnail texture for one pane cell.
+    #[doc(hidden)]
+    pub fn debug_thumb_id_for_test(
+        &self,
+        stencil: StencilId,
+        master: i64,
+    ) -> Option<egui::TextureId> {
+        let serial = match stencil {
+            StencilId::Document => crate::stencil::DOC_SERIAL,
+            StencilId::Open(ix) => self.stencils.get(ix).map(|s| s.serial())?,
+        };
+        self.stencil.thumb_id(serial, master)
+    }
     /// kittest (#63): stencil list entry header rects, document entry
     /// first.
     #[doc(hidden)]
