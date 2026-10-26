@@ -19,7 +19,7 @@ use crate::canvas::{self, Handle, HandleId, PageGeom, View};
 use crate::cmd::{AddMasterInstance, MoveShape};
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
-use crate::stencil::Stencil;
+use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
 use crate::svgimg::TextureCache;
 use crate::theme;
 
@@ -112,6 +112,10 @@ pub struct App {
     /// top of `draw` so undo/ungroup/doc changes leave it coherent.
     group_edit: Vec<i64>,
     stencil: Stencil,
+    /// The open-stencil set (Shapes pane, #63) — session state, never
+    /// file content. Kept across document switches like Visio's
+    /// workspace; the pane (`stencil`) renders it.
+    stencils: StencilSet,
     /// Stencil panel content rect from the last frame (resize-handle
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
@@ -332,6 +336,7 @@ impl App {
             drag: None,
             group_edit: Vec::new(),
             stencil: Stencil::default(),
+            stencils: StencilSet::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
             pool: crate::rasterpool::RasterPool::default(),
@@ -1872,18 +1877,15 @@ impl App {
             }
         }
         // Stencil placement takes priority.
-        if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
-            let new_id = self
-                .ed
-                .as_ref()
-                .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
-            self.apply(AddMasterInstance::new(page_id, master, page_pos));
+        if let Some(key) = self.stencil.armed {
             self.stencil.armed = None;
             self.ctx_menu = None;
             self.placed_last_click = true;
-            if let Some(nid) = new_id {
-                self.set_selection(Some((page_id, nid)));
-                self.sel_set = vec![(page_id, nid)];
+            if let Some(nid) = self.place_master(key, page_pos) {
+                if let Some(page_id) = self.page_id() {
+                    self.set_selection(Some((page_id, nid)));
+                    self.sel_set = vec![(page_id, nid)];
+                }
             }
             return;
         }
@@ -1918,6 +1920,32 @@ impl App {
             }
             None => {
                 self.set_selection(None);
+            }
+        }
+    }
+
+    /// Place the armed/carried master `key` at `page_pos` (inches).
+    /// Returns the new shape id when a placement happened.
+    ///
+    /// Document masters place directly. A master from an open stencil
+    /// must first be copied into the drawing (Visio's first-use
+    /// import, #63): the import command lands with #84, so until then
+    /// stencil-master placements disarm with a status note.
+    fn place_master(&mut self, key: MasterKey, page_pos: (f64, f64)) -> Option<i64> {
+        let page_id = self.page_id()?;
+        match key.0 {
+            StencilId::Document => {
+                let new_id = self
+                    .ed
+                    .as_ref()
+                    .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
+                self.apply(AddMasterInstance::new(page_id, key.1, page_pos));
+                new_id
+            }
+            StencilId::Open(_) => {
+                self.status =
+                    "placing from an open stencil arrives with master import (#84)".into();
+                None
             }
         }
     }
@@ -5845,7 +5873,7 @@ impl App {
             .unwrap_or(0)
     }
     #[doc(hidden)]
-    pub fn debug_master_cells(&self) -> Vec<(i64, Rect)> {
+    pub fn debug_master_cells(&self) -> Vec<(crate::stencil::MasterKey, Rect)> {
         self.stencil.cell_rects.clone()
     }
     /// Column count of the last stencil layout, re-derived from the
@@ -5944,11 +5972,36 @@ impl App {
         self.ctx_menu_rect
     }
     #[doc(hidden)]
-    pub fn debug_armed(&self) -> Option<i64> {
+    pub fn debug_armed(&self) -> Option<MasterKey> {
         self.stencil.armed
     }
+    /// kittest (#63): open a stencil file into the pane exactly like
+    /// the "Open Existing Stencil…" flow (minus the native dialog).
     #[doc(hidden)]
-    pub fn debug_carry(&self) -> Option<i64> {
+    pub fn open_stencil_for_test(&mut self, path: &std::path::Path) {
+        match self.stencils.open_file(path) {
+            Ok((ix, _existing)) => {
+                self.stencil.reveal = Some(StencilId::Open(ix));
+            }
+            Err(e) => self.status = format!("open stencil failed: {e:#}"),
+        }
+    }
+    /// kittest (#63): open-stencil entry titles + expansion, pane order.
+    #[doc(hidden)]
+    pub fn debug_stencil_entries(&self) -> Vec<(String, bool)> {
+        self.stencils
+            .iter()
+            .map(|(_, st)| (st.title.clone(), st.expanded))
+            .collect()
+    }
+    /// kittest (#63): stencil list entry header rects, document entry
+    /// first.
+    #[doc(hidden)]
+    pub fn debug_stencil_entry_rects(&self) -> Vec<(StencilId, egui::Rect)> {
+        self.stencil.entry_rects.clone()
+    }
+    #[doc(hidden)]
+    pub fn debug_carry(&self) -> Option<MasterKey> {
         self.stencil.carry
     }
     /// MRU entries, most recent first (recent-files tests).
@@ -6476,7 +6529,7 @@ impl App {
     /// place an instance there. Click-to-arm then click-to-place still
     /// works alongside this.
     fn stencil_carry(&mut self, ctx: &Context) {
-        let Some(master) = self.stencil.carry else {
+        let Some(key) = self.stencil.carry else {
             return;
         };
         let (down, released, pos) = ctx.input(|i| {
@@ -6494,43 +6547,46 @@ impl App {
         let ppi = self.view.px_per_in();
         if down {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+            let Some(ed) = self.ed.as_ref() else { return };
+            // The ghost renders from the master's own source document
+            // (#82): a stencil master need not exist in the edited
+            // document (it is copied in only on placement, #84).
+            let Some((serial, src, m)) = self.stencils.resolve(ed, key) else {
+                self.stencil.carry = None;
+                return;
+            };
             // Ghost: the master thumbnail drawn at the shape's real
             // on-page size, semi-transparent, pinned at the cursor.
-            let App { ed, stencil, pool, .. } = self;
-            if let Some(ed) = ed.as_ref() {
-                let (w, h) = master_size(&ed.doc, master);
-                let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
-                let r = Rect::from_center_size(p, size);
-                let layer =
-                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
-                let painter = ctx.layer_painter(layer);
-                // While the first-use thumbnail is still on a worker
-                // (#92) the ghost carries just its outline.
-                if let Some(tex) = stencil.texture(ctx, ed, master, pool) {
-                    painter.image(
-                        tex.id(),
-                        r,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::from_white_alpha(150),
-                    );
-                }
-                let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
-                painter.rect_stroke(
+            let (w, h) = master_size(src, m.id);
+            let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
+            let r = Rect::from_center_size(p, size);
+            let layer =
+                egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
+            let painter = ctx.layer_painter(layer);
+            // While the first-use thumbnail is still on a worker
+            // (#92) the ghost carries just its outline.
+            if let Some(tex) = self.stencil.texture(ctx, serial, src, m.id, &mut self.pool) {
+                painter.image(
+                    tex.id(),
                     r,
-                    1.0,
-                    Stroke::new(1.0, t.selection),
-                    egui::StrokeKind::Middle,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::from_white_alpha(150),
                 );
             }
+            let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
+            painter.rect_stroke(
+                r,
+                1.0,
+                Stroke::new(1.0, t.selection),
+                egui::StrokeKind::Middle,
+            );
         }
         if released {
             self.stencil.carry = None;
             if self.canvas_rect.contains(p) {
-                if let Some(page_id) = self.page_id() {
-                    let geom = self.page_geom();
-                    let (x, y) = canvas::screen_to_page(p, &self.view, &geom);
-                    self.apply(AddMasterInstance::new(page_id, master, (x, y)));
-                }
+                let geom = self.page_geom();
+                let (x, y) = canvas::screen_to_page(p, &self.view, &geom);
+                self.place_master(key, (x, y));
             }
         }
     }
@@ -6567,8 +6623,8 @@ impl App {
                         done.was_parse,
                     );
                 }
-                crate::rasterpool::RasterKey::Thumb(id) => {
-                    self.stencil.on_thumb_done(ui.ctx(), id, done.image);
+                crate::rasterpool::RasterKey::Thumb { serial, master } => {
+                    self.stencil.on_thumb_done(ui.ctx(), serial, master, done.image);
                 }
                 crate::rasterpool::RasterKey::Shape { page, id, version, bucket } => {
                     if let Some(msg) = self.layers.on_shape_done(
@@ -6672,11 +6728,15 @@ impl App {
                     .inner_margin(egui::Margin::same(2)),
             )
             .show(ui, |ui| self.page_tabs(ui));
-        if self
+        // The pane lists the document's masters plus every open
+        // stencil (#63): it stays up once a stencil is open, even for
+        // a master-less document.
+        let pane_wanted = self
             .ed()
             .map(|ed| !ed.doc.masters.is_empty())
             .unwrap_or(false)
-        {
+            || !self.stencils.is_empty();
+        if pane_wanted {
             egui::Panel::left("stencil")
                 .frame(
                     egui::Frame::new()
@@ -6693,15 +6753,15 @@ impl App {
                         self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
                         let title = stencil_title(&self.path);
-                        let App { ed, stencil, pool, .. } = self;
+                        let App { ed, stencil, stencils, pool, .. } = self;
                         if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed, &title, pool) {
+                            if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
                                 armed = Some(id);
                             }
                         }
                         if let Some(id) = armed {
                             self.status =
-                                format!("master {} armed — click the canvas to place", id);
+                                format!("master {} armed — click the canvas to place", id.1);
                         }
                         if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked()
                         {
@@ -7837,7 +7897,7 @@ mod tests {
             .first()
             .map(|m| m.id)
             .unwrap();
-        app.stencil.armed = Some(master);
+        app.stencil.armed = Some((StencilId::Document, master));
         app.on_canvas_click((4.0, 5.0), false, false);
         assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
         assert!(app.placed_last_click);

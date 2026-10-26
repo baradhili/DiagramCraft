@@ -531,7 +531,7 @@ fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
         .state()
         .debug_master_cells()
         .into_iter()
-        .find(|(id, _)| *id == master)
+        .find(|(id, _)| *id == (dc_ui::stencil::StencilId::Document, master))
         .map(|(_, r)| r)
         .unwrap_or_else(|| panic!("master {master} in the stencil"));
     let from = cell.center();
@@ -1133,11 +1133,11 @@ fn assert_grid_fits(h: &Harness<'_, App>) {
     for (id, r) in &cells {
         assert!(
             r.right() <= inner.right() + 0.5,
-            "master {id} cell {r:?} exceeds pane content {inner:?}"
+            "master {id:?} cell {r:?} exceeds pane content {inner:?}"
         );
         assert!(
             r.left() >= inner.left() - 0.5,
-            "master {id} clipped at the left edge"
+            "master {id:?} clipped at the left edge"
         );
     }
 }
@@ -2706,7 +2706,7 @@ fn drag_moves_the_shape_live_under_the_cursor() {
     let mut h = harness_with_blank();
     h.run();
     let (master, _) = h.state().debug_master_cells()[0];
-    let (page, shape) = place_master(&mut h, master);
+    let (page, shape) = place_master(&mut h, master.1);
     h.run();
     // Select the placed shape (placement may not carry selection).
     let r = h.state().debug_shape_screen_rect(shape).expect("placed");
@@ -2744,5 +2744,196 @@ fn drag_moves_the_shape_live_under_the_cursor() {
         "the shape must land where the ghost showed: {:?} vs {:?}",
         r2.center(),
         from + egui::vec2(60.0, -40.0)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Multiple open stencils (GitHub #63 sub-issue 1 / #82)
+// ---------------------------------------------------------------------------
+
+/// A synthetic standalone stencil (.vssx) written from an in-code
+/// model — DiagramCraft's own fixture, no Microsoft content. Master
+/// ids are caller-chosen so tests can make two stencils collide.
+fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> std::path::PathBuf {
+    use vsdx::model::*;
+    let xmlns = || {
+        vec![
+            (
+                "xmlns".to_string(),
+                "http://schemas.microsoft.com/office/visio/2012/main".to_string(),
+            ),
+            (
+                "xmlns:r".to_string(),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                    .to_string(),
+            ),
+        ]
+    };
+    let mut doc = vsdx::Document {
+        root_attrs: xmlns(),
+        pages_attrs: xmlns(),
+        masters_attrs: xmlns(),
+        doc_part: "visio/document.xml".into(),
+        pages_part: "visio/pages/pages.xml".into(),
+        items: vec![DocItem::StyleSheets],
+        ..Document::default()
+    };
+    let ss_attrs = vec![("ID".into(), "0".into()), ("NameU".into(), "No Style".into())];
+    doc.stylesheets.push(StyleSheet {
+        id: 0,
+        name_u: Some("No Style".into()),
+        attrs: ss_attrs.clone(),
+        sheet: Sheet {
+            attrs: ss_attrs,
+            ..Sheet::default()
+        },
+    });
+    for (i, (name, id)) in masters.iter().enumerate() {
+        let mut sheet = Sheet::default();
+        for (n, v) in [("PinX", "1"), ("PinY", "1"), ("Width", "1"), ("Height", "1")] {
+            sheet.set_cell(n, Cell::value(v));
+        }
+        let line = |t: &str, ix: i64, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            n: None,
+            attrs: vec![("T".into(), t.into()), ("IX".into(), ix.to_string())],
+            cells: vec![("X".into(), Cell::value(x)), ("Y".into(), Cell::value(y))],
+        };
+        sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            attrs: vec![("N".into(), "Geometry".into()), ("IX".into(), "0".into())],
+            cells: vec![],
+            rows: vec![
+                line("MoveTo", 1, "0", "0"),
+                line("LineTo", 2, "1", "0"),
+                line("LineTo", 3, "1", "1"),
+                line("LineTo", 4, "0", "1"),
+                line("LineTo", 5, "0", "0"),
+            ],
+        }));
+        let shape = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            line_style: Some(0),
+            fill_style: Some(0),
+            text_style: Some(0),
+            attrs: vec![
+                ("ID".into(), "1".into()),
+                ("Type".into(), "Shape".into()),
+                ("LineStyle".into(), "0".into()),
+                ("FillStyle".into(), "0".into()),
+                ("TextStyle".into(), "0".into()),
+            ],
+            sheet,
+            ..Shape::default()
+        };
+        doc.masters.push(Master {
+            id: *id,
+            name_u: Some(name.to_string()),
+            attrs: vec![
+                ("ID".into(), id.to_string()),
+                ("NameU".into(), name.to_string()),
+                ("Name".into(), name.to_string()),
+                ("BaseID".into(), format!("{{SYNTH-{stem}-{id}}}")),
+            ],
+            shapes: vec![shape],
+            part: format!("visio/masters/master{}.xml", i + 1),
+            contents_attrs: xmlns(),
+            ..Master::default()
+        });
+    }
+    let mut page_sheet = Sheet::default();
+    page_sheet.set_cell("PageWidth", Cell::value("8.5"));
+    page_sheet.set_cell("PageHeight", Cell::value("11"));
+    doc.pages.push(Page {
+        id: 0,
+        name: "Page-1".into(),
+        attrs: vec![("ID".into(), "0".into()), ("NameU".into(), "Page-1".into())],
+        children: vec![IndexChild::Sheet {
+            tag: "PageSheet".into(),
+            sheet: page_sheet,
+        }],
+        part: "visio/pages/page1.xml".into(),
+        contents_attrs: xmlns(),
+        ..Page::default()
+    });
+    let path = dir.join(format!("{stem}.vssx"));
+    vsdx::write::save(&doc, &path).unwrap();
+    path
+}
+
+#[test]
+fn stencil_pane_lists_multiple_open_stencils_independently() {
+    use dc_ui::stencil::StencilId;
+    let mut h = harness_with_blank();
+    h.run();
+    let doc_cells = h.state().debug_master_cells().len();
+    assert!(doc_cells > 0, "blank template exposes starter masters");
+    let tmp = tempfile::tempdir().unwrap();
+    // Two synthetic stencils whose master ids deliberately collide —
+    // pane identity must be (stencil, master), never a bare id (#82).
+    let a = synth_stencil(tmp.path(), "alpha", &[("Square", 1), ("Circle", 2)]);
+    let b = synth_stencil(tmp.path(), "beta", &[("Star", 1), ("Arrow", 2)]);
+    h.state_mut().open_stencil_for_test(&a);
+    h.state_mut().open_stencil_for_test(&b);
+    h.run();
+
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries.len(), 2, "two open stencils listed");
+    assert_eq!(entries[0], ("alpha".to_string(), true), "opened expanded");
+    assert_eq!(entries[1], ("beta".to_string(), true), "second entry below the first");
+
+    let count = |h: &Harness<'_, App>, which: StencilId| {
+        h.state()
+            .debug_master_cells()
+            .iter()
+            .filter(|(k, _)| k.0 == which)
+            .count()
+    };
+    assert_eq!(count(&h, StencilId::Document), doc_cells, "document entry still first");
+    assert_eq!(count(&h, StencilId::Open(0)), 2, "alpha's masters listed");
+    assert_eq!(count(&h, StencilId::Open(1)), 2, "beta's masters listed");
+
+    // Collapse the first open stencil via its entry header: only its
+    // grid disappears; the document entry and the other stencil stay.
+    let header = h
+        .state()
+        .debug_stencil_entry_rects()
+        .into_iter()
+        .find(|(id, _)| *id == StencilId::Open(0))
+        .expect("alpha header laid out")
+        .1;
+    click_at(&mut h, header.center(), egui::PointerButton::Primary);
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries[0].1, false, "alpha collapsed by its own header");
+    assert_eq!(entries[1].1, true, "beta's expansion is independent");
+    assert_eq!(count(&h, StencilId::Open(0)), 0, "collapsed entry hides its grid");
+    assert_eq!(count(&h, StencilId::Open(1)), 2);
+    assert_eq!(
+        count(&h, StencilId::Document),
+        doc_cells,
+        "document entry untouched by a stencil collapse"
+    );
+
+    // Re-expand, then a canvas interaction leaves the entries
+    // unchanged. The collapse re-wrapped the pane (the scrollbar
+    // appeared, the doc grid re-wrapped one row longer), so the
+    // header moved — always click the FRESH rect.
+    let header2 = h
+        .state()
+        .debug_stencil_entry_rects()
+        .into_iter()
+        .find(|(id, _)| *id == StencilId::Open(0))
+        .expect("alpha header laid out")
+        .1;
+    click_at(&mut h, header2.center(), egui::PointerButton::Primary);
+    let canvas_center = h.state().debug_canvas_rect().center();
+    click_at(&mut h, canvas_center, egui::PointerButton::Primary);
+    assert_eq!(
+        count(&h, StencilId::Open(0)),
+        2,
+        "entries survive a canvas interaction unchanged"
     );
 }

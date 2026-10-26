@@ -34,8 +34,10 @@ pub(crate) enum RasterKey {
         version: u64,
         bucket: u32,
     },
-    /// A stencil master thumbnail.
-    Thumb(i64),
+    /// A stencil master thumbnail, keyed by the source's session
+    /// serial + master id — master ids alone collide across stencils
+    /// (#63/#85; serial 0 is the document's own master set).
+    Thumb { serial: u64, master: i64 },
     /// A per-shape canvas layer (#93): `RasterKey::Shape { page, id,
     /// version, bucket }`. The version/bucket travel with the job so
     /// `on_shape_done` can discard a superseded completion (a newer
@@ -53,7 +55,7 @@ impl RasterKey {
     fn kind(&self) -> crate::perf::Kind {
         match self {
             RasterKey::Page { .. } | RasterKey::Shape { .. } => crate::perf::Kind::Page,
-            RasterKey::Thumb(_) => crate::perf::Kind::Thumb,
+            RasterKey::Thumb { .. } => crate::perf::Kind::Thumb,
         }
     }
 }
