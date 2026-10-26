@@ -3660,6 +3660,11 @@ impl App {
             } else {
                 (0.0, 0.0, geom.w_in, geom.h_in)
             };
+            // The compositing scope is the TOP-LEVEL group on the
+            // group-edit stack: composite iterates page.shapes (top
+            // level), so the innermost id of a nested stack ([G1, G2])
+            // matches nothing and blanked the canvas. Hit-testing
+            // stays scoped to the innermost group (shape_hit).
             self.layers.composite(
                 ui.ctx(),
                 &mut self.pool,
@@ -3667,7 +3672,7 @@ impl App {
                 page,
                 self.view.px_per_in(),
                 vp,
-                self.group_edit.last().copied(),
+                self.group_edit.first().copied(),
                 &hidden,
             )
         };
