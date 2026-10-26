@@ -586,6 +586,12 @@ impl App {
             );
         }
         self.page_idx = to;
+        // Group-edit state does not carry across pages: shape ids
+        // overlap across pages, and the per-frame coherence check only
+        // drops levels that stop resolving to a Group — an id that
+        // happens to be a group on the new page would keep the mode
+        // alive with the wrong scope (#78).
+        self.group_edit.clear();
         self.tab_scroll_to_active = true;
         match self.page_states.remove(&new_id) {
             Some(st) => {
