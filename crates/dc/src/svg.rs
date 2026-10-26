@@ -660,6 +660,22 @@ pub fn page_point_to_parent_local(
     }
 }
 
+/// Map a point in the last chain entry's PARENT-LOCAL y-up frame to
+/// PAGE inches y-up — the forward direction of
+/// [`page_point_to_parent_local`], used to read a nested member's pin
+/// into page space during drags.
+pub fn parent_local_point_to_page(
+    doc: &Document,
+    chain: &[&Shape],
+    page_h: f64,
+    p: (f64, f64),
+) -> (f64, f64) {
+    let m = ancestors_affine(doc, chain, page_h);
+    let iy = if chain.len() >= 2 { -p.1 } else { page_h - p.1 };
+    let (sx, sy) = m.apply(p.0, iy);
+    (sx, page_h - sy)
+}
+
 fn render_shape<'a>(
     doc: &'a Document,
     s: &'a Shape,
@@ -3323,7 +3339,15 @@ mod tests {
             let local = page_point_to_parent_local(&doc, &chain, 11.0, p);
             let (sx, sy) = ancestors_affine(&doc, &chain, 11.0).apply(local.0, -local.1);
             assert!((sx - p.0).abs() < 1e-9 && (11.0 - sy - p.1).abs() < 1e-9);
+            // And back through the forward helper.
+            let back = parent_local_point_to_page(&doc, &chain, 11.0, local);
+            assert!((back.0 - p.0).abs() < 1e-9 && (back.1 - p.1).abs() < 1e-9);
         }
+        // A top-level chain (no ancestors) is the identity in page
+        // space: the parent frame IS the page.
+        let top = vec![&g];
+        let q = (3.25, 8.5);
+        assert_eq!(parent_local_point_to_page(&doc, &top, 11.0, q), q);
     }
 
     #[test]

@@ -1638,6 +1638,18 @@ impl App {
     /// the endpoint cells stale — the handles would sit at the old
     /// positions and the next endpoint drag would snap the line back,
     /// CodeRabbit review of df4a562); 2D shapes move the pin alone.
+    /// Page height in inches — the y-flip anchor of the XForm chains.
+    fn page_height(ed: &Editor, page_id: i64) -> f64 {
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| p.sheet())
+            .and_then(|sh| sh.cell("PageHeight"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(11.0)
+    }
+
     fn move_cmd_for(
         &self,
         page_id: i64,
@@ -1660,15 +1672,7 @@ impl App {
         // the page-space drag target into the member's parent frame
         // through the same XForm chain the renderer composes.
         let new_pin = if chain.len() >= 2 {
-            let page_h = ed
-                .doc
-                .pages
-                .iter()
-                .find(|p| p.id == page_id)
-                .and_then(|p| p.sheet())
-                .and_then(|s| s.cell("PageHeight"))
-                .and_then(|c| c.numeric())
-                .unwrap_or(11.0);
+            let page_h = Self::page_height(ed, page_id);
             dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, new_pin)
         } else {
             new_pin
@@ -1762,10 +1766,29 @@ impl App {
                                         ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                                     };
                                     if let (Some(px), Some(py)) = (g("PinX"), g("PinY")) {
+                                        // Member pins are parent-local
+                                        // (#78): map to page space,
+                                        // apply the page-space delta,
+                                        // and let move_cmd_for convert
+                                        // the target back — a raw
+                                        // local+page sum misplaces
+                                        // members of transformed
+                                        // groups.
+                                        let target = if chain.len() >= 2 {
+                                            let page_h = Self::page_height(ed, page_id);
+                                            dc::svg::parent_local_point_to_page(
+                                                &ed.doc,
+                                                &chain,
+                                                page_h,
+                                                (px, py),
+                                            )
+                                        } else {
+                                            (px, py)
+                                        };
                                         cmds.push(self.move_cmd_for(
                                             page_id,
                                             sid,
-                                            (px + dx, py + dy),
+                                            (target.0 + dx, target.1 + dy),
                                         ));
                                     }
                                 }
@@ -1790,7 +1813,24 @@ impl App {
                                 ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric())
                             };
                             if let (Some(px), Some(py)) = (get("PinX"), get("PinY")) {
-                                cmds.push(self.move_cmd_for(page_id, sid, (px + dx, py + dy)));
+                                // Parent-local pin → page space (see
+                                // the container path above).
+                                let target = if chain.len() >= 2 {
+                                    let page_h = Self::page_height(ed, page_id);
+                                    dc::svg::parent_local_point_to_page(
+                                        &ed.doc,
+                                        &chain,
+                                        page_h,
+                                        (px, py),
+                                    )
+                                } else {
+                                    (px, py)
+                                };
+                                cmds.push(self.move_cmd_for(
+                                    page_id,
+                                    sid,
+                                    (target.0 + dx, target.1 + dy),
+                                ));
                             }
                         }
                         self.apply(Macro::new("move shapes", cmds));
@@ -1907,6 +1947,17 @@ impl App {
                     .and_then(|c| c.numeric()),
             );
         let Some((px, py)) = pin else { return };
+        // The drag tracks the pin in PAGE space: a nested member's Pin
+        // cells are parent-local (#78), so map them through the XForm
+        // chain — the gesture delta and move_cmd_for's page-space
+        // targets must agree (a mixed-frame pin misplaces members of
+        // translated/rotated groups).
+        let (pin_px, pin_py) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            dc::svg::parent_local_point_to_page(&ed.doc, &chain, page_h, (px, py))
+        } else {
+            (px, py)
+        };
         // Group semantics at press time: pressing a member of the
         // current multi-selection drags the whole set; pressing an
         // unselected shape moves only that shape (its release-click then
@@ -1922,9 +1973,9 @@ impl App {
         };
         self.drag = Some(DragState {
             shape: shape_id,
-            grab_off: (px - page_pos.0, py - page_pos.1),
-            start_pin: (px, py),
-            last_pin: (px, py),
+            grab_off: (pin_px - page_pos.0, pin_py - page_pos.1),
+            start_pin: (pin_px, pin_py),
+            last_pin: (pin_px, pin_py),
             moved: false,
             group,
         });
@@ -3601,8 +3652,11 @@ impl App {
                             if let Some(shape) =
                                 vsdx::model::find_shape_by_id(&page.shapes, id)
                             {
+                                // Nested-aware: a group-edit member
+                                // maps its parent-local rect through
+                                // the XForm chain to page space.
                                 if let Some((x, y, w, h)) =
-                                    Self::shape_rect_static(&ed.doc, page.id, shape)
+                                    self.shape_rect(&ed.doc, page.id, shape)
                                 {
                                     let tl = canvas::page_to_screen(x + dx, y + h + dy, &self.view, &geom);
                                     let br = canvas::page_to_screen(x + w + dx, y + dy, &self.view, &geom);
