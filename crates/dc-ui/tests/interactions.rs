@@ -3140,3 +3140,140 @@ fn stencil_thumbnails_key_by_source_and_evict_on_close() {
         "beta (now entry 0) kept its own art — not a stale alpha texture"
     );
 }
+
+/// #86: an active search replaces the entry list with one virtual
+/// "Search Results" entry aggregating matches from the document set
+/// and every open stencil (observed Visio 2016 behavior); clearing the
+/// box restores the list with each entry's own expansion — search is a
+/// view, never a state change.
+#[test]
+fn search_aggregates_matches_into_a_results_entry() {
+    use dc_ui::stencil::StencilId;
+    let mut h = harness_with_blank();
+    h.run();
+    let tmp = tempfile::tempdir().unwrap();
+    // "r" matches Square/Circle (alpha), Star/Arrow (beta) and some of
+    // the blank template's document masters; "square" is alpha-only.
+    let a = synth_stencil(tmp.path(), "alpha", &[("Square", 1), ("Circle", 2)]);
+    let b = synth_stencil(tmp.path(), "beta", &[("Star", 1), ("Arrow", 2)]);
+    h.state_mut().open_stencil_for_test(&a);
+    h.state_mut().open_stencil_for_test(&b);
+    h.run();
+
+    let keys = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_master_cells()
+            .iter()
+            .map(|(k, _)| *k)
+            .collect::<Vec<_>>()
+    };
+    let visible = |h: &Harness<'_, App>| h.state().debug_visible_entry_ids();
+    let full_doc = {
+        let doc: Vec<i64> = keys(&h)
+            .into_iter()
+            .filter(|k| k.0 == StencilId::Document)
+            .map(|k| k.1)
+            .collect();
+        doc.len()
+    };
+    assert!(full_doc > 0, "blank template exposes starter masters");
+
+    // One query matching masters in every source: the stencil entries
+    // are replaced by a single aggregated results grid holding matches
+    // from the document set, then each open stencil in pane order.
+    h.state_mut().set_search_for_test("r");
+    h.run();
+    assert!(
+        visible(&h).is_empty(),
+        "no stencil entries under an active search"
+    );
+    let got = keys(&h);
+    let srcs: Vec<dc_ui::stencil::StencilId> = {
+        let mut v = Vec::new();
+        for k in &got {
+            if v.last() != Some(&k.0) {
+                v.push(k.0);
+            }
+        }
+        v
+    };
+    assert_eq!(
+        srcs,
+        vec![
+            StencilId::Document,
+            StencilId::Open(0),
+            StencilId::Open(1)
+        ],
+        "results aggregate the document set then each stencil in order"
+    );
+    let doc_hits = got.iter().filter(|k| k.0 == StencilId::Document).count();
+    assert!(
+        doc_hits > 0 && doc_hits < full_doc,
+        "document matches narrowed: {doc_hits} of {full_doc}"
+    );
+    assert_eq!(
+        got.iter()
+            .filter(|k| k.0 == StencilId::Open(0) || k.0 == StencilId::Open(1))
+            .count(),
+        4,
+        "both stencils' matching masters present"
+    );
+
+    // A stencil-only match still shows the results entry with just
+    // that one master.
+    h.state_mut().set_search_for_test("square");
+    h.run();
+    let got = keys(&h);
+    assert_eq!(
+        got,
+        vec![(StencilId::Open(0), 1)],
+        "the one matching master, addressed by its own source"
+    );
+
+    // Search is a view, never a state change: collapse the document
+    // entry, run a search (which must still surface the document's
+    // matches), clear it — the entry list comes back exactly as it
+    // was, document entry collapsed, both stencils expanded.
+    h.state_mut().set_search_for_test("");
+    h.run();
+    let entries = h.state().debug_stencil_entry_rects();
+    let doc_rect = entries
+        .iter()
+        .find(|(id, _)| *id == StencilId::Document)
+        .map(|(_, r)| *r)
+        .expect("document entry restored");
+    click_at(&mut h, doc_rect.center(), egui::PointerButton::Primary);
+    assert_eq!(
+        visible(&h),
+        vec![StencilId::Document, StencilId::Open(0), StencilId::Open(1)],
+        "collapsed document entry keeps its header"
+    );
+    assert_eq!(
+        keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
+        0,
+        "collapsed document entry hides its grid"
+    );
+
+    h.state_mut().set_search_for_test("r");
+    h.run();
+    assert!(
+        keys(&h).into_iter().any(|k| k.0 == StencilId::Document),
+        "the search still surfaces the collapsed entry's masters"
+    );
+
+    h.state_mut().set_search_for_test("");
+    h.run();
+    assert_eq!(
+        visible(&h),
+        vec![StencilId::Document, StencilId::Open(0), StencilId::Open(1)],
+        "clearing restores every entry"
+    );
+    assert_eq!(
+        keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
+        0,
+        "document entry is still collapsed — the flag survived the search"
+    );
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries.len(), 2, "stencil expansion flags untouched");
+    assert!(entries.iter().all(|(_, e)| *e), "stencils still expanded");
+}

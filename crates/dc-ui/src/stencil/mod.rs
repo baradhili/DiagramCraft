@@ -183,6 +183,11 @@ impl Stencil {
         let mut wrap_width = self.last_wrap_width;
         let mut cols = self.last_cols.max(1);
         let q = self.search.to_lowercase();
+        // An active search turns the pane into a results view (#86):
+        // zero-match entries hide entirely, matches force their grid
+        // open, and every entry's own collapsed flag is untouched —
+        // clearing the box restores exactly what was there before.
+        let searching = !q.is_empty();
         let reveal = self.reveal.take();
         let mut close_requested: Option<usize> = None;
         area.show(ui, |ui| {
@@ -201,51 +206,72 @@ impl Stencil {
                 resp
             };
 
-            // Entry 0: the document's own masters.
-            let resp = header(ui, StencilId::Document, stencil_title, !self.collapsed);
-            self.entry_rects.push((StencilId::Document, resp.rect));
-            if resp.clicked() {
-                self.collapsed = !self.collapsed;
-            }
-            if !self.collapsed {
-                let cells = doc_cells(ed, &q);
+            // An active search REPLACES the entry list with one
+            // virtual "Search Results" entry aggregating every match
+            // from the document set and all open stencils — observed
+            // Visio 2016 behavior (owner screenshot, 2026-10-26): the
+            // pane does not filter each stencil in place. Clearing the
+            // box restores the list with each entry's own expansion —
+            // search is a view, never a state change.
+            if searching {
+                let mut cells = doc_cells(ed, &q);
+                for ix in 0..set.len() {
+                    cells.extend(stencil_cells(set, ix, &q));
+                }
+                stencil_list_entry(ui, t, "Search Results", true);
                 if cells.is_empty() {
-                    ui.weak(if q.is_empty() { "No shapes." } else { "No matching shapes." });
+                    ui.weak("No matching shapes.");
                 } else {
                     self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
                 }
-            }
-
-            // Then every open stencil, in open order, each with its own
-            // expansion — session state, never file content (#82).
-            for ix in 0..set.len() {
-                let id = StencilId::Open(ix);
-                let (title, expanded) = match set.get(ix) {
-                    Some(st) => (st.title.as_str(), st.expanded),
-                    None => continue,
-                };
-                let resp = header(ui, id, title, expanded);
-                self.entry_rects.push((id, resp.rect));
+            } else {
+                // Entry 0: the document's own masters.
+                let resp = header(ui, StencilId::Document, stencil_title, !self.collapsed);
+                self.entry_rects.push((StencilId::Document, resp.rect));
                 if resp.clicked() {
-                    set.set_expanded(ix, !expanded);
+                    self.collapsed = !self.collapsed;
                 }
-                // Right-click an open stencil to close it (#85): its
-                // textures and in-flight marks are evicted by serial,
-                // so a later stencil at the same pane position can
-                // never inherit stale art.
-                resp.context_menu(|ui| {
-                    if ui.button("Close Stencil...").clicked() {
-                        close_requested = Some(ix);
-                        ui.close();
-                    }
-                });
-                if expanded {
-                    let cells = stencil_cells(set, ix, &q);
-                    if !cells.is_empty() {
+                if !self.collapsed {
+                    let cells = doc_cells(ed, &q);
+                    if cells.is_empty() {
+                        ui.weak("No shapes.");
+                    } else {
                         self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
                     }
                 }
-                ui.add_space(2.0);
+
+                // Then every open stencil, in open order, each with its
+                // own expansion — session state, never file content
+                // (#82).
+                for ix in 0..set.len() {
+                    let id = StencilId::Open(ix);
+                    let (title, expanded) = match set.get(ix) {
+                        Some(st) => (st.title.as_str(), st.expanded),
+                        None => continue,
+                    };
+                    let resp = header(ui, id, title, expanded);
+                    self.entry_rects.push((id, resp.rect));
+                    if resp.clicked() {
+                        set.set_expanded(ix, !expanded);
+                    }
+                    // Right-click an open stencil to close it (#85): its
+                    // textures and in-flight marks are evicted by serial,
+                    // so a later stencil at the same pane position can
+                    // never inherit stale art.
+                    resp.context_menu(|ui| {
+                        if ui.button("Close Stencil...").clicked() {
+                            close_requested = Some(ix);
+                            ui.close();
+                        }
+                    });
+                    if expanded {
+                        let cells = stencil_cells(set, ix, &q);
+                        if !cells.is_empty() {
+                            self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
+                        }
+                    }
+                    ui.add_space(2.0);
+                }
             }
         });
 

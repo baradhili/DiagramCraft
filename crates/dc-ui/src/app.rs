@@ -6054,6 +6054,18 @@ impl App {
             .map(|(_, st)| (st.title.clone(), st.expanded))
             .collect()
     }
+    /// kittest (#86): set the pane's search box (the results-view
+    /// filter) without driving the text edit widget.
+    #[doc(hidden)]
+    pub fn set_search_for_test(&mut self, q: &str) {
+        self.stencil.search = q.to_string();
+    }
+    /// kittest (#86): the pane entries currently VISIBLE (headers
+    /// rendered this frame) — a search hides zero-match entries.
+    #[doc(hidden)]
+    pub fn debug_visible_entry_ids(&self) -> Vec<crate::stencil::StencilId> {
+        self.stencil.entry_rects.iter().map(|(id, _)| *id).collect()
+    }
     /// kittest (#84): the edited document's masters (id, NameU).
     #[doc(hidden)]
     pub fn debug_doc_masters(&self) -> Vec<(i64, String)> {
