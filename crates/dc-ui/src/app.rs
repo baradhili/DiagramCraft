@@ -480,6 +480,11 @@ impl App {
                 self.group_edit.clear();
                 self.stencil.armed = None;
                 self.tex.clear();
+                // Per-shape layers are keyed by shape id, which
+                // collides across documents (both number from 1), and
+                // set_page() alone won't clear when the page ids match
+                // — drop the old document's textures/bounds.
+                self.layers.clear();
                 self.page_states.clear();
                 self.tab_menu = None;
                 self.tab_rename = None;
@@ -759,6 +764,7 @@ impl App {
         self.group_edit.clear();
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.layers.clear();
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
@@ -6794,6 +6800,7 @@ impl App {
         self.set_selection(None);
         self.stencil = Stencil::default();
         self.tex.clear();
+        self.layers.clear();
         self.page_states.clear();
         self.tab_menu = None;
         self.tab_rename = None;
