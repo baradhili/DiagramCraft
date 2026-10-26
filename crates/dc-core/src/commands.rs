@@ -719,16 +719,25 @@ impl RemoveShape {
 impl crate::Command for RemoveShape {
 
     fn touched(&self, doc: &Document) -> crate::TouchList {
-        // `removed`'s index path says where the shape lived: an empty
-        // path is a top-level removal (membership); a non-empty one
-        // removed a sub-shape, so its top-level container's ink
-        // changed (resolve the container by walking the path prefix).
+        // `removed`'s index path says where the shape lived. shape_path
+        // numbers EVERY level (its doc: "the last element is the
+        // shape's slot"), so a top-level shape is path.len() == 1 and a
+        // nested one is longer. A len-1 path used to fall into the
+        // nested walk below, which read page.shapes[path[0]] AFTER the
+        // removal — the slot now holds the successor — so a top-level
+        // removal touched an unrelated sibling's Ink and never emitted
+        // the removed shape's own Membership.
         let path = self.removed.as_ref().map(|(_, p)| p.clone()).unwrap_or_default();
-        if path.is_empty() {
+        if path.len() == 1 {
             return crate::TouchList {
                 pages: vec![],
                 shapes: vec![crate::Touched { page: self.page, shape: self.shape, touch: crate::Touch::Membership }],
             };
+        }
+        // Empty path: nothing captured yet (touched before apply) —
+        // say nothing precise, invalidate the page.
+        if path.is_empty() {
+            return crate::TouchList::page(self.page);
         }
         // Post-apply the shape is gone; walk to its former container
         // to confirm the path resolves, then roll up to the top-level

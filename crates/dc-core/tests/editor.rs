@@ -1748,3 +1748,50 @@ fn hyperlink_row_add_edit_remove_round_trip() {
     ed.undo().unwrap();
     assert_eq!(link(&ed).len(), 1);
 }
+
+#[test]
+fn remove_shape_touch_targets_the_removed_shape_not_its_successor() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let shape = |id: i64, ty: &str| {
+        let mut s = Shape {
+            id,
+            type_: Some(ty.into()),
+            ..Shape::default()
+        };
+        s.sheet.set_cell("PinX", Cell::value("1"));
+        s
+    };
+    for (id, parent) in [(1, None), (2, None), (3, Some(2)), (4, None)] {
+        ed.apply(AddShape {
+            page,
+            parent,
+            shape: shape(id, if id == 2 { "Group" } else { "Shape" }),
+        })
+        .unwrap();
+    }
+    // page.shapes = [1, Group(2)[3], 4].
+    //
+    // Top-level removal from the MIDDLE: the touch is the removed
+    // shape's own Membership. (The old classification ran the nested
+    // walk, read the post-removal slot 0 — now the group — and
+    // touched the group's Ink instead.)
+    let (_, t) = ed.apply(RemoveShape::new(page, 1)).unwrap();
+    assert_eq!(t.shapes.len(), 1, "one touched shape: {t:?}");
+    assert_eq!(t.shapes[0].shape, 1, "the removed shape, not its successor");
+    assert!(matches!(t.shapes[0].touch, dc_core::Touch::Membership));
+
+    // Nested removal: the top-level ROOT's Ink (the whole subtree
+    // layer re-rasters), not the member itself.
+    let (_, t) = ed.apply(RemoveShape::new(page, 3)).unwrap();
+    assert_eq!(t.shapes.len(), 1, "one touched shape: {t:?}");
+    assert_eq!(t.shapes[0].shape, 2, "the member's top-level root");
+    assert!(matches!(t.shapes[0].touch, dc_core::Touch::Ink));
+
+    // Pre-apply (no captured path): nothing precise is known — the
+    // whole page invalidates.
+    let cmd = RemoveShape::new(page, 4);
+    let t = <RemoveShape as dc_core::Command>::touched(&cmd, &ed.doc);
+    assert_eq!(t.pages, vec![page]);
+    assert!(t.shapes.is_empty());
+}
