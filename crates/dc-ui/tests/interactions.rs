@@ -736,6 +736,10 @@ fn protection_locks_refuse_resize() {
 fn line_body_drag_translates_endpoints() {
     let mut h = harness_with_blank();
     h.run();
+    // The Line master sits outside Quick Shapes' head set — reveal the
+    // document stencil entry (#102) to place it.
+    h.state_mut().show_doc_stencil_for_test();
+    h.run();
     let (page, shape) = place_master(&mut h, LINE_MASTER);
 
     // Stretch the line first so its body has room clear of every
@@ -807,6 +811,10 @@ fn line_body_drag_translates_endpoints() {
 fn line_endpoint_drag_moves_only_that_end() {
     let mut h = harness_with_blank();
     h.run();
+    // The Line master sits outside Quick Shapes' head set — reveal the
+    // document stencil entry (#102) to place it.
+    h.state_mut().show_doc_stencil_for_test();
+    h.run();
     let (page, shape) = place_master(&mut h, LINE_MASTER);
 
     // Instance snapshot: horizontal 1-inch line centered on the drop.
@@ -865,6 +873,10 @@ fn line_endpoint_drag_moves_only_that_end() {
 #[test]
 fn line_midpoint_drag_translates_both_ends() {
     let mut h = harness_with_blank();
+    h.run();
+    // The Line master sits outside Quick Shapes' head set — reveal the
+    // document stencil entry (#102) to place it.
+    h.state_mut().show_doc_stencil_for_test();
     h.run();
     let (page, shape) = place_master(&mut h, LINE_MASTER);
     let (bx0, by0, ex0, ey0) = (
@@ -1144,12 +1156,12 @@ fn drag_stencil_edge_to(h: &mut Harness<'_, App>, target_x: f32) {
 fn assert_grid_fits(h: &Harness<'_, App>) {
     let inner = h.state().debug_stencil_panel_inner_rect();
     let cells = h.state().debug_master_cells();
-    // Quick Shapes (#88) adds the 6 head masters once more on top of
-    // the document entry's 8.
+    // #102: the document entry is not pinned — the starter masters
+    // appear as Quick Shapes' head cells only.
     assert_eq!(
         cells.len(),
-        8 + 6,
-        "8 starter masters in the doc entry (incl. the 1D Line, #59) + their Quick Shapes heads"
+        6,
+        "the starter head masters in Quick Shapes only (#102)"
     );
     for (id, r) in &cells {
         assert!(
@@ -2933,15 +2945,15 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
             .filter(|(k, _)| k.0 == which)
             .count()
     };
-    // Quick Shapes (#88) leads the pane: every source's head masters
-    // appear once more at the top (each synth stencil is under the
-    // per-source cap, so its whole set joins). doc_cells was measured
-    // with only the document open — quick heads + doc entry — and
-    // opening stencils adds no document masters.
+    // Quick Shapes (#88) leads the pane and — with the document entry
+    // unpinned (#102) — is the only place the document's masters
+    // appear: its head masters, once. Each synth stencil is under the
+    // per-source cap, so its whole set joins quick as well as its
+    // own entry.
     assert_eq!(
         count(&h, StencilId::Document),
-        doc_cells,
-        "doc masters in Quick Shapes and the document entry"
+        6,
+        "doc head masters in Quick Shapes only (no pinned document entry, #102)"
     );
     assert_eq!(count(&h, StencilId::Open(0)), 4, "alpha twice (quick + entry)");
     assert_eq!(count(&h, StencilId::Open(1)), 4, "beta twice (quick + entry)");
@@ -2967,8 +2979,8 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
     assert_eq!(count(&h, StencilId::Open(1)), 4);
     assert_eq!(
         count(&h, StencilId::Document),
-        doc_cells,
-        "document entry untouched by a stencil collapse"
+        6,
+        "document head masters untouched by a stencil collapse"
     );
 
     // Re-expand, then a canvas interaction leaves the entries
@@ -3291,34 +3303,34 @@ fn search_aggregates_matches_into_a_results_entry() {
         "the one matching master, addressed by its own source"
     );
 
-    // Search is a view, never a state change: collapse the document
-    // entry, run a search (which must still surface the document's
+    // Search is a view, never a state change: collapse an open
+    // stencil entry, run a search (which must still surface its
     // matches), clear it — the entry list comes back exactly as it
-    // was, document entry collapsed, both stencils expanded.
+    // was, alpha collapsed, beta expanded.
     h.state_mut().set_search_for_test("");
     h.run();
     let entries = h.state().debug_stencil_entry_rects();
-    let doc_rect = entries
+    let alpha_rect = entries
         .iter()
-        .find(|(id, _)| *id == StencilId::Document)
+        .find(|(id, _)| *id == StencilId::Open(0))
         .map(|(_, r)| *r)
-        .expect("document entry restored");
-    click_at(&mut h, doc_rect.center(), egui::PointerButton::Primary);
+        .expect("alpha entry restored");
+    click_at(&mut h, alpha_rect.center(), egui::PointerButton::Primary);
     assert_eq!(
         visible(&h),
-        vec![StencilId::Document, StencilId::Open(0), StencilId::Open(1)],
-        "collapsed document entry keeps its header"
+        vec![StencilId::Open(0), StencilId::Open(1)],
+        "collapsed alpha keeps its header"
     );
     assert_eq!(
-        keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
-        6,
-        "collapsed document entry hides its grid (Quick Shapes still shows the doc heads)"
+        keys(&h).into_iter().filter(|k| k.0 == StencilId::Open(0)).count(),
+        2,
+        "collapsed alpha hides its grid (Quick Shapes still shows its heads)"
     );
 
-    h.state_mut().set_search_for_test("r");
+    h.state_mut().set_search_for_test("square");
     h.run();
     assert!(
-        keys(&h).into_iter().any(|k| k.0 == StencilId::Document),
+        keys(&h).into_iter().any(|k| k.0 == StencilId::Open(0)),
         "the search still surfaces the collapsed entry's masters"
     );
 
@@ -3326,17 +3338,18 @@ fn search_aggregates_matches_into_a_results_entry() {
     h.run();
     assert_eq!(
         visible(&h),
-        vec![StencilId::Document, StencilId::Open(0), StencilId::Open(1)],
+        vec![StencilId::Open(0), StencilId::Open(1)],
         "clearing restores every entry"
     );
     assert_eq!(
-        keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
-        6,
-        "document entry is still collapsed — the flag survived the search (Quick heads remain)"
+        keys(&h).into_iter().filter(|k| k.0 == StencilId::Open(0)).count(),
+        2,
+        "alpha is still collapsed — the flag survived the search (Quick Shapes keeps its heads)"
     );
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries.len(), 2, "stencil expansion flags untouched");
-    assert!(entries.iter().all(|(_, e)| *e), "stencils still expanded");
+    assert_eq!(entries[0], ("alpha".to_string(), false), "alpha still collapsed");
+    assert_eq!(entries[1], ("beta".to_string(), true), "beta still expanded");
 }
 
 /// #87: the More Shapes menu lists the built-in catalog by category;
@@ -3464,24 +3477,19 @@ fn quick_shapes_aggregates_places_and_tracks_closures() {
         !keys[..expect.len()].contains(&(StencilId::Open(0), 3)),
         "hidden masters never join Quick Shapes"
     );
-    // The document's own entry follows with the full (unquick) grid:
-    // doc-keyed cells = the quick heads (≤6) plus the whole doc entry.
+    // #102: the document entry is not pinned — the document's masters
+    // appear only as Quick Shapes' head cells.
     let quick_heads = 6.min(doc_masters);
     assert_eq!(
         keys.iter().filter(|k| k.0 == StencilId::Document).count(),
-        quick_heads + doc_masters,
-        "doc masters appear once in Quick Shapes and once in the doc entry"
+        quick_heads,
+        "doc head masters appear in Quick Shapes only"
     );
 
     // Place from Quick Shapes: the Square cell (an open-stencil
     // master) imports + places in one undo (#84 path).
     let before = h.state().debug_doc_masters().len();
     let shapes_before = h.state().debug_shape_count();
-    let cell = h.state().debug_master_cells()
-        .into_iter()
-        .find(|(k, _)| *k == (StencilId::Open(0), 1))
-        .expect("Square cell in Quick Shapes")
-        .1;
     // A reveal-on-open may have scrolled the pane; come back to the
     // top so the Quick Shapes cells are in the viewport.
     h.state_mut().scroll_pane_to_top_for_test();
@@ -3560,4 +3568,74 @@ fn quick_shapes_aggregates_places_and_tracks_closures() {
         vec![(StencilId::Open(0), 1), (StencilId::Open(0), 1)],
         "alpha's masters left the pane with the stencil; beta's Star is all that remains"
     );
+}
+
+/// #102: the drawing's own masters are not pinned as a pane entry —
+/// Quick Shapes aggregates them for placement — and "More Shapes ▸
+/// Document Stencil" reveals the entry for the session.
+#[test]
+fn document_stencil_entry_is_opt_in() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+
+    // Default: no Document entry — Quick Shapes' head cells only.
+    let entries = h.state().debug_stencil_entry_rects();
+    assert!(
+        entries.iter().all(|(id, _)| *id != StencilId::Document),
+        "the document entry is not pinned (#102)"
+    );
+    let doc_cells = h
+        .state()
+        .debug_master_cells()
+        .iter()
+        .filter(|(k, _)| k.0 == StencilId::Document)
+        .count();
+    assert_eq!(doc_cells, 6, "its head masters live in Quick Shapes");
+
+    // More Shapes ▸ Document Stencil reveals the entry with the full
+    // document set.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    let entries = h.state().debug_stencil_entry_rects();
+    assert!(
+        entries.iter().any(|(id, _)| *id == StencilId::Document),
+        "the toggle reveals the document entry"
+    );
+    let doc_cells = h
+        .state()
+        .debug_master_cells()
+        .iter()
+        .filter(|(k, _)| k.0 == StencilId::Document)
+        .count();
+    assert_eq!(
+        doc_cells,
+        6 + 8,
+        "Quick Shapes heads plus the full document set in the revealed entry"
+    );
+
+    // Untick: the entry leaves again; Quick Shapes is unaffected.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    let entries = h.state().debug_stencil_entry_rects();
+    assert!(
+        entries.iter().all(|(id, _)| *id != StencilId::Document),
+        "unticking hides the entry again"
+    );
+    let doc_cells = h
+        .state()
+        .debug_master_cells()
+        .iter()
+        .filter(|(k, _)| k.0 == StencilId::Document)
+        .count();
+    assert_eq!(doc_cells, 6, "Quick Shapes still aggregates the heads");
 }

@@ -90,6 +90,10 @@ pub struct Stencil {
     pub(crate) scroll_fix: Option<f32>,
     /// The document-masters entry is collapsed (master grid hidden).
     pub collapsed: bool,
+    /// #102: the drawing's own masters are NOT pinned in the pane
+    /// (observed Visio 2016) — reachable via Quick Shapes (#88), and
+    /// opt-in per session through "More Shapes ▸ Document Stencil".
+    pub doc_stencil_visible: bool,
     /// The Quick Shapes virtual entry's own expand flag (#88) —
     /// initialized expanded at the App construction site.
     pub quick_expanded: bool,
@@ -151,6 +155,7 @@ impl Stencil {
             last_wrap_width: 0.0,
             scroll_fix: None,
             collapsed: false,
+            doc_stencil_visible: false,
             quick_expanded: false,
             quick_rect: None,
             search_rect: None,
@@ -220,6 +225,11 @@ impl Stencil {
                     ui.separator();
                     if ui.button("Open Existing Stencil...").clicked() {
                         self.request = Some(Request::OpenStencilDialog);
+                        ui.close();
+                    }
+                    // Visio parity (#102): the document stencil is an
+                    // opt-in pane entry, not a pinned one.
+                    if ui.checkbox(&mut self.doc_stencil_visible, "Document Stencil").changed() {
                         ui.close();
                     }
                 });
@@ -305,26 +315,31 @@ impl Stencil {
                     self.entry_grid(ui, t, &quick, cols, pool, &mut clicked, "stencil-grid-quick");
                 }
 
-                // Entry 0: the document's own masters.
-                let resp = header(ui, StencilId::Document, stencil_title, !self.collapsed);
-                self.entry_rects.push((StencilId::Document, resp.rect));
-                if resp.clicked() {
-                    self.collapsed = !self.collapsed;
-                }
-                if !self.collapsed {
-                    let cells = doc_cells(ed, &q);
-                    if cells.is_empty() {
-                        ui.weak("No shapes.");
-                    } else {
-                        self.entry_grid(
-                            ui,
-                            t,
-                            &cells,
-                            cols,
-                            pool,
-                            &mut clicked,
-                            "stencil-grid-doc",
-                        );
+                // The drawing's own masters are not pinned (#102):
+                // Quick Shapes aggregates them for placement; the entry
+                // itself is opt-in per session via the More Shapes
+                // menu (observed Visio 2016).
+                if self.doc_stencil_visible {
+                    let resp = header(ui, StencilId::Document, stencil_title, !self.collapsed);
+                    self.entry_rects.push((StencilId::Document, resp.rect));
+                    if resp.clicked() {
+                        self.collapsed = !self.collapsed;
+                    }
+                    if !self.collapsed {
+                        let cells = doc_cells(ed, &q);
+                        if cells.is_empty() {
+                            ui.weak("No shapes.");
+                        } else {
+                            self.entry_grid(
+                                ui,
+                                t,
+                                &cells,
+                                cols,
+                                pool,
+                                &mut clicked,
+                                "stencil-grid-doc",
+                            );
+                        }
                     }
                 }
 

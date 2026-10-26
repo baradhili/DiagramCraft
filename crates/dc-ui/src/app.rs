@@ -6113,6 +6113,13 @@ impl App {
     pub fn debug_search_rect_for_test(&self) -> Option<egui::Rect> {
         self.stencil.search_rect
     }
+    /// kittest (#102): reveal the document-stencil entry for this
+    /// session (masters outside Quick Shapes' head set — e.g. the 1D
+    /// Line — are only listed there).
+    #[doc(hidden)]
+    pub fn show_doc_stencil_for_test(&mut self) {
+        self.stencil.doc_stencil_visible = true;
+    }
     /// kittest (#86): the pane entries currently VISIBLE (headers
     /// rendered this frame) — a search hides zero-match entries.
     #[doc(hidden)]
