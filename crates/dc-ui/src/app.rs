@@ -217,12 +217,16 @@ enum ColorTarget {
 enum PendingDialog {
     Open(Receiver<Option<PathBuf>>),
     SaveAs(Receiver<Option<PathBuf>>),
+    /// "Open Existing Stencil…" (.vssx into the Shapes pane, #83).
+    OpenStencil(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
 enum PendingKind {
     Open,
     SaveAs,
+    /// "Open Existing Stencil…" from the Shapes pane (#83).
+    OpenStencil,
 }
 
 /// Backstage rail command.
@@ -471,6 +475,17 @@ impl App {
     }
 
     fn load(&mut self, path: PathBuf) {
+        // Visio semantics: File→Open of a stencil lands it in the
+        // Shapes pane, not the editor — the drawing stays untouched
+        // (#83).
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("vssx"))
+        {
+            self.open_stencil(path);
+            return;
+        }
         match Editor::open(&path) {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
@@ -751,6 +766,28 @@ impl App {
         self.begin_dialog(PendingKind::Open);
     }
 
+    /// Open a `.vssx` into the Shapes pane (#83): dedupes by source
+    /// path (re-opening expands and focuses the existing entry),
+    /// reveals the entry, and notes the status. Parse failures surface
+    /// as a status note, like other load failures.
+    fn open_stencil(&mut self, path: PathBuf) {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "stencil".into());
+        match self.stencils.open_file(&path) {
+            Ok((ix, existing)) => {
+                self.stencil.reveal = Some(StencilId::Open(ix));
+                self.status = if existing {
+                    format!("stencil {stem} is already open — expanded")
+                } else {
+                    format!("opened stencil {stem}")
+                };
+            }
+            Err(e) => self.status = format!("open stencil failed: {e:#}"),
+        }
+    }
+
     /// File → New: replace the current document with a blank drawing,
     /// prompting first if it has unsaved changes.
     fn do_new(&mut self) {
@@ -805,6 +842,9 @@ impl App {
                     PendingKind::Open => rfd::FileDialog::new()
                         .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
                         .pick_file(),
+                    PendingKind::OpenStencil => rfd::FileDialog::new()
+                        .add_filter("Visio stencil", &["vssx"])
+                        .pick_file(),
                     PendingKind::SaveAs => rfd::FileDialog::new()
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
@@ -815,6 +855,7 @@ impl App {
         });
         self.dialog = Some(match kind {
             PendingKind::Open => PendingDialog::Open(rx),
+            PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
         });
     }
@@ -827,7 +868,9 @@ impl App {
             return;
         };
         let (path, again) = match &dialog {
-            PendingDialog::Open(rx) | PendingDialog::SaveAs(rx) => match rx.try_recv() {
+            PendingDialog::Open(rx)
+            | PendingDialog::SaveAs(rx)
+            | PendingDialog::OpenStencil(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -846,6 +889,7 @@ impl App {
         };
         match dialog {
             PendingDialog::Open(_) => self.load(path),
+            PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -5979,12 +6023,14 @@ impl App {
     /// the "Open Existing Stencil…" flow (minus the native dialog).
     #[doc(hidden)]
     pub fn open_stencil_for_test(&mut self, path: &std::path::Path) {
-        match self.stencils.open_file(path) {
-            Ok((ix, _existing)) => {
-                self.stencil.reveal = Some(StencilId::Open(ix));
-            }
-            Err(e) => self.status = format!("open stencil failed: {e:#}"),
-        }
+        self.open_stencil(path.to_path_buf());
+    }
+    /// kittest (#83): File→Open through the real dialog-worker seam —
+    /// the next dialog resolves with `path` instead of opening rfd.
+    #[doc(hidden)]
+    pub fn open_file_for_test(&mut self, path: std::path::PathBuf) {
+        self.dialog_preset_for_test = Some(Some(path));
+        self.do_open();
     }
     /// kittest (#63): open-stencil entry titles + expansion, pane order.
     #[doc(hidden)]
@@ -6752,12 +6798,21 @@ impl App {
                         // master grid (crates/dc-ui/src/stencil.rs).
                         self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
+                        let mut request = None;
                         let title = stencil_title(&self.path);
-                        let App { ed, stencil, stencils, pool, .. } = self;
-                        if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
-                                armed = Some(id);
+                        {
+                            let App { ed, stencil, stencils, pool, .. } = self;
+                            if let Some(ed) = ed.as_ref() {
+                                if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
+                                    armed = Some(id);
+                                }
+                                request = stencil.request.take();
                             }
+                        }
+                        // Pane requests (#83): the pane can't reach the
+                        // dialog worker itself.
+                        if matches!(request, Some(crate::stencil::Request::OpenStencilDialog)) {
+                            self.begin_dialog(PendingKind::OpenStencil);
                         }
                         if let Some(id) = armed {
                             self.status =

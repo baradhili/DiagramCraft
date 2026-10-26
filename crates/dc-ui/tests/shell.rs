@@ -131,7 +131,7 @@ fn fixture_pages(dir: &std::path::Path, names: &[&str]) -> std::path::PathBuf {
 <Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/masters" Target="masters/masters.xml"/>
 </Relationships>"#;
 
-    let path = dir.join("shell.vssx");
+    let path = dir.join("shell.vsdx");
     let file = std::fs::File::create(&path).unwrap();
     let mut w = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default();
@@ -392,7 +392,7 @@ fn recent_entry_click_reopens() {
     assert_eq!(harness.state().debug_shape_count(), 0, "no document yet");
     // Click the MRU entry (labeled with the file name) on the start
     // screen; the document opens.
-    harness.get_by_label_contains("shell.vssx").click();
+    harness.get_by_label_contains("shell.vsdx").click();
     harness.run();
     assert_eq!(
         harness.state().debug_shape_count(),

@@ -2937,3 +2937,75 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
         "entries survive a canvas interaction unchanged"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Opening .vssx stencils into the pane (GitHub #83, #63 sub-issue 2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn more_shapes_menu_opens_a_stencil_into_the_pane() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let tmp = tempfile::tempdir().unwrap();
+    let s = synth_stencil(tmp.path(), "gamma", &[("Box", 3)]);
+    // The dialog-worker test seam answers the native dialog (never
+    // opens rfd under kittest).
+    h.state_mut().preset_save_as_for_test(Some(s.clone()));
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Open Existing Stencil...").click();
+    h.run();
+    for _ in 0..8 {
+        h.run(); // the worker thread's answer lands via poll_dialog
+    }
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries, vec![("gamma".to_string(), true)], "stencil opened expanded");
+    assert!(
+        h.state()
+            .debug_master_cells()
+            .iter()
+            .any(|(k, _)| matches!(k.0, dc_ui::stencil::StencilId::Open(0))),
+        "its masters are listed"
+    );
+    assert!(h.state().debug_status().contains("opened stencil"));
+
+    // Re-opening the same path dedupes: expands the entry, adds nothing.
+    h.state_mut().open_stencil_for_test(&s);
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries.len(), 1, "re-open dedupes by source path");
+}
+
+#[test]
+fn file_open_of_a_stencil_lands_in_the_pane_not_the_editor() {
+    let mut h = harness_with_blank();
+    h.run();
+    let shapes_before = h.state().debug_shape_count();
+    let tmp = tempfile::tempdir().unwrap();
+    let s = synth_stencil(tmp.path(), "delta", &[("Blob", 5)]);
+    // File→Open through the real dialog-worker seam, preset-answered.
+    h.state_mut().open_file_for_test(s);
+    h.run();
+    for _ in 0..8 {
+        h.run();
+    }
+    assert_eq!(
+        h.state().debug_stencil_entries().len(),
+        1,
+        "the .vssx opened into the Shapes pane"
+    );
+    assert!(
+        h.state().debug_master_cells().iter().any(|(k, _)| matches!(k.0, dc_ui::stencil::StencilId::Open(0))),
+        "its masters are listed"
+    );
+    assert_eq!(
+        h.state().debug_shape_count(),
+        shapes_before,
+        "the edited document is untouched by a stencil open"
+    );
+    assert!(
+        h.state().debug_status().contains("opened stencil"),
+        "status notes the stencil open: {}",
+        h.state().debug_status()
+    );
+}

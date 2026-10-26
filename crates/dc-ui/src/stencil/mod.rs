@@ -49,6 +49,15 @@ fn matches(m: &vsdx::Master, q: &str) -> bool {
             .unwrap_or(false)
 }
 
+/// Something the pane asks the app to do (the pane cannot reach the
+/// dialog worker or the catalog itself).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// "More Shapes ▸ Open Existing Stencil…" — launch the native
+    /// file dialog filtered to `.vssx` (#83).
+    OpenStencilDialog,
+}
+
 /// The pane's state: which master — addressed by (source, id) — is
 /// armed for dropping.
 #[derive(Default)]
@@ -80,6 +89,9 @@ pub struct Stencil {
     /// Entry to scroll into view next frame (#83: a just-opened or
     /// re-focused stencil).
     pub reveal: Option<StencilId>,
+    /// A request for the app (dialog launch, #83), consumed by `App`
+    /// right after `show`.
+    pub request: Option<Request>,
     /// Thumbnails keyed by (cache serial, master id) — the serial is
     /// session-unique per open stencil (and 0 for the document set),
     /// so ids that collide across stencils never collide here (#85).
@@ -137,11 +149,17 @@ impl Stencil {
 
         let mut clicked = None;
         // Visio pane header: "Shapes" title bar with a "More Shapes"
-        // affordance, then the search box, then the stencil list.
+        // menu (Open Existing Stencil…, #83; the built-in categories
+        // arrive with #87), then the search box, then the stencil list.
         ui.horizontal(|ui| {
             ui.strong("Shapes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak("More Shapes ...");
+                ui.menu_button("More Shapes", |ui| {
+                    if ui.button("Open Existing Stencil...").clicked() {
+                        self.request = Some(Request::OpenStencilDialog);
+                        ui.close();
+                    }
+                });
             });
         });
         ui.add(
@@ -175,7 +193,7 @@ impl Stencil {
             ui.set_min_width(wrap_width);
 
             let header = |ui: &mut Ui, id: StencilId, title: &str, expanded: bool| {
-                let mut resp = stencil_list_entry(ui, t, title, expanded);
+                let resp = stencil_list_entry(ui, t, title, expanded);
                 if reveal == Some(id) {
                     resp.scroll_to_me(Some(egui::Align::TOP));
                 }
