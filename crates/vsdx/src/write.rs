@@ -252,6 +252,85 @@ fn push_index_children(out: &mut String, children: &[IndexChild]) {
     }
 }
 
+/// The rId an index entry itself declares: its `r:id` attribute or
+/// `<Rel r:id>` child — exactly the binding parse uses to find the
+/// entry's contents part. `None` when the model entry declares
+/// neither (an in-code-built or freshly imported entry).
+fn own_rid(attrs: &Attrs, children: &[IndexChild]) -> Option<String> {
+    attrs
+        .iter()
+        .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+        .map(|(_, v)| v.clone())
+        .or_else(|| {
+            children.iter().find_map(|c| match c {
+                IndexChild::Rel(a) => a
+                    .iter()
+                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// rIds for `own.len()` index entries: the declared one when present,
+/// else a fresh sequential rId past `floor` and past every rId the
+/// entries themselves declare, so a synthesized id never collides with
+/// an entry that brings its own. Deterministic — every consumer of a
+/// document's index rIds (the index serializer, the rels
+/// reconciliation, the fresh-path rels generation) derives them from
+/// this one function and therefore agrees.
+fn index_rids(own: Vec<Option<String>>, floor: u32) -> Vec<String> {
+    let max = own
+        .iter()
+        .flatten()
+        .filter_map(|r| r.strip_prefix("rId").and_then(|s| s.parse::<u32>().ok()))
+        .chain(std::iter::once(floor))
+        .max()
+        .unwrap_or(0);
+    let mut n = max;
+    own.into_iter()
+        .map(|o| {
+            o.unwrap_or_else(|| {
+                n += 1;
+                format!("rId{n}")
+            })
+        })
+        .collect()
+}
+
+/// Per-master rIds of the masters index (`floor` = highest numeric rId
+/// in the source masters rels, so synthesis skips rIds a retained
+/// package already binds; 0 for fresh documents).
+pub(crate) fn master_index_rids(doc: &Document, floor: u32) -> Vec<String> {
+    index_rids(
+        doc.masters
+            .iter()
+            .map(|m| own_rid(&m.attrs, &m.children))
+            .collect(),
+        floor,
+    )
+}
+
+/// Per-page rIds of the pages index — the page analog of
+/// [`master_index_rids`].
+pub(crate) fn page_index_rids(doc: &Document, floor: u32) -> Vec<String> {
+    index_rids(
+        doc.pages
+            .iter()
+            .map(|p| own_rid(&p.attrs, &p.children))
+            .collect(),
+        floor,
+    )
+}
+
+/// Highest numeric rId among a rels part's entries (0 when none) —
+/// the synthesis floor for a retained package.
+fn rels_rid_floor<'a>(ids: impl Iterator<Item = &'a str>) -> u32 {
+    ids.filter_map(|id| id.strip_prefix("rId").and_then(|n| n.parse::<u32>().ok()))
+        .max()
+        .unwrap_or(0)
+}
+
 // ---------------------------------------------------------------------------
 // Part serializers
 // ---------------------------------------------------------------------------
@@ -318,11 +397,25 @@ pub fn document_xml(doc: &Document) -> String {
     out
 }
 
-/// Serialize the pages index part (`pages.xml`).
+/// Serialize the pages index part (`pages.xml`) — fresh-path behavior:
+/// every page lacking its own `<Rel>`/r:id gets a synthesized binding
+/// (the fresh path assigns all pages parts).
 pub fn pages_index_xml(doc: &Document) -> String {
+    pages_index_xml_with(doc, &page_index_rids(doc, 0), true)
+}
+
+/// [`pages_index_xml`] for a retained package: `floor` comes from the
+/// source pages rels, and pages with no part of their own (stencil
+/// pages — index-only entries with no contents part) get no synthesized
+/// binding, keeping a pure round-trip byte-stable.
+pub(crate) fn pages_index_xml_floored(doc: &Document, floor: u32) -> String {
+    pages_index_xml_with(doc, &page_index_rids(doc, floor), false)
+}
+
+fn pages_index_xml_with(doc: &Document, rids: &[String], fresh: bool) -> String {
     let mut out = String::from(decl());
     push_open(&mut out, "Pages", &with_xmlns(&doc.pages_attrs), false);
-    for page in &doc.pages {
+    for (i, page) in doc.pages.iter().enumerate() {
         let attrs = if page.attrs.is_empty() {
             synth_attrs(&[
                 ("ID", Some(page.id.to_string())),
@@ -333,6 +426,20 @@ pub fn pages_index_xml(doc: &Document) -> String {
         };
         push_open(&mut out, "Page", &attrs, false);
         push_index_children(&mut out, &page.children);
+        // A page the model built without a `<Rel>` child still needs a
+        // binding to its contents part — parse resolves contents
+        // strictly through this rId and would otherwise load the page
+        // empty. Synthesized ids match the rels part because both
+        // derive from [`page_index_rids`]. A retained package keeps
+        // part-less stencil pages exactly as parsed.
+        if own_rid(&page.attrs, &page.children).is_none() && (fresh || !page.part.is_empty()) {
+            push_open(
+                &mut out,
+                "Rel",
+                &[("r:id".to_string(), rids[i].clone())],
+                true,
+            );
+        }
         push_close(&mut out, "Page");
     }
     push_close(&mut out, "Pages");
@@ -358,11 +465,24 @@ pub fn page_xml(page: &Page) -> String {
     out
 }
 
-/// Serialize the masters index part (`masters.xml`).
+/// Serialize the masters index part (`masters.xml`) — fresh-path
+/// behavior: every master lacking its own `<Rel>`/r:id gets a
+/// synthesized binding.
 pub fn masters_index_xml(doc: &Document) -> String {
+    masters_index_xml_with(doc, &master_index_rids(doc, 0), true)
+}
+
+/// [`masters_index_xml`] for a retained package (`floor` from the
+/// source masters rels; part-less masters get no synthesized binding,
+/// keeping a pure round-trip byte-stable).
+pub(crate) fn masters_index_xml_floored(doc: &Document, floor: u32) -> String {
+    masters_index_xml_with(doc, &master_index_rids(doc, floor), false)
+}
+
+fn masters_index_xml_with(doc: &Document, rids: &[String], fresh: bool) -> String {
     let mut out = String::from(decl());
     push_open(&mut out, "Masters", &with_xmlns(&doc.masters_attrs), false);
-    for m in &doc.masters {
+    for (i, m) in doc.masters.iter().enumerate() {
         let attrs = if m.attrs.is_empty() {
             synth_attrs(&[("ID", Some(m.id.to_string())), ("NameU", m.name_u.clone())])
         } else {
@@ -370,6 +490,18 @@ pub fn masters_index_xml(doc: &Document) -> String {
         };
         push_open(&mut out, "Master", &attrs, false);
         push_index_children(&mut out, &m.children);
+        // Same binding requirement as pages: a master without its own
+        // `<Rel>` child (in-code built, or imported from a stencil —
+        // ImportMaster drops the borrowed stencil rel) gets a
+        // synthesized one so its contents part survives save→parse.
+        if own_rid(&m.attrs, &m.children).is_none() && (fresh || !m.part.is_empty()) {
+            push_open(
+                &mut out,
+                "Rel",
+                &[("r:id".to_string(), rids[i].clone())],
+                true,
+            );
+        }
         push_close(&mut out, "Master");
     }
     push_close(&mut out, "Masters");
@@ -438,14 +570,28 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
             parts.insert(name.to_string(), bytes);
         }
         parts.insert(doc.doc_part.clone(), document_xml(doc).into_bytes());
-        parts.insert(doc.pages_part.clone(), pages_index_xml(doc).into_bytes());
+        parts.insert(
+            doc.pages_part.clone(),
+            pages_index_xml_floored(
+                doc,
+                rels_rid_floor(pkg.relationships(&doc.pages_part).iter().map(|(id, _, _)| id.as_str())),
+            )
+            .into_bytes(),
+        );
         for p in &doc.pages {
             if !p.part.is_empty() && pkg.part(&p.part).is_some() {
                 parts.insert(p.part.clone(), page_xml(p).into_bytes());
             }
         }
         if let Some(mp) = &doc.masters_part {
-            parts.insert(mp.clone(), masters_index_xml(doc).into_bytes());
+            parts.insert(
+                mp.clone(),
+                masters_index_xml_floored(
+                    doc,
+                    rels_rid_floor(pkg.relationships(mp).iter().map(|(id, _, _)| id.as_str())),
+                )
+                .into_bytes(),
+            );
         }
         for m in &doc.masters {
             if !m.part.is_empty() && pkg.part(&m.part).is_some() {
@@ -474,6 +620,9 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
     };
     parts.insert(doc_part.clone(), document_xml(doc).into_bytes());
     parts.insert(pages_part.clone(), pages_index_xml(doc).into_bytes());
+    // The rIds the pages index was just serialized with — the rels part
+    // must record exactly these (both derive from [`page_index_rids`]).
+    let page_rids = page_index_rids(doc, 0);
 
     // Assign part names to pages/masters that lack one (1-based, in order).
     let mut page_parts: Vec<(String, String)> = Vec::new(); // (part, rId)
@@ -483,17 +632,7 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
         } else {
             p.part.clone()
         };
-        let rid = p
-            .children
-            .iter()
-            .find_map(|c| match c {
-                IndexChild::Rel(a) => a
-                    .iter()
-                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
-                    .map(|(_, v)| v.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| format!("rId{}", i + 1));
+        let rid = own_rid(&p.attrs, &p.children).unwrap_or_else(|| page_rids[i].clone());
         parts.insert(part.clone(), page_xml(p).into_bytes());
         page_parts.push((part, rid));
     }
@@ -506,23 +645,15 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
             .clone()
             .unwrap_or_else(|| masters_part_default.clone());
         parts.insert(masters_part.clone(), masters_index_xml(doc).into_bytes());
+        // Same agreement requirement as the pages rels above.
+        let master_rids = master_index_rids(doc, 0);
         for (i, m) in doc.masters.iter().enumerate() {
             let part = if m.part.is_empty() {
                 format!("visio/masters/master{}.xml", m.id)
             } else {
                 m.part.clone()
             };
-            let rid = m
-                .children
-                .iter()
-                .find_map(|c| match c {
-                    IndexChild::Rel(a) => a
-                        .iter()
-                        .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
-                        .map(|(_, v)| v.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| format!("rId{}", i + 1));
+            let rid = own_rid(&m.attrs, &m.children).unwrap_or_else(|| master_rids[i].clone());
             parts.insert(part.clone(), master_xml(m).into_bytes());
             master_parts.push((part, rid));
         }
@@ -903,13 +1034,18 @@ fn reconcile_page_parts(
         .map(|e| resolve_target(&index_dir, &e.target))
         .collect();
 
-    let model_pages: Vec<&Page> = doc.pages.iter().filter(|p| !p.part.is_empty()).collect();
-    let model_parts: Vec<String> = model_pages.iter().map(|p| p.part.clone()).collect();
+    let model_pages: Vec<(usize, &Page)> = doc
+        .pages
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| !p.part.is_empty())
+        .collect();
+    let model_parts: Vec<String> = model_pages.iter().map(|(_, p)| p.part.clone()).collect();
 
-    let added: Vec<&Page> = model_pages
+    let added: Vec<(usize, &Page)> = model_pages
         .iter()
         .copied()
-        .filter(|p| !src_targets.contains(&p.part))
+        .filter(|(_, p)| !src_targets.contains(&p.part))
         .collect();
     let removed: Vec<String> = src_targets
         .iter()
@@ -922,44 +1058,25 @@ fn reconcile_page_parts(
     }
 
     // Parts: add new, drop removed.
-    for page in &added {
+    for (_, page) in &added {
         parts.insert(page.part.clone(), page_xml(page).into_bytes());
     }
     for part in &removed {
         parts.remove(part.as_str());
     }
 
-    // Pages-index rels: drop removed targets, append new pages' rIds
-    // (from each page's `<Rel r:id>` child, else a fresh sequential ID).
+    // Pages-index rels: drop removed targets, append new pages' rIds —
+    // each page's own `<Rel r:id>` child when it has one, else the same
+    // synthesized rId the index was serialized with (both derive from
+    // [`page_index_rids`], so the index and rels always agree).
+    let rids = page_index_rids(doc, rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())));
     let mut entries: Vec<RelEntry> = src_entries
         .iter()
         .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))
         .cloned()
         .collect();
-    let mut next_rid = 1 + entries
-        .iter()
-        .filter_map(|e| {
-            e.id.strip_prefix("rId")
-                .and_then(|n| n.parse::<usize>().ok())
-        })
-        .max()
-        .unwrap_or(0);
-    for page in &added {
-        let rid = page
-            .children
-            .iter()
-            .find_map(|c| match c {
-                IndexChild::Rel(a) => a
-                    .iter()
-                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
-                    .map(|(_, v)| v.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                let id = format!("rId{next_rid}");
-                next_rid += 1;
-                id
-            });
+    for (i, page) in &added {
+        let rid = own_rid(&page.attrs, &page.children).unwrap_or_else(|| rids[*i].clone());
         let target = relative_target(&index_dir, &page.part);
         entries.push(RelEntry {
             id: rid,
@@ -976,7 +1093,7 @@ fn reconcile_page_parts(
             let name = part.trim_start_matches('/');
             !removed.iter().any(|r| r == name)
         });
-        for page in &added {
+        for (_, page) in &added {
             let name = format!("/{}", page.part);
             if !overrides.iter().any(|(p, _)| *p == name) {
                 overrides.push((name, CT_PAGE.to_string()));
@@ -1016,13 +1133,18 @@ fn reconcile_master_parts(
         .map(|e| resolve_target(&index_dir, &e.target))
         .collect();
 
-    let model_masters: Vec<&Master> = doc.masters.iter().filter(|m| !m.part.is_empty()).collect();
-    let model_parts: Vec<String> = model_masters.iter().map(|m| m.part.clone()).collect();
+    let model_masters: Vec<(usize, &Master)> = doc
+        .masters
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| !m.part.is_empty())
+        .collect();
+    let model_parts: Vec<String> = model_masters.iter().map(|(_, m)| m.part.clone()).collect();
 
-    let added: Vec<&Master> = model_masters
+    let added: Vec<(usize, &Master)> = model_masters
         .iter()
         .copied()
-        .filter(|m| !src_targets.contains(&m.part))
+        .filter(|(_, m)| !src_targets.contains(&m.part))
         .collect();
     let removed: Vec<String> = src_targets
         .iter()
@@ -1034,42 +1156,23 @@ fn reconcile_master_parts(
         return;
     }
 
-    for m in &added {
+    for (_, m) in &added {
         parts.insert(m.part.clone(), master_xml(m).into_bytes());
     }
     for part in &removed {
         parts.remove(part.as_str());
     }
 
+    // Same agreement requirement as the pages rels: rIds without their
+    // own `<Rel>` child are the ones the index was serialized with.
+    let rids = master_index_rids(doc, rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())));
     let mut entries: Vec<RelEntry> = src_entries
         .iter()
         .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))
         .cloned()
         .collect();
-    let mut next_rid = 1 + entries
-        .iter()
-        .filter_map(|e| {
-            e.id.strip_prefix("rId")
-                .and_then(|n| n.parse::<usize>().ok())
-        })
-        .max()
-        .unwrap_or(0);
-    for m in &added {
-        let rid = m
-            .children
-            .iter()
-            .find_map(|c| match c {
-                IndexChild::Rel(a) => a
-                    .iter()
-                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
-                    .map(|(_, v)| v.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                let id = format!("rId{next_rid}");
-                next_rid += 1;
-                id
-            });
+    for (i, m) in &added {
+        let rid = own_rid(&m.attrs, &m.children).unwrap_or_else(|| rids[*i].clone());
         entries.push(RelEntry {
             id: rid,
             type_: rel_type("master"),
@@ -1084,7 +1187,7 @@ fn reconcile_master_parts(
             let name = part.trim_start_matches('/');
             !removed.iter().any(|r| r == name)
         });
-        for m in &added {
+        for (_, m) in &added {
             let name = format!("/{}", m.part);
             if !overrides.iter().any(|(p, _)| *p == name) {
                 overrides.push((name, CT_MASTER.to_string()));

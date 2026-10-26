@@ -233,3 +233,125 @@ fn formula_subset() {
         Some(1.5)
     );
 }
+
+/// A model-built document (fresh `write::save` path) whose pages and
+/// masters carry no `<Rel>` children — parse binds contents parts
+/// strictly through each entry's rId, so the writer must synthesize
+/// `<Rel r:id>` children (and matching rels entries) for such entries
+/// or the shapes silently vanish on reload (#85).
+#[test]
+fn fresh_save_binds_contents_without_rel_children() {
+    use vsdx::model::*;
+
+    let xmlns = || {
+        vec![
+            (
+                "xmlns".to_string(),
+                "http://schemas.microsoft.com/office/visio/2012/main".to_string(),
+            ),
+            (
+                "xmlns:r".to_string(),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                    .to_string(),
+            ),
+        ]
+    };
+    let mut doc = vsdx::Document {
+        root_attrs: xmlns(),
+        pages_attrs: xmlns(),
+        masters_attrs: xmlns(),
+        doc_part: "visio/document.xml".into(),
+        pages_part: "visio/pages/pages.xml".into(),
+        items: vec![DocItem::StyleSheets],
+        ..vsdx::Document::default()
+    };
+
+    // One master, one page, both built in code: no IndexChild::Rel.
+    let mut sheet = Sheet::default();
+    for (n, v) in [("PinX", "1"), ("PinY", "1"), ("Width", "1"), ("Height", "1")] {
+        sheet.set_cell(n, Cell::value(v));
+    }
+    sheet.children.push(SheetChild::Section(Section {
+        name: "Geometry".into(),
+        ix: 0,
+        attrs: vec![("N".into(), "Geometry".into()), ("IX".into(), "0".into())],
+        cells: vec![],
+        rows: vec![Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            n: None,
+            attrs: vec![("T".into(), "MoveTo".into()), ("IX".into(), "1".into())],
+            cells: vec![("X".into(), Cell::value("0")), ("Y".into(), Cell::value("0"))],
+        }],
+    }));
+    doc.masters.push(Master {
+        id: 1,
+        name_u: Some("Square".into()),
+        attrs: vec![("ID".into(), "1".into()), ("NameU".into(), "Square".into())],
+        shapes: vec![Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            sheet,
+            ..Shape::default()
+        }],
+        part: "visio/masters/master1.xml".into(),
+        contents_attrs: xmlns(),
+        ..Master::default()
+    });
+    doc.pages.push(Page {
+        id: 0,
+        name: "Page-1".into(),
+        attrs: vec![("ID".into(), "0".into()), ("NameU".into(), "Page-1".into())],
+        children: vec![],
+        part: "visio/pages/page1.xml".into(),
+        contents_attrs: xmlns(),
+        shapes: vec![Shape {
+            id: 2,
+            type_: Some("Shape".into()),
+            master: Some(1),
+            ..Shape::default()
+        }],
+        ..Page::default()
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fresh.vsdx");
+    vsdx::write::save(&doc, &path).unwrap();
+
+    // The written index carries a synthesized Rel per entry, and the
+    // rels parts bind them to the contents parts.
+    let pkg = vsdx::Package::open(&path).unwrap();
+    let masters_index = String::from_utf8(
+        pkg.part("visio/masters/masters.xml").unwrap().to_vec(),
+    )
+    .unwrap();
+    assert!(
+        masters_index.contains("<Rel r:id=\"rId1\"/>"),
+        "master entry synthesized its Rel binding: {masters_index}"
+    );
+    let pages_index = String::from_utf8(
+        pkg.part("visio/pages/pages.xml").unwrap().to_vec(),
+    )
+    .unwrap();
+    assert!(
+        pages_index.contains("<Rel r:id=\"rId1\"/>"),
+        "page entry synthesized its Rel binding: {pages_index}"
+    );
+
+    // Reload: both keep their shapes.
+    let back = vsdx::parse::parse(&path).unwrap();
+    assert_eq!(back.masters.len(), 1);
+    assert_eq!(
+        back.masters[0].shapes.len(),
+        1,
+        "master contents survive the round-trip"
+    );
+    assert_eq!(back.masters[0].part, "visio/masters/master1.xml");
+    assert_eq!(back.pages.len(), 1);
+    assert_eq!(
+        back.pages[0].shapes.len(),
+        1,
+        "page contents survive the round-trip"
+    );
+    assert_eq!(back.pages[0].shapes[0].master, Some(1));
+}
