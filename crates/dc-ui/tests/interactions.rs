@@ -3277,3 +3277,83 @@ fn search_aggregates_matches_into_a_results_entry() {
     assert_eq!(entries.len(), 2, "stencil expansion flags untouched");
     assert!(entries.iter().all(|(_, e)| *e), "stencils still expanded");
 }
+
+/// #87: the More Shapes menu lists the built-in catalog by category;
+/// opening a built-in lands in the pane like a file stencil, and the
+/// same menu path toggles it closed.
+#[test]
+fn builtin_catalog_menu_opens_and_toggles_stencils() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+
+    // General ▸ Basic Shapes: 48 masters land as an expanded entry.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click();
+    for _ in 0..4 {
+        h.run(); // the pane request is handled on a later frame
+    }
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries, vec![("Basic Shapes".to_string(), true)]);
+    assert_eq!(
+        h.state()
+            .debug_master_cells()
+            .iter()
+            .filter(|(k, _)| k.0 == StencilId::Open(0))
+            .count(),
+        48,
+        "all Basic Shapes masters listed"
+    );
+    assert!(h.state().debug_status().contains("opened Basic Shapes"));
+    ctx_menu_snapshot(&mut h, "dc_ui_builtin_basic_shapes");
+
+    // Accessories ▸ Containers: a second category, a second entry.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Accessories").click();
+    h.run();
+    h.get_by_label("Containers").click();
+    for _ in 0..4 {
+        h.run();
+    }
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(
+        entries,
+        vec![
+            ("Basic Shapes".to_string(), true),
+            ("Containers".to_string(), true)
+        ]
+    );
+
+    // The same menu path toggles: Basic Shapes closes (Containers
+    // shifts down a pane position), the status names the close.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click();
+    for _ in 0..4 {
+        h.run();
+    }
+    let entries = h.state().debug_stencil_entries();
+    assert_eq!(entries, vec![("Containers".to_string(), true)]);
+    assert!(h.state().debug_status().contains("closed Basic Shapes"));
+    assert!(
+        !h.state()
+            .debug_master_cells()
+            .iter()
+            .any(|(k, _)| matches!(k.0, StencilId::Open(1))),
+        "containers shifted to pane position 0 (no stale Open(1) cells)"
+    );
+    assert!(
+        h.state()
+            .debug_master_cells()
+            .iter()
+            .any(|(k, _)| k.0 == StencilId::Open(0)),
+        "containers' masters are listed at pane position 0"
+    );
+}

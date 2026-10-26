@@ -1,0 +1,20 @@
+# Built-in stencil catalog manifest (GitHub #87).
+#
+# One line per catalog entry:
+#   slug | category | display title | source file in Visio Content/1033
+#
+# The initial set follows the shipped Visio 2016 auto-opened companion
+# stencils (REA evidence, VISLIB.DLL references): basic shapes plus the
+# containers/callouts companions. Categories mirror the observed More
+# Shapes menu taxonomy. Expansion is a manifest edit + re-run of
+# `cargo run -p vsdx --example extract-stencils`.
+#
+# Provenance: masters are copied from the shipped Visio 2016 stencils
+# into this repository as built-in stencil assets under the scoped
+# owner exception of 2026-10-25 (AGENTS.md). Sample/Office16 itself
+# stays untracked; tests never regenerate these files — a dc-ui test
+# verifies the committed bytes against digests.txt.
+
+general-basic-shapes | General | Basic Shapes | BASIC_U.VSSX
+accessories-containers | Accessories | Containers | SDCONT_U.VSSX
+accessories-callouts | Accessories | Callouts | SDCALL_U.VSSX

@@ -765,11 +765,15 @@ fn content_types_xml(
             part, ct
         ));
     }
-    override_part(
-        doc_part,
-        "application/vnd.ms-visio.drawing.main+xml",
-        &mut out,
-    );
+    // A document with masters but no pages is a stencil (the
+    // synthetic built-in catalog, #87): its main part carries the
+    // stencil content type, like the shipped `Visio Content` files.
+    let doc_ct = if !doc.masters.is_empty() && doc.pages.is_empty() {
+        "application/vnd.ms-visio.stencil.main+xml"
+    } else {
+        "application/vnd.ms-visio.drawing.main+xml"
+    };
+    override_part(doc_part, doc_ct, &mut out);
     for part in &page_set {
         override_part(part, "application/vnd.ms-visio.pages+xml", &mut out);
     }

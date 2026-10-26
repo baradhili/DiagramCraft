@@ -7,6 +7,7 @@
 //! 2026-10-26): the open-stencil set lives in [`source::StencilSet`],
 //! the built-in catalog in `catalog` (#87).
 
+pub mod builtin;
 pub mod source;
 
 pub use source::{MasterKey, Origin, StencilId, StencilSet, DOC_SERIAL};
@@ -56,6 +57,10 @@ pub enum Request {
     /// "More Shapes ▸ Open Existing Stencil…" — launch the native
     /// file dialog filtered to `.vssx` (#83).
     OpenStencilDialog,
+    /// "More Shapes ▸ <category> ▸ <stencil>" — open the built-in
+    /// stencil, or close it when its entry is already open (the menu
+    /// checkbox state, #87).
+    ToggleBuiltin(&'static str),
 }
 
 /// The pane's state: which master — addressed by (source, id) — is
@@ -149,12 +154,31 @@ impl Stencil {
 
         let mut clicked = None;
         // Visio pane header: "Shapes" title bar with a "More Shapes"
-        // menu (Open Existing Stencil…, #83; the built-in categories
-        // arrive with #87), then the search box, then the stencil list.
+        // menu — built-in catalog categories (#87), then Open Existing
+        // Stencil… (#83) — then the search box, then the stencil list.
         ui.horizontal(|ui| {
             ui.strong("Shapes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("More Shapes", |ui| {
+                    // One submenu per category, one checkable entry per
+                    // built-in stencil; the checkbox reflects (and
+                    // toggles) the stencil's pane entry (observed Visio
+                    // 2016 menu behavior).
+                    for cat in builtin::categories() {
+                        ui.menu_button(cat, |ui| {
+                            for b in builtin::by_category(cat) {
+                                let source = builtin::source_path(b.slug);
+                                let mut open = set
+                                    .iter()
+                                    .any(|(_, st)| st.source == source);
+                                if ui.checkbox(&mut open, b.title).changed() {
+                                    self.request = Some(Request::ToggleBuiltin(b.slug));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    ui.separator();
                     if ui.button("Open Existing Stencil...").clicked() {
                         self.request = Some(Request::OpenStencilDialog);
                         ui.close();
@@ -279,19 +303,7 @@ impl Stencil {
         // open-stencil placements rather than mis-place from a stale
         // index (document placements are unaffected).
         if let Some(ix) = close_requested {
-            if let Some(serial) = set.close(ix) {
-                self.evict(serial);
-                let open = |k: Option<MasterKey>| {
-                    matches!(k.map(|k| k.0), Some(StencilId::Open(_)))
-                };
-                if open(self.armed) {
-                    self.armed = None;
-                }
-                if open(self.carry) {
-                    self.carry = None;
-                }
-                self.reveal = None;
-            }
+            self.close_entry(set, ix);
         }
 
         // A resize changed the row structure: re-anchor the scroll so
@@ -498,6 +510,27 @@ impl Stencil {
     pub(crate) fn evict(&mut self, serial: u64) {
         self.textures.retain(|(s, _, _)| *s != serial);
         self.inflight.retain(|(s, _)| *s != serial);
+    }
+
+    /// Close pane entry `ix` completely (#85/#87): remove it from the
+    /// set, evict its thumbnail cache by serial, and disarm any
+    /// armed/carried master from that (or a shifted) open position.
+    /// Returns the closed entry's serial.
+    pub(crate) fn close_entry(&mut self, set: &mut StencilSet, ix: usize) -> Option<u64> {
+        let serial = set.close(ix)?;
+        self.evict(serial);
+        // A close shifts every later entry's pane position — disarm
+        // open-stencil placements rather than mis-place from a stale
+        // index (document placements are unaffected).
+        let open = |k: Option<MasterKey>| matches!(k.map(|k| k.0), Some(StencilId::Open(_)));
+        if open(self.armed) {
+            self.armed = None;
+        }
+        if open(self.carry) {
+            self.carry = None;
+        }
+        self.reveal = None;
+        Some(serial)
     }
 
     /// kittest (#92): how many master thumbnails have landed.

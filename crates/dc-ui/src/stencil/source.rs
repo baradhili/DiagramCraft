@@ -134,8 +134,10 @@ impl StencilSet {
 
     /// Pane position of the entry opened from `source`, if any.
     /// Paths are compared after best-effort canonicalization so a
-    /// relative and an absolute pick of the same file match.
-    fn position_for(&self, source: &Path) -> Option<usize> {
+    /// relative and an absolute pick of the same file match. Built-in
+    /// pseudo-paths (`builtin/…`, #87) never canonicalize and compare
+    /// verbatim.
+    pub fn position_for(&self, source: &Path) -> Option<usize> {
         let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
         let want = canon(source);
         self.open

@@ -789,6 +789,41 @@ impl App {
         }
     }
 
+    /// More Shapes ▸ category ▸ stencil: open a built-in catalog
+    /// stencil, or close its entry when it is already open (the menu
+    /// checkbox state, #87). Built-ins land in the pane exactly like
+    /// file stencils (#83) — placement, thumbnails, search, and close
+    /// all key off the open-stencil set.
+    fn toggle_builtin(&mut self, slug: &'static str) {
+        let Some(b) = crate::stencil::builtin::by_slug(slug) else {
+            return;
+        };
+        let source = crate::stencil::builtin::source_path(b.slug);
+        if let Some(ix) = self.stencils.position_for(&source) {
+            let title = self
+                .stencils
+                .get(ix)
+                .map(|st| st.title.clone())
+                .unwrap_or_else(|| b.title.to_string());
+            self.stencil.close_entry(&mut self.stencils, ix);
+            self.status = format!("closed {title}");
+            return;
+        }
+        match vsdx::parse::parse_bytes(b.bytes) {
+            Ok(doc) => {
+                let (ix, _) = self.stencils.open_parsed(
+                    doc,
+                    source,
+                    b.title.to_string(),
+                    crate::stencil::Origin::Builtin,
+                );
+                self.stencil.reveal = Some(StencilId::Open(ix));
+                self.status = format!("opened {title}", title = b.title);
+            }
+            Err(e) => self.status = format!("built-in stencil failed to load: {e:#}"),
+        }
+    }
+
     /// File → New: replace the current document with a blank drawing,
     /// prompting first if it has unsaved changes.
     fn do_new(&mut self) {
@@ -6862,10 +6897,17 @@ impl App {
                                 request = stencil.request.take();
                             }
                         }
-                        // Pane requests (#83): the pane can't reach the
-                        // dialog worker itself.
-                        if matches!(request, Some(crate::stencil::Request::OpenStencilDialog)) {
-                            self.begin_dialog(PendingKind::OpenStencil);
+                        // Pane requests (#83/#87): the pane can't reach
+                        // the dialog worker or the catalog's byte
+                        // loader itself.
+                        match request {
+                            Some(crate::stencil::Request::OpenStencilDialog) => {
+                                self.begin_dialog(PendingKind::OpenStencil);
+                            }
+                            Some(crate::stencil::Request::ToggleBuiltin(slug)) => {
+                                self.toggle_builtin(slug);
+                            }
+                            None => {}
                         }
                         if let Some(id) = armed {
                             self.status =
