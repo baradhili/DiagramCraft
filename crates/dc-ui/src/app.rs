@@ -6564,10 +6564,15 @@ impl App {
                 crate::rasterpool::RasterKey::Thumb(id) => {
                     self.stencil.on_thumb_done(ui.ctx(), id, done.image);
                 }
-                crate::rasterpool::RasterKey::Shape { page, id } => {
-                    if let Some(msg) =
-                        self.layers.on_shape_done(ui.ctx(), page, id, done.image)
-                    {
+                crate::rasterpool::RasterKey::Shape { page, id, version, bucket } => {
+                    if let Some(msg) = self.layers.on_shape_done(
+                        ui.ctx(),
+                        page,
+                        id,
+                        version,
+                        bucket,
+                        done.image,
+                    ) {
                         self.status = msg;
                     }
                 }

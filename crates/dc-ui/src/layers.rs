@@ -129,16 +129,28 @@ impl ShapeLayers {
     }
 
     /// Land a worker completion for a shape layer (#92 drain).
-    /// Returns a failure message to surface once, if any.
+    /// Returns a failure message to surface once, if any. A
+    /// completion whose (version, bucket) does not match the entry's
+    /// inflight job is superseded — a newer job was posted while this
+    /// one was in flight — and is discarded WITHOUT touching the
+    /// inflight mark (taking it would orphan the live job: its own
+    /// landing would find nothing and the stale image would stay
+    /// cached as current forever).
     pub(crate) fn on_shape_done(
         &mut self,
         ctx: &Context,
         page: i64,
         id: i64,
+        version: u64,
+        bucket: u32,
         image: anyhow::Result<egui::ColorImage>,
     ) -> Option<String> {
         let entry = self.entries.get_mut(&id)?;
-        let (v, bucket) = entry.inflight.take()?;
+        if entry.inflight != Some((version, bucket)) {
+            return None; // superseded: the live job's landing is still owed
+        }
+        entry.inflight = None;
+        let v = version;
         match image {
             Ok(image) => {
                 let tex = {
@@ -298,6 +310,8 @@ impl ShapeLayers {
                     RasterKey::Shape {
                         page: page.id,
                         id: shape.id,
+                        version,
+                        bucket,
                     },
                     RasterJob::Parse { svg, width },
                 ) {
@@ -343,5 +357,54 @@ impl ShapeLayers {
             }
         }
         (quads, status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image() -> egui::ColorImage {
+        egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4])
+    }
+
+    /// A completion for a job that was superseded while in flight (an
+    /// edit bumped the version and composite posted a newer job) is
+    /// discarded without consuming the live job's inflight mark —
+    /// otherwise the stale image would be cached as current and the
+    /// live job's own landing would find no mark and vanish.
+    #[test]
+    fn superseded_shape_completion_does_not_consume_the_inflight_mark() {
+        let mut layers = ShapeLayers::default();
+        layers.entries.insert(
+            7,
+            Entry {
+                version: u64::MAX,
+                bucket: 384,
+                tex: None,
+                svg: None,
+                svg_version: u64::MAX,
+                inflight: Some((2, 384)),
+                failed: None,
+            },
+        );
+        let ctx = egui::Context::default();
+        // The stale v1 completion lands first (two workers, out of
+        // order): discarded, inflight untouched.
+        assert!(layers
+            .on_shape_done(&ctx, 0, 7, 1, 384, Ok(image()))
+            .is_none());
+        let e = &layers.entries[&7];
+        assert_eq!(e.inflight, Some((2, 384)), "superseded landing must not take the mark");
+        assert!(e.tex.is_none(), "superseded image must not be cached");
+        // The live v2 job lands: stored, mark cleared.
+        assert!(layers
+            .on_shape_done(&ctx, 0, 7, 2, 384, Ok(image()))
+            .is_none());
+        let e = &layers.entries[&7];
+        assert_eq!(e.inflight, None);
+        assert!(e.tex.is_some());
+        assert_eq!(e.version, 2);
+        assert_eq!(e.bucket, 384);
     }
 }

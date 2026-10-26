@@ -36,9 +36,17 @@ pub(crate) enum RasterKey {
     },
     /// A stencil master thumbnail.
     Thumb(i64),
-    /// A per-shape canvas layer (#93): `RasterKey::Shape { page, id }`.
-    /// Counts as Page work in the perf split (it *is* page content).
-    Shape { page: i64, id: i64 },
+    /// A per-shape canvas layer (#93): `RasterKey::Shape { page, id,
+    /// version, bucket }`. The version/bucket travel with the job so
+    /// `on_shape_done` can discard a superseded completion (a newer
+    /// job was posted while this one was in flight) without consuming
+    /// the live job's inflight mark.
+    Shape {
+        page: i64,
+        id: i64,
+        version: u64,
+        bucket: u32,
+    },
 }
 
 impl RasterKey {
