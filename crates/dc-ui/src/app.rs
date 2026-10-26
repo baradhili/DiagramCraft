@@ -16,7 +16,8 @@ use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
 use crate::canvas::{self, Handle, HandleId, PageGeom, View};
-use crate::cmd::{AddMasterInstance, MoveShape};
+use crate::cmd::MoveShape;
+use dc_core::AddMasterInstance;
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
@@ -1972,9 +1973,9 @@ impl App {
     /// Returns the new shape id when a placement happened.
     ///
     /// Document masters place directly. A master from an open stencil
-    /// must first be copied into the drawing (Visio's first-use
-    /// import, #63): the import command lands with #84, so until then
-    /// stencil-master placements disarm with a status note.
+    /// is first copied into the drawing (Visio's first-use import,
+    /// #84) and the instance placed referencing the document-local
+    /// copy — one undo step removes both together.
     fn place_master(&mut self, key: MasterKey, page_pos: (f64, f64)) -> Option<i64> {
         let page_id = self.page_id()?;
         match key.0 {
@@ -1986,10 +1987,23 @@ impl App {
                 self.apply(AddMasterInstance::new(page_id, key.1, page_pos));
                 new_id
             }
-            StencilId::Open(_) => {
-                self.status =
-                    "placing from an open stencil arrives with master import (#84)".into();
-                None
+            StencilId::Open(ix) => {
+                let src = self
+                    .stencils
+                    .get(ix)
+                    .and_then(|st| st.doc.master(key.1))
+                    .cloned();
+                let Some(src) = src else {
+                    self.stencil.armed = None;
+                    return None;
+                };
+                let Some(ed) = self.ed.as_ref() else {
+                    return None;
+                };
+                let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+                let cmd = dc_core::place_master_from_stencil(&ed.doc, page_id, &src, page_pos);
+                self.apply(cmd);
+                Some(new_id)
             }
         }
     }
@@ -6039,6 +6053,20 @@ impl App {
             .iter()
             .map(|(_, st)| (st.title.clone(), st.expanded))
             .collect()
+    }
+    /// kittest (#84): the edited document's masters (id, NameU).
+    #[doc(hidden)]
+    pub fn debug_doc_masters(&self) -> Vec<(i64, String)> {
+        self.ed
+            .as_ref()
+            .map(|ed| {
+                ed.doc
+                    .masters
+                    .iter()
+                    .map(|m| (m.id, m.name_u.clone().unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// kittest (#63): stencil list entry header rects, document entry
     /// first.

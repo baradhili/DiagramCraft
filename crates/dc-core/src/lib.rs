@@ -20,9 +20,10 @@ pub mod layers;
 pub mod scope;
 
 pub use commands::{
-    AddConnect, AddLayer, AddPage, AddShape, DuplicateShape, Macro, MovePage, RemoveConnect,
-    RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, ReorderShape, SetCell,
-    SetRowCell, SetText,
+    AddConnect, AddLayer, AddMasterInstance, AddPage, AddShape, DuplicateShape, ImportMaster,
+    Macro, MovePage, RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage,
+    ReorderShape, SetCell, SetRowCell, SetText, find_imported, next_master_id,
+    place_master_from_stencil,
 };
 pub use connects::{Connect, Connects, ConnectsOwner};
 pub use scope::{find_shape_mut, Scope};

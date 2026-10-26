@@ -62,122 +62,10 @@ impl Command for MoveShape {
     }
 }
 
-/// Place a new instance of a master onto a page at a pin position
-/// (inches). Geometry/format inherit from the master, exactly like a
-/// Visio drag-from-stencil drop.
-pub struct AddMasterInstance {
-    pub page: i64,
-    pub master: i64,
-    pub pin: (f64, f64),
-    id: Option<i64>,
-}
-
-impl AddMasterInstance {
-    pub fn new(page: i64, master: i64, pin: (f64, f64)) -> AddMasterInstance {
-        AddMasterInstance {
-            page,
-            master,
-            pin,
-            id: None,
-        }
-    }
-}
-
-impl Command for AddMasterInstance {
-    fn touched(&self, _doc: &Document) -> dc_core::TouchList {
-        // A fresh top-level instance (#93): membership only — its
-        // layer renders on demand.
-        match self.id {
-            Some(id) => dc_core::TouchList {
-                pages: vec![],
-                shapes: vec![dc_core::Touched {
-                    page: self.page,
-                    shape: id,
-                    touch: dc_core::Touch::Membership,
-                }],
-            },
-            None => dc_core::TouchList::page(self.page),
-        }
-    }
-
-    fn label(&self) -> String {
-        format!(
-            "add master {} instance at ({:.3}, {:.3})",
-            self.master, self.pin.0, self.pin.1
-        )
-    }
-    fn apply(&mut self, doc: &mut Document) -> anyhow::Result<()> {
-        let id = dc_core::commands::next_shape_id(doc, self.page);
-        self.id = Some(id);
-        let mut sheet = vsdx::model::Sheet::default();
-        sheet.set_cell("PinX", Cell::value(format!("{:.6}", self.pin.0)));
-        sheet.set_cell("PinY", Cell::value(format!("{:.6}", self.pin.1)));
-        // A 1D master (line/connector: root shape carries Begin/End
-        // cells) gets XForm1D snapshots on the instance — a horizontal
-        // 1-inch line centered on the drop point — plus the derived
-        // XForm literals the renderer reads, exactly like Visio's
-        // instancing caches (GitHub #59).
-        let one_d = doc.master(self.master).is_some_and(|m| {
-            m.shapes
-                .iter()
-                .any(|s| s.sheet.cell("BeginX").is_some() && s.sheet.cell("EndX").is_some())
-        });
-        if one_d {
-            let (bx, ex) = (self.pin.0 - 0.5, self.pin.0 + 0.5);
-            let by = self.pin.1;
-            for (n, v) in [
-                ("BeginX", bx),
-                ("BeginY", by),
-                ("EndX", ex),
-                ("EndY", by),
-                ("Width", 1.0),
-                ("Height", 0.0),
-                ("LocPinX", 0.5),
-                ("LocPinY", 0.0),
-                ("Angle", 0.0),
-            ] {
-                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
-            }
-        }
-        let shape = Shape {
-            id,
-            type_: Some("Shape".to_string()),
-            master: Some(self.master),
-            line_style: Some(0),
-            fill_style: Some(0),
-            text_style: Some(0),
-            attrs: vec![
-                ("ID".to_string(), id.to_string()),
-                ("Type".to_string(), "Shape".to_string()),
-                ("Master".to_string(), self.master.to_string()),
-                ("LineStyle".to_string(), "0".to_string()),
-                ("FillStyle".to_string(), "0".to_string()),
-                ("TextStyle".to_string(), "0".to_string()),
-            ],
-            sheet,
-            ..Shape::default()
-        };
-        let page = doc
-            .pages
-            .iter_mut()
-            .find(|p| p.id == self.page)
-            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
-        page.shapes.push(shape);
-        Ok(())
-    }
-    fn undo(&mut self, doc: &mut Document) -> anyhow::Result<()> {
-        let Some(id) = self.id else { return Ok(()) };
-        let page = doc
-            .pages
-            .iter_mut()
-            .find(|p| p.id == self.page)
-            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
-        if let Some(pos) = page.shapes.iter().position(|s| s.id == id) {
-            page.shapes.remove(pos);
-        }
-        Ok(())
-    }
-}
+/// Place a new instance of a master onto a page — `AddMasterInstance`
+/// moved to dc-core with #84 (it mutates the model; dc-ui keeps UI
+/// glue only). Import + place as one undo step:
+/// `dc_core::place_master_from_stencil`.
 
 /// Refresh a flattened group's inherited cell caches after a resize
 /// (GitHub #59). Visio instances carry `F='Inh'` snapshots of every
@@ -579,8 +467,16 @@ mod tests {
 
     #[test]
     fn add_master_instance_undo_removes() {
+        // AddMasterInstance now lives in dc-core (#84); keep the
+        // behavioral pin here through the re-exported command.
         let mut ed = doc_with_shape();
-        ed.apply(AddMasterInstance::new(0, 7, (3.0, 3.0))).unwrap();
+        ed.doc.masters.push(vsdx::Master {
+            id: 7,
+            name_u: Some("M".into()),
+            ..vsdx::Master::default()
+        });
+        ed.apply(dc_core::AddMasterInstance::new(0, 7, (3.0, 3.0)))
+            .unwrap();
         assert!(vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 2).is_some());
         let s = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 2).unwrap();
         assert_eq!(s.master, Some(7));

@@ -457,6 +457,7 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
         // and keep the pages-index rels and [Content_Types].xml in sync.
         // Pure round-trips (no page-set change) leave all three untouched.
         reconcile_page_parts(&mut parts, doc, pkg);
+        reconcile_master_parts(&mut parts, doc, pkg);
         return parts;
     }
 
@@ -979,6 +980,114 @@ fn reconcile_page_parts(
             let name = format!("/{}", page.part);
             if !overrides.iter().any(|(p, _)| *p == name) {
                 overrides.push((name, CT_PAGE.to_string()));
+            }
+        }
+        let built = build_content_types(&defaults, &overrides);
+        defaults.clear();
+        parts.insert("[Content_Types].xml".to_string(), built);
+    }
+}
+
+const CT_MASTER: &str = "application/vnd.ms-visio.master+xml";
+
+/// Materialize/drop master parts for masters added or removed
+/// relative to the source package (ImportMaster, #84) — the
+/// masters-index analog of `reconcile_page_parts`. An imported master
+/// arrives with a document-unique part name and no borrowed `<Rel>`
+/// child; its rId is assigned here. Master *removal* (a future command
+/// would need it) works the same way as page removal.
+fn reconcile_master_parts(
+    parts: &mut BTreeMap<String, Vec<u8>>,
+    doc: &Document,
+    pkg: &crate::opc::Package,
+) {
+    let Some(mp) = &doc.masters_part else {
+        return;
+    };
+    let index_dir = dir_of(mp);
+    let rels_part = rels_part_of(mp);
+
+    let src_entries = match pkg.part(&rels_part) {
+        Some(bytes) => parse_rels(bytes),
+        None => Vec::new(),
+    };
+    let src_targets: Vec<String> = src_entries
+        .iter()
+        .map(|e| resolve_target(&index_dir, &e.target))
+        .collect();
+
+    let model_masters: Vec<&Master> = doc.masters.iter().filter(|m| !m.part.is_empty()).collect();
+    let model_parts: Vec<String> = model_masters.iter().map(|m| m.part.clone()).collect();
+
+    let added: Vec<&Master> = model_masters
+        .iter()
+        .copied()
+        .filter(|m| !src_targets.contains(&m.part))
+        .collect();
+    let removed: Vec<String> = src_targets
+        .iter()
+        .filter(|t| !model_parts.contains(*t))
+        .cloned()
+        .collect();
+
+    if added.is_empty() && removed.is_empty() {
+        return;
+    }
+
+    for m in &added {
+        parts.insert(m.part.clone(), master_xml(m).into_bytes());
+    }
+    for part in &removed {
+        parts.remove(part.as_str());
+    }
+
+    let mut entries: Vec<RelEntry> = src_entries
+        .iter()
+        .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))
+        .cloned()
+        .collect();
+    let mut next_rid = 1 + entries
+        .iter()
+        .filter_map(|e| {
+            e.id.strip_prefix("rId")
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .max()
+        .unwrap_or(0);
+    for m in &added {
+        let rid = m
+            .children
+            .iter()
+            .find_map(|c| match c {
+                IndexChild::Rel(a) => a
+                    .iter()
+                    .find(|(k, _)| k.len() > 2 && k.ends_with(":id"))
+                    .map(|(_, v)| v.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let id = format!("rId{next_rid}");
+                next_rid += 1;
+                id
+            });
+        entries.push(RelEntry {
+            id: rid,
+            type_: rel_type("master"),
+            target: relative_target(&index_dir, &m.part),
+        });
+    }
+    parts.insert(rels_part, build_rels(&entries));
+
+    if let Some(ct_bytes) = parts.get("[Content_Types].xml").cloned() {
+        let (mut defaults, mut overrides) = parse_content_types(&ct_bytes);
+        overrides.retain(|(part, _)| {
+            let name = part.trim_start_matches('/');
+            !removed.iter().any(|r| r == name)
+        });
+        for m in &added {
+            let name = format!("/{}", m.part);
+            if !overrides.iter().any(|(p, _)| *p == name) {
+                overrides.push((name, CT_MASTER.to_string()));
             }
         }
         let built = build_content_types(&defaults, &overrides);

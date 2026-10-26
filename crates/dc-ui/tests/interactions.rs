@@ -3009,3 +3009,73 @@ fn file_open_of_a_stencil_lands_in_the_pane_not_the_editor() {
         h.state().debug_status()
     );
 }
+
+/// Dropping a master from an open stencil copies it into the drawing
+/// and places the instance in one undo step (#84).
+#[test]
+fn stencil_master_drop_imports_and_places_as_one_undo() {
+    use dc_ui::stencil::StencilId;
+    let mut h = harness_with_blank();
+    h.run();
+    let masters_before = h.state().debug_doc_masters().len();
+    let tmp = tempfile::tempdir().unwrap();
+    // The stencil master's id (1) collides with nothing here, but its
+    // BaseID identity is what the import dedupes on.
+    let s = synth_stencil(tmp.path(), "kit", &[("Kite", 1)]);
+    h.state_mut().open_stencil_for_test(&s);
+    h.run();
+    let from = h
+        .state()
+        .debug_master_cells()
+        .into_iter()
+        .find(|(k, _)| *k == (StencilId::Open(0), 1))
+        .expect("kite master cell")
+        .1
+        .center();
+    let to = h.state().debug_canvas_rect().center();
+
+    // The drag-drop paradigm: press on the cell, cross the canvas,
+    // release.
+    h.hover_at(from);
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(from + (to - from) * 0.5);
+    h.run();
+    h.hover_at(to);
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+
+    assert_eq!(h.state().debug_shape_count(), 1, "the drop placed a shape");
+    let masters = h.state().debug_doc_masters();
+    assert_eq!(
+        masters.len(),
+        masters_before + 1,
+        "first use imported a copy into the drawing"
+    );
+    let imported_id = masters.last().unwrap().0;
+    assert_eq!(
+        masters.last().unwrap().1, "Kite",
+        "the imported master keeps its name"
+    );
+
+    // One undo removes the shape AND the imported master together.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "undo removed the instance");
+    assert_eq!(
+        h.state().debug_doc_masters().len(),
+        masters_before,
+        "the same undo removed the imported master"
+    );
+    let _ = imported_id;
+}
