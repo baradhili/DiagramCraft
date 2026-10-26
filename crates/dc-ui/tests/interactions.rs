@@ -527,14 +527,33 @@ fn drag_naturally(h: &mut Harness<'_, App>, from: Pos2, by: egui::Vec2) {
 /// Place a master through the stencil's click-to-arm, click-to-place
 /// path and return the (page, shape) of the placed instance.
 fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
-    let cell = h
-        .state()
-        .debug_master_cells()
-        .into_iter()
-        .find(|(id, _)| *id == (dc_ui::stencil::StencilId::Document, master))
-        .map(|(_, r)| r)
-        .unwrap_or_else(|| panic!("master {master} in the stencil"));
-    let from = cell.center();
+    // Quick Shapes (#88) added a first entry, so a target master's
+    // cell may sit below the fold — wheel the pane until the cell is
+    // in the viewport before clicking it.
+    let mut wheels = 0;
+    let from = loop {
+        let cell = h
+            .state()
+            .debug_master_cells()
+            .into_iter()
+            .find(|(id, _)| *id == (dc_ui::stencil::StencilId::Document, master))
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("master {master} in the stencil"));
+        if cell.center().y < 760.0 {
+            break cell.center();
+        }
+        wheels += 1;
+        assert!(wheels < 40, "pane never scrolled master {master} into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(3);
+    };
     let to = h.state().debug_canvas_rect().center();
     click_at(h, from, egui::PointerButton::Primary);
     click_at(h, to, egui::PointerButton::Primary);
@@ -1125,10 +1144,12 @@ fn drag_stencil_edge_to(h: &mut Harness<'_, App>, target_x: f32) {
 fn assert_grid_fits(h: &Harness<'_, App>) {
     let inner = h.state().debug_stencil_panel_inner_rect();
     let cells = h.state().debug_master_cells();
+    // Quick Shapes (#88) adds the 6 head masters once more on top of
+    // the document entry's 8.
     assert_eq!(
         cells.len(),
-        8,
-        "blank template exposes 8 starter masters (incl. the 1D Line, #59)"
+        8 + 6,
+        "8 starter masters in the doc entry (incl. the 1D Line, #59) + their Quick Shapes heads"
     );
     for (id, r) in &cells {
         assert!(
@@ -2755,6 +2776,17 @@ fn drag_moves_the_shape_live_under_the_cursor() {
 /// model — DiagramCraft's own fixture, no Microsoft content. Master
 /// ids are caller-chosen so tests can make two stencils collide.
 fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> std::path::PathBuf {
+    synth_stencil_opts(dir, stem, masters, &[])
+}
+
+/// [`synth_stencil`] with extra `Hidden='1'` masters (#88: Quick
+/// Shapes excludes them; the pane entry itself still lists them).
+fn synth_stencil_opts(
+    dir: &std::path::Path,
+    stem: &str,
+    masters: &[(&str, i64)],
+    hidden: &[(&str, i64)],
+) -> std::path::PathBuf {
     use vsdx::model::*;
     let xmlns = || {
         vec![
@@ -2788,7 +2820,12 @@ fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> 
             ..Sheet::default()
         },
     });
-    for (i, (name, id)) in masters.iter().enumerate() {
+    let all: Vec<(&str, i64, bool)> = masters
+        .iter()
+        .map(|(n, i)| (*n, *i, false))
+        .chain(hidden.iter().map(|(n, i)| (*n, *i, true)))
+        .collect();
+    for (i, (name, id, is_hidden)) in all.iter().enumerate() {
         let mut sheet = Sheet::default();
         for (n, v) in [("PinX", "1"), ("PinY", "1"), ("Width", "1"), ("Height", "1")] {
             sheet.set_cell(n, Cell::value(v));
@@ -2829,15 +2866,19 @@ fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> 
             sheet,
             ..Shape::default()
         };
+        let mut attrs = vec![
+            ("ID".into(), id.to_string()),
+            ("NameU".into(), name.to_string()),
+            ("Name".into(), name.to_string()),
+            ("BaseID".into(), format!("{{SYNTH-{stem}-{id}}}")),
+        ];
+        if *is_hidden {
+            attrs.push(("Hidden".into(), "1".into()));
+        }
         doc.masters.push(Master {
             id: *id,
             name_u: Some(name.to_string()),
-            attrs: vec![
-                ("ID".into(), id.to_string()),
-                ("NameU".into(), name.to_string()),
-                ("Name".into(), name.to_string()),
-                ("BaseID".into(), format!("{{SYNTH-{stem}-{id}}}")),
-            ],
+            attrs,
             shapes: vec![shape],
             part: format!("visio/masters/master{}.xml", i + 1),
             contents_attrs: xmlns(),
@@ -2892,9 +2933,18 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
             .filter(|(k, _)| k.0 == which)
             .count()
     };
-    assert_eq!(count(&h, StencilId::Document), doc_cells, "document entry still first");
-    assert_eq!(count(&h, StencilId::Open(0)), 2, "alpha's masters listed");
-    assert_eq!(count(&h, StencilId::Open(1)), 2, "beta's masters listed");
+    // Quick Shapes (#88) leads the pane: every source's head masters
+    // appear once more at the top (each synth stencil is under the
+    // per-source cap, so its whole set joins). doc_cells was measured
+    // with only the document open — quick heads + doc entry — and
+    // opening stencils adds no document masters.
+    assert_eq!(
+        count(&h, StencilId::Document),
+        doc_cells,
+        "doc masters in Quick Shapes and the document entry"
+    );
+    assert_eq!(count(&h, StencilId::Open(0)), 4, "alpha twice (quick + entry)");
+    assert_eq!(count(&h, StencilId::Open(1)), 4, "beta twice (quick + entry)");
 
     // Collapse the first open stencil via its entry header: only its
     // grid disappears; the document entry and the other stencil stay.
@@ -2909,8 +2959,12 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries[0].1, false, "alpha collapsed by its own header");
     assert_eq!(entries[1].1, true, "beta's expansion is independent");
-    assert_eq!(count(&h, StencilId::Open(0)), 0, "collapsed entry hides its grid");
-    assert_eq!(count(&h, StencilId::Open(1)), 2);
+    assert_eq!(
+        count(&h, StencilId::Open(0)),
+        2,
+        "collapsed entry hides its grid (Quick Shapes still shows its heads)"
+    );
+    assert_eq!(count(&h, StencilId::Open(1)), 4);
     assert_eq!(
         count(&h, StencilId::Document),
         doc_cells,
@@ -2933,7 +2987,7 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
     click_at(&mut h, canvas_center, egui::PointerButton::Primary);
     assert_eq!(
         count(&h, StencilId::Open(0)),
-        2,
+        4,
         "entries survive a canvas interaction unchanged"
     );
 }
@@ -3023,6 +3077,13 @@ fn stencil_master_drop_imports_and_places_as_one_undo() {
     // BaseID identity is what the import dedupes on.
     let s = synth_stencil(tmp.path(), "kit", &[("Kite", 1)]);
     h.state_mut().open_stencil_for_test(&s);
+    h.run();
+    // The open-reveal scrolled the pane; come back to the top so the
+    // Quick Shapes copy of the cell is fully in the viewport (its
+    // clipped center can sit under the search box otherwise). Dragging
+    // from the Quick Shapes copy exercises #88's promise: placing from
+    // Quick Shapes imports exactly like the source entry.
+    h.state_mut().scroll_pane_to_top_for_test();
     h.run();
     let from = h
         .state()
@@ -3250,8 +3311,8 @@ fn search_aggregates_matches_into_a_results_entry() {
     );
     assert_eq!(
         keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
-        0,
-        "collapsed document entry hides its grid"
+        6,
+        "collapsed document entry hides its grid (Quick Shapes still shows the doc heads)"
     );
 
     h.state_mut().set_search_for_test("r");
@@ -3270,8 +3331,8 @@ fn search_aggregates_matches_into_a_results_entry() {
     );
     assert_eq!(
         keys(&h).into_iter().filter(|k| k.0 == StencilId::Document).count(),
-        0,
-        "document entry is still collapsed — the flag survived the search"
+        6,
+        "document entry is still collapsed — the flag survived the search (Quick heads remain)"
     );
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries.len(), 2, "stencil expansion flags untouched");
@@ -3305,8 +3366,8 @@ fn builtin_catalog_menu_opens_and_toggles_stencils() {
             .iter()
             .filter(|(k, _)| k.0 == StencilId::Open(0))
             .count(),
-        48,
-        "all Basic Shapes masters listed"
+        48 + 6,
+        "all 48 masters in the entry plus its head 6 in Quick Shapes (#88)"
     );
     assert!(h.state().debug_status().contains("opened Basic Shapes"));
     ctx_menu_snapshot(&mut h, "dc_ui_builtin_basic_shapes");
@@ -3355,5 +3416,148 @@ fn builtin_catalog_menu_opens_and_toggles_stencils() {
             .iter()
             .any(|(k, _)| k.0 == StencilId::Open(0)),
         "containers' masters are listed at pane position 0"
+    );
+}
+
+/// #88: Quick Shapes — the pane's virtual first entry aggregating the
+/// head masters of every source (document set first, then each open
+/// stencil in pane order), hidden masters excluded. Placing from it
+/// imports through the source identity exactly like the source entry,
+/// and closing a stencil removes its contributions.
+#[test]
+fn quick_shapes_aggregates_places_and_tracks_closures() {
+    use dc_ui::stencil::StencilId;
+    let mut h = harness_with_blank();
+    h.run();
+    let tmp = tempfile::tempdir().unwrap();
+    let a = synth_stencil_opts(tmp.path(), "alpha", &[("Square", 1), ("Circle", 2)], &[("Ghost", 3)]);
+    let b = synth_stencil_opts(tmp.path(), "beta", &[("Star", 1)], &[]);
+    h.state_mut().open_stencil_for_test(&a);
+    h.state_mut().open_stencil_for_test(&b);
+    h.run();
+
+    // The first cells in the pane belong to Quick Shapes: the doc
+    // set's masters first, then alpha's visible heads (Ghost hidden
+    // masters never contribute), then beta's.
+    let keys: Vec<(dc_ui::stencil::StencilId, i64)> = h
+        .state()
+        .debug_master_cells()
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
+    let doc_masters = h.state().debug_doc_masters().len();
+    let mut expect: Vec<(dc_ui::stencil::StencilId, i64)> = h
+        .state()
+        .debug_doc_masters()
+        .iter()
+        .take(6)
+        .map(|(id, _)| (StencilId::Document, *id))
+        .collect();
+    expect.extend([(StencilId::Open(0), 1), (StencilId::Open(0), 2)]);
+    expect.push((StencilId::Open(1), 1));
+    assert_eq!(
+        &keys[..expect.len()],
+        &expect[..],
+        "Quick Shapes leads with every source's visible head masters"
+    );
+    assert!(
+        !keys[..expect.len()].contains(&(StencilId::Open(0), 3)),
+        "hidden masters never join Quick Shapes"
+    );
+    // The document's own entry follows with the full (unquick) grid:
+    // doc-keyed cells = the quick heads (≤6) plus the whole doc entry.
+    let quick_heads = 6.min(doc_masters);
+    assert_eq!(
+        keys.iter().filter(|k| k.0 == StencilId::Document).count(),
+        quick_heads + doc_masters,
+        "doc masters appear once in Quick Shapes and once in the doc entry"
+    );
+
+    // Place from Quick Shapes: the Square cell (an open-stencil
+    // master) imports + places in one undo (#84 path).
+    let before = h.state().debug_doc_masters().len();
+    let shapes_before = h.state().debug_shape_count();
+    let cell = h.state().debug_master_cells()
+        .into_iter()
+        .find(|(k, _)| *k == (StencilId::Open(0), 1))
+        .expect("Square cell in Quick Shapes")
+        .1;
+    // A reveal-on-open may have scrolled the pane; come back to the
+    // top so the Quick Shapes cells are in the viewport.
+    h.state_mut().scroll_pane_to_top_for_test();
+    h.run();
+    let cell = h.state().debug_master_cells()
+        .into_iter()
+        .find(|(k, _)| *k == (StencilId::Open(0), 1))
+        .expect("Square cell in Quick Shapes")
+        .1;
+    click_at(&mut h, cell.center(), egui::PointerButton::Primary);
+    h.run();
+    let canvas = h.state().debug_canvas_rect().center();
+    click_at(&mut h, canvas, egui::PointerButton::Primary);
+    for _ in 0..2 {
+        h.run();
+    }
+    assert_eq!(h.state().debug_shape_count(), shapes_before + 1, "shape placed");
+    assert_eq!(
+        h.state().debug_doc_masters().len(),
+        before + 1,
+        "placing an open-stencil master from Quick Shapes imported it"
+    );
+
+    // Closing a stencil removes its contributions from Quick Shapes:
+    // right-click alpha's entry header → Close Stencil...
+    // Quick Shapes makes the pane content taller than the viewport —
+    // wheel down to bring alpha's entry header into view.
+    let mut wheels = 0;
+    let alpha = loop {
+        let entries = h.state().debug_stencil_entry_rects();
+        let alpha = entries
+            .iter()
+            .find(|(id, _)| *id == StencilId::Open(0))
+            .map(|(_, r)| *r)
+            .expect("alpha entry listed");
+        if alpha.center().y < 700.0 {
+            break alpha;
+        }
+        wheels += 1;
+        assert!(wheels < 40, "pane never scrolled alpha into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        // Hovering pane cells arms tooltips (constant repaint), so
+        // step instead of settling.
+        h.run_steps(3);
+    };
+    click_at(&mut h, alpha.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Close Stencil...").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    let keys: Vec<(dc_ui::stencil::StencilId, i64)> = h
+        .state()
+        .debug_master_cells()
+        .iter()
+        .map(|(k, _)| *k)
+        .collect();
+    // Alpha is gone; beta (one master, Star id 1 — colliding with
+    // alpha's Square id, deliberately) shifted to pane position 0, so
+    // the pane holds exactly beta's two cells: one in Quick Shapes,
+    // one in beta's own entry.
+    let open_cells: Vec<(dc_ui::stencil::StencilId, i64)> = keys
+        .iter()
+        .filter(|k| !matches!(k.0, StencilId::Document))
+        .copied()
+        .collect();
+    assert_eq!(
+        open_cells,
+        vec![(StencilId::Open(0), 1), (StencilId::Open(0), 1)],
+        "alpha's masters left the pane with the stencil; beta's Star is all that remains"
     );
 }

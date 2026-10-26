@@ -6095,6 +6095,24 @@ impl App {
     pub fn set_search_for_test(&mut self, q: &str) {
         self.stencil.search = q.to_string();
     }
+    /// kittest (#88): scroll the stencil pane back to its top next
+    /// frame (a just-opened stencil's reveal may have scrolled the
+    /// Quick Shapes cells out of the viewport).
+    #[doc(hidden)]
+    pub fn scroll_pane_to_top_for_test(&mut self) {
+        self.stencil.scroll_fix = Some(0.0);
+    }
+    /// kittest (#88): the Quick Shapes header rect from the last
+    /// layout.
+    #[doc(hidden)]
+    pub fn debug_quick_rect_for_test(&self) -> Option<egui::Rect> {
+        self.stencil.quick_rect
+    }
+    /// kittest (#88): the search box rect from the last layout.
+    #[doc(hidden)]
+    pub fn debug_search_rect_for_test(&self) -> Option<egui::Rect> {
+        self.stencil.search_rect
+    }
     /// kittest (#86): the pane entries currently VISIBLE (headers
     /// rendered this frame) — a search hides zero-match entries.
     #[doc(hidden)]

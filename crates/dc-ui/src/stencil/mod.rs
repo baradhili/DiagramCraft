@@ -65,7 +65,6 @@ pub enum Request {
 
 /// The pane's state: which master — addressed by (source, id) — is
 /// armed for dropping.
-#[derive(Default)]
 pub struct Stencil {
     pub armed: Option<MasterKey>,
     /// Master currently being dragged from the pane (button held);
@@ -87,10 +86,18 @@ pub struct Stencil {
     /// allowance); tests re-derive the expected column count from it.
     pub last_wrap_width: f32,
     /// Vertical offset to force on the next frame after a re-wrap
-    /// moved the master rows.
-    scroll_fix: Option<f32>,
+    /// moved the master rows (also driven by the kittest scroll hook).
+    pub(crate) scroll_fix: Option<f32>,
     /// The document-masters entry is collapsed (master grid hidden).
     pub collapsed: bool,
+    /// The Quick Shapes virtual entry's own expand flag (#88) —
+    /// initialized expanded at the App construction site.
+    pub quick_expanded: bool,
+    /// Quick Shapes header rect from the last layout (screen coords);
+    /// kittest drives its toggle through this.
+    pub quick_rect: Option<egui::Rect>,
+    /// Search box rect from the last layout (kittest diagnostics).
+    pub search_rect: Option<egui::Rect>,
     /// Entry to scroll into view next frame (#83: a just-opened or
     /// re-focused stencil).
     pub reveal: Option<StencilId>,
@@ -122,7 +129,39 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     (a * (1.0 - t) + b * t).into()
 }
 
+impl Default for Stencil {
+    fn default() -> Self {
+        Self {
+            quick_expanded: true, // Quick Shapes opens expanded (#88)
+            ..Self::empty()
+        }
+    }
+}
+
 impl Stencil {
+    /// `Default` without the Quick Shapes preference: all-zero state.
+    fn empty() -> Self {
+        Self {
+            armed: None,
+            carry: None,
+            search: String::new(),
+            cell_rects: Vec::new(),
+            entry_rects: Vec::new(),
+            last_cols: 0,
+            last_wrap_width: 0.0,
+            scroll_fix: None,
+            collapsed: false,
+            quick_expanded: false,
+            quick_rect: None,
+            search_rect: None,
+            reveal: None,
+            request: None,
+            textures: Vec::new(),
+            inflight: std::collections::HashSet::new(),
+            loaded_for: None,
+        }
+    }
+
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -186,14 +225,16 @@ impl Stencil {
                 });
             });
         });
-        ui.add(
+        let sr = ui.add(
             egui::TextEdit::singleline(&mut self.search)
                 .hint_text("Search Shapes")
                 .desired_width(ui.available_width()),
         );
+        self.search_rect = Some(sr.rect);
         ui.add_space(4.0);
         self.cell_rects.clear();
         self.entry_rects.clear();
+        self.quick_rect = None;
 
         // Visio lists the open stencils as independently expandable
         // entries, the document's own masters first (the document
@@ -246,9 +287,24 @@ impl Stencil {
                 if cells.is_empty() {
                     ui.weak("No matching shapes.");
                 } else {
-                    self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
+                    self.entry_grid(ui, t, &cells, cols, pool, &mut clicked, "stencil-grid-search");
                 }
             } else {
+                // Entry "Quick Shapes" (#88): a virtual first entry
+                // aggregating every source's head masters — not an
+                // open stencil, so it has no close menu and never
+                // moves: closing a stencil just removes its
+                // contributions.
+                let quick = quick_cells(ed, set);
+                let resp = stencil_list_entry(ui, t, "Quick Shapes", self.quick_expanded);
+                self.quick_rect = Some(resp.rect);
+                if resp.clicked() {
+                    self.quick_expanded = !self.quick_expanded;
+                }
+                if self.quick_expanded && !quick.is_empty() {
+                    self.entry_grid(ui, t, &quick, cols, pool, &mut clicked, "stencil-grid-quick");
+                }
+
                 // Entry 0: the document's own masters.
                 let resp = header(ui, StencilId::Document, stencil_title, !self.collapsed);
                 self.entry_rects.push((StencilId::Document, resp.rect));
@@ -260,7 +316,15 @@ impl Stencil {
                     if cells.is_empty() {
                         ui.weak("No shapes.");
                     } else {
-                        self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
+                        self.entry_grid(
+                            ui,
+                            t,
+                            &cells,
+                            cols,
+                            pool,
+                            &mut clicked,
+                            "stencil-grid-doc",
+                        );
                     }
                 }
 
@@ -269,8 +333,8 @@ impl Stencil {
                 // (#82).
                 for ix in 0..set.len() {
                     let id = StencilId::Open(ix);
-                    let (title, expanded) = match set.get(ix) {
-                        Some(st) => (st.title.as_str(), st.expanded),
+                    let (title, expanded, st_serial) = match set.get(ix) {
+                        Some(st) => (st.title.as_str(), st.expanded, st.serial()),
                         None => continue,
                     };
                     let resp = header(ui, id, title, expanded);
@@ -291,7 +355,8 @@ impl Stencil {
                     if expanded {
                         let cells = stencil_cells(set, ix, &q);
                         if !cells.is_empty() {
-                            self.entry_grid(ui, t, &cells, cols, pool, &mut clicked);
+                            let grid = format!("stencil-grid-{serial}", serial = st_serial);
+                            self.entry_grid(ui, t, &cells, cols, pool, &mut clicked, &grid);
                         }
                     }
                     ui.add_space(2.0);
@@ -333,9 +398,13 @@ impl Stencil {
         cols: usize,
         pool: &mut crate::rasterpool::RasterPool,
         clicked: &mut Option<MasterKey>,
+        grid: &str,
     ) {
-        let serial = cells[0].serial;
-        egui::Grid::new(format!("stencil-grid-{serial}"))
+        // One explicit egui id per grid: the virtual entries (Quick
+        // Shapes, Search Results) mix source serials, so deriving the
+        // id from the first cell would collide with the document
+        // entry's grid in the same frame.
+        egui::Grid::new(grid)
             .num_columns(cols)
             .spacing([GAP, GAP])
             .min_col_width(CELL_W)
@@ -566,6 +635,53 @@ fn doc_cells<'a>(ed: &'a Editor, q: &str) -> Vec<Cell<'a>> {
 }
 
 /// One open stencil's cells, rendered from its own document (#85).
+/// Quick Shapes membership (#88): the format carries no quick-shape
+/// flag (REA, BASIC_U attribute census) — Visio persists membership
+/// app-side — so the default is app-level too: the head masters of
+/// every source, document set first then each open stencil in pane
+/// order, hidden masters excluded.
+fn visible_master(m: &vsdx::Master) -> bool {
+    !m.attrs.iter().any(|(k, v)| k == "Hidden" && v.trim() != "0")
+}
+
+/// How many masters each source contributes to Quick Shapes (#88).
+const QUICK_PER_SOURCE: usize = 6;
+
+/// The Quick Shapes virtual entry's cells: every source's head
+/// masters, in pane order, each cell addressed by its own source key
+/// so placement imports exactly like dropping from the source entry.
+fn quick_cells<'a>(ed: &'a Editor, set: &'a StencilSet) -> Vec<Cell<'a>> {
+    let mut cells = Vec::new();
+    {
+        let mut ordered: Vec<&vsdx::Master> =
+            ed.doc.masters.iter().filter(|m| visible_master(m)).collect();
+        ordered.sort_by_key(|m| m.id);
+        for m in ordered.into_iter().take(QUICK_PER_SOURCE) {
+            cells.push(Cell {
+                key: (StencilId::Document, m.id),
+                serial: DOC_SERIAL,
+                src: &ed.doc,
+                master: m,
+            });
+        }
+    }
+    for ix in 0..set.len() {
+        let Some(st) = set.get(ix) else { continue };
+        let mut ordered: Vec<&vsdx::Master> =
+            st.doc.masters.iter().filter(|m| visible_master(m)).collect();
+        ordered.sort_by_key(|m| m.id);
+        for m in ordered.into_iter().take(QUICK_PER_SOURCE) {
+            cells.push(Cell {
+                key: (StencilId::Open(ix), m.id),
+                serial: st.serial(),
+                src: &st.doc,
+                master: m,
+            });
+        }
+    }
+    cells
+}
+
 fn stencil_cells<'a>(set: &'a StencilSet, ix: usize, q: &str) -> Vec<Cell<'a>> {
     let st = match set.get(ix) {
         Some(st) => st,
