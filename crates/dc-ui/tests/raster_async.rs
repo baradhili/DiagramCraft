@@ -5,8 +5,13 @@
 //! drain, so (a) after the first `run` the page texture is absent even
 //! if a worker already finished, (b) once it appears, exactly one page
 //! parse happened (#91 tree reuse held off-thread), and (c) the
-//! stencil pane populates progressively — the per-frame post cap means
-//! far fewer than all masters are textured after the first run.
+//! stencil pane populates progressively — no single frame may ever
+//! queue more than the per-frame post cap (a count-after-N-frames
+//! assert would race `mount`'s run-to-stable pump, whose pass count
+//! is machine-speed-dependent: on a slow runner every pass is long
+//! enough for the workers to finish, so ALL masters can legitimately
+//! be textured by the first explicit step — observed on the 2-core
+//! CI runner).
 //! Fixtures are generated in code (repo policy: no Microsoft content).
 
 use dc_ui::app::App;
@@ -288,22 +293,36 @@ fn rasters_run_off_thread_and_land_on_later_frames() {
     );
     drop(h); // joins the pool's workers
 
-    // --- Phase 2: a 100-master stencil pane populates progressively —
-    //     the per-frame post cap keeps the first run from rasterizing
-    //     every master at once (the pre-#92 serial burst; 100 > cap ×
-    //     the step's layout passes, so the stagger is deterministic). ---
+    // --- Phase 2: the #92 guarantee is the per-frame POST CAP, not a
+    //     landed count after a fixed number of frames. `mount` pumps
+    //     run-to-stable internally: how many passes that takes (and
+    //     how many worker completions land inside them) depends on
+    //     machine speed — on the 2-core CI runner all 100 masters were
+    //     legitimately textured by the first explicit step, which is
+    //     fine: the cap still spread the WORK across frames. What must
+    //     hold everywhere: no single frame ever queued more than the
+    //     cap — the pre-#92 serial burst queued all 121 at once. ---
     perf::reset();
     let path = fixture(tmp.path(), 20, 100);
     let mut h = mount(App::with_doc(&path));
     h.step();
-    let after_first = h.state().debug_stencil_thumb_count_for_test();
+    let peak = h.state().debug_pool_peak_posts_per_frame_for_test();
+    assert!(peak > 0, "no raster job was ever queued");
+    let cap = h.state().debug_pool_post_cap_for_test();
     assert!(
-        after_first < 100,
-        "first run textured {after_first}/100 masters — the cap should stagger them"
+        peak <= cap,
+        "one frame queued {peak} jobs — the per-frame cap ({cap}) must stagger posts (#92)"
     );
     pump_until(
         &mut h,
         |a| a.debug_stencil_thumb_count_for_test() == 100,
         "all 100 thumbnails",
+    );
+    // Every master went through the pool (a texture only materializes
+    // from its own posted job; re-posts of still-missing entries only
+    // push the count higher).
+    assert!(
+        h.state().debug_pool_total_posts_for_test() >= 100,
+        "masters were textured without pool posts — impossible; hook is wrong"
     );
 }

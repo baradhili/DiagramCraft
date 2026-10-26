@@ -115,6 +115,14 @@ pub struct RasterPool {
     rx_done: Receiver<RasterDone>,
     workers: Vec<std::thread::JoinHandle<()>>,
     posted_this_frame: usize,
+    /// High-water mark of `posted_this_frame` between drains — the
+    /// most jobs any single frame ever queued (the #92 async test
+    /// asserts this stays at the cap; a count-after-N-frames assert
+    /// would race mount's run-to-stable pump, which is
+    /// machine-speed-dependent).
+    peak_posts_per_frame: usize,
+    /// Lifetime count of queued jobs (sync/inline posts excluded).
+    total_posts: u64,
     /// A post was cap-rejected since the last drain — App turns this
     /// into a repaint so the deferred post isn't stuck waiting for
     /// input.
@@ -157,13 +165,29 @@ impl RasterPool {
                 })
             })
             .collect();
-        Self { tx: Some(tx), rx_done, workers, posted_this_frame: 0, deferred: false }
+        Self {
+            tx: Some(tx),
+            rx_done,
+            workers,
+            posted_this_frame: 0,
+            peak_posts_per_frame: 0,
+            total_posts: 0,
+            deferred: false,
+        }
     }
 
     /// Inline-only pool (no threads).
     fn inline() -> Self {
         let (_tx_done, rx_done) = channel::<RasterDone>();
-        Self { tx: None, rx_done, workers: Vec::new(), posted_this_frame: 0, deferred: false }
+        Self {
+            tx: None,
+            rx_done,
+            workers: Vec::new(),
+            posted_this_frame: 0,
+            peak_posts_per_frame: 0,
+            total_posts: 0,
+            deferred: false,
+        }
     }
 
     /// Queue (or inline) a raster job.
@@ -179,6 +203,8 @@ impl RasterPool {
             return Posted::Capped;
         }
         self.posted_this_frame += 1;
+        self.peak_posts_per_frame = self.peak_posts_per_frame.max(self.posted_this_frame);
+        self.total_posts += 1;
         // A send failure means every worker died (a resvg panic would
         // have taken the thread down); run the real job inline so the
         // raster still lands rather than silently never arriving.
@@ -211,6 +237,23 @@ impl RasterPool {
     /// Whether a cap-rejected post is waiting for the next frame.
     pub fn take_deferred(&mut self) -> bool {
         std::mem::take(&mut self.deferred)
+    }
+
+    /// The per-frame post cap (test hook: the async contract asserts
+    /// against the real constant, not a copy).
+    pub fn post_cap(&self) -> usize {
+        PER_FRAME_POST_CAP
+    }
+
+    /// Most jobs any single frame ever queued (test hook, #92).
+    pub fn debug_peak_posts_per_frame(&self) -> usize {
+        self.peak_posts_per_frame
+    }
+
+    /// Lifetime queued-job count, sync/inline posts excluded (test
+    /// hook, #92).
+    pub fn debug_total_posts(&self) -> u64 {
+        self.total_posts
     }
 
     /// Whether `post` would queue right now (per-frame budget left).

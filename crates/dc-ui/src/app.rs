@@ -5979,6 +5979,23 @@ impl App {
     pub fn debug_stencil_thumb_count_for_test(&self) -> usize {
         self.stencil.thumb_count_for_test()
     }
+    /// kittest (#92): the per-frame post cap the async contract asserts
+    /// against.
+    #[doc(hidden)]
+    pub fn debug_pool_post_cap_for_test(&self) -> usize {
+        self.pool.post_cap()
+    }
+    /// kittest (#92): the most raster jobs any single frame ever
+    /// queued — must never exceed the cap (the anti-burst invariant).
+    #[doc(hidden)]
+    pub fn debug_pool_peak_posts_per_frame_for_test(&self) -> usize {
+        self.pool.debug_peak_posts_per_frame()
+    }
+    /// kittest (#92): lifetime queued raster jobs.
+    #[doc(hidden)]
+    pub fn debug_pool_total_posts_for_test(&self) -> u64 {
+        self.pool.debug_total_posts()
+    }
     /// kittest: a shape's INSTANCE-LOCAL User row value (#25) — None
     /// while the row is inherited from the master.
     #[doc(hidden)]
