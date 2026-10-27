@@ -821,7 +821,11 @@ impl App {
             self.status = format!("closed {title}");
             return;
         }
-        match vsdx::parse::parse_bytes(b.bytes) {
+        // Which variant opens is the pane's session preference (#85
+        // follow-up): US by default, the metric twin with "Metric
+        // Stencils" ticked.
+        let metric = self.stencil.metric_units;
+        match vsdx::parse::parse_bytes(b.bytes_for(metric)) {
             Ok(doc) => {
                 let (ix, _) = self.stencils.open_parsed(
                     doc,
@@ -830,7 +834,11 @@ impl App {
                     crate::stencil::Origin::Builtin,
                 );
                 self.stencil.reveal = Some(StencilId::Open(ix));
-                self.status = format!("opened {title}", title = b.title);
+                self.status = if metric {
+                    format!("opened {title} (metric)", title = b.title)
+                } else {
+                    format!("opened {title}", title = b.title)
+                };
             }
             Err(e) => self.status = format!("built-in stencil failed to load: {e:#}"),
         }

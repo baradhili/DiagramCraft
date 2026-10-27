@@ -6,15 +6,21 @@ catalog's single source of truth for slug/category/title/embedded
 bytes; its table is regenerated alongside the manifest and the digest
 test fails if the two drift apart).
 
-**Coverage:** every shipped US-units Visio 2016 stencil — 186 entries
-across the observed More Shapes taxonomy: General, Accessories,
-Flowchart, Network, Software and Database, Maps and Floor Plans,
-Engineering, Schedule, Organization Chart, Business. Skips:
-`*_VISIO2013_U` backward-compat variants, duplicate display titles
-(richer stencil wins), DVCALL (all masters hidden — data-graphic
-definitions, not shapes), and the SDCALL auto-open companion (its menu
-entry is the richer CALOUT "Callouts"). The full skip list and the
-per-stencil category curation live in `manifest.txt`.
+**Coverage:** every shipped Visio 2016 stencil in **both unit
+variants** — 186 entries (371 asset files, ~43 MB) across the observed
+More Shapes taxonomy: General, Accessories, Flowchart, Network,
+Software and Database, Maps and Floor Plans, Engineering, Schedule,
+Organization Chart, Business. The shipped `_U`/`_M` pairs differ in
+master geometry only (round inches vs round millimetres) and carry no
+file-level units marker, so which variant opens is the app's session
+preference — the More Shapes "Metric Stencils" toggle (`<slug>.vssx`
+is the US asset, `<slug>-m.vssx` its metric twin; only DIMARC ships
+US-only). Skips: `*_VISIO2013` backward-compat variants, duplicate
+display titles (richer stencil wins), DVCALL (all masters hidden —
+data-graphic definitions, not shapes), and the SDCALL auto-open
+companion (its menu entry is the richer CALOUT "Callouts"). The full
+skip list and the per-stencil category curation live in
+`manifest.txt`.
 
 ## Provenance
 

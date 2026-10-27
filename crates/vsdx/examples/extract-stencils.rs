@@ -54,38 +54,59 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
 
     let mut digests = String::new();
-    for (lineno, line) in std::fs::read_to_string(&manifest)?.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // slug | category | display title | source file in the 1033 dir
-        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
-        anyhow::ensure!(
-            parts.len() == 4,
-            "manifest line {}: expected 'slug | category | title | SOURCE.VSSX'",
-            lineno + 1
-        );
-        let (slug, category, title, source) = (parts[0], parts[1], parts[2], parts[3]);
-        let src_path = sample_dir.join(source);
-        let doc = extract(&src_path)?;
-        let out_path = out_dir.join(format!("{slug}.vssx"));
+    let mut emit = |slug: &str,
+                    category: &str,
+                    title: &str,
+                    source: &str,
+                    out_name: String,
+                    out_dir: &Path,
+                    sample_dir: &Path,
+                    digests: &mut String|
+     -> anyhow::Result<()> {
+        let doc = extract(&sample_dir.join(source))?;
+        let out_path = out_dir.join(&out_name);
         vsdx::write::save(&doc, &out_path)?;
         let bytes = std::fs::read(&out_path)?;
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(&bytes);
-        let hex: String = h
-            .finalize()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
+        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
         println!(
-            "{slug}.vssx  ({category} / {title})  <- {source}: {} masters, {} bytes, sha256 {hex}",
+            "{out_name}  ({category} / {title})  <- {source}: {} masters, {} bytes, sha256 {hex}",
             doc.masters.len(),
             bytes.len()
         );
-        digests.push_str(&format!("{hex}  {slug}.vssx\n"));
+        digests.push_str(&format!("{hex}  {out_name}\n"));
+        Ok(())
+    };
+    for (lineno, line) in std::fs::read_to_string(&manifest)?.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // slug | category | display title | US source | metric source
+        // (either source column may be '-'; the metric asset is
+        // <slug>-m.vssx — the shipped U/M pairs differ in master
+        // geometry only, and carry no file-level units marker).
+        let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+        anyhow::ensure!(
+            parts.len() == 5,
+            "manifest line {}: expected 'slug | category | title | US.VSSX | M.VSSX'",
+            lineno + 1
+        );
+        let (slug, category, title, us, metric) =
+            (parts[0], parts[1], parts[2], parts[3], parts[4]);
+        if us != "-" {
+            emit(slug, category, title, us, format!("{slug}.vssx"), &out_dir, &sample_dir, &mut digests)?;
+        }
+        if metric != "-" {
+            let name = if us != "-" {
+                format!("{slug}-m.vssx")
+            } else {
+                format!("{slug}.vssx") // metric-only entry: default asset
+            };
+            emit(slug, category, title, metric, name, &out_dir, &sample_dir, &mut digests)?;
+        }
     }
     std::fs::write(out_dir.join("digests.txt"), digests)?;
     println!("wrote {}", out_dir.join("digests.txt").display());

@@ -3639,3 +3639,63 @@ fn document_stencil_entry_is_opt_in() {
         .count();
     assert_eq!(doc_cells, 6, "Quick Shapes still aggregates the heads");
 }
+
+/// #85 follow-up: the More Shapes "Metric Stencils" session toggle —
+/// built-ins open from their metric twins when ticked (the shipped U/M
+/// pairs differ in master geometry only), and the status names the
+/// variant.
+#[test]
+fn metric_toggle_opens_the_metric_variant() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+
+    // Default: the US variant.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click();
+    for _ in 0..4 {
+        h.run();
+    }
+    assert_eq!(
+        h.state().debug_stencil_entries(),
+        vec![("Basic Shapes".to_string(), true)]
+    );
+    assert_eq!(h.state().debug_status(), "opened Basic Shapes");
+
+    // Tick Metric Stencils, close, reopen: the metric twin opened.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Metric Stencils").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click(); // untick closes the US entry
+    for _ in 0..4 {
+        h.run();
+    }
+    assert_eq!(h.state().debug_stencil_entries(), Vec::new(), "US entry closed");
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click(); // reopen — now metric
+    for _ in 0..4 {
+        h.run();
+    }
+    assert_eq!(
+        h.state().debug_stencil_entries(),
+        vec![("Basic Shapes".to_string(), true)]
+    );
+    assert_eq!(
+        h.state().debug_status(),
+        "opened Basic Shapes (metric)",
+        "the metric twin opened under the session preference"
+    );
+}

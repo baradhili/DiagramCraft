@@ -94,6 +94,11 @@ pub struct Stencil {
     /// (observed Visio 2016) — reachable via Quick Shapes (#88), and
     /// opt-in per session through "More Shapes ▸ Document Stencil".
     pub doc_stencil_visible: bool,
+    /// #85 follow-up: open built-ins from their metric twins (the U/M
+    /// pairs differ in master geometry only — round inches vs round
+    /// millimetres — and the shipped files carry no units marker, so
+    /// the choice is this session preference).
+    pub metric_units: bool,
     /// The Quick Shapes virtual entry's own expand flag (#88) —
     /// initialized expanded at the App construction site.
     pub quick_expanded: bool,
@@ -156,6 +161,7 @@ impl Stencil {
             scroll_fix: None,
             collapsed: false,
             doc_stencil_visible: false,
+            metric_units: false,
             quick_expanded: false,
             quick_rect: None,
             search_rect: None,
@@ -204,6 +210,16 @@ impl Stencil {
             ui.strong("Shapes");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.menu_button("More Shapes", |ui| {
+                    // Unit variant for built-ins (US default): a session
+                    // preference — the shipped U/M stencil pairs differ
+                    // in master geometry only and carry no units marker.
+                    if ui
+                        .checkbox(&mut self.metric_units, "Metric Stencils")
+                        .changed()
+                    {
+                        ui.close();
+                    }
+                    ui.separator();
                     // One submenu per category, one checkable entry per
                     // built-in stencil; the checkbox reflects (and
                     // toggles) the stencil's pane entry (observed Visio
