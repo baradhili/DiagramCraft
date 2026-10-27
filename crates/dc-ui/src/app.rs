@@ -7981,6 +7981,28 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_package_open_surfaces_an_error_and_pollutes_nothing() {
+        // #97 item 8: a truncated/garbage .vsdx must degrade to a
+        // status error — never a panic — and leave the session state
+        // (recent files, the open document) untouched.
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("corrupt.vsdx");
+        std::fs::write(&bad, b"this is not a zip archive at all").unwrap();
+        let mut app = App::with_blank();
+        app.load(bad.clone());
+        assert!(
+            app.status.starts_with("open failed"),
+            "status = {}",
+            app.status
+        );
+        assert!(
+            !app.debug_recent().iter().any(|p| p.ends_with("corrupt.vsdx")),
+            "a corrupt open must not be recorded in recent files"
+        );
+        assert!(app.ed.is_some(), "the previously open document survives");
+    }
+
+    #[test]
     fn saving_records_the_saved_path() {
         let tmp = tempfile::tempdir().unwrap();
         let mut app = App::with_blank();

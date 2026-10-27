@@ -432,6 +432,48 @@ fn marquee_selects_multiple_and_delete_removes_all() {
     assert_eq!(h.state().debug_shape_count(), 0);
 }
 
+/// Redo wiring (#97 item 7): undo was exercised ~20x across the
+/// suites, redo never. Keyboard (Ctrl+Y) and the QAT Redo button must
+/// both restore a move.
+#[test]
+fn redo_restores_an_undone_move_via_keyboard_and_the_qat_button() {
+    let mut h = harness_with_blank();
+    h.run();
+    place_master(&mut h, 2);
+    let (page, shape) = h.state().debug_sel().expect("placed shape selected");
+    let x0 = cell_of(&h, page, shape, "PinX");
+
+    // Move it right.
+    let c = h.state().debug_shape_screen_rect(shape).expect("shape rect");
+    drag_naturally(&mut h, c.center(), egui::vec2(60.0, 0.0));
+    let x1 = cell_of(&h, page, shape, "PinX");
+    assert!(x1 > x0 + 0.1, "drag moved the shape: {x0} -> {x1}");
+
+    // Undo, then redo via Ctrl+Y: the move returns.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x0).abs() < 1e-6,
+        "undo restored the original pin"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Y);
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x1).abs() < 1e-6,
+        "Ctrl+Y redid the move"
+    );
+
+    // And via the QAT Redo button after another undo.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.get_by_label_contains("Redo").click();
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x1).abs() < 1e-6,
+        "QAT Redo redid the move"
+    );
+}
+
 // ------------------------------------------------------------------
 // GitHub #59: reliable handles, shapesheet guards, 1D line handles.
 
