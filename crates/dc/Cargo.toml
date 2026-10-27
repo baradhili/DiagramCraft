@@ -10,6 +10,8 @@ vsdx = { path = "../vsdx" }
 dc-core = { path = "../dc-core" }
 anyhow.workspace = true
 clap.workspace = true
+fontdb = "0.24"
+ttf-parser = "0.25"
 
 [dev-dependencies]
 tempfile = "3"

@@ -309,12 +309,12 @@ fn ensure_fonts(ctx: &egui::Context) {
     insert_font(
         ctx,
         CANVAS_FAMILY,
-        include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
+        include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf"),
     );
     insert_font(
         ctx,
         &format!("{CANVAS_FAMILY} Bold"),
-        include_bytes!("../assets/fonts/Carlito-Bold.ttf"),
+        include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf"),
     );
 }
 

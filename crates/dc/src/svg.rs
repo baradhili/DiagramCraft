@@ -1371,9 +1371,15 @@ fn emit_text(
     let (ins_l, ins_r, ins_t, ins_b) = tb.insets;
     let line_h = tb.line_height;
 
-    // Greedy word wrap. Average glyph advance for proportional sans at
-    // mixed case is ~0.5 em; Calibri runs slightly narrower.
-    let max_chars = (((tw - ins_l - ins_r) / (size * 0.5)).floor() as usize).max(1);
+    // Greedy word wrap against REAL font metrics (GitHub #21): runs
+    // are measured as the sum of per-glyph advances from the face the
+    // rasterizer will draw (system font where installed, vendored
+    // Carlito otherwise — `textmetrics`), replacing the ~0.5 em
+    // average-advance guess that re-wrapped lines the author had
+    // fitted to the block.
+    let usable_w = (tw - ins_l - ins_r).max(0.02);
+    let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold);
+    let width_in = |s: &str| face.width_in(s, size);
     let mut lines: Vec<String> = Vec::new();
     // Visio stores line breaks as CRLF: breaking on each of \r and \n
     // separately would insert an empty paragraph between every pair of
@@ -1385,26 +1391,36 @@ fn emit_text(
         }
         let mut cur = String::new();
         for word in para.split(' ') {
-            let candidate_len = cur.len() + word.len() + !cur.is_empty() as usize;
-            if !cur.is_empty() && candidate_len > max_chars {
-                lines.push(cur.clone());
-                cur.clear();
+            let candidate = if cur.is_empty() {
+                word.to_string()
+            } else {
+                format!("{cur} {word}")
+            };
+            if !cur.is_empty() && width_in(&candidate) > usable_w {
+                lines.push(std::mem::take(&mut cur));
+                cur = word.to_string();
+            } else {
+                cur = candidate;
             }
-            // A single word longer than the line: hard-split.
-            let mut w = word;
-            while w.len() > max_chars {
-                let (head, rest) = w.split_at(max_chars);
-                if !cur.is_empty() {
-                    lines.push(cur.clone());
-                    cur.clear();
+            // A single word wider than the line: hard-split at the
+            // longest character prefix that fits (always ≥1 char, so
+            // the loop makes progress).
+            while width_in(&cur) > usable_w && cur.chars().count() > 1 {
+                let mut split_at = cur
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cur.len());
+                for (i, _) in cur.char_indices().skip(1) {
+                    if width_in(&cur[..i]) <= usable_w {
+                        split_at = i;
+                    } else {
+                        break;
+                    }
                 }
-                lines.push(head.to_string());
-                w = rest;
+                let rest = cur.split_off(split_at);
+                lines.push(std::mem::replace(&mut cur, rest));
             }
-            if !cur.is_empty() {
-                cur.push(' ');
-            }
-            cur.push_str(w);
         }
         lines.push(cur);
     }
@@ -2571,12 +2587,6 @@ fn quote_family(name: &str) -> String {
     }
 }
 
-fn push_family(chain: &mut Vec<String>, family: &str) {
-    if !chain.iter().any(|f| f.eq_ignore_ascii_case(family)) {
-        chain.push(quote_family(family));
-    }
-}
-
 /// `font-family` fallback chain for a document font (GitHub #17):
 /// the document's own family first (the best face on any viewer),
 /// then its metric-compatible substitute if the alias table covers
@@ -2585,7 +2595,11 @@ fn push_family(chain: &mut Vec<String>, family: &str) {
 /// Text with no Font cell gets Visio's default family — Calibri —
 /// through the same table (Calibri → Carlito). Deduplicated
 /// case-insensitively.
-fn font_family_attr(font: Option<&str>) -> String {
+/// The font-family fallback chain (UNQUOTED names, CSS generic
+/// last) the renderer declares for a shape's resolved Character Font
+/// — the same walk [`crate::textmetrics`] measures with, so the wrap
+/// decision and the raster use one resolution (#21).
+pub(crate) fn family_chain(font: Option<&str>) -> Vec<String> {
     let name = match font.map(str::trim) {
         Some(f) if !f.is_empty() => f,
         _ => "Calibri",
@@ -2594,12 +2608,18 @@ fn font_family_attr(font: Option<&str>) -> String {
         Some((s, c)) => (Some(s), c),
         None => (None, "sans-serif"),
     };
-    let mut chain = vec![quote_family(name)];
-    if let Some(s) = substitute {
-        push_family(&mut chain, s);
+    let mut chain = vec![name.to_string()];
+    for c in substitute.into_iter().chain(["Carlito"]) {
+        if !chain.iter().any(|f| f.eq_ignore_ascii_case(c)) {
+            chain.push(c.to_string());
+        }
     }
-    push_family(&mut chain, "Carlito");
     chain.push(class.to_string());
+    chain
+}
+
+fn font_family_attr(font: Option<&str>) -> String {
+    let chain: Vec<String> = family_chain(font).iter().map(|f| quote_family(f)).collect();
     // Document-supplied family names land in an XML attribute — the
     // joined CSS list is attribute content like any other.
     format!(" font-family=\"{}\"", escape_attr(&chain.join(", ")))
@@ -3745,6 +3765,138 @@ mod tests {
         let (x, y, w, h) = text_block_page_rect(&doc, &page, 2).unwrap();
         assert!((x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
         assert!((w - 1.0).abs() < 1e-9 && (h - 0.5).abs() < 1e-9);
+    }
+
+    /// Count the emitted text lines (tspans) of one shape.
+    fn text_lines(out: &str) -> Vec<String> {
+        out.split("<tspan")
+            .skip(1)
+            .map(|l| l.split('>').nth(1).unwrap_or("").split('<').next().unwrap_or("").to_string())
+            .collect()
+    }
+
+    /// A shape carrying the utilisation.vsdx specimen 1065's exact
+    /// text-block cells (#21): TxtWidth 0.8159 in, 8 pt (0.1111 in)
+    /// text, zero side margins (inherited from the connector master)
+    /// — the authored three-line label the 0.5 em guess re-wrapped
+    /// into four (15 chars > its 14-char cap at that width).
+    fn shape_1065() -> Shape {
+        let mut s = Shape::default();
+        s.sheet.text = Some("If allograft\r\nIs implanted or\r\n opened".into());
+        // The specimen's connector master inherits zero left/right
+        // margins, so the usable width IS the block width.
+        for (n, v) in [
+            ("Width", "2.0"),
+            ("Height", "1.0"),
+            ("TxtWidth", "0.8159"),
+            ("TxtHeight", "0.6"),
+            ("LeftMargin", "0"),
+            ("RightMargin", "0"),
+        ] {
+            s.sheet.set_cell(n, Cell::value(v));
+        }
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                cells: vec![("Size".into(), Cell::value("0.1111"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        s
+    }
+
+    /// #21: measured wrap keeps the authored line "Is implanted or"
+    /// on one line — real per-glyph advances at 8 pt measure ≈0.70 in
+    /// against the 0.8159 in block, where the 0.5 em guess capped the
+    /// line at 14 characters and split it.
+    #[test]
+    fn measured_wrap_keeps_the_utilisation_1065_lines() {
+        let doc = Document::default();
+        let s = shape_1065();
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        let lines = text_lines(&out);
+        // (A line's leading space has always been dropped by the
+        // splitter — unchanged behavior, noted on the issue.)
+        assert_eq!(
+            lines,
+            vec!["If allograft", "Is implanted or", "opened"],
+            "the three authored lines survive: {out}"
+        );
+    }
+
+    /// #21: a run that genuinely overflows still wraps — measurement
+    /// replaces the guess, it does not disable wrapping.
+    #[test]
+    fn measured_wrap_splits_genuinely_overflowing_runs() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.text =
+            Some("considerable label text beyond the block".into());
+        s.sheet.set_cell("Width", Cell::value("0.8"));
+        s.sheet.set_cell("Height", Cell::value("1.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("0.8"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        let lines = text_lines(&out);
+        assert!(lines.len() > 1, "must wrap: {lines:?}");
+        // The greedy invariant: every line except the last is full —
+        // adding the next word would overflow.
+        let usable = 0.8 - 0.1 - 0.1;
+        let face = crate::textmetrics::resolve(None, false);
+        for pair in lines.windows(2) {
+            let joined = format!("{} {}", pair[0], pair[1]);
+            assert!(
+                face.width_in(&joined, 0.13889) > usable,
+                "line {:?} wrapped too early (usable {usable}): {lines:?}",
+                pair[0]
+            );
+        }
+    }
+
+    /// #21: a single word wider than the block hard-splits at the
+    /// longest fitting prefix (never a zero-length line, never a
+    /// stuck loop).
+    #[test]
+    fn measured_wrap_hard_splits_single_long_words() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.text = Some("aaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        s.sheet.set_cell("Width", Cell::value("0.5"));
+        s.sheet.set_cell("TxtWidth", Cell::value("0.5"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        let lines = text_lines(&out);
+        assert!(lines.len() > 1, "a 26-em-ish run cannot fit 0.3 in: {lines:?}");
+        assert!(
+            lines.iter().all(|l| !l.is_empty()),
+            "hard splits keep every line non-empty: {lines:?}"
+        );
+        let joined: String = lines.concat();
+        assert_eq!(joined, "aaaaaaaaaaaaaaaaaaaaaaaaaa", "no characters lost");
+    }
+
+    /// CRLF and lone CR each break exactly one line (carried over
+    /// from the guess era — the normalizer is unchanged).
+    #[test]
+    fn crlf_and_lone_cr_each_break_one_line() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.text = Some("one\r\ntwo\rthree".into());
+        s.sheet.set_cell("Width", Cell::value("8.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("8.0"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 8.0, 1.0, 1.0, 1.0, false, &mut out);
+        assert_eq!(
+            text_lines(&out),
+            vec!["one", "two", "three"],
+            "no empty paragraph between CRLF pairs"
+        );
     }
 
     /// GitHub #22's no-ghost guarantee: `render_page_no_text` drops
