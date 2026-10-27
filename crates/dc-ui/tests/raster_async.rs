@@ -305,6 +305,9 @@ fn rasters_run_off_thread_and_land_on_later_frames() {
     perf::reset();
     let path = fixture(tmp.path(), 20, 100);
     let mut h = mount(App::with_doc(&path));
+    // #102: the document entry is opt-in — reveal it so all 100 masters
+    // (not just Quick Shapes' head 6) get pane thumbnails.
+    h.state_mut().show_doc_stencil_for_test();
     h.step();
     let peak = h.state().debug_pool_peak_posts_per_frame_for_test();
     assert!(peak > 0, "no raster job was ever queued");

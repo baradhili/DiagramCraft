@@ -2,5 +2,14 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "The release linux job is pinned to ubuntu-24.04 on purpose: the ubuntu-26.04 image's glibc 2.43 made every binary it linked refuse to start on Ubuntu 24.04 / Mint 22.x (#98), and the workflow's 'Enforce glibc floor' step (GLIBC_FLOOR=2.39) fails the build if this drifts. Runner bumps require an explicit compat decision, so Renovate must not propose them.",
+      "matchFileNames": [".github/workflows/release.yml"],
+      "matchManagers": ["github-actions"],
+      "matchDepNames": ["ubuntu"],
+      "enabled": false
+    }
   ]
 }

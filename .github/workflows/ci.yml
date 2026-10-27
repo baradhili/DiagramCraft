@@ -9,6 +9,10 @@ permissions:
 
 jobs:
   test:
+    # Renovate PRs (lockfile-only bumps from renovate/* branches) are
+    # reviewed and verified manually before being applied — see #99/#101.
+    # github.head_ref is empty on push events, so main pushes still run.
+    if: ${{ !startsWith(github.head_ref, 'renovate/') }}
     strategy:
       fail-fast: false
       matrix:

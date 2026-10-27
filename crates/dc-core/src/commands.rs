@@ -603,6 +603,294 @@ impl crate::Command for AddShape {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Master instancing and import (#84)
+// ---------------------------------------------------------------------------
+
+/// Next free master ID (max existing + 1, 1-based start).
+pub fn next_master_id(doc: &Document) -> i64 {
+    doc.masters.iter().map(|m| m.id).max().unwrap_or(0) + 1
+}
+
+/// First value of a masters-index attribute, by name.
+fn master_attr<'a>(m: &'a vsdx::model::Master, name: &str) -> Option<&'a str> {
+    m.attrs
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.as_str())
+}
+
+/// The document-local master a stencil master maps to, if it was
+/// already imported: same non-empty `BaseID`, or — when the source
+/// carries `MatchByName='1'` — same `NameU` (the VSDX reuse keys
+/// Visio itself uses, #84).
+pub fn find_imported(doc: &Document, src: &vsdx::model::Master) -> Option<i64> {
+    if let Some(base) = master_attr(src, "BaseID").filter(|s| !s.is_empty()) {
+        if let Some(m) = doc
+            .masters
+            .iter()
+            .find(|m| master_attr(m, "BaseID") == Some(base))
+        {
+            return Some(m.id);
+        }
+    }
+    if master_attr(src, "MatchByName") == Some("1") {
+        if let Some(name) = src.name_u.as_deref() {
+            if let Some(m) = doc
+                .masters
+                .iter()
+                .find(|m| m.name_u.as_deref() == Some(name))
+            {
+                return Some(m.id);
+            }
+        }
+    }
+    None
+}
+
+/// Copy a master from an open stencil into the drawing's Masters
+/// collection on first use (#84, Visio's self-contained-drawing rule).
+///
+/// The source master is cloned at construction — a `Command` cannot
+/// hold a reference into another `Document`. The copy gets a fresh
+/// document-local id and a document-unique part name; the borrowed
+/// `<Rel>` index child is dropped (the write path assigns a fresh rId,
+/// `vsdx::write` masters reconciliation). `BaseID`/`NameU` travel
+/// verbatim, so re-drops dedupe through [`find_imported`] and reuse
+/// the imported copy instead of duplicating.
+pub struct ImportMaster {
+    source: vsdx::model::Master,
+    /// What apply did: a fresh copy (undo removes it) or a dedupe hit
+    /// (undo is a no-op).
+    outcome: Option<ImportOutcome>,
+}
+
+enum ImportOutcome {
+    /// A compatible master was already present; undo is a no-op.
+    Reused,
+    /// A fresh copy was appended at `pos`; undo removes it.
+    Fresh { pos: usize },
+}
+
+impl ImportMaster {
+    pub fn new(source: vsdx::model::Master) -> ImportMaster {
+        ImportMaster {
+            source,
+            outcome: None,
+        }
+    }
+}
+
+impl crate::Command for ImportMaster {
+    fn touched(&self, _doc: &Document) -> crate::TouchList {
+        // Master definitions carry no page ink; the instance placed
+        // alongside this in the same macro reports its own membership.
+        crate::TouchList::none()
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "import master {}",
+            self.source.name_u.as_deref().unwrap_or("-")
+        )
+    }
+
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        if find_imported(doc, &self.source).is_some() {
+            self.outcome = Some(ImportOutcome::Reused);
+            return Ok(());
+        }
+        let id = next_master_id(doc);
+        let mut m = self.source.clone();
+        m.id = id;
+        if let Some(slot) = m.attrs.iter_mut().find(|(k, _)| k == "ID") {
+            slot.1 = id.to_string();
+        } else {
+            m.attrs.insert(0, ("ID".to_string(), id.to_string()));
+        }
+        // Document-unique part name: one past the highest existing
+        // `master{N}.xml` — never a borrowed stencil part name.
+        let next_part = 1 + doc
+            .masters
+            .iter()
+            .filter_map(|m| {
+                let stem = m.part.rsplit('/').next()?;
+                stem.strip_prefix("master")?
+                    .strip_suffix(".xml")?
+                    .parse::<usize>()
+                    .ok()
+            })
+            .max()
+            .unwrap_or(0);
+        m.part = format!("visio/masters/master{next_part}.xml");
+        // The stencil's rIds belong to the stencil's rels, not ours.
+        m.children
+            .retain(|c| !matches!(c, IndexChild::Rel(_)));
+        doc.masters.push(m);
+        self.outcome = Some(ImportOutcome::Fresh {
+            pos: doc.masters.len() - 1,
+        });
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        match self.outcome.take() {
+            Some(ImportOutcome::Fresh { pos }) => {
+                if pos < doc.masters.len() {
+                    doc.masters.remove(pos);
+                }
+            }
+            Some(ImportOutcome::Reused) | None => {}
+        }
+        Ok(())
+    }
+}
+
+/// One undoable place-from-stencil step (#84): import the master into
+/// the drawing if it is not already there (Visio first-use copy), then
+/// place the instance — one undo removes both together. The instance's
+/// master id is precomputed from `doc` (deterministic: the import
+/// assigns `next_master_id` at apply time against the same state).
+pub fn place_master_from_stencil(
+    doc: &Document,
+    page: i64,
+    src: &vsdx::model::Master,
+    pin: (f64, f64),
+) -> Macro {
+    let name = src.name_u.as_deref().unwrap_or("-");
+    match find_imported(doc, src) {
+        Some(id) => Macro::new(
+            format!("place master {name}"),
+            vec![Box::new(AddMasterInstance::new(page, id, pin))],
+        ),
+        None => Macro::new(
+            format!("place master {name}"),
+            vec![
+                Box::new(ImportMaster::new(src.clone())),
+                Box::new(AddMasterInstance::new(page, next_master_id(doc), pin)),
+            ],
+        ),
+    }
+}
+
+/// Place a new instance of a master onto a page at a pin position
+/// (inches). Geometry/format inherit from the master, exactly like a
+/// Visio drag-from-stencil drop. Lives in dc-core (not dc-ui) since
+/// #84: it mutates the model like every other command here.
+pub struct AddMasterInstance {
+    pub page: i64,
+    pub master: i64,
+    pub pin: (f64, f64),
+    id: Option<i64>,
+}
+
+impl AddMasterInstance {
+    pub fn new(page: i64, master: i64, pin: (f64, f64)) -> AddMasterInstance {
+        AddMasterInstance {
+            page,
+            master,
+            pin,
+            id: None,
+        }
+    }
+}
+
+impl crate::Command for AddMasterInstance {
+    fn touched(&self, _doc: &Document) -> crate::TouchList {
+        // A fresh top-level instance (#93): membership only — its
+        // layer renders on demand.
+        match self.id {
+            Some(id) => crate::TouchList {
+                pages: vec![],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: id,
+                    touch: crate::Touch::Membership,
+                }],
+            },
+            None => crate::TouchList::page(self.page),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "add master {} instance at ({:.3}, {:.3})",
+            self.master, self.pin.0, self.pin.1
+        )
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let id = next_shape_id(doc, self.page);
+        self.id = Some(id);
+        let mut sheet = vsdx::model::Sheet::default();
+        sheet.set_cell("PinX", Cell::value(format!("{:.6}", self.pin.0)));
+        sheet.set_cell("PinY", Cell::value(format!("{:.6}", self.pin.1)));
+        // A 1D master (line/connector: root shape carries Begin/End
+        // cells) gets XForm1D snapshots on the instance — a horizontal
+        // 1-inch line centered on the drop point — plus the derived
+        // XForm literals the renderer reads, exactly like Visio's
+        // instancing caches (GitHub #59).
+        let one_d = doc.master(self.master).is_some_and(|m| {
+            m.shapes
+                .iter()
+                .any(|s| s.sheet.cell("BeginX").is_some() && s.sheet.cell("EndX").is_some())
+        });
+        if one_d {
+            let (bx, ex) = (self.pin.0 - 0.5, self.pin.0 + 0.5);
+            let by = self.pin.1;
+            for (n, v) in [
+                ("BeginX", bx),
+                ("BeginY", by),
+                ("EndX", ex),
+                ("EndY", by),
+                ("Width", 1.0),
+                ("Height", 0.0),
+                ("LocPinX", 0.5),
+                ("LocPinY", 0.0),
+                ("Angle", 0.0),
+            ] {
+                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
+            }
+        }
+        let shape = Shape {
+            id,
+            type_: Some("Shape".to_string()),
+            master: Some(self.master),
+            line_style: Some(0),
+            fill_style: Some(0),
+            text_style: Some(0),
+            attrs: vec![
+                ("ID".to_string(), id.to_string()),
+                ("Type".to_string(), "Shape".to_string()),
+                ("Master".to_string(), self.master.to_string()),
+                ("LineStyle".to_string(), "0".to_string()),
+                ("FillStyle".to_string(), "0".to_string()),
+                ("TextStyle".to_string(), "0".to_string()),
+            ],
+            sheet,
+            ..Shape::default()
+        };
+        let page = doc
+            .pages
+            .iter_mut()
+            .find(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        page.shapes.push(shape);
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let Some(id) = self.id else { return Ok(()) };
+        let page = doc
+            .pages
+            .iter_mut()
+            .find(|p| p.id == self.page)
+            .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
+        if let Some(pos) = page.shapes.iter().position(|s| s.id == id) {
+            page.shapes.remove(pos);
+        }
+        Ok(())
+    }
+}
+
 /// Remove one row from a sheet section (GitHub #28: deleting a
 /// Hyperlink row). Undo reinserts it at its original position.
 #[derive(Debug, Clone)]

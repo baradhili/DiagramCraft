@@ -16,10 +16,11 @@ use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
 use crate::canvas::{self, Handle, HandleId, PageGeom, View};
-use crate::cmd::{AddMasterInstance, MoveShape};
+use crate::cmd::MoveShape;
+use dc_core::AddMasterInstance;
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
-use crate::stencil::Stencil;
+use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
 use crate::svgimg::TextureCache;
 use crate::theme;
 
@@ -112,6 +113,10 @@ pub struct App {
     /// top of `draw` so undo/ungroup/doc changes leave it coherent.
     group_edit: Vec<i64>,
     stencil: Stencil,
+    /// The open-stencil set (Shapes pane, #63) — session state, never
+    /// file content. Kept across document switches like Visio's
+    /// workspace; the pane (`stencil`) renders it.
+    stencils: StencilSet,
     /// Stencil panel content rect from the last frame (resize-handle
     /// target for the kittest re-wrap tests).
     stencil_panel_inner: Rect,
@@ -213,12 +218,16 @@ enum ColorTarget {
 enum PendingDialog {
     Open(Receiver<Option<PathBuf>>),
     SaveAs(Receiver<Option<PathBuf>>),
+    /// "Open Existing Stencil…" (.vssx into the Shapes pane, #83).
+    OpenStencil(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
 enum PendingKind {
     Open,
     SaveAs,
+    /// "Open Existing Stencil…" from the Shapes pane (#83).
+    OpenStencil,
 }
 
 /// Backstage rail command.
@@ -332,6 +341,7 @@ impl App {
             drag: None,
             group_edit: Vec::new(),
             stencil: Stencil::default(),
+            stencils: StencilSet::default(),
             stencil_panel_inner: Rect::NOTHING,
             tex: TextureCache::default(),
             pool: crate::rasterpool::RasterPool::default(),
@@ -466,6 +476,17 @@ impl App {
     }
 
     fn load(&mut self, path: PathBuf) {
+        // Visio semantics: File→Open of a stencil lands it in the
+        // Shapes pane, not the editor — the drawing stays untouched
+        // (#83).
+        if path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("vssx"))
+        {
+            self.open_stencil(path);
+            return;
+        }
         match Editor::open(&path) {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
@@ -746,6 +767,86 @@ impl App {
         self.begin_dialog(PendingKind::Open);
     }
 
+    /// Open a `.vssx` into the Shapes pane (#83): dedupes by source
+    /// path (re-opening expands and focuses the existing entry),
+    /// reveals the entry, and notes the status. Parse failures surface
+    /// as a status note, like other load failures.
+    /// The user's My Shapes folder (Visio convention, owner direction
+    /// 2026-10-27): `<home>/Documents/My Shapes`. Created on demand —
+    /// the Open Existing Stencil dialog starts there (#105 will grow
+    /// the auto-open default set out of it). None when no home
+    /// directory is known (neither HOME nor USERPROFILE): the dialog
+    /// then keeps its default start location and nothing is created.
+    fn my_shapes_dir() -> Option<std::path::PathBuf> {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)?;
+        let dir = my_shapes_path(Some(home));
+        let _ = std::fs::create_dir_all(&dir);
+        Some(dir)
+    }
+
+    fn open_stencil(&mut self, path: PathBuf) {
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "stencil".into());
+        match self.stencils.open_file(&path) {
+            Ok((ix, existing)) => {
+                self.stencil.reveal = Some(StencilId::Open(ix));
+                self.status = if existing {
+                    format!("stencil {stem} is already open — expanded")
+                } else {
+                    format!("opened stencil {stem}")
+                };
+            }
+            Err(e) => self.status = format!("open stencil failed: {e:#}"),
+        }
+    }
+
+    /// More Shapes ▸ category ▸ stencil: open a built-in catalog
+    /// stencil, or close its entry when it is already open (the menu
+    /// checkbox state, #87). Built-ins land in the pane exactly like
+    /// file stencils (#83) — placement, thumbnails, search, and close
+    /// all key off the open-stencil set.
+    fn toggle_builtin(&mut self, slug: &'static str) {
+        let Some(b) = crate::stencil::builtin::by_slug(slug) else {
+            return;
+        };
+        let source = crate::stencil::builtin::source_path(b.slug);
+        if let Some(ix) = self.stencils.position_for(&source) {
+            let title = self
+                .stencils
+                .get(ix)
+                .map(|st| st.title.clone())
+                .unwrap_or_else(|| b.title.to_string());
+            self.stencil.close_entry(&mut self.stencils, ix);
+            self.status = format!("closed {title}");
+            return;
+        }
+        // Which variant opens is the pane's session preference (#85
+        // follow-up): US by default, the metric twin with "Metric
+        // Stencils" ticked.
+        let metric = self.stencil.metric_units;
+        match vsdx::parse::parse_bytes(b.bytes_for(metric)) {
+            Ok(doc) => {
+                let (ix, _) = self.stencils.open_parsed(
+                    doc,
+                    source,
+                    b.title.to_string(),
+                    crate::stencil::Origin::Builtin,
+                );
+                self.stencil.reveal = Some(StencilId::Open(ix));
+                self.status = if metric {
+                    format!("opened {title} (metric)", title = b.title)
+                } else {
+                    format!("opened {title}", title = b.title)
+                };
+            }
+            Err(e) => self.status = format!("built-in stencil failed to load: {e:#}"),
+        }
+    }
+
     /// File → New: replace the current document with a blank drawing,
     /// prompting first if it has unsaved changes.
     fn do_new(&mut self) {
@@ -800,6 +901,14 @@ impl App {
                     PendingKind::Open => rfd::FileDialog::new()
                         .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
                         .pick_file(),
+                    PendingKind::OpenStencil => {
+                        let mut dlg =
+                            rfd::FileDialog::new().add_filter("Visio stencil", &["vssx"]);
+                        if let Some(dir) = Self::my_shapes_dir() {
+                            dlg = dlg.set_directory(dir);
+                        }
+                        dlg.pick_file()
+                    }
                     PendingKind::SaveAs => rfd::FileDialog::new()
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
@@ -810,6 +919,7 @@ impl App {
         });
         self.dialog = Some(match kind {
             PendingKind::Open => PendingDialog::Open(rx),
+            PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
         });
     }
@@ -822,7 +932,9 @@ impl App {
             return;
         };
         let (path, again) = match &dialog {
-            PendingDialog::Open(rx) | PendingDialog::SaveAs(rx) => match rx.try_recv() {
+            PendingDialog::Open(rx)
+            | PendingDialog::SaveAs(rx)
+            | PendingDialog::OpenStencil(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -841,6 +953,7 @@ impl App {
         };
         match dialog {
             PendingDialog::Open(_) => self.load(path),
+            PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -1872,18 +1985,15 @@ impl App {
             }
         }
         // Stencil placement takes priority.
-        if let (Some(master), Some(page_id)) = (self.stencil.armed, self.page_id()) {
-            let new_id = self
-                .ed
-                .as_ref()
-                .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
-            self.apply(AddMasterInstance::new(page_id, master, page_pos));
+        if let Some(key) = self.stencil.armed {
             self.stencil.armed = None;
             self.ctx_menu = None;
             self.placed_last_click = true;
-            if let Some(nid) = new_id {
-                self.set_selection(Some((page_id, nid)));
-                self.sel_set = vec![(page_id, nid)];
+            if let Some(nid) = self.place_master(key, page_pos) {
+                if let Some(page_id) = self.page_id() {
+                    self.set_selection(Some((page_id, nid)));
+                    self.sel_set = vec![(page_id, nid)];
+                }
             }
             return;
         }
@@ -1918,6 +2028,45 @@ impl App {
             }
             None => {
                 self.set_selection(None);
+            }
+        }
+    }
+
+    /// Place the armed/carried master `key` at `page_pos` (inches).
+    /// Returns the new shape id when a placement happened.
+    ///
+    /// Document masters place directly. A master from an open stencil
+    /// is first copied into the drawing (Visio's first-use import,
+    /// #84) and the instance placed referencing the document-local
+    /// copy — one undo step removes both together.
+    fn place_master(&mut self, key: MasterKey, page_pos: (f64, f64)) -> Option<i64> {
+        let page_id = self.page_id()?;
+        match key.0 {
+            StencilId::Document => {
+                let new_id = self
+                    .ed
+                    .as_ref()
+                    .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
+                self.apply(AddMasterInstance::new(page_id, key.1, page_pos));
+                new_id
+            }
+            StencilId::Open(ix) => {
+                let src = self
+                    .stencils
+                    .get(ix)
+                    .and_then(|st| st.doc.master(key.1))
+                    .cloned();
+                let Some(src) = src else {
+                    self.stencil.armed = None;
+                    return None;
+                };
+                let Some(ed) = self.ed.as_ref() else {
+                    return None;
+                };
+                let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+                let cmd = dc_core::place_master_from_stencil(&ed.doc, page_id, &src, page_pos);
+                self.apply(cmd);
+                Some(new_id)
             }
         }
     }
@@ -5845,7 +5994,7 @@ impl App {
             .unwrap_or(0)
     }
     #[doc(hidden)]
-    pub fn debug_master_cells(&self) -> Vec<(i64, Rect)> {
+    pub fn debug_master_cells(&self) -> Vec<(crate::stencil::MasterKey, Rect)> {
         self.stencil.cell_rects.clone()
     }
     /// Column count of the last stencil layout, re-derived from the
@@ -5944,11 +6093,102 @@ impl App {
         self.ctx_menu_rect
     }
     #[doc(hidden)]
-    pub fn debug_armed(&self) -> Option<i64> {
+    pub fn debug_armed(&self) -> Option<MasterKey> {
         self.stencil.armed
     }
+    /// kittest (#63): open a stencil file into the pane exactly like
+    /// the "Open Existing Stencil…" flow (minus the native dialog).
     #[doc(hidden)]
-    pub fn debug_carry(&self) -> Option<i64> {
+    pub fn open_stencil_for_test(&mut self, path: &std::path::Path) {
+        self.open_stencil(path.to_path_buf());
+    }
+    /// kittest (#83): File→Open through the real dialog-worker seam —
+    /// the next dialog resolves with `path` instead of opening rfd.
+    #[doc(hidden)]
+    pub fn open_file_for_test(&mut self, path: std::path::PathBuf) {
+        self.dialog_preset_for_test = Some(Some(path));
+        self.do_open();
+    }
+    /// kittest (#63): open-stencil entry titles + expansion, pane order.
+    #[doc(hidden)]
+    pub fn debug_stencil_entries(&self) -> Vec<(String, bool)> {
+        self.stencils
+            .iter()
+            .map(|(_, st)| (st.title.clone(), st.expanded))
+            .collect()
+    }
+    /// kittest (#86): set the pane's search box (the results-view
+    /// filter) without driving the text edit widget.
+    #[doc(hidden)]
+    pub fn set_search_for_test(&mut self, q: &str) {
+        self.stencil.search = q.to_string();
+    }
+    /// kittest (#88): scroll the stencil pane back to its top next
+    /// frame (a just-opened stencil's reveal may have scrolled the
+    /// Quick Shapes cells out of the viewport).
+    #[doc(hidden)]
+    pub fn scroll_pane_to_top_for_test(&mut self) {
+        self.stencil.scroll_fix = Some(0.0);
+    }
+    /// kittest (#88): the Quick Shapes header rect from the last
+    /// layout.
+    #[doc(hidden)]
+    pub fn debug_quick_rect_for_test(&self) -> Option<egui::Rect> {
+        self.stencil.quick_rect
+    }
+    /// kittest (#88): the search box rect from the last layout.
+    #[doc(hidden)]
+    pub fn debug_search_rect_for_test(&self) -> Option<egui::Rect> {
+        self.stencil.search_rect
+    }
+    /// kittest (#102): reveal the document-stencil entry for this
+    /// session (masters outside Quick Shapes' head set — e.g. the 1D
+    /// Line — are only listed there).
+    #[doc(hidden)]
+    pub fn show_doc_stencil_for_test(&mut self) {
+        self.stencil.doc_stencil_visible = true;
+    }
+    /// kittest (#86): the pane entries currently VISIBLE (headers
+    /// rendered this frame) — a search hides zero-match entries.
+    #[doc(hidden)]
+    pub fn debug_visible_entry_ids(&self) -> Vec<crate::stencil::StencilId> {
+        self.stencil.entry_rects.iter().map(|(id, _)| *id).collect()
+    }
+    /// kittest (#84): the edited document's masters (id, NameU).
+    #[doc(hidden)]
+    pub fn debug_doc_masters(&self) -> Vec<(i64, String)> {
+        self.ed
+            .as_ref()
+            .map(|ed| {
+                ed.doc
+                    .masters
+                    .iter()
+                    .map(|m| (m.id, m.name_u.clone().unwrap_or_default()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    /// kittest (#85): the landed thumbnail texture for one pane cell.
+    #[doc(hidden)]
+    pub fn debug_thumb_id_for_test(
+        &self,
+        stencil: StencilId,
+        master: i64,
+    ) -> Option<egui::TextureId> {
+        let serial = match stencil {
+            StencilId::Document => crate::stencil::DOC_SERIAL,
+            StencilId::Open(ix) => self.stencils.get(ix).map(|s| s.serial())?,
+        };
+        self.stencil.thumb_id(serial, master)
+    }
+    /// kittest (#63): stencil list entry header rects, document entry
+    /// first.
+    #[doc(hidden)]
+    pub fn debug_stencil_entry_rects(&self) -> Vec<(StencilId, egui::Rect)> {
+        self.stencil.entry_rects.clone()
+    }
+    #[doc(hidden)]
+    pub fn debug_carry(&self) -> Option<MasterKey> {
         self.stencil.carry
     }
     /// MRU entries, most recent first (recent-files tests).
@@ -6476,7 +6716,7 @@ impl App {
     /// place an instance there. Click-to-arm then click-to-place still
     /// works alongside this.
     fn stencil_carry(&mut self, ctx: &Context) {
-        let Some(master) = self.stencil.carry else {
+        let Some(key) = self.stencil.carry else {
             return;
         };
         let (down, released, pos) = ctx.input(|i| {
@@ -6494,43 +6734,46 @@ impl App {
         let ppi = self.view.px_per_in();
         if down {
             ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+            let Some(ed) = self.ed.as_ref() else { return };
+            // The ghost renders from the master's own source document
+            // (#82): a stencil master need not exist in the edited
+            // document (it is copied in only on placement, #84).
+            let Some((serial, src, m)) = self.stencils.resolve(ed, key) else {
+                self.stencil.carry = None;
+                return;
+            };
             // Ghost: the master thumbnail drawn at the shape's real
             // on-page size, semi-transparent, pinned at the cursor.
-            let App { ed, stencil, pool, .. } = self;
-            if let Some(ed) = ed.as_ref() {
-                let (w, h) = master_size(&ed.doc, master);
-                let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
-                let r = Rect::from_center_size(p, size);
-                let layer =
-                    egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
-                let painter = ctx.layer_painter(layer);
-                // While the first-use thumbnail is still on a worker
-                // (#92) the ghost carries just its outline.
-                if let Some(tex) = stencil.texture(ctx, ed, master, pool) {
-                    painter.image(
-                        tex.id(),
-                        r,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        Color32::from_white_alpha(150),
-                    );
-                }
-                let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
-                painter.rect_stroke(
+            let (w, h) = master_size(src, m.id);
+            let size = Vec2::new((w as f32 * ppi).max(10.0), (h as f32 * ppi).max(10.0));
+            let r = Rect::from_center_size(p, size);
+            let layer =
+                egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("stencil-ghost"));
+            let painter = ctx.layer_painter(layer);
+            // While the first-use thumbnail is still on a worker
+            // (#92) the ghost carries just its outline.
+            if let Some(tex) = self.stencil.texture(ctx, serial, src, m.id, &mut self.pool) {
+                painter.image(
+                    tex.id(),
                     r,
-                    1.0,
-                    Stroke::new(1.0, t.selection),
-                    egui::StrokeKind::Middle,
+                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                    Color32::from_white_alpha(150),
                 );
             }
+            let t = theme::shell_tokens(&ctx.style_of(ctx.theme()).visuals);
+            painter.rect_stroke(
+                r,
+                1.0,
+                Stroke::new(1.0, t.selection),
+                egui::StrokeKind::Middle,
+            );
         }
         if released {
             self.stencil.carry = None;
             if self.canvas_rect.contains(p) {
-                if let Some(page_id) = self.page_id() {
-                    let geom = self.page_geom();
-                    let (x, y) = canvas::screen_to_page(p, &self.view, &geom);
-                    self.apply(AddMasterInstance::new(page_id, master, (x, y)));
-                }
+                let geom = self.page_geom();
+                let (x, y) = canvas::screen_to_page(p, &self.view, &geom);
+                self.place_master(key, (x, y));
             }
         }
     }
@@ -6567,8 +6810,8 @@ impl App {
                         done.was_parse,
                     );
                 }
-                crate::rasterpool::RasterKey::Thumb(id) => {
-                    self.stencil.on_thumb_done(ui.ctx(), id, done.image);
+                crate::rasterpool::RasterKey::Thumb { serial, master } => {
+                    self.stencil.on_thumb_done(ui.ctx(), serial, master, done.image);
                 }
                 crate::rasterpool::RasterKey::Shape { page, id, version, bucket } => {
                     if let Some(msg) = self.layers.on_shape_done(
@@ -6672,11 +6915,15 @@ impl App {
                     .inner_margin(egui::Margin::same(2)),
             )
             .show(ui, |ui| self.page_tabs(ui));
-        if self
+        // The pane lists the document's masters plus every open
+        // stencil (#63): it stays up once a stencil is open, even for
+        // a master-less document — but it needs a document to render
+        // against (the pane body draws nothing without an editor).
+        let pane_wanted = self
             .ed()
-            .map(|ed| !ed.doc.masters.is_empty())
-            .unwrap_or(false)
-        {
+            .map(|ed| !ed.doc.masters.is_empty() || !self.stencils.is_empty())
+            .unwrap_or(false);
+        if pane_wanted {
             egui::Panel::left("stencil")
                 .frame(
                     egui::Frame::new()
@@ -6692,16 +6939,32 @@ impl App {
                         // master grid (crates/dc-ui/src/stencil.rs).
                         self.stencil_panel_inner = ui.max_rect();
                         let mut armed = None;
+                        let mut request = None;
                         let title = stencil_title(&self.path);
-                        let App { ed, stencil, pool, .. } = self;
-                        if let Some(ed) = ed.as_ref() {
-                            if let Some(id) = stencil.show(ui, ed, &title, pool) {
-                                armed = Some(id);
+                        {
+                            let App { ed, stencil, stencils, pool, .. } = self;
+                            if let Some(ed) = ed.as_ref() {
+                                if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
+                                    armed = Some(id);
+                                }
+                                request = stencil.request.take();
                             }
+                        }
+                        // Pane requests (#83/#87): the pane can't reach
+                        // the dialog worker or the catalog's byte
+                        // loader itself.
+                        match request {
+                            Some(crate::stencil::Request::OpenStencilDialog) => {
+                                self.begin_dialog(PendingKind::OpenStencil);
+                            }
+                            Some(crate::stencil::Request::ToggleBuiltin(slug)) => {
+                                self.toggle_builtin(slug);
+                            }
+                            None => {}
                         }
                         if let Some(id) = armed {
                             self.status =
-                                format!("master {} armed — click the canvas to place", id);
+                                format!("master {} armed — click the canvas to place", id.1);
                         }
                         if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked()
                         {
@@ -7593,6 +7856,14 @@ fn protection_flag(doc: &Document, sh: &Shape, chain: &[&Shape], name: &str) -> 
 /// Title of the stencil list entry: the open file's stem (a .vssx
 /// stencil is the whole document), else the document's own master set
 /// (GitHub #53: the pane lists its stencil like Visio does).
+/// `My Shapes` under a home directory (pure half of
+/// [`App::my_shapes_dir`] for testing).
+fn my_shapes_path(home: Option<PathBuf>) -> PathBuf {
+    home.unwrap_or_else(|| PathBuf::from("."))
+        .join("Documents")
+        .join("My Shapes")
+}
+
 fn stencil_title(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -7602,6 +7873,14 @@ fn stencil_title(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn my_shapes_defaults_under_documents() {
+        assert_eq!(
+            my_shapes_path(Some(PathBuf::from("/home/bret"))),
+            PathBuf::from("/home/bret/Documents/My Shapes")
+        );
+    }
 
     // Dialogs must never block the UI thread; these tests drive the
     // polling half directly (no real native dialog is ever spawned).
@@ -7837,7 +8116,7 @@ mod tests {
             .first()
             .map(|m| m.id)
             .unwrap();
-        app.stencil.armed = Some(master);
+        app.stencil.armed = Some((StencilId::Document, master));
         app.on_canvas_click((4.0, 5.0), false, false);
         assert_eq!(app.debug_shape_count(), 1, "armed master placed on click");
         assert!(app.placed_last_click);

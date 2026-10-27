@@ -1795,3 +1795,162 @@ fn remove_shape_touch_targets_the_removed_shape_not_its_successor() {
     assert_eq!(t.pages, vec![page]);
     assert!(t.shapes.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Place-from-stencil: ImportMaster + AddMasterInstance (#84)
+// ---------------------------------------------------------------------------
+
+/// A synthetic STENCIL master like one parsed from an open `.vssx`:
+/// its ids, parts, and rIds belong to the stencil's own namespace and
+/// deliberately collide with the document's (master 7, master1.xml,
+/// rId1) — the import must re-key all of them. `BaseID` is the
+/// cross-document identity Visio dedupes on.
+fn stencil_master(base_id: &str, name: &str) -> vsdx::model::Master {
+    use vsdx::model::*;
+    let mut sheet = Sheet::default();
+    for (n, v) in [("Width", "1"), ("Height", "1")] {
+        sheet.set_cell(n, Cell::value(v));
+    }
+    let row = |t: &str, ix: i64, x: &str, y: &str| Row {
+        t: Some(t.into()),
+        ix,
+        n: None,
+        attrs: vec![("T".into(), t.into()), ("IX".into(), ix.to_string())],
+        cells: vec![("X".into(), Cell::value(x)), ("Y".into(), Cell::value(y))],
+    };
+    sheet.children.push(SheetChild::Section(Section {
+        name: "Geometry".into(),
+        ix: 0,
+        attrs: vec![("N".into(), "Geometry".into()), ("IX".into(), "0".into())],
+        cells: vec![],
+        rows: vec![
+            row("MoveTo", 1, "0", "0"),
+            row("LineTo", 2, "1", "0"),
+            row("LineTo", 3, "1", "1"),
+            row("LineTo", 4, "0", "1"),
+        ],
+    }));
+    let mut m = Master {
+        id: 7, // collides with the document's own master 7
+        name_u: Some(name.into()),
+        attrs: vec![
+            ("ID".into(), "7".into()),
+            ("NameU".into(), name.into()),
+            ("Name".into(), name.into()),
+            ("BaseID".into(), base_id.into()),
+            ("MatchByName".into(), "1".into()),
+        ],
+        // The stencil's rId1 belongs to the stencil's rels; the import
+        // must drop it (the writer assigns a fresh document rId).
+        children: vec![IndexChild::Rel(vec![("r:id".into(), "rId1".into())])],
+        shapes: vec![Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            line_style: Some(0),
+            fill_style: Some(0),
+            text_style: Some(0),
+            attrs: vec![
+                ("ID".into(), "1".into()),
+                ("Type".into(), "Shape".into()),
+                ("LineStyle".into(), "0".into()),
+                ("FillStyle".into(), "0".into()),
+                ("TextStyle".into(), "0".into()),
+            ],
+            sheet,
+            ..Shape::default()
+        }],
+        part: "visio/masters/master1.xml".into(), // collides too
+        ..Master::default()
+    };
+    let _ = &mut m;
+    m
+}
+
+#[test]
+fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
+    let (mut ed, tmp) = open_fixture();
+    assert_eq!(ed.doc.masters.len(), 1, "fixture carries one master (id 7)");
+    let page_shapes = |ed: &Editor| ed.doc.pages[0].shapes.len();
+    assert_eq!(page_shapes(&ed), 2);
+
+    // 1) First drop imports a re-keyed copy (+1 master) and places the
+    //    instance referencing the document-local copy.
+    let src = stencil_master("{S1}", "Star");
+    ed.apply(dc_core::place_master_from_stencil(&ed.doc, 0, &src, (3.0, 3.0)))
+        .unwrap();
+    assert_eq!(ed.doc.masters.len(), 2, "first drop imports the master");
+    assert_eq!(page_shapes(&ed), 3);
+    {
+        let imported = ed.doc.masters.last().unwrap();
+        assert_ne!(imported.id, 7, "fresh document-local id (stencil id 7 collides)");
+        assert_eq!(imported.id, 8);
+        assert_eq!(imported.part, "visio/masters/master2.xml", "document-unique part");
+        assert!(
+            imported
+                .children
+                .iter()
+                .all(|c| !matches!(c, IndexChild::Rel(_))),
+            "the stencil's borrowed Rel child is dropped"
+        );
+        assert_eq!(imported.name_u.as_deref(), Some("Star"), "NameU travels verbatim");
+        assert_eq!(
+            imported
+                .attrs
+                .iter()
+                .find(|(k, _)| k == "BaseID")
+                .map(|(_, v)| v.as_str()),
+            Some("{S1}"),
+            "BaseID travels verbatim (the dedupe key)"
+        );
+    }
+    let imported_id = ed.doc.masters.last().unwrap().id;
+    let placed = ed.doc.pages[0].shapes.last().unwrap();
+    assert_eq!(placed.master, Some(imported_id), "the instance references the local copy");
+
+    // 2) A second drop of the same master dedupes: reuse, no new master.
+    ed.apply(dc_core::place_master_from_stencil(&ed.doc, 0, &src, (5.0, 5.0)))
+        .unwrap();
+    assert_eq!(ed.doc.masters.len(), 2, "re-drop reuses the imported copy");
+    assert_eq!(page_shapes(&ed), 4);
+    let second = ed.doc.pages[0].shapes.last().unwrap();
+    assert_eq!(second.master, Some(imported_id));
+
+    // 3) One undo reverts exactly one placement step; the second
+    //    placement's undo removes only its shape, the first's removes
+    //    shape AND imported master together.
+    ed.undo().unwrap();
+    assert_eq!(page_shapes(&ed), 3, "second placement undone alone");
+    assert_eq!(ed.doc.masters.len(), 2, "imported master still in use");
+    ed.undo().unwrap();
+    assert_eq!(page_shapes(&ed), 2, "first placement undone");
+    assert_eq!(ed.doc.masters.len(), 1, "…including its imported master");
+
+    // 4) Redo restores both steps exactly.
+    ed.redo().unwrap();
+    ed.redo().unwrap();
+    assert_eq!(ed.doc.masters.len(), 2);
+    assert_eq!(page_shapes(&ed), 4);
+    assert_eq!(ed.doc.masters.last().unwrap().id, 8, "redo re-imports with the same id");
+
+    // 5) Save → reload keeps the imported master and its part.
+    let out = tmp.path().join("placed.vsdx");
+    ed.save_as(&out).unwrap();
+    let pkg = vsdx::Package::open(&out).unwrap();
+    let names = pkg.part_names();
+    assert!(
+        names.contains(&"visio/masters/master2.xml"),
+        "the imported master's part was materialized: {names:?}"
+    );
+    let rels = String::from_utf8(
+        pkg.part("visio/masters/_rels/masters.xml.rels").unwrap().to_vec(),
+    )
+    .unwrap();
+    assert!(
+        rels.contains("master2.xml"),
+        "masters.xml.rels gained the imported master's relationship: {rels}"
+    );
+    let reloaded = Editor::open(&out).unwrap();
+    assert_eq!(reloaded.doc.masters.len(), 2, "reload keeps the imported master");
+    assert_eq!(reloaded.doc.masters.last().unwrap().name_u.as_deref(), Some("Star"));
+    assert_eq!(reloaded.doc.pages[0].shapes.len(), 4, "placed shapes survive");
+}
