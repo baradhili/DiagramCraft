@@ -28,11 +28,13 @@ If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or
 
 ## Helping
 
-Right now it is pretty raw AI generated code and UI.. yes it suck and yes it does only a fraction of what it should do - but hey it does manage to mostly draw vsdx correctly!
+Its sort of usable!
 
 How can you help?
 
 1. Create issues - it gives me and my agent a way to track what could be fixed
+
+2. Close issues - there are plenty now and I only have so much token quota 
 
 2. Create PR - awesome! - but please keep the PRs on a narrow feature (no 10000 line PRs please!) and make sure they are at least checked by CodeRabbit - or better Greptile
 
@@ -129,7 +131,7 @@ Bypass a single commit with `COMMITLINT_SKIP=1`.
 
 ## Roadmap
 
-### M1–M5 — Shipped (v0.1.0 → v0.2.4)
+### M1–M5 — Current
 
 M1–M4 (read VSDX, render to SVG, lossless write/round-trip, editing
 core) shipped before the first public release. M5 — the GUI — shipped
@@ -157,7 +159,7 @@ drawing (#132), native table shapes (#135), plus the standing
 carry-forward — contextual ribbon tabs, snap/glue indicators,
 connector routing UX, and the template flow.
 
-### M6 — Ecosystem — Current
+### M6 — Ecosystem
 
 - Data linking (`data` crate): CSV/SQLite recordsets → shape data
   (URS category "Data Linking"; spec'd in VeeTrace).
