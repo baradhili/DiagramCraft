@@ -191,8 +191,9 @@ pub struct App {
     /// In-app shape clipboard (Cut/Copy/Paste within DiagramCraft; rich
     /// OS-clipboard formats arrive with a later milestone).
     clipboard: Option<Shape>,
-    /// Inline text editor target: (shape id, draft text).
-    text_edit: Option<(i64, String)>,
+    /// In-place WYSIWYG text editor session (GitHub #22); the state
+    /// and overlay live in `crate::textedit`, this is the shell glue.
+    text_edit: Option<crate::textedit::TextEditSession>,
     /// The last canvas click placed a stencil master — a double-click
     /// completing that click pair must not open a text editor.
     placed_last_click: bool,
@@ -1244,7 +1245,8 @@ impl App {
                 if i.key_pressed(egui::Key::F2) {
                     if let Some((_, s)) = self.sel {
                         let draft = self.selected_text(s).unwrap_or_default();
-                        self.text_edit = Some((s, draft));
+                        self.begin_text_edit(s, draft);
+                        self.status = format!("editing text of shape {s}");
                     }
                 }
             }
@@ -2174,9 +2176,9 @@ impl App {
         match classify_dbl_click(formula.as_deref()) {
             DblClick::OpenText => {
                 // The F2 path reached by mouse: seed the draft and let
-                // `text_edit_window` run it.
+                // the in-place editor run it.
                 let draft = self.selected_text(shape_id).unwrap_or_default();
-                self.text_edit = Some((shape_id, draft));
+                self.begin_text_edit(shape_id, draft);
                 self.status = format!("editing text of shape {shape_id}");
             }
             DblClick::Deferred(msg) => self.status = msg,
@@ -3893,6 +3895,10 @@ impl App {
                 vp,
                 self.group_edit.first().copied(),
                 &hidden,
+                // While the in-place editor is open (#22) its shape's
+                // layer renders without the text — the editor overlay
+                // is the only copy on screen.
+                self.text_edit.as_ref().map(|s| s.shape),
             )
         };
         if let Some(msg) = layer_status {
@@ -3929,22 +3935,35 @@ impl App {
             armed,
             &hit,
             &mut mouse,
+            // While the in-place text editor is open (#22) the canvas
+            // is interaction-locked: a plain click ends the edit and
+            // nothing else reports (no select/marquee/dbl-click).
+            self.text_edit.is_some(),
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
-        if let Some(pos) = out.dbl_click_page_pos {
-            // The second click of the pair completes a double-click
-            // instead of a plain click: the first click already ran its
-            // select (and possible drag-start) semantics on its frame.
-            self.on_canvas_dbl_click(pos);
-        } else if let Some(pos) = out.click_page_pos {
-            self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
-        }
-        if let Some(pos) = out.press_page_pos {
-            self.on_canvas_press(pos);
-        }
-        if let Some((x0, y0, x1, y1)) = out.marquee_done {
-            self.apply_marquee(x0, y0, x1, y1);
+        if self.text_edit.is_some() {
+            // Click anywhere on the canvas = click outside the text:
+            // end the edit (commit; the editor decided Esc the same
+            // way). No other canvas event is reported while locked.
+            if out.click_page_pos.is_some() {
+                self.end_text_edit(true);
+            }
+        } else {
+            if let Some(pos) = out.dbl_click_page_pos {
+                // The second click of the pair completes a double-click
+                // instead of a plain click: the first click already ran its
+                // select (and possible drag-start) semantics on its frame.
+                self.on_canvas_dbl_click(pos);
+            } else if let Some(pos) = out.click_page_pos {
+                self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+            }
+            if let Some(pos) = out.press_page_pos {
+                self.on_canvas_press(pos);
+            }
+            if let Some((x0, y0, x1, y1)) = out.marquee_done {
+                self.apply_marquee(x0, y0, x1, y1);
+            }
         }
         // Comment badges (#29 rework): a small bubble at the top-left
         // corner of every commented shape — the shipped 2016 indicator,
@@ -4087,6 +4106,35 @@ impl App {
                     self.ctx_menu = Some((shape_id, anchor, pos));
                 }
                 None => self.ctx_menu = None,
+            }
+        }
+        // In-place WYSIWYG text editor overlay (GitHub #22): laid over
+        // the canvas at the shape's text-block rect, styled from the
+        // same resolved cells the renderer paints with. The entry zoom
+        // (once) focuses the block; ending flows (Esc, click outside)
+        // commit through the retired dialog's SetText path.
+        if self.text_edit.is_some() {
+            if let Some(sess) = self.text_edit.as_mut() {
+                if let Some(ed) = self.ed.as_ref() {
+                    if let Some(page) = ed.doc.pages.iter().find(|p| p.id == sess.page) {
+                        if let Some(b) = dc::svg::text_block_page_rect(&ed.doc, page, sess.shape) {
+                            sess.enter_zoom(&mut self.view, b, self.canvas_rect, &geom);
+                        }
+                    }
+                }
+            }
+            let mut flow = crate::textedit::EditFlow::Active;
+            if let Some(sess) = self.text_edit.as_mut() {
+                if let Some(ed) = self.ed.as_ref() {
+                    let page =
+                        &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                    flow = crate::textedit::show_overlay(ui, sess, &ed.doc, page, &geom, &self.view);
+                }
+            }
+            match flow {
+                crate::textedit::EditFlow::Commit => self.end_text_edit(true),
+                crate::textedit::EditFlow::Abandon => self.end_text_edit(false),
+                crate::textedit::EditFlow::Active => {}
             }
         }
         self.shape_context_menu(ui.ctx());
@@ -4278,7 +4326,7 @@ impl App {
     /// add / edit / remove through the command layer (one undo per
     /// change) and Go to follow a link. The draft lives OUTSIDE the
     /// window closure (a per-frame clone would drop typed text — the
-    /// text_edit_window pattern).
+    /// retired text-edit-window pattern).
     fn add_comment(&mut self, shape_id: i64, body: &str) {
         let Some(page_id) = self.page_id() else {
             return;
@@ -5924,7 +5972,8 @@ impl App {
             }
             Act::EditText => {
                 let draft = self.selected_text(shape_id).unwrap_or_default();
-                self.text_edit = Some((shape_id, draft));
+                self.begin_text_edit(shape_id, draft);
+                self.status = format!("editing text of shape {shape_id}");
             }
             Act::ShapeSheet => self.show_shapesheet = true,
         }
@@ -5985,13 +6034,58 @@ impl App {
             .and_then(|c| c.numeric())
     }
 
-    /// Current text of a shape (draft seed for the Edit Text dialog).
+    /// Current text of a shape (draft seed for the in-place editor).
     fn selected_text(&self, shape_id: i64) -> Option<String> {
         let page_id = self.page_id()?;
         let ed = self.ed.as_ref()?;
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let s = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
         s.sheet.text.clone()
+    }
+
+    /// Open the in-place WYSIWYG editor on a shape (GitHub #22): the
+    /// session captures the view (restored on exit) and the central
+    /// panel applies the entry zoom, lays the editor over the text
+    /// block, and suppresses the shape's text in its canvas layer.
+    fn begin_text_edit(&mut self, shape_id: i64, draft: String) {
+        let Some(page_id) = self.page_id() else { return };
+        self.text_edit = Some(crate::textedit::TextEditSession::new(
+            page_id,
+            shape_id,
+            draft,
+            &self.view,
+        ));
+    }
+
+    /// End the in-place editor: restore the pre-edit view, and commit
+    /// the draft through `SetText` (one undo step, dirty, texture
+    /// invalidation — the retired dialog's commit path). A no-change
+    /// exit (open, close, type nothing) applies nothing — Visio does
+    /// not record an undo step for it.
+    fn end_text_edit(&mut self, commit: bool) {
+        let Some(sess) = self.text_edit.take() else {
+            return;
+        };
+        sess.restore_view(&mut self.view);
+        if !commit {
+            return;
+        }
+        let current = self
+            .ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == sess.page))
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sess.shape))
+            .and_then(|s| s.sheet.text.clone())
+            .unwrap_or_default();
+        if sess.draft != current {
+            self.apply(SetText::new(
+                Scope::Shape {
+                    page: sess.page,
+                    shape: sess.shape,
+                },
+                sess.draft,
+            ));
+        }
     }
 
     /// Test/introspection hooks for the kittest interaction tests.
@@ -6041,6 +6135,31 @@ impl App {
     #[doc(hidden)]
     pub fn debug_canvas_rect(&self) -> Rect {
         self.canvas_rect
+    }
+    /// kittest: the active view zoom (#22 asserts the entry zoom and
+    /// the restore).
+    #[doc(hidden)]
+    pub fn debug_view_zoom(&self) -> f32 {
+        self.view.zoom
+    }
+    /// kittest: the open in-place editor session as (page, shape)
+    /// (#22).
+    #[doc(hidden)]
+    pub fn debug_text_edit(&self) -> Option<(i64, i64)> {
+        self.text_edit.as_ref().map(|s| (s.page, s.shape))
+    }
+    /// kittest: the screen rect the editor overlay covers — the
+    /// shape's text block mapped through the live view (#22).
+    #[doc(hidden)]
+    pub fn debug_text_edit_rect(&self) -> Option<Rect> {
+        let sess = self.text_edit.as_ref()?;
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == sess.page)?;
+        let (x, y, w, h) = dc::svg::text_block_page_rect(&ed.doc, page, sess.shape)?;
+        let geom = self.page_geom();
+        let tl = canvas::page_to_screen(x, y + h, &self.view, &geom);
+        let br = canvas::page_to_screen(x + w, y, &self.view, &geom);
+        Some(Rect::from_two_pos(tl, br))
     }
     #[doc(hidden)]
     /// kittest: multi-selection size (#26).
@@ -6623,53 +6742,6 @@ impl App {
         self.version += 1;
     }
 
-    /// The inline text editor opened by Edit Text… (Visio F2).
-    fn text_edit_window(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, mut draft)) = self.text_edit.take() else {
-            return;
-        };
-        let mut apply = false;
-        let mut cancel = false;
-        let mut open = true;
-        let win = egui::Window::new("Edit Text")
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .open(&mut open)
-            .min_width(340.0)
-            .show(ctx, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut draft)
-                        .hint_text("Shape text")
-                        .desired_rows(5)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("OK").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        // closed below via the flag
-                        cancel = true;
-                    }
-                });
-            });
-        let _ = win;
-        if apply {
-            if let Some(page_id) = self.page_id() {
-                self.apply(SetText::new(
-                    Scope::Shape {
-                        page: page_id,
-                        shape: shape_id,
-                    },
-                    draft,
-                ));
-            }
-        } else if cancel || !open {
-            // discarded
-        } else {
-            self.text_edit = Some((shape_id, draft));
-        }
-    }
-
     /// The Visio theme palette shown by the ribbon Fill/Line buttons.
     fn color_palette_window(&mut self, ctx: &egui::Context) {
         let Some(target) = self.color_pick else {
@@ -6868,7 +6940,6 @@ impl App {
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
-        self.text_edit_window(&ctx);
         self.reorder_pages_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
@@ -8108,11 +8179,11 @@ mod tests {
         // No EventDblClick cell: Visio's default — open the editor.
         let (mut app, sid) = app_with_event_formula(None);
         app.on_canvas_dbl_click((4.0, 5.5));
-        assert_eq!(
-            app.text_edit,
-            Some((sid, String::new())),
-            "default opens the editor"
-        );
+        let sess = app.text_edit.as_ref().expect("default opens the editor");
+        assert_eq!((sess.page, sess.shape), (app.page_id().unwrap(), sid));
+        assert_eq!(sess.draft, "", "draft seeds from the shape's text");
+        app.end_text_edit(true);
+        assert!(app.text_edit.is_none(), "a no-change exit applies nothing");
 
         // RUNADDON: deferral status, no editor.
         let (mut app, _) = app_with_event_formula(Some("RUNADDON(\"x\")"));

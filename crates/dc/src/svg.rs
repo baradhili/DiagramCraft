@@ -79,7 +79,7 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
             r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
         );
         for shape in &m.shapes {
-            render_shape(doc, shape, master_h, &[], &m.part, &mut svg);
+            render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
         }
         let _ = writeln!(svg, "</g>");
         let _ = writeln!(
@@ -182,7 +182,7 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
         r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
     );
     for shape in &m.shapes {
-        render_shape(doc, shape, master_h, &[], &m.part, &mut svg);
+        render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
     }
     let _ = writeln!(svg, "</g>");
     let _ = writeln!(svg, "</svg>");
@@ -202,7 +202,21 @@ pub fn render_page_with(
     page: &vsdx::Page,
     hidden: &[i64],
 ) -> anyhow::Result<String> {
-    render_page_opts(doc, page, hidden, None)
+    render_page_opts(doc, page, hidden, None, None)
+}
+
+/// [`render_page`] with one shape's TEXT suppressed (GitHub #22): the
+/// in-place canvas editor covers the text block, so the page raster
+/// underneath must not also show the shape's old text (ghost text
+/// under the caret). The shape itself — geometry, fill, borders —
+/// keeps rendering; only its own `emit_text` pass is skipped.
+pub fn render_page_no_text(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+    skip_text_shape: i64,
+) -> anyhow::Result<String> {
+    render_page_opts(doc, page, hidden, None, Some(skip_text_shape))
 }
 
 /// The ink bounds of one top-level shape's subtree, in page
@@ -352,6 +366,21 @@ pub fn render_shape_layer(
     hidden: &[i64],
     bounds: (f64, f64, f64, f64),
 ) -> anyhow::Result<String> {
+    render_shape_layer_opts(doc, page, shape_id, hidden, bounds, None)
+}
+
+/// [`render_shape_layer`] with one shape's text suppressed (GitHub
+/// #22): while the GUI's in-place editor is open on `skip_text_shape`,
+/// its layer renders every stroke except that shape's own text — the
+/// editor overlay is the only copy of the text on screen.
+pub fn render_shape_layer_opts(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+    skip_text: Option<i64>,
+) -> anyhow::Result<String> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let Some(shape) = page.shapes.iter().find(|s| s.id == shape_id) else {
         anyhow::bail!("shape {shape_id} not found on page {}", page.id);
@@ -371,7 +400,7 @@ pub fn render_shape_layer(
         ph = bh * PX_PER_IN,
     );
     if !hidden_member(shape) {
-        render_shape(doc, shape, page_h, &[], &page.part, &mut svg);
+        render_shape(doc, shape, page_h, &[], &page.part, skip_text, &mut svg);
     }
     let _ = writeln!(svg, "</svg>");
     Ok(svg)
@@ -387,7 +416,7 @@ pub fn render_page_scoped(
     hidden: &[i64],
     only: i64,
 ) -> anyhow::Result<String> {
-    render_page_opts(doc, page, hidden, Some(only))
+    render_page_opts(doc, page, hidden, Some(only), None)
 }
 
 fn render_page_opts(
@@ -395,6 +424,7 @@ fn render_page_opts(
     page: &vsdx::Page,
     hidden: &[i64],
     only: Option<i64>,
+    skip_text: Option<i64>,
 ) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
@@ -435,7 +465,7 @@ fn render_page_opts(
                 continue;
             }
         }
-        render_shape(doc, shape, h, &[], &page.part, &mut svg);
+        render_shape(doc, shape, h, &[], &page.part, skip_text, &mut svg);
     }
     let _ = writeln!(svg, "</svg>");
     Ok(svg)
@@ -682,6 +712,7 @@ fn render_shape<'a>(
     page_h: f64,
     chain: &[&'a Shape],
     part: &str,
+    skip_text: Option<i64>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -738,11 +769,11 @@ fn render_shape<'a>(
     }
     // Sub-shapes of a group live in the parent's local frame.
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, out);
+        render_shape_local(doc, sub, &chain, part, skip_text, out);
     }
     mirror_master(doc, s, &chain, width, height, out);
 
-    emit_text(doc, s, &chain, width, height, sx, sy, out);
+    emit_text(doc, s, &chain, width, height, sx, sy, skip_text == Some(s.id), out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -753,6 +784,7 @@ fn render_shape_local<'a>(
     s: &'a Shape,
     chain: &[&'a Shape],
     part: &str,
+    skip_text: Option<i64>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -789,12 +821,12 @@ fn render_shape_local<'a>(
         }
     }
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, out);
+        render_shape_local(doc, sub, &chain, part, skip_text, out);
     }
     mirror_master(doc, s, &chain, width, height, out);
     // Group-local rendering applies no flip scale of its own, so the text
     // needs no flip compensation here.
-    emit_text(doc, s, &chain, width, height, 1.0, 1.0, out);
+    emit_text(doc, s, &chain, width, height, 1.0, 1.0, skip_text == Some(s.id), out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -874,7 +906,7 @@ fn mirror_master(
             ty = -(by + bh),
         );
         for r in &m.shapes {
-            render_shape_local(doc, r, &[], mpart, out);
+            render_shape_local(doc, r, &[], mpart, None, out);
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
@@ -898,7 +930,7 @@ fn mirror_master(
             if let Some(t) = &wrapper {
                 let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
             }
-            render_shape_local(doc, sub, chain, mpart, out);
+            render_shape_local(doc, sub, chain, mpart, None, out);
             if wrapper.is_some() {
                 let _ = writeln!(out, "</g>");
             }
@@ -1073,25 +1105,135 @@ impl Mat {
 // them would just move the long call sites into a struct nobody else
 // shares.
 #[allow(clippy::too_many_arguments)]
-fn emit_text(
+/// A shape's resolved text block: placement in the shape's LOCAL frame
+/// (inches, y-up) plus the styling the renderer paints it with — the
+/// single source of truth shared by [`emit_text`] (the SVG backend),
+/// the GUI's in-place editor overlay (GitHub #22), and tests, so the
+/// editing view cannot drift from the rendered result.
+///
+/// Placement follows the sheet's `Txt*` cells with the same defaults
+/// `emit_text` applies: pin at the shape's center, size = the shape's
+/// Width/Height, LocPin centered in the block. Styling resolves
+/// through the instance → master chain exactly like the renderer
+/// (Character `Font`/`Size`/`Color`/`Style`, Paragraph `HorzAlign`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextBlock {
+    /// `TxtPinX`/`TxtPinY` — the block's pin in the shape's local frame.
+    pub pin: (f64, f64),
+    /// `TxtWidth`/`TxtHeight` (clamped to ≥ 0.02 in like `emit_text`).
+    pub size: (f64, f64),
+    /// `TxtLocPinX`/`TxtLocPinY` — the pin's offset from the block's
+    /// lower-left corner.
+    pub loc_pin: (f64, f64),
+    /// `TxtAngle` (radians, local).
+    pub angle: f64,
+    /// Text-block insets (left, right, top, bottom) — Visio defaults
+    /// 0.1 in / 0.1 in / 0.0555 in / 0.0555 in.
+    pub insets: (f64, f64, f64, f64),
+    /// Line height in inches (`LineSpacing` × font size, default 1.2).
+    pub line_height: f64,
+    /// Character `Font` (family name) if any cell resolves one.
+    pub font: Option<String>,
+    /// Character `Size` in inches (0.13889 in = 10 pt); default 10 pt.
+    pub font_size: f64,
+    /// Resolved Character `Color` as `#rrggbb` (palette/theme aware).
+    pub color: String,
+    /// Character `Style` bit 1.
+    pub bold: bool,
+    /// Character `Style` bit 2.
+    pub italic: bool,
+    /// Paragraph `HorzAlign`: 0 left, 1 center (Visio default), 2
+    /// right, 3 justify.
+    pub halign: i32,
+    /// `VertAlign`: 1 top, 2 middle (default), 3 bottom.
+    pub valign: i32,
+}
+
+/// Resolve one shape's [`TextBlock`] through the instance → master
+/// chain (GitHub #22): the same cell reads and defaults `emit_text`
+/// performs, hoisted so the GUI overlay and the renderer agree.
+pub fn text_block(doc: &Document, page: &vsdx::Page, shape_id: i64) -> Option<TextBlock> {
+    let chain = dc_core::scope::shape_chain(doc, page.id, shape_id).ok()?;
+    let s = *chain.last()?;
+    let env = shape_env(doc, s, &chain);
+    let get = |n: &str| -> Option<f64> {
+        doc.resolve_cell(s, &chain, n)
+            .and_then(|c| cell_num(&c, &env))
+    };
+    let width = get("Width").unwrap_or(1.0);
+    let height = get("Height").unwrap_or(1.0);
+    Some(resolve_text_block(doc, s, &chain, width, height))
+}
+
+/// The shape's text block in PAGE coordinates (inches, y-up, origin
+/// bottom-left — [`shape_page_rect`]'s convention): the block's local
+/// rect mapped through the ancestor XForm chain. The shape's own
+/// `Angle`/`TxtAngle` are not applied (v1 of the in-place editor,
+/// GitHub #22 — a rotated shape yields the axis-aligned box).
+pub fn text_block_page_rect(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+) -> Option<(f64, f64, f64, f64)> {
+    let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
+    let chain = dc_core::scope::shape_chain(doc, page.id, shape_id).ok()?;
+    let s = *chain.last()?;
+    let env = shape_env(doc, s, &chain);
+    let get = |n: &str| -> Option<f64> {
+        doc.resolve_cell(s, &chain, n)
+            .and_then(|c| cell_num(&c, &env))
+    };
+    let width = get("Width").unwrap_or(1.0);
+    let height = get("Height").unwrap_or(1.0);
+    let tb = resolve_text_block(doc, s, &chain, width, height);
+    // Shape-local → parent-local (v1, unrotated: the same
+    // pin-anchored placement `shape_page_rect` uses for the shape
+    // rect) → page through the ancestor chain.
+    let (pin_x, pin_y) = (get("PinX").unwrap_or(0.0), get("PinY").unwrap_or(0.0));
+    let (loc_x, loc_y) = (
+        get("LocPinX").unwrap_or(width / 2.0),
+        get("LocPinY").unwrap_or(height / 2.0),
+    );
+    let m = ancestors_affine(doc, &chain, page_h);
+    let nested = chain.len() >= 2;
+    let corner = |x: f64, y: f64| -> (f64, f64) {
+        let iy = if nested { -y } else { page_h - y };
+        let (sx, sy) = m.apply(x, iy);
+        (sx, page_h - sy)
+    };
+    let (tx, ty) = tb.pin;
+    let (tw, th) = tb.size;
+    let (lpx, lpy) = tb.loc_pin;
+    let bx = pin_x - loc_x + tx - lpx;
+    let by = pin_y - loc_y + ty - lpy;
+    let pts = [
+        corner(bx, by),
+        corner(bx + tw, by),
+        corner(bx, by + th),
+        corner(bx + tw, by + th),
+    ];
+    let xs = pts.iter().map(|p| p.0);
+    let ys = pts.iter().map(|p| p.1);
+    let (min_x, max_x) = (
+        xs.clone().fold(f64::INFINITY, f64::min),
+        xs.fold(f64::NEG_INFINITY, f64::max),
+    );
+    let (min_y, max_y) = (
+        ys.clone().fold(f64::INFINITY, f64::min),
+        ys.fold(f64::NEG_INFINITY, f64::max),
+    );
+    Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+/// The cell resolution behind [`TextBlock`] — shared by `emit_text`
+/// (which paints from it) and the public [`text_block`] wrapper.
+fn resolve_text_block(
     doc: &Document,
     s: &Shape,
     chain: &[&Shape],
     width: f64,
     height: f64,
-    sx: f64,
-    sy: f64,
-    out: &mut String,
-) {
-    let Some(text) = s
-        .sheet
-        .text
-        .as_deref()
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-    else {
-        return;
-    };
+) -> TextBlock {
     let env = shape_env(doc, s, chain);
     let get = |n: &str| -> Option<f64> {
         doc.resolve_cell(s, chain, n)
@@ -1105,7 +1247,7 @@ fn emit_text(
     // Char.Size lives in the Character section's first row, stored in
     // inches (0.13889 in = 10 pt); the viewBox unit is inches, so the
     // value is the SVG font-size directly.
-    let size = char_size(doc, s, chain).unwrap_or(0.13888).max(0.02);
+    let font_size = char_size(doc, s, chain).unwrap_or(0.13888).max(0.02);
     // First Character row extras: color (palette/theme aware) and the
     // Style bitmask (1 = bold, 2 = italic). Both resolve per-cell through
     // `char_cell`, so a LangID-only instance row picks them up from the
@@ -1124,24 +1266,6 @@ fn emit_text(
     let style_bits = char_cell(doc, s, chain, "Style")
         .and_then(|c| c.numeric())
         .unwrap_or(0.0) as u32;
-    let font_attrs = format!(
-        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
-        s = size,
-        ff = font_family_attr(char_font(doc, s, chain).as_deref()),
-        // Document-supplied color text (e.g. a `#…` value) is attribute
-        // content — escape it like every other attribute.
-        c = escape_attr(&color),
-        b = if style_bits & 1 != 0 {
-            r#" font-weight="bold""#
-        } else {
-            ""
-        },
-        i = if style_bits & 2 != 0 {
-            r#" font-style="italic""#
-        } else {
-            ""
-        },
-    );
 
     // Paragraph alignment: Visio HorzAlign 0 = left, 1 = center, 2 = right,
     // 3 = justify (rendered as left). Absent cell → Visio default 1 (center).
@@ -1171,10 +1295,81 @@ fn emit_text(
     let ins_r = get("RightMargin").unwrap_or(0.1);
     let ins_t = get("TopMargin").unwrap_or(0.0555);
     let ins_b = get("BottomMargin").unwrap_or(0.0555);
-    let line_h = get("LineSpacing")
-        .map(|l| l * size)
-        .unwrap_or(size * 1.2)
-        .max(size);
+    let line_height = get("LineSpacing")
+        .map(|l| l * font_size)
+        .unwrap_or(font_size * 1.2)
+        .max(font_size);
+
+    TextBlock {
+        pin: (tx, ty),
+        size: (tw, th),
+        loc_pin: (get("TxtLocPinX").unwrap_or(tw / 2.0), get("TxtLocPinY").unwrap_or(th / 2.0)),
+        angle,
+        insets: (ins_l, ins_r, ins_t, ins_b),
+        line_height,
+        font: char_font(doc, s, chain),
+        font_size,
+        color,
+        bold: style_bits & 1 != 0,
+        italic: style_bits & 2 != 0,
+        halign,
+        valign,
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
+fn emit_text(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    width: f64,
+    height: f64,
+    sx: f64,
+    sy: f64,
+    skip: bool,
+    out: &mut String,
+) {
+    if skip {
+        return;
+    }
+    let Some(text) = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    else {
+        return;
+    };
+    let tb = resolve_text_block(doc, s, chain, width, height);
+    let (tx, ty) = tb.pin;
+    let (tw, th) = tb.size;
+    let angle = tb.angle;
+    let size = tb.font_size;
+    let color = tb.color;
+    let style_bits = (tb.bold as u32) | ((tb.italic as u32) << 1);
+    let font_attrs = format!(
+        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
+        s = size,
+        ff = font_family_attr(tb.font.as_deref()),
+        // Document-supplied color text (e.g. a `#…` value) is attribute
+        // content — escape it like every other attribute.
+        c = escape_attr(&color),
+        b = if style_bits & 1 != 0 {
+            r#" font-weight="bold""#
+        } else {
+            ""
+        },
+        i = if style_bits & 2 != 0 {
+            r#" font-style="italic""#
+        } else {
+            ""
+        },
+    );
+    let halign = tb.halign;
+    let valign = tb.valign;
+    let (ins_l, ins_r, ins_t, ins_b) = tb.insets;
+    let line_h = tb.line_height;
 
     // Greedy word wrap. Average glyph advance for proportional sans at
     // mixed case is ~0.5 em; Calibri runs slightly narrower.
@@ -1221,8 +1416,7 @@ fn emit_text(
     // corner is (tx - lpx, ty - lpy) — masters can pin off-center, so no
     // centered-pin assumption. In the emitted y-negated frame the top edge
     // is -(ty - lpy + th).
-    let lpx = get("TxtLocPinX").unwrap_or(tw / 2.0);
-    let lpy = get("TxtLocPinY").unwrap_or(th / 2.0);
+    let (lpx, lpy) = tb.loc_pin;
     let top_edge = -(ty - lpy + th);
     let first_baseline = match valign {
         1 => top_edge + ins_t + size * 0.8,                // top
@@ -2916,7 +3110,7 @@ mod tests {
         s.sheet.text = Some("hello".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
         assert!(
             out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
             "emitted text element: {out}"
@@ -2979,7 +3173,7 @@ mod tests {
         let s = shape_with_pinned_text(txt_angle_deg);
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, false, &mut out);
         let t = out
             .split("transform=\"")
             .nth(1)?
@@ -3454,5 +3648,119 @@ mod tests {
         let (doc, page) = page_fixture(vec![hidden_shape]);
         let svg = render_shape_layer(&doc, &page, 1, &[2], bounds).unwrap();
         assert!(!svg.contains("<g transform"), "hidden root must not draw: {svg}");
+    }
+
+    /// GitHub #22: the shared TextBlock resolution must agree with the
+    /// defaults `emit_text` has always used — absent `Txt*` cells pin
+    /// the block at the shape's center, size it to the shape, and take
+    /// the Visio built-ins (10 pt, black, centered, 0.1/0.0555 in
+    /// insets).
+    #[test]
+    fn text_block_defaults_match_emit_text() {
+        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0)]);
+        let tb = text_block(&doc, &page, 1).unwrap();
+        assert_eq!(tb.pin, (1.0, 0.5), "pin defaults to the shape's center");
+        assert_eq!(tb.size, (2.0, 1.0), "size defaults to Width/Height");
+        assert_eq!(tb.loc_pin, (1.0, 0.5));
+        assert_eq!(tb.angle, 0.0);
+        assert!((tb.font_size - 0.13888).abs() < 1e-9, "10 pt default");
+        assert_eq!(tb.color, "#000000");
+        assert!(!tb.bold && !tb.italic);
+        assert_eq!(tb.halign, 1, "Visio default HorzAlign = center");
+        assert_eq!(tb.valign, 2, "middle");
+        assert_eq!(tb.insets, (0.1, 0.1, 0.0555, 0.0555));
+        assert!((tb.line_height - tb.font_size * 1.2).abs() < 1e-12);
+        assert_eq!(tb.font, None);
+    }
+
+    /// Explicit `Txt*` cells and Character/Paragraph styling resolve
+    /// through the chain (GitHub #22 — the editor overlay and the
+    /// renderer read the same values).
+    #[test]
+    fn text_block_reads_txt_cells_and_style() {
+        let mut sh = shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0);
+        for (n, v) in [
+            ("TxtPinX", 1.5),
+            ("TxtPinY", 0.25),
+            ("TxtWidth", 1.0),
+            ("TxtHeight", 0.5),
+            ("TxtLocPinX", 0.5),
+            ("TxtLocPinY", 0.25),
+        ] {
+            sh.sheet.set_cell(n, Cell::value(format!("{v}")));
+        }
+        sh.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                cells: vec![
+                    ("Font".into(), Cell::value("Arial")),
+                    ("Size".into(), Cell::value("0.27778")), // 20 pt
+                    ("Color".into(), Cell::value("#FF0000")),
+                    ("Style".into(), Cell::value("1")), // bold
+                ],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        sh.sheet.children.push(SheetChild::Section(Section {
+            name: "Paragraph".into(),
+            rows: vec![Row {
+                cells: vec![("HorzAlign".into(), Cell::value("2"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let (doc, page) = page_fixture(vec![sh]);
+        let tb = text_block(&doc, &page, 1).unwrap();
+        assert_eq!(tb.pin, (1.5, 0.25));
+        assert_eq!(tb.size, (1.0, 0.5));
+        assert_eq!(tb.loc_pin, (0.5, 0.25));
+        assert_eq!(tb.font.as_deref(), Some("Arial"));
+        assert!((tb.font_size - 0.27778).abs() < 1e-12);
+        assert_eq!(tb.color, "#FF0000");
+        assert!(tb.bold && !tb.italic);
+        assert_eq!(tb.halign, 2);
+    }
+
+    /// The block's PAGE rect (the editor overlay's footprint): a
+    /// default block on an unrotated top-level shape is the shape's
+    /// own rect; an explicit smaller block lands pin-anchored
+    /// (GitHub #22).
+    #[test]
+    fn text_block_page_rect_maps_local_block() {
+        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0)]);
+        let (x, y, w, h) = text_block_page_rect(&doc, &page, 1).unwrap();
+        // Shape rect: pin (4,5) center → (3, 4.5)..(5, 5.5), y-up.
+        assert!((x - 3.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!((w - 2.0).abs() < 1e-9 && (h - 1.0).abs() < 1e-9);
+
+        // Off-center pin: TxtPin (1.5, 0.25) with a centered 1×0.5
+        // block → shape-local (1.0, 0.0)..(2.0, 0.5) → page
+        // (4.0, 4.5)..(5.0, 5.0) (pin − LocPin = (3.0, 4.5) offset).
+        let mut sh = shape_at(2, (4.0, 5.0), 2.0, 1.0, 0.0);
+        for (n, v) in [("TxtPinX", 1.5), ("TxtPinY", 0.25), ("TxtWidth", 1.0), ("TxtHeight", 0.5)] {
+            sh.sheet.set_cell(n, Cell::value(format!("{v}")));
+        }
+        let (doc, page) = page_fixture(vec![sh]);
+        let (x, y, w, h) = text_block_page_rect(&doc, &page, 2).unwrap();
+        assert!((x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!((w - 1.0).abs() < 1e-9 && (h - 0.5).abs() < 1e-9);
+    }
+
+    /// GitHub #22's no-ghost guarantee: `render_page_no_text` drops
+    /// exactly the named shape's text and keeps everything else.
+    #[test]
+    fn render_page_no_text_suppresses_only_that_shape() {
+        let mut a = shape_at(1, (2.0, 8.0), 1.0, 1.0, 0.0);
+        a.sheet.text = Some("alpha".into());
+        let mut b = shape_at(2, (6.0, 8.0), 1.0, 1.0, 0.0);
+        b.sheet.text = Some("beta".into());
+        let (doc, page) = page_fixture(vec![a, b]);
+        let full = render_page(&doc, &page).unwrap();
+        assert!(full.contains("alpha") && full.contains("beta"));
+        let skipped = render_page_no_text(&doc, &page, &[], 1).unwrap();
+        assert!(!skipped.contains("alpha"), "edited shape's text is gone");
+        assert!(skipped.contains("beta"), "other shapes keep their text");
+        assert!(skipped.contains("<g transform"), "geometry keeps rendering");
     }
 }

@@ -82,6 +82,11 @@ pub struct ShapeLayers {
     bboxes: HashMap<i64, (f64, f64, f64, f64)>,
     stale_bbox: std::collections::HashSet<i64>,
     gone: std::collections::HashSet<i64>,
+    /// The shape whose TEXT is currently suppressed in layer renders
+    /// (the in-place editor, #22). When it changes the store clears —
+    /// every retained SVG/texture either has the text baked in or
+    /// must gain it back; the refill is progressive/off-thread.
+    text_skip: Option<i64>,
 }
 
 impl ShapeLayers {
@@ -232,7 +237,15 @@ impl ShapeLayers {
         viewport: (f64, f64, f64, f64),
         group_edit: Option<i64>,
         hidden: &[i64],
+        skip_text: Option<i64>,
     ) -> (Vec<ShapeQuad>, Option<String>) {
+        // Text suppression toggle (#22): the retained SVGs (and landed
+        // textures) were serialized under the previous setting, so a
+        // change clears the store; refill is progressive and pooled.
+        if self.text_skip != skip_text {
+            self.text_skip = skip_text;
+            self.clear();
+        }
         self.set_page(page.id);
         let bucket = (ppi * 4.0).round().max(4.0) as u32; // ±0.25 ppi
         let mut quads = Vec::new();
@@ -334,7 +347,9 @@ impl ShapeLayers {
                 // changes re-post without re-serializing.
                 if entry.svg.is_none() || entry.svg_version != version {
                     let _s = crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
-                    match dc::svg::render_shape_layer(doc, page, shape.id, hidden, bbox) {
+                    match dc::svg::render_shape_layer_opts(
+                        doc, page, shape.id, hidden, bbox, skip_text,
+                    ) {
                         Ok(svg) => {
                             entry.svg = Some(svg);
                             entry.svg_version = version;

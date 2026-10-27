@@ -18,5 +18,6 @@ pub mod recent;
 pub mod ribbon;
 pub mod stencil;
 pub mod svgimg;
+pub mod textedit;
 pub mod theme;
 pub mod units;

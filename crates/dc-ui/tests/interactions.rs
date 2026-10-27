@@ -943,11 +943,14 @@ fn ribbon_zoom_buttons_zoom_and_refit() {
     );
 }
 
-/// GitHub #20: double-clicking a shape opens its linked text for
-/// editing (the F2 window reached by mouse, honoring EventDblClick — a
-/// placed shape has no formula, so Visio's default: open the editor).
+/// GitHub #20/#22: double-clicking a shape opens its linked text for
+/// IN-PLACE editing (honoring EventDblClick — a placed shape has no
+/// formula, so Visio's default: open the editor). The overlay — not a
+/// modal window — sits on the shape's text-block rect, the view zooms
+/// into the block and back out on exit, and the committed text lands
+/// through SetText (one undo step restores the pre-edit text).
 #[test]
-fn double_click_opens_text_editor_and_edits_shape_text() {
+fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
     let mut h = dblclick_harness_with_blank();
     h.run();
     let from = h.state().debug_master_cells()[0].1.center();
@@ -962,37 +965,62 @@ fn double_click_opens_text_editor_and_edits_shape_text() {
         None,
         "a fresh master instance carries no text"
     );
+    let zoom_before = h.state().debug_view_zoom();
 
     dbl_click_at(&mut h, to);
-    assert!(
-        h.query_all_by_label_contains("Edit Text").count() > 0,
-        "double-click opened the Edit Text window"
-    );
-
-    // Set the field's value the accesskit way (the stencil pane's
-    // search box is another TextInput, so scope the query to the
-    // window), then OK: the text lands through SetText (one undo step).
-    h.get_by_label_contains("Edit Text")
-        .get_by_role(egui::Role::MultilineTextInput)
-        .set_text_value_accesskit("Server");
     h.run();
     assert_eq!(
-        h.get_by_label_contains("Edit Text")
-            .get_by_role(egui::Role::MultilineTextInput)
-            .value()
-            .as_deref(),
-        Some("Server"),
-        "typed text visible in the field"
+        h.state().debug_text_edit(),
+        Some(h.state().debug_sel().unwrap()),
+        "double-click opened the in-place editor on the shape"
     );
-    h.get_by_label_contains("OK").click();
+    // The overlay — not a modal window — is up, at the shape's block.
+    let editor = h.get_by_role(egui::Role::MultilineTextInput);
+    let block = h
+        .state()
+        .debug_text_edit_rect()
+        .expect("text block resolves on screen");
+    let er = editor.rect();
+    assert!(
+        block.expand(6.0).contains_rect(er),
+        "editor {er:?} sits on the text block {block:?}"
+    );
+    // The edited text stays where it renders (owner report on #22):
+    // content vertically centered in the block per the default
+    // VertAlign — no jump to the block's top-left on entry.
+    assert!(
+        (er.center().y - block.center().y).abs() < 4.0,
+        "editor content anchored mid-block: editor {er:?} vs block {block:?}"
+    );
+    assert!(
+        h.state().debug_view_zoom() > zoom_before,
+        "entry zoomed into the block: {} -> {}",
+        zoom_before,
+        h.state().debug_view_zoom()
+    );
+
+    // Type the accesskit way, then click EMPTY canvas: the click
+    // outside ends the edit and commits (Visio semantics; one undo
+    // step — the retired dialog's commit path).
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Server");
+    h.run();
+    click_at(&mut h, to + egui::vec2(200.0, 200.0), egui::PointerButton::Primary);
     h.run();
     assert_eq!(
         h.state().debug_shape_text(sid).as_deref(),
         Some("Server"),
-        "OK committed the typed text"
+        "click-outside committed the typed text"
+    );
+    assert_eq!(h.state().debug_text_edit(), None, "editor closed");
+    assert!(
+        (h.state().debug_view_zoom() - zoom_before).abs() < 1e-4,
+        "view restored to the pre-edit zoom: {} vs {}",
+        h.state().debug_view_zoom(),
+        zoom_before
     );
 
-    // Ctrl+Z restores the shape's original (empty) text.
+    // One Ctrl+Z restores the shape's original (empty) text.
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
     assert_eq!(
@@ -1001,11 +1029,29 @@ fn double_click_opens_text_editor_and_edits_shape_text() {
         "undo restores the pre-edit text"
     );
 
+    // Esc exits the editor and KEEPS the typed text (Visio's live-text
+    // model; the module docs pin the decision).
+    dbl_click_at(&mut h, to);
+    h.run();
+    assert!(h.state().debug_text_edit().is_some());
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Router");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_text_edit(), None, "Esc closed the editor");
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Router"),
+        "Esc kept the typed text"
+    );
+
     // A double-click on empty page area (well off the shape) opens
     // nothing — folded in from the former no-op test; same harness.
     dbl_click_at(&mut h, to + egui::vec2(200.0, 200.0));
-    assert!(
-        h.query_all_by_label_contains("Edit Text").count() == 0,
+    assert_eq!(
+        h.state().debug_text_edit(),
+        None,
         "double-click on empty page must not open an editor"
     );
     assert_eq!(h.state().debug_shape_count(), 1);
