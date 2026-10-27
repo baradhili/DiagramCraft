@@ -29,14 +29,27 @@ fn titled_doc() -> (tempfile::TempDir, App) {
     (dir, App::with_doc(&path))
 }
 
-/// Click one of the prompt's buttons. The prompt window is centered;
-/// matching exact labels below the top bands keeps the ribbon/QAT
-/// (e.g. a "Save" up there) out of the match.
+/// Click one of the prompt's buttons, scoped to the prompt window's own
+/// rect (#97 section 4: was a hardcoded y-band that one ribbon
+/// relayout would break across all nine callers — the ribbon/QAT
+/// "Save" lives outside the window and is excluded by containment).
+/// Click one of the prompt's buttons, scoped to the prompt itself: the
+/// buttons sit in a tight band below the prompt title's node, within
+/// its horizontal span (#97 section 4 — was an absolute y>250 screen
+/// band that one shell relayout would break across all nine callers;
+/// the ribbon/QAT "Save" is nowhere near the title and never matches).
 fn click_prompt_button(h: &mut Harness<'_, App>, label: &str) {
+    let title = h.get_by_label_contains("Save changes to").rect();
     let node = h
         .get_all_by_label(label)
         .into_iter()
-        .find(|n| n.rect().min.y > 250.0)
+        .find(|n| {
+            let r = n.rect();
+            r.min.y >= title.max.y
+                && r.min.y < title.max.y + 80.0
+                && r.min.x >= title.min.x - 60.0
+                && r.max.x <= title.max.x + 60.0
+        })
         .unwrap_or_else(|| panic!("no {label} button in the close prompt"));
     node.click();
     h.run();

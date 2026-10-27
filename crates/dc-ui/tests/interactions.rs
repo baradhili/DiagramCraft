@@ -1505,12 +1505,13 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button — take the topmost "…Group…"
-    // row in the menu (below the ribbon bands). GitHub #78: that row is
-    // the Group ▸ flyout parent; the action lives in its submenu.
+    // The ribbon also has a Group button — scope the pick to the ctx
+    // menu's own rect (#97 §4: no hardcoded band). GitHub #78: that row
+    // is the Group ▸ flyout parent; the action lives in its submenu.
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_row = h
         .get_all_by_label_contains("Group")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Group ▸ flyout row in the context menu");
     group_row.click();
@@ -1518,8 +1519,11 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_item = h
         .get_all_by_label_contains("Group")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
-        .find(|n| !menu.expand(2.0).contains_rect(n.rect()))
+        .filter(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .next()
         .expect("Group item in the flyout submenu");
     group_item.click();
     h.run();
@@ -1599,8 +1603,9 @@ fn context_menu_container_wraps_and_carries_members() {
     );
     h.run();
     // Container opens a flyout (Visio 2016); the action is in it.
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Container")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Container flyout parent")
         .click();
@@ -1681,8 +1686,9 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
     // Open Hyperlink… from the context menu, add a row.
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Hyperlink")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Hyperlink… row in the context menu")
         .click();
@@ -2031,8 +2037,9 @@ fn format_pane_edits_cells_for_whole_selection() {
         egui::PointerButton::Secondary,
     );
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Format Shape")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Format Shape… row")
         .click();
@@ -2049,8 +2056,18 @@ fn format_pane_edits_cells_for_whole_selection() {
     // The FillPattern dropdown button reads "Solid  ›" (a pane label
     // "Solid" alone would be ambiguous) — take the button on the pane's
     // right column.
+    // Scope to the pane via its title node's relative geometry (the
+    // title strip itself does not contain the dropdown; #97 section 4
+    // replaces the old absolute min.x > 1050 band).
+    let pane = h.get_by_label_contains("Format Shape").rect();
     h.get_all_by_label_contains("Solid")
-        .filter(|n| n.rect().min.x > 1050.0)
+        .filter(|n| {
+            let r = n.rect();
+            r.min.x >= pane.min.x - 20.0
+                && r.max.x <= pane.max.x + 20.0
+                && r.min.y > pane.max.y
+                && r.min.y < pane.max.y + 300.0
+        })
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("FillPattern dropdown")
         .click();
@@ -2217,8 +2234,9 @@ fn hyperlink_dialog_close_dismisses_and_discards_draft() {
 
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Hyperlink")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Hyperlink… row")
         .click();
@@ -2261,8 +2279,9 @@ fn shape_data_dialog_close_dismisses() {
     click_at(&mut h, to, egui::PointerButton::Primary);
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Shape Data")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Shape Data… row")
         .click();
