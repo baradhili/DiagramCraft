@@ -774,13 +774,16 @@ impl App {
     /// The user's My Shapes folder (Visio convention, owner direction
     /// 2026-10-27): `<home>/Documents/My Shapes`. Created on demand —
     /// the Open Existing Stencil dialog starts there (#105 will grow
-    /// the auto-open default set out of it).
-    fn my_shapes_dir() -> std::path::PathBuf {
-        let dir = my_shapes_path(
-            std::env::var_os("HOME").map(std::path::PathBuf::from),
-        );
+    /// the auto-open default set out of it). None when no home
+    /// directory is known (neither HOME nor USERPROFILE): the dialog
+    /// then keeps its default start location and nothing is created.
+    fn my_shapes_dir() -> Option<std::path::PathBuf> {
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(std::path::PathBuf::from)?;
+        let dir = my_shapes_path(Some(home));
         let _ = std::fs::create_dir_all(&dir);
-        dir
+        Some(dir)
     }
 
     fn open_stencil(&mut self, path: PathBuf) {
@@ -898,10 +901,14 @@ impl App {
                     PendingKind::Open => rfd::FileDialog::new()
                         .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
                         .pick_file(),
-                    PendingKind::OpenStencil => rfd::FileDialog::new()
-                        .add_filter("Visio stencil", &["vssx"])
-                        .set_directory(Self::my_shapes_dir())
-                        .pick_file(),
+                    PendingKind::OpenStencil => {
+                        let mut dlg =
+                            rfd::FileDialog::new().add_filter("Visio stencil", &["vssx"]);
+                        if let Some(dir) = Self::my_shapes_dir() {
+                            dlg = dlg.set_directory(dir);
+                        }
+                        dlg.pick_file()
+                    }
                     PendingKind::SaveAs => rfd::FileDialog::new()
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
@@ -6910,12 +6917,12 @@ impl App {
             .show(ui, |ui| self.page_tabs(ui));
         // The pane lists the document's masters plus every open
         // stencil (#63): it stays up once a stencil is open, even for
-        // a master-less document.
+        // a master-less document — but it needs a document to render
+        // against (the pane body draws nothing without an editor).
         let pane_wanted = self
             .ed()
-            .map(|ed| !ed.doc.masters.is_empty())
-            .unwrap_or(false)
-            || !self.stencils.is_empty();
+            .map(|ed| !ed.doc.masters.is_empty() || !self.stencils.is_empty())
+            .unwrap_or(false);
         if pane_wanted {
             egui::Panel::left("stencil")
                 .frame(

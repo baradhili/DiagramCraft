@@ -298,6 +298,17 @@ fn index_rids(own: Vec<Option<String>>, floor: u32) -> Vec<String> {
         .collect()
 }
 
+/// The masters index part a save writes: the document's own when
+/// parsed, else a synthesized default for a retained package that
+/// shipped without one but gained masters by import (#84/CodeRabbit:
+/// without this, imported masters silently dropped on save).
+pub(crate) fn effective_masters_part(doc: &Document) -> Option<String> {
+    if let Some(mp) = &doc.masters_part {
+        return Some(mp.clone());
+    }
+    (!doc.masters.is_empty()).then(|| "visio/masters/masters.xml".to_string())
+}
+
 /// Per-master rIds of the masters index (`floor` = highest numeric rId
 /// in the source masters rels, so synthesis skips rIds a retained
 /// package already binds; 0 for fresh documents).
@@ -546,8 +557,8 @@ pub fn modeled_parts(doc: &Document) -> Vec<String> {
             v.push(p.part.clone());
         }
     }
-    if let Some(mp) = &doc.masters_part {
-        v.push(mp.clone());
+    if let Some(mp) = effective_masters_part(doc) {
+        v.push(mp);
     }
     for m in &doc.masters {
         if !m.part.is_empty() {
@@ -583,15 +594,45 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
                 parts.insert(p.part.clone(), page_xml(p).into_bytes());
             }
         }
-        if let Some(mp) = &doc.masters_part {
+        if let Some(mp) = effective_masters_part(doc) {
             parts.insert(
                 mp.clone(),
                 masters_index_xml_floored(
                     doc,
-                    rels_rid_floor(pkg.relationships(mp).iter().map(|(id, _, _)| id.as_str())),
+                    rels_rid_floor(pkg.relationships(&mp).iter().map(|(id, _, _)| id.as_str())),
                 )
                 .into_bytes(),
             );
+            // A synthesized index (the package shipped without a masters
+            // part) also needs its document relationship — the fresh
+            // path's generate_rels writes one; the retained path copies
+            // the source rels verbatim, so append it here.
+            if doc.masters_part.is_none() {
+                let doc_rels = rels_part_of(&doc.doc_part);
+                let mut entries = match parts.get(&doc_rels) {
+                    Some(bytes) => parse_rels(bytes),
+                    None => Vec::new(),
+                };
+                let have_masters = entries
+                    .iter()
+                    .any(|e| e.type_ == rel_type("masters"));
+                if !have_masters {
+                    let next = 1 + entries
+                        .iter()
+                        .filter_map(|e| {
+                            e.id.strip_prefix("rId")
+                                .and_then(|n| n.parse::<u32>().ok())
+                        })
+                        .max()
+                        .unwrap_or(0);
+                    entries.push(RelEntry {
+                        id: format!("rId{next}"),
+                        type_: rel_type("masters"),
+                        target: relative_target(&dir_of(&doc.doc_part), &mp),
+                    });
+                    parts.insert(doc_rels, build_rels(&entries));
+                }
+            }
         }
         for m in &doc.masters {
             if !m.part.is_empty() && pkg.part(&m.part).is_some() {
@@ -1110,6 +1151,7 @@ fn reconcile_page_parts(
 }
 
 const CT_MASTER: &str = "application/vnd.ms-visio.master+xml";
+const CT_MASTERS: &str = "application/vnd.ms-visio.masters+xml";
 
 /// Materialize/drop master parts for masters added or removed
 /// relative to the source package (ImportMaster, #84) — the
@@ -1122,9 +1164,10 @@ fn reconcile_master_parts(
     doc: &Document,
     pkg: &crate::opc::Package,
 ) {
-    let Some(mp) = &doc.masters_part else {
+    let Some(mp) = effective_masters_part(doc) else {
         return;
     };
+    let mp = &mp;
     let index_dir = dir_of(mp);
     let rels_part = rels_part_of(mp);
 
@@ -1196,6 +1239,14 @@ fn reconcile_master_parts(
             if !overrides.iter().any(|(p, _)| *p == name) {
                 overrides.push((name, CT_MASTER.to_string()));
             }
+        }
+        // The index part's own override: the fresh path's
+        // content_types_xml writes it; a synthesized index (the
+        // package shipped without one) reaches the retained path only
+        // through here.
+        let idx_name = format!("/{}", mp);
+        if !overrides.iter().any(|(p, _)| *p == idx_name) {
+            overrides.push((idx_name, CT_MASTERS.to_string()));
         }
         let built = build_content_types(&defaults, &overrides);
         defaults.clear();
