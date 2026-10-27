@@ -333,11 +333,58 @@ fn render_perf_stage_split() {
 
 /// #90 + #93 regression, in one sequential fn (the perf counters are
 /// process-global — parallel test threads would smear them): idle
-/// cached frames add ZERO page work, a drag-release MOVE re-renders
-/// nothing (the layer texture is translation-invariant), and a
-/// resize-handle commit re-renders exactly ONE layer (n=1 per stage)
-/// whether the page holds 500 or 2000 shapes — the flatness #93's
-/// verification asks for, guarded headlessly under the sync seam.
+/// The per-n leg of the flatness gate: a committed MOVE re-renders
+/// nothing and a resize-handle commit re-renders exactly one layer
+/// (n=1 per stage).
+fn move_and_resize_commits_are_flat(n: usize, tmp: &std::path::Path) {
+    let path = many_shape_fixture(tmp, n, 4);
+    let mut h = mount(App::with_doc(&path));
+    h.run();
+    h.run(); // fill + settle (sync seam: everything lands inline)
+
+    // --- move commit: O(0) ---
+    let center = h.state().debug_canvas_rect().center();
+    press(&mut h, center);
+    let base = perf::snapshot();
+    h.hover_at(center + egui::vec2(24.0, -18.0));
+    h.run();
+    release(&mut h, center + egui::vec2(24.0, -18.0));
+    let d = perf::diff(&base, &perf::snapshot());
+    for s in &d {
+        if s.stage.starts_with("page/") {
+            assert_eq!(s.count, 0, "{} ran {}× for a move (n={})", s.stage, s.count, n);
+        }
+    }
+
+    // --- resize commit: exactly one layer ---
+    h.state().debug_sel().expect("shape selected after move");
+    let corners = h.state().debug_sel_corners().expect("handles");
+    press(&mut h, corners[1]);
+    let base = perf::snapshot();
+    h.hover_at(corners[1] + egui::vec2(16.0, -12.0));
+    h.run();
+    release(&mut h, corners[1] + egui::vec2(16.0, -12.0));
+    let d = perf::diff(&base, &perf::snapshot());
+    for s in &d {
+        for stage in ["page/svg", "page/resolve", "page/parse", "page/render", "page/upload"] {
+            if s.stage == stage {
+                assert_eq!(
+                    s.count, 1,
+                    "{} ran {}× for a one-shape resize (n={}) — must be flat in page size",
+                    s.stage, s.count, n
+                );
+            }
+        }
+    }
+}
+
+/// #90/#93 acceptance gate: idle cached frames add ZERO page work, a
+/// drag-release MOVE re-renders nothing (the layer texture is
+/// translation-invariant), and a resize-handle commit re-renders
+/// exactly ONE layer (n=1 per stage) — the flatness #93's verification
+/// asks for, guarded headlessly under the sync seam. Runs at n=500 in
+/// the default (debug) suite; the n=2000 leg is the ignored twin below
+/// (debug builds pay superlinearly for the 4× shapes — #97 §4 split).
 #[test]
 fn idle_frames_are_free_and_commits_scale_with_the_shape() {
     // --- #90: idle frames skip the page pipeline entirely ---
@@ -366,45 +413,16 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
     }
 
     let tmp = tempfile::tempdir().unwrap();
-    for &n in &[500usize, 2000] {
-        let path = many_shape_fixture(tmp.path(), n, 4);
-        let mut h = mount(App::with_doc(&path));
-        h.run();
-        h.run(); // fill + settle (sync seam: everything lands inline)
+    move_and_resize_commits_are_flat(500, tmp.path());
+}
 
-        // --- move commit: O(0) ---
-        let center = h.state().debug_canvas_rect().center();
-        press(&mut h, center);
-        let base = perf::snapshot();
-        h.hover_at(center + egui::vec2(24.0, -18.0));
-        h.run();
-        release(&mut h, center + egui::vec2(24.0, -18.0));
-        let d = perf::diff(&base, &perf::snapshot());
-        for s in &d {
-            if s.stage.starts_with("page/") {
-                assert_eq!(s.count, 0, "{} ran {}× for a move (n={})", s.stage, s.count, n);
-            }
-        }
-
-        // --- resize commit: exactly one layer ---
-        h.state().debug_sel().expect("shape selected after move");
-        let corners = h.state().debug_sel_corners().expect("handles");
-        press(&mut h, corners[1]);
-        let base = perf::snapshot();
-        h.hover_at(corners[1] + egui::vec2(16.0, -12.0));
-        h.run();
-        release(&mut h, corners[1] + egui::vec2(16.0, -12.0));
-        let d = perf::diff(&base, &perf::snapshot());
-        for s in &d {
-            for stage in ["page/svg", "page/resolve", "page/parse", "page/render", "page/upload"] {
-                if s.stage == stage {
-                    assert_eq!(
-                        s.count, 1,
-                        "{} ran {}× for a one-shape resize (n={}) — must be flat in page size",
-                        s.stage, s.count, n
-                    );
-                }
-            }
-        }
-    }
+/// The n=2000 leg of the flatness gate — same asserts, off the default
+/// path. Run with the release recipe (alongside the stage-split bench):
+/// `cargo test -p dc-ui --release --test render_perf -- --ignored
+/// --nocapture`.
+#[test]
+#[ignore = "n=2000 twin of the flatness gate (release recipe; the n=500 leg runs by default)"]
+fn commits_scale_with_the_shape_at_2000() {
+    let tmp = tempfile::tempdir().unwrap();
+    move_and_resize_commits_are_flat(2000, tmp.path());
 }

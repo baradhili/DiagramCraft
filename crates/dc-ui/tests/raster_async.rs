@@ -230,11 +230,6 @@ fn rasters_run_off_thread_and_land_on_later_frames() {
         .map(|s| (s.count, s.ns))
         .unwrap_or((0, 0));
     assert!(parse.0 > 0, "layers did rasterize");
-    let mean_ms = parse.1 as f64 / parse.0 as f64 / 1e6;
-    assert!(
-        mean_ms < 50.0,
-        "mean page/parse {mean_ms:.1}ms — a whole-page parse ran"
-    );
     // The stencil pane (4 masters here) also filled in off-thread.
     pump_until(
         &mut h,
@@ -247,6 +242,32 @@ fn rasters_run_off_thread_and_land_on_later_frames() {
         &mut h,
         |a| a.debug_layer_count_for_test() == 1200,
         "all 1200 layers to land",
+    );
+
+    // No whole-page parse regime (#93), checked on the stable
+    // post-fill population: page/parse is exclusively per-layer (thumbs
+    // record under thumb/parse), so at least one parse per landed layer
+    // — and the tree cache legitimately re-parses evicted layers during
+    // fit-settle (observed ~1.7× layers), so the count is a floor, not
+    // an equality. The mean discriminates the actual failure mode —
+    // REPEATED monolith parses (a monolith of this document costs
+    // ~half a second; per-layer trees are sub-millisecond) — with two
+    // orders of magnitude of headroom over the per-layer cost.
+    let parse = perf::snapshot()
+        .into_iter()
+        .find(|s| s.stage == "page/parse")
+        .map(|s| (s.count, s.ns))
+        .unwrap_or((0, 0));
+    assert!(
+        parse.0 >= 1200,
+        "only {} page parses for 1200 layers — layers did not rasterize",
+        parse.0
+    );
+    let mean_ms = parse.1 as f64 / parse.0 as f64 / 1e6;
+    assert!(
+        mean_ms < 100.0,
+        "mean page/parse {mean_ms:.1}ms over {} parses — a whole-page parse regime ran",
+        parse.0
     );
 
     // --- #93 acceptance: a committed MOVE re-renders nothing. Drag
