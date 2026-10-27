@@ -6,8 +6,9 @@
 //! package — the real editing scenario.
 
 use dc_core::commands::{
-    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, MovePage, RemoveConnect, RemoveLayer,
-    RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, GroupShapes, MovePage, RemoveConnect,
+    RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell,
+    SetText, UngroupShape,
 };
 use dc_core::connects::{Connect, ConnectsHost, ConnectsOwner};
 use dc_core::layers::{layer_name, layer_rows};
@@ -2010,4 +2011,225 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
     assert_eq!(reloaded.doc.masters.len(), 2, "reload keeps the imported master");
     assert_eq!(reloaded.doc.masters.last().unwrap().name_u.as_deref(), Some("Star"));
     assert_eq!(reloaded.doc.pages[0].shapes.len(), 4, "placed shapes survive");
+}
+
+// ---------------------------------------------------------------------------
+// #97 §6 item 5: the apply error contract — every refused command
+// leaves the document untouched and pushes no history entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refused_commands_never_mutate_or_push_history() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    let shape_ids = |ed: &Editor| {
+        format!(
+            "{:?}",
+            ed.doc.pages[0]
+                .shapes
+                .iter()
+                .map(|s| (s.id, s.sub_shapes.len()))
+                .collect::<Vec<_>>()
+        )
+    };
+    let before = shape_ids(&ed);
+
+    // Unknown shape scope.
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 99 },
+            "PinX",
+            vsdx::model::Cell::value("1"),
+        ))
+        .is_err());
+    // Page position out of range.
+    assert!(ed.apply(MovePage { from: 0, to: 9 }).is_err());
+    // GroupShapes needs at least two members.
+    assert!(ed.apply(GroupShapes::new(page0, vec![1])).is_err());
+    // Ungrouping a shape with no members (a non-group) refuses.
+    assert!(ed.apply(UngroupShape::new(page0, 1)).is_err());
+    // Connection index out of range.
+    assert!(ed
+        .apply(RemoveConnect::new(ConnectsOwner::Page(page0), 9))
+        .is_err());
+
+    assert_eq!(
+        shape_ids(&ed),
+        before,
+        "a refused command mutated the document"
+    );
+    assert!(
+        ed.undo().unwrap().is_none(),
+        "a refused command pushed a history entry"
+    );
+}
+
+#[test]
+fn add_connect_on_a_partless_page_refuses() {
+    // A stencil-like page with no contents part would silently lose the
+    // connection on save; the command refuses instead.
+    let mut ed = Editor::new(bare_doc());
+    let page0 = ed.doc.pages[0].id;
+    let r = ed.apply(AddConnect {
+        owner: ConnectsOwner::Page(page0),
+        connect: Connect {
+            from_sheet: 1,
+            from_cell: "Begin".into(),
+            from_part: 3,
+            to_sheet: 2,
+            to_cell: "End".into(),
+            to_part: 3,
+            extra: Vec::new(),
+        },
+    });
+    assert!(r.is_err(), "partless page must refuse connection edits");
+    assert!(ed.undo().unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// #97 §6 item 6: GUARD/Protection refusals live in the command layer —
+// the GUI gestures AND `dc edit` inherit the same semantics. A plain
+// value write is refused; a write carrying a formula (ShapeSheet edit,
+// `--formula`, the cache refresh's F='Inh' snapshots) is the escape
+// hatch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Author a GUARDed Width the way shipped files carry it.
+    {
+        let sh = &mut ed.doc.pages[0].shapes[0];
+        let mut g = vsdx::model::Cell::value("2");
+        g.f = Some("GUARD(2 in)".into());
+        sh.sheet.set_cell("Width", g);
+    }
+
+    // Plain value write: refused, cell untouched, no history entry.
+    let err = ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        vsdx::model::Cell::value("3"),
+    ));
+    assert!(err.is_err(), "plain write to a GUARDed cell must refuse");
+    assert_eq!(
+        ed.doc.pages[0].shapes[0]
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric()),
+        Some(2.0),
+        "refused write changed the guarded cell"
+    );
+    assert!(ed.undo().unwrap().is_none());
+
+    // A formula write is the escape hatch (ShapeSheet edit / --formula).
+    let mut f = vsdx::model::Cell::default();
+    f.f = Some("Width*2".into());
+    ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        f,
+    ))
+    .unwrap();
+
+    // An F='Inh' cache-refresh write lands under the guard too (the
+    // flattened-group refresh re-evaluates guarded master formulas).
+    let mut inh = vsdx::model::Cell::default();
+    inh.v = Some("2".into());
+    inh.f = Some("Inh".into());
+    ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        inh,
+    ))
+    .unwrap();
+}
+
+#[test]
+fn set_cell_refuses_locked_axes_via_protection_rows() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Author LockHeight in the Protection section (instance side).
+    {
+        let sh = &mut ed.doc.pages[0].shapes[0];
+        sh.sheet.children.push(vsdx::model::SheetChild::Section(
+            vsdx::model::Section {
+                name: "Protection".into(),
+                rows: vec![vsdx::model::Row {
+                    cells: vec![(
+                        "LockHeight".into(),
+                        vsdx::model::Cell::value("1"),
+                    )],
+                    ..vsdx::model::Row::default()
+                }],
+                ..vsdx::model::Section::default()
+            },
+        ));
+    }
+
+    let scope = dc_core::Scope::Shape { page: page0, shape: 1 };
+    // The locked axis refuses.
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            scope.clone(),
+            "Height",
+            vsdx::model::Cell::value("3"),
+        ))
+        .is_err());
+    // The unlocked axis still writes.
+    ed.apply(dc_core::commands::SetCell::new(
+        scope.clone(),
+        "Width",
+        vsdx::model::Cell::value("4"),
+    ))
+    .unwrap();
+    // Writing the lock cell itself is allowed — that is how a shape is
+    // unlocked.
+    ed.apply(dc_core::commands::SetCell::new(
+        scope,
+        "LockHeight",
+        vsdx::model::Cell::value("0"),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn master_side_guards_and_locks_protect_instances() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Shape 2 (BoxFromMaster) inherits from master 7: a GUARD in the
+    // master's Width protects the instance the same way the GUI's
+    // gesture-level check treats it.
+    {
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        let mut g = vsdx::model::Cell::value("1");
+        g.f = Some("GUARD(1 in)".into());
+        root.sheet.set_cell("Width", g);
+    }
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 2 },
+            "Width",
+            vsdx::model::Cell::value("9"),
+        ))
+        .is_err());
+    // LockWidth on the master locks the instance's axis as well.
+    {
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        root.sheet.set_cell("LockWidth", vsdx::model::Cell::value("1"));
+    }
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 2 },
+            "Width",
+            vsdx::model::Cell::value("9"),
+        ))
+        .is_err());
 }
