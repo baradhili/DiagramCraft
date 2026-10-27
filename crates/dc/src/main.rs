@@ -211,7 +211,8 @@ fn main() -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let pkg = vsdx::Package::open(path).context("opening package")?;
+    let pkg = vsdx::Package::open(path)
+        .with_context(|| format!("opening {}", path.display()))?;
     println!("OPC package: {}", path.display());
     for name in pkg.part_names() {
         let ct = pkg.content_type_of(name).unwrap_or_default();
@@ -221,7 +222,7 @@ fn info(path: &Path) -> Result<()> {
 }
 
 fn inspect(path: &Path) -> Result<()> {
-    let doc = vsdx::parse::parse(path)?;
+    let doc = vsdx::parse::parse(path).with_context(|| format!("opening {}", path.display()))?;
     println!(
         "document: {} page(s), {} master(s), {} stylesheet(s), {} color(s)",
         doc.pages.len(),
@@ -307,30 +308,49 @@ fn print_shape(doc: &vsdx::Document, s: &vsdx::Shape, chain: &[&vsdx::Shape], in
 }
 
 fn render(path: &Path, out: &Path, page_no: Option<usize>, masters: bool) -> Result<()> {
-    let doc = vsdx::parse::parse(path)?;
-    let svg = if masters {
+    let doc = vsdx::parse::parse(path).with_context(|| format!("opening {}", path.display()))?;
+    if masters {
         if doc.masters.is_empty() {
             bail!("document has no masters");
         }
-        svg::render_masters(&doc)?
-    } else {
-        if doc.pages.is_empty() {
-            bail!("document has no pages");
-        }
-        let idx = match page_no {
-            Some(n) if n >= 1 && n <= doc.pages.len() => n - 1,
-            Some(n) => bail!("page {n} out of range (1..={})", doc.pages.len()),
-            None => 0,
-        };
-        svg::render_page(&doc, &doc.pages[idx])?
+        let svg = svg::render_masters(&doc)?;
+        std::fs::write(out, svg).with_context(|| format!("writing {}", out.display()))?;
+        println!("wrote {}", out.display());
+        return Ok(());
+    }
+    if doc.pages.is_empty() {
+        bail!("document has no pages");
+    }
+    let indices: Vec<usize> = match page_no {
+        Some(n) if n >= 1 && n <= doc.pages.len() => vec![n - 1],
+        Some(n) => bail!("page {n} out of range (1..={})", doc.pages.len()),
+        // No --page: every page (the help text's "page N appends -N for
+        // multi-page docs" contract — previously page 1 was rendered
+        // and the rest silently dropped).
+        None => (0..doc.pages.len()).collect(),
     };
-    std::fs::write(out, svg).with_context(|| format!("writing {}", out.display()))?;
-    println!("wrote {}", out.display());
+    let numbered = indices.len() > 1;
+    for idx in indices {
+        let svg = svg::render_page(&doc, &doc.pages[idx])?;
+        let target = if numbered {
+            let mut name = out.file_stem().unwrap_or_default().to_os_string();
+            name.push(format!("-{}", idx + 1));
+            if let Some(ext) = out.extension() {
+                name.push(".");
+                name.push(ext);
+            }
+            out.with_file_name(name)
+        } else {
+            out.to_path_buf()
+        };
+        std::fs::write(&target, svg).with_context(|| format!("writing {}", target.display()))?;
+        println!("wrote {}", target.display());
+    }
     Ok(())
 }
 
 fn roundtrip(path: &Path, out: &Path, verify: bool) -> Result<()> {
-    let doc = vsdx::parse::parse(path)?;
+    let doc = vsdx::parse::parse(path).with_context(|| format!("opening {}", path.display()))?;
     vsdx::write::save(&doc, out)?;
     println!("wrote {}", out.display());
     if verify {

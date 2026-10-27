@@ -487,4 +487,95 @@ mod tests {
         ed.redo().unwrap();
         assert!(vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, 2).is_some());
     }
+
+    /// #97 §4 relocation: the group-cache-refresh semantics (formerly a
+    /// 340-line kittest) tested at the command layer — the app's resize
+    /// commit is SetCells for the new dims + group_cache_refresh in one
+    /// Macro, and that Macro is applied directly here.
+    #[test]
+    fn group_cache_refresh_reevaluates_inh_caches_through_user_indirections() {
+        use crate::group_fixture::taskg_editor;
+        let (mut ed, page, [root, sub, icon]) = taskg_editor();
+        let num = |ed: &dc_core::Editor, id: i64, k: &str| {
+            vsdx::model::find_shape_by_id(&ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, id)
+                .unwrap()
+                .sheet
+                .cell(k)
+                .and_then(|c| c.numeric())
+                .unwrap_or(f64::NAN)
+        };
+
+        // Resize 1×0.5 → 1.3×0.7 the way the app commits it.
+        let (kx, ky) = (1.3f64, 1.4f64);
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(SetCell::new(
+                Scope::Shape { page, shape: root },
+                "Width",
+                Cell::value("1.3"),
+            )),
+            Box::new(SetCell::new(
+                Scope::Shape { page, shape: root },
+                "Height",
+                Cell::value("0.7"),
+            )),
+        ];
+        cmds.extend(group_cache_refresh(&ed.doc, page, root, kx, ky));
+        ed.apply(dc_core::Macro::new("resize shape", cmds)).unwrap();
+        let (w1, h1) = (1.3f64, 0.7f64);
+
+        // Sub caches scaled with the group.
+        assert!((num(&ed, sub, "Width") - kx).abs() < 1e-3, "sub Width: {}", num(&ed, sub, "Width"));
+        assert!((num(&ed, sub, "PinX") - 0.5 * kx).abs() < 1e-3, "sub PinX: {}", num(&ed, sub, "PinX"));
+        // Sub geometry row caches scaled too.
+        let s = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, sub).unwrap();
+        let geo = &s.sheet.sections_named("Geometry")[0];
+        let far_x = geo.rows.iter()
+            .find(|r| r.ix == 3).unwrap()
+            .cell("X").and_then(|c| c.numeric()).unwrap();
+        assert!((far_x - 1.0 * kx).abs() < 1e-3, "sub geometry X scaled: {far_x}");
+
+        // The Txt block followed, including the cells the User
+        // indirection hides: TxtPinX = GUARD(User.TxtPinX) with
+        // User.TxtPinX = Width/2 must re-center.
+        assert!((num(&ed, root, "TxtWidth") - w1).abs() < 1e-3, "TxtWidth: {}", num(&ed, root, "TxtWidth"));
+        assert!((num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3, "TxtPinX: {}", num(&ed, root, "TxtPinX"));
+        assert!((num(&ed, root, "TxtPinY") - h1 / 2.0).abs() < 1e-3, "TxtPinY: {}", num(&ed, root, "TxtPinY"));
+        assert!((num(&ed, root, "TxtLocPinX") - w1 / 2.0).abs() < 1e-3, "TxtLocPinX: {}", num(&ed, root, "TxtLocPinX"));
+        // Refreshed cells keep F='Inh' — a later resize must refresh
+        // them again, not meet frozen literals.
+        let s = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, root).unwrap();
+        assert_eq!(s.sheet.cell("TxtPinX").unwrap().f.as_deref(), Some("Inh"));
+
+        // The fixed-size icon kept its GUARD'ed size and X offset, while
+        // PinY = GUARD(Sheet.1!User.IconY) with
+        // User.IconY = Height - User.InfoPanelHeight/2 re-evaluated at
+        // the new height (the instance's cached User.IconY must not
+        // freeze it).
+        assert!((num(&ed, icon, "Width") - 0.157480).abs() < 1e-6, "icon Width: {}", num(&ed, icon, "Width"));
+        assert!((num(&ed, icon, "PinX") - 0.1).abs() < 1e-6, "icon PinX: {}", num(&ed, icon, "PinX"));
+        assert!((num(&ed, icon, "PinY") - (h1 - 0.1)).abs() < 1e-3, "icon PinY: {}", num(&ed, icon, "PinY"));
+
+        // A SECOND resize refreshes again (the Inh markers survived).
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(SetCell::new(
+                Scope::Shape { page, shape: root },
+                "Width",
+                Cell::value("1.56"),
+            )),
+        ];
+        cmds.extend(group_cache_refresh(&ed.doc, page, root, 1.56 / w1, 1.0));
+        ed.apply(dc_core::Macro::new("resize shape", cmds)).unwrap();
+        assert!((num(&ed, root, "TxtPinX") - 0.78).abs() < 1e-3, "second refresh: {}", num(&ed, root, "TxtPinX"));
+
+        // Each undo restores one resize's whole refresh; two undos
+        // return to the authored caches.
+        ed.undo().unwrap();
+        assert!((num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3, "undo #1");
+        ed.undo().unwrap();
+        assert!((num(&ed, sub, "Width") - 1.0).abs() < 1e-6, "undo restored sub cache");
+        assert!((num(&ed, root, "TxtPinX") - 0.5).abs() < 1e-6, "undo restored TxtPinX");
+        assert!((num(&ed, icon, "PinY") - 0.4).abs() < 1e-6, "undo restored icon PinY");
+    }
 }

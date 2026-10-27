@@ -53,6 +53,7 @@ fn icon_paints_pixels_inside_content_row() {
             RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
         )],
     )];
+    // Bare content row (no theme, no panel chrome).
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
         .build_ui(|ui| {
@@ -67,17 +68,10 @@ fn icon_paints_pixels_inside_content_row() {
         n > 800,
         "content-row Paste painted only {n} px — icon missing"
     );
-}
 
-#[test]
-fn icon_paints_with_theme_and_panel() {
-    // Same structure as the shell: theme installed, panel with frame.
-    let groups = vec![Group::new(
-        "Clipboard",
-        vec![big(
-            RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
-        )],
-    )];
+    // Same row inside the shell's chrome: theme installed and a panel
+    // frame around it (folded in from the former theme+panel test; the
+    // theme path is what every full-shell harness exercises).
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
         .build_ui(|ui| {
@@ -126,20 +120,4 @@ fn icon_paints_in_full_shell() {
         n > 2000,
         "full-shell ribbon band has only {n} ink px — icons missing"
     );
-}
-
-#[test]
-#[ignore]
-fn dump_shell_render() {
-    let mut app = dc_ui::app::App::with_blank();
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1280.0, 800.0))
-        .build_ui(move |ui| {
-            dc_ui::theme::install(ui.ctx());
-            app.draw(ui);
-        });
-    h.run();
-    h.run();
-    let img = h.render().unwrap();
-    img.save("/tmp/shell_render.png").unwrap();
 }

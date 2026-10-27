@@ -206,6 +206,9 @@ impl crate::Command for SetCell {
         format!("set {}:{} = {:?}", self.scope, self.name, self.new.v)
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        if let Some(reason) = protection_refusal(doc, &self.scope, &self.name, &self.new) {
+            bail!("{reason}");
+        }
         let (name, new) = (self.name.clone(), self.new.clone());
         let s = sheet_mut(doc, &self.scope)?;
         self.old = s.cell(&name).cloned();
@@ -222,6 +225,99 @@ impl crate::Command for SetCell {
         }
         Ok(())
     }
+}
+
+/// The Protection lock that guards `cell`, if any (Visio's geometry
+/// locks — the same four the canvas gestures honor).
+fn lock_for(cell: &str) -> Option<&'static str> {
+    Some(match cell {
+        "Width" => "LockWidth",
+        "Height" => "LockHeight",
+        "BeginX" | "BeginY" => "LockBegin",
+        "EndX" | "EndY" => "LockEnd",
+        _ => return None,
+    })
+}
+
+/// A Protection flag is on when its cell (sheet-level or a Protection
+/// section cell/row) resolves non-zero — on the instance or its master
+/// source.
+fn sheet_locked(sheet: &vsdx::model::Sheet, name: &str) -> bool {
+    let on = |c: Option<&Cell>| {
+        c.and_then(|c| c.numeric())
+            .map(|v| v != 0.0)
+            .unwrap_or(false)
+    };
+    on(sheet.cell(name))
+        || sheet
+            .sections_named("Protection")
+            .iter()
+            .any(|sec| on(sec.cell(name)) || sec.rows.iter().any(|r| on(r.cell(name))))
+}
+
+/// The effective formula for `name` on `sh`: the instance cell's own
+/// formula, or — when the instance carries only an `F='Inh'` snapshot
+/// (`resolve_cell` prefers the instance cell for xform cells) — the
+/// master-source formula behind it. A `GUARD(` there guards the
+/// instance even though the snapshot's `V` sits in front of it.
+pub fn effective_formula(
+    doc: &Document,
+    sh: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    name: &str,
+) -> Option<String> {
+    let mut f = doc
+        .resolve_cell(sh, chain, name)
+        .and_then(|c| c.f.clone())
+        .filter(|f| f != "Inh");
+    if f.is_none() {
+        f = doc
+            .instance_source(sh, chain)
+            .and_then(|m| m.sheet.cell(name))
+            .and_then(|c| c.f.clone())
+            .filter(|f| f != "Inh");
+    }
+    f
+}
+
+/// Visio protection semantics shared by every surface (#97 §6 item 6):
+/// a **plain value** write to a shape cell is refused when the cell —
+/// resolved instance → master — carries a `GUARD(...)` formula, or the
+/// Protection section locks the cell's axis (LockWidth/Height/Begin/
+/// End, on the instance or its master). Writes that carry a formula
+/// are the documented escape hatch and always allowed: ShapeSheet
+/// editing (the CLI's `--formula`) and the flattened-group cache
+/// refresh's `F='Inh'` snapshots legitimately land under guarded
+/// master formulas. Before this lived only in the GUI's gestures,
+/// `dc edit --cell` silently clobbered every protection the GUI
+/// honored.
+pub fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell) -> Option<String> {
+    if new.f.is_some() {
+        return None;
+    }
+    let Scope::Shape { page, shape } = scope else {
+        return None;
+    };
+    let p = doc.pages.iter().find(|p| p.id == *page)?;
+    let sh = vsdx::model::find_shape_by_id(&p.shapes, *shape)?;
+    let chain = crate::scope::shape_chain(doc, *page, *shape).ok()?;
+    if let Some(f) = effective_formula(doc, sh, &chain, name) {
+        let guard = f.trim().trim_start_matches('=').trim();
+        if guard.to_ascii_uppercase().starts_with("GUARD(") {
+            return Some(format!("{name} is GUARDed ({f}) — edit the formula to change it"));
+        }
+    }
+    if let Some(lock) = lock_for(name) {
+        let locked = sheet_locked(&sh.sheet, lock)
+            || doc
+                .instance_source(sh, &chain)
+                .map(|src| sheet_locked(&src.sheet, lock))
+                .unwrap_or(false);
+        if locked {
+            return Some(format!("{lock} is set (Protection section) — {name} is locked"));
+        }
+    }
+    None
 }
 
 /// Set one cell of a section row (e.g. a geometry row coordinate).

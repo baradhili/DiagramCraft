@@ -6,6 +6,8 @@
 pub mod app;
 pub mod canvas;
 pub mod cmd;
+#[doc(hidden)]
+pub mod group_fixture;
 pub mod icontex;
 mod layers;
 pub mod os_theme;

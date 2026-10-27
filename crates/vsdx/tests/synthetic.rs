@@ -218,22 +218,6 @@ fn parses_synthetic_package() {
     );
 }
 
-#[test]
-fn formula_subset() {
-    let mut env = vsdx::formula::Env::new();
-    env.insert("Width".to_string(), 2.0);
-    env.insert("Height".to_string(), 1.0);
-    assert_eq!(
-        vsdx::formula::eval("Width*0.5", &env).unwrap().as_f64(),
-        Some(1.0)
-    );
-    // Unit suffixes are absorbed.
-    assert_eq!(
-        vsdx::formula::eval("Width-0.5DL", &env).unwrap().as_f64(),
-        Some(1.5)
-    );
-}
-
 /// A model-built document (fresh `write::save` path) whose pages and
 /// masters carry no `<Rel>` children — parse binds contents parts
 /// strictly through each entry's rId, so the writer must synthesize

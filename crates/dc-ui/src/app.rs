@@ -1811,6 +1811,14 @@ impl App {
             shape: sid,
         };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // Real 1D masters commonly derive PinX/PinY through
+        // GUARD((BeginX+EndX)/2) — a formula-driven pin must not be
+        // literal-written (the command layer now refuses it, which
+        // would abort the whole move Macro); the endpoints carry the
+        // geometry, exactly as apply_line_move's guard documents.
+        let formula_pinned = |n: &str| {
+            dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_some()
+        };
         let cmds: Vec<Box<dyn dc_core::Command>> = [
             ("BeginX", bx + dx),
             ("BeginY", by + dy),
@@ -1820,6 +1828,7 @@ impl App {
             ("PinY", py + dy),
         ]
         .into_iter()
+        .filter(|(n, _)| !matches!(*n, "PinX" | "PinY") || !formula_pinned(n))
         .map(|(n, v)| {
             Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
         })
@@ -2241,7 +2250,8 @@ impl App {
     // -- shell panels -----------------------------------------------------
 
     fn title_band(&mut self, ui: &mut Ui) {
-        // Visio 2016: green band, tiny QAT (Save/Undo/Redo + chevron) at
+        // Visio 2016-style accent band (owner-selected warm gray,
+// 2026-10-27), tiny QAT (Save/Undo/Redo + chevron) at
         // the far left, document title centered. The brand green band
         // stays green in dark mode (GitHub #52).
         let t = theme::shell_tokens(ui.visuals());
@@ -7978,6 +7988,28 @@ mod tests {
             app.debug_recent().is_empty(),
             "a failed open must not record anything"
         );
+    }
+
+    #[test]
+    fn corrupt_package_open_surfaces_an_error_and_pollutes_nothing() {
+        // #97 item 8: a truncated/garbage .vsdx must degrade to a
+        // status error — never a panic — and leave the session state
+        // (recent files, the open document) untouched.
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("corrupt.vsdx");
+        std::fs::write(&bad, b"this is not a zip archive at all").unwrap();
+        let mut app = App::with_blank();
+        app.load(bad.clone());
+        assert!(
+            app.status.starts_with("open failed"),
+            "status = {}",
+            app.status
+        );
+        assert!(
+            !app.debug_recent().iter().any(|p| p.ends_with("corrupt.vsdx")),
+            "a corrupt open must not be recorded in recent files"
+        );
+        assert!(app.ed.is_some(), "the previously open document survives");
     }
 
     #[test]

@@ -3,10 +3,11 @@
 
 use egui::{Color32, Style, Visuals};
 
-/// Visio brand green (2016 accent).
-pub const ACCENT: Color32 = Color32::from_rgb(33, 115, 70);
-/// Darker accent for hover/pressed states.
-pub const ACCENT_DARK: Color32 = Color32::from_rgb(23, 84, 51);
+/// The title/File/rail band accent — owner-selected warm gray
+/// #817e7b (2026-10-27, replacing the Visio 2016 brand green).
+pub const ACCENT: Color32 = Color32::from_rgb(0x81, 0x7e, 0x7b);
+/// Darker accent for hover/pressed states (the band accent at ~72%).
+pub const ACCENT_DARK: Color32 = Color32::from_rgb(92, 90, 88);
 /// Ribbon content background (Office 2016 light shell).
 pub const RIBBON_BG: Color32 = Color32::from_rgb(245, 245, 245);
 /// Tab strip + ribbon content surface (Office 2016 "Colorful": white
@@ -29,8 +30,8 @@ pub const DESK: Color32 = Color32::from_rgb(200, 200, 200);
 pub const PAGE_EDGE: Color32 = Color32::from_rgb(140, 140, 140);
 /// Selection frame + handles (Visio 2016 selection is a thin blue).
 pub const SELECTION: Color32 = Color32::from_rgb(0, 112, 192);
-/// Status bar: light gray band with dark text (Visio 2016; the green
-/// is only the title bar and File tab).
+/// Status bar: light gray band with dark text (Visio 2016; the accent
+/// fill is only the title bar and File tab).
 pub const STATUS_BG: Color32 = Color32::from_rgb(238, 238, 238);
 pub const STATUS_TEXT: Color32 = Color32::from_rgb(60, 60, 60);
 /// Stencil pane background.
@@ -42,10 +43,10 @@ pub const RULER_TEXT: Color32 = Color32::from_rgb(90, 90, 90);
 /// Page-tab strip.
 pub const TABS_BG: Color32 = Color32::from_rgb(225, 225, 225);
 pub const TAB_ACTIVE: Color32 = Color32::from_rgb(255, 255, 255);
-/// Backstage (File screen) rail: the selected destination's band and
-/// dimmed command text on the green rail (Visio 2010 three-band rail,
-/// GitHub #55).
-pub const RAIL_SELECTED: Color32 = Color32::from_rgb(44, 145, 91);
+/// Backstage (File screen) rail: the selected destination's band on
+/// the accent rail (Visio 2010 three-band rail, GitHub #55) — the
+/// band accent's darker companion so it reads on the band fill.
+pub const RAIL_SELECTED: Color32 = Color32::from_rgb(92, 90, 88);
 pub const RAIL_DISABLED: Color32 = Color32::from_gray(160);
 /// Backstage page headline text.
 pub const BACK_TITLE: Color32 = Color32::from_rgb(50, 50, 50);
@@ -62,8 +63,9 @@ pub const CARD_BG: Color32 = Color32::WHITE;
 /// it stays white in dark mode (the document, not the shell).
 #[derive(Clone, Copy)]
 pub struct ShellTokens {
-    /// The green title/File/rail band fill — the brand green in both
-    /// modes (Office keeps brand bands in dark themes).
+    /// The title/File/rail band fill — the owner-selected warm gray
+    /// (#817e7b) in both modes (Office keeps brand bands in dark
+    /// themes).
     pub accent_band: Color32,
     /// Accent for lines and small elements (tab underline, launcher
     /// hover, armed stencil border): lifted in dark so it reads on
@@ -156,11 +158,11 @@ pub const LIGHT: ShellTokens = ShellTokens {
 };
 
 /// The dark mapping: neutral surfaces in the Office dark family with
-/// the same green accents lifted to read on them (GitHub #52).
+/// the same warm-gray accents lifted to read on them (GitHub #52).
 pub const DARK: ShellTokens = ShellTokens {
     accent_band: ACCENT,
-    accent: Color32::from_rgb(56, 167, 110),
-    accent_dark: Color32::from_rgb(98, 200, 145),
+    accent: Color32::from_rgb(178, 175, 172),
+    accent_dark: Color32::from_rgb(203, 199, 196),
     ribbon_bg: Color32::from_gray(43),
     ribbon_content: Color32::from_gray(54),
     ribbon_edge: Color32::from_gray(86),

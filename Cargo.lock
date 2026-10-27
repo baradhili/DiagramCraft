@@ -1025,6 +1025,7 @@ dependencies = [
  "anyhow",
  "clap",
  "dc-core",
+ "tempfile",
  "vsdx",
 ]
 

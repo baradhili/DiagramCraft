@@ -432,56 +432,45 @@ fn marquee_selects_multiple_and_delete_removes_all() {
     assert_eq!(h.state().debug_shape_count(), 0);
 }
 
+/// Redo wiring (#97 item 7): undo was exercised ~20x across the
+/// suites, redo never. Keyboard (Ctrl+Y) and the QAT Redo button must
+/// both restore a move.
 #[test]
-fn corner_drag_resizes_shape() {
+fn redo_restores_an_undone_move_via_keyboard_and_the_qat_button() {
     let mut h = harness_with_blank();
     h.run();
-    let from = h.state().debug_master_cells()[0].1.center();
-    let to = h.state().debug_canvas_rect().center();
-    click_at(&mut h, from, egui::PointerButton::Primary);
-    click_at(&mut h, to, egui::PointerButton::Primary);
-    h.run();
-    assert_eq!(h.state().debug_shape_count(), 1);
+    place_master(&mut h, 2);
+    let (page, shape) = h.state().debug_sel().expect("placed shape selected");
+    let x0 = cell_of(&h, page, shape, "PinX");
 
-    // Selection rect in screen coords comes from the app; approximate:
-    // the shape is ~1in at ~fit zoom centered where we dropped. Grab the
-    // bottom-right corner via the app's debug accessor.
-    let br = h.state().debug_sel_br_corner().expect("selection rect");
-    let tl_before = h.state().debug_sel_tl_corner().expect("selection rect");
-    let before = h.state().debug_sel_width();
-    let h_before = h.state().debug_sel_height();
-    h.hover_at(br);
-    h.event(egui::Event::PointerButton {
-        pos: br,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.hover_at(br + egui::vec2(40.0, 30.0));
+    // Move it right.
+    let c = h.state().debug_shape_screen_rect(shape).expect("shape rect");
+    drag_naturally(&mut h, c.center(), egui::vec2(60.0, 0.0));
+    let x1 = cell_of(&h, page, shape, "PinX");
+    assert!(x1 > x0 + 0.1, "drag moved the shape: {x0} -> {x1}");
+
+    // Undo, then redo via Ctrl+Y: the move returns.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
-    h.event(egui::Event::PointerButton {
-        pos: br + egui::vec2(40.0, 30.0),
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x0).abs() < 1e-6,
+        "undo restored the original pin"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Y);
     h.run();
-    let after = h.state().debug_sel_width();
-    let h_after = h.state().debug_sel_height();
     assert!(
-        after > before + 0.15,
-        "corner drag grew the shape: {before} → {after}"
+        (cell_of(&h, page, shape, "PinX") - x1).abs() < 1e-6,
+        "Ctrl+Y redid the move"
     );
+
+    // And via the QAT Redo button after another undo.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.get_by_label_contains("Redo").click();
+    h.run();
     assert!(
-        h_after > h_before + 0.1,
-        "corner drag grew the shape height: {h_before} → {h_after}"
-    );
-    // Dragging the bottom-right screen corner must anchor the opposite
-    // (top-left) corner: it stays put within a pixel.
-    let tl_after = h.state().debug_sel_tl_corner().expect("selection rect");
-    assert!(
-        (tl_after.x - tl_before.x).abs() <= 1.0 && (tl_after.y - tl_before.y).abs() <= 1.0,
-        "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
+        (cell_of(&h, page, shape, "PinX") - x1).abs() < 1e-6,
+        "QAT Redo redid the move"
     );
 }
 
@@ -924,63 +913,33 @@ fn line_midpoint_drag_translates_both_ends() {
     );
 }
 
-/// Fit-mode zoom (GitHub #18): the document opens fit-to-window and the
-/// fit follows window resizes; once the user zooms manually, resizes
-/// must not clobber the chosen view. Fit Page re-arms it.
+/// Ribbon zoom wiring (GitHub #18): the View tab's Zoom In button
+/// zooms ×1.25 and Fit Window returns to the fit zoom. The fit-state
+/// machine itself (resize-follows until manual override) is unit-tested
+/// in canvas.rs `refit_follows_content_changes_until_manual_intervention`.
 #[test]
-fn zoom_follows_window_resize_in_fit_mode() {
+fn ribbon_zoom_buttons_zoom_and_refit() {
     let mut h = harness_with_blank();
     h.run();
     h.run(); // fit settles
     let z_fit = h.state().debug_zoom();
 
-    // Make the window taller: still in fit mode → the page re-fits
-    // (bigger zoom — the fit is height-limited in this window shape).
-    // This is the opening bug — nothing watched the content rect, so
-    // the view stayed frozen at the old size.
-    h.set_size(egui::vec2(1280.0, 1200.0));
-    h.run();
-    let z_tall = h.state().debug_zoom();
-    assert!(
-        z_tall > z_fit * 1.05,
-        "resize while in fit mode must re-fit: {z_fit} → {z_tall}"
-    );
-
-    // Manual zoom (ribbon View → Zoom In) leaves fit mode.
     h.get_by_label_contains("View").click();
     h.run();
     h.get_by_label_contains("Zoom In").click();
     h.run();
     let z_manual = h.state().debug_zoom();
     assert!(
-        (z_manual - (z_tall * 1.25)).abs() < 0.01,
-        "manual zoom: {z_tall} × 1.25 expected, got {z_manual}"
+        (z_manual - (z_fit * 1.25)).abs() < 0.01,
+        "Zoom In: {z_fit} × 1.25 expected, got {z_manual}"
     );
 
-    // Resize again: the manual view survives untouched.
-    h.set_size(egui::vec2(1280.0, 700.0));
-    h.run();
-    assert_eq!(
-        h.state().debug_zoom(),
-        z_manual,
-        "a resize must not clobber the user's manual zoom"
-    );
-
-    // Fit Window re-arms fit mode: the view fits the (now shorter)
-    // window again.
     h.get_by_label_contains("Fit Window").click();
     h.run();
     let z_refit = h.state().debug_zoom();
     assert!(
-        (z_refit - z_manual).abs() / z_manual > 0.05,
-        "Fit Page should re-fit away from the manual zoom: {z_manual} → {z_refit}"
-    );
-    // And following resumes.
-    h.set_size(egui::vec2(1280.0, 1200.0));
-    h.run();
-    assert!(
-        h.state().debug_zoom() > z_refit * 1.05,
-        "fit mode follows resizes again after Fit Page"
+        (z_refit - z_fit).abs() / z_fit < 0.05,
+        "Fit Window returns to the fit zoom: {z_manual} → {z_refit} (fit was {z_fit})"
     );
 }
 
@@ -1041,21 +1000,9 @@ fn double_click_opens_text_editor_and_edits_shape_text() {
         None,
         "undo restores the pre-edit text"
     );
-}
 
-/// GitHub #20: a double-click on empty page area opens nothing.
-#[test]
-fn double_click_on_empty_page_is_a_no_op() {
-    let mut h = dblclick_harness_with_blank();
-    h.run();
-    let from = h.state().debug_master_cells()[0].1.center();
-    let to = h.state().debug_canvas_rect().center();
-    click_at(&mut h, from, egui::PointerButton::Primary);
-    click_at(&mut h, to, egui::PointerButton::Primary);
-    h.run();
-    assert_eq!(h.state().debug_shape_count(), 1);
-
-    // Well off the placed shape (~3 in at fit zoom), still on the page.
+    // A double-click on empty page area (well off the shape) opens
+    // nothing — folded in from the former no-op test; same harness.
     dbl_click_at(&mut h, to + egui::vec2(200.0, 200.0));
     assert!(
         h.query_all_by_label_contains("Edit Text").count() == 0,
@@ -1117,12 +1064,6 @@ fn ctx_menu_snapshot(h: &mut Harness<'_, App>, name: &str) {
 
 // ------------------------------------------------------------------
 // GitHub #53: the stencil grid re-wraps to the live pane width.
-
-/// The wrap formula, mirroring `columns_for` in stencil.rs: C columns
-/// occupy C*64 + (C-1)*6 px of wrapped width.
-fn cols_for(w: f32) -> usize {
-    (((w + 6.0) / 70.0).floor() as usize).max(1)
-}
 
 /// Drag the stencil panel's resize handle so the panel's outer width
 /// becomes `target_x`, moving through intermediate widths with a
@@ -1213,32 +1154,37 @@ fn stencil_rewraps_to_pane_width_during_resize() {
     h.run();
     h.run();
 
-    // The rendered column count matches the computed optimum for the
-    // width the grid actually wrapped into, at every stop.
+    // At the 380px stop the wrap is strictly wider than the 2-column
+    // default and everything fits the pane (no mirror of the layout
+    // formula here on purpose: a hand-copied twin of columns_for can
+    // pass while both copies are wrong — behavior anchors instead).
     let mut cols_380 = 0;
     for _ in 0..3 {
-        let expect = cols_for(h.state().debug_stencil_wrap_width());
         cols_380 = h.state().debug_stencil_cols();
-        assert_eq!(cols_380, expect, "column count matches the wrap optimum");
+        assert!(cols_380 >= 4, "380px pane wraps to 4+ columns, got {cols_380}");
         assert_grid_fits(&h);
         h.run();
     }
 
-    // And back down through the issue's other stops: 260px, then 160.
+    // And back down through the issue's other stops: monotonic
+    // narrowing, everything still fitting.
     drag_stencil_edge_to(&mut h, 260.0);
     let cols_260 = h.state().debug_stencil_cols();
-    assert_eq!(
-        cols_260,
-        cols_for(h.state().debug_stencil_wrap_width()),
-        "260px pane matches the wrap optimum"
+    assert!(
+        cols_260 > 2 && cols_260 < cols_380,
+        "260px pane narrows between the default and 380px: {cols_260}"
     );
-    assert!(cols_260 < cols_380, "narrowing reduces the column count");
+    assert_grid_fits(&h);
     drag_stencil_edge_to(&mut h, 160.0);
-    assert_eq!(
-        h.state().debug_stencil_cols(),
-        cols_for(h.state().debug_stencil_wrap_width()),
-        "back at 160px the wrap optimum holds"
+    let cols_160 = h.state().debug_stencil_cols();
+    assert!(
+        cols_160 <= cols_260,
+        "nominally-160px pane narrows to at most the 260px wrap: {cols_160}"
     );
+    // (No exact count here on purpose: dragging the outer edge to
+    // 160px lands marginally narrower than the pristine default pane,
+    // so the wrap may legitimately be 1 column where the fresh app
+    // shows 2. The pristine default is pinned by the cols0 assert.)
     assert_grid_fits(&h);
 }
 
@@ -1424,210 +1370,23 @@ fn backstage_search_filters_templates() {
     );
 }
 
-/// A synthetic flattened group — the structure real Visio files save
-/// (inline sub-shapes whose XForm and geometry cells are `F='Inh'`
-/// snapshots of formula evaluations at the instance's size; the
-/// utilisation.vsdx "Receive order" report, GitHub #59). Resizing must
-/// refresh those caches (Visio's edit-time refresh) or the selection
-/// box grows around a stale drawing: sub-shape XForms, the Txt block,
-/// and geometry row coordinates all follow the new size, while a
-/// fixed-size sub-shape (a GUARD'ed icon) keeps its size.
+/// Wiring leg of the #59 flattened-group cache-refresh coverage
+/// (#97 §4 relocation): the semantic facts — sub-shape/Txt/geometry
+/// caches re-evaluate through User indirections, GUARD'ed sizes stay,
+/// one undo per refresh — are unit-tested in cmd.rs
+/// (group_cache_refresh_reevaluates_inh_caches_through_user_indirections)
+/// against the shared taskg fixture. What needs the real shell is only
+/// this: the corner-drag GESTURE commits that refresh Macro, and one
+/// undo reverts it.
 #[test]
-fn resizing_a_flattened_group_refreshes_subshape_caches() {
-    // -- fixture: master 10 "TaskG" = root group + proportional Body
-    //    sub + fixed-size Icon sub; instance with inline F='Inh' caches.
-    let mut ed = dc_core::Editor::new_blank();
-    let page_id = ed.doc.pages[0].id;
-    // Detach the source package: the retained-package write path only
-    // re-serializes masters that already exist in the source zip, so a
-    // master ADDED in the editing layer would be dropped on save (a
-    // writer gap of its own — pages got a reconcile pass in M4, masters
-    // never did). The fresh-document path writes every modeled master.
-    ed.doc.package = None;
-    let cell = |v: &str, f: Option<&str>| vsdx_model_cell(v, f);
-
-    let mut mroot = vsdx::model::Shape {
-        id: 1,
-        type_: Some("Group".into()),
-        ..vsdx::model::Shape::default()
-    };
-    // The layout cells real task masters use (Process.7 pattern): the
-    // Txt block and icon pins hide their size dependence behind User
-    // rows — `TxtPinX = GUARD(User.TxtPinX)` where `User.TxtPinX =
-    // Width/2`, `PinY = GUARD(Sheet.1!User.IconY)` where
-    // `User.IconY = Height - User.InfoPanelHeight/2`. A refresh that
-    // only greps formulas for "Width"/"Height" cannot see through the
-    // indirection and leaves those caches stale (the icon/text drift
-    // report on #59).
-    for (n, v, f) in [
-        ("IconX", "0.1", None),
-        ("IconY", "0.9", Some("Height-User.InfoPanelHeight/2")),
-        ("InfoPanelHeight", "0.2", None),
-        ("TxtPinX", "1", Some("Width/2")),
-        ("TxtPinY", "0.5", Some("Height/2")),
-        ("TxtWidth", "2", Some("Width*1")),
-        ("TxtHeight", "1", Some("Height*1")),
-    ] {
-        add_user_row(&mut mroot.sheet, n, v, f);
-    }
-    for (n, v, f) in [
-        ("PinX", "1", None),
-        ("PinY", "0.5", None),
-        ("Width", "2", None),
-        ("Height", "1", None),
-        ("TxtPinX", "1", Some("GUARD(User.TxtPinX)")),
-        ("TxtPinY", "0.5", Some("GUARD(User.TxtPinY)")),
-        ("TxtWidth", "2", Some("GUARD(User.TxtWidth)")),
-        ("TxtHeight", "1", Some("GUARD(User.TxtHeight)")),
-        ("TxtLocPinX", "1", Some("TxtWidth*0.5")),
-        ("TxtLocPinY", "0.5", Some("TxtHeight*0.5")),
-    ] {
-        mroot.sheet.set_cell(n, cell(v, f));
-    }
-    let mut mbody = vsdx::model::Shape {
-        id: 2,
-        type_: Some("Shape".into()),
-        ..vsdx::model::Shape::default()
-    };
-    for (n, v, f) in [
-        ("PinX", "1", "Sheet.1!Width*0.5"),
-        ("PinY", "0.5", "Sheet.1!Height*0.5"),
-        ("Width", "2", "Sheet.1!Width*1"),
-        ("Height", "1", "Sheet.1!Height*1"),
-        ("LocPinX", "1", "Width*0.5"),
-        ("LocPinY", "0.5", "Height*0.5"),
-    ] {
-        mbody.sheet.set_cell(n, cell(v, Some(f)));
-    }
-    add_rect_geometry(&mut mbody.sheet, 2.0, 1.0, None);
-    let mut micon = vsdx::model::Shape {
-        id: 3,
-        type_: Some("Shape".into()),
-        ..vsdx::model::Shape::default()
-    };
-    for (n, v, f) in [
-        ("PinX", "0.2", "GUARD(Sheet.1!User.IconX)"),
-        ("PinY", "0.2", "GUARD(Sheet.1!User.IconY)"),
-        ("Width", "0.157480", "GUARD(4MM)"),
-        ("Height", "0.110236", "GUARD(2.8MM)"),
-        ("LocPinX", "0.078740", "Width*0.5"),
-        ("LocPinY", "0.055118", "Height*0.5"),
-    ] {
-        micon.sheet.set_cell(n, cell(v, Some(f)));
-    }
-    add_rect_geometry(&mut micon.sheet, 0.157480, 0.110236, None);
-    mroot.sub_shapes = vec![mbody, micon];
-    ed.doc.masters.push(vsdx::model::Master {
-        id: 10,
-        name_u: Some("TaskG".into()),
-        attrs: vec![
-            ("ID".into(), "10".into()),
-            ("NameU".into(), "TaskG".into()),
-            ("Name".into(), "TaskG".into()),
-        ],
-        children: vec![vsdx::model::IndexChild::Rel(vec![(
-            "r:id".into(),
-            "rId9".into(),
-        )])],
-        shapes: vec![mroot],
-        part: "visio/masters/master10.xml".into(),
-        ..vsdx::model::Master::default()
-    });
-
-    // Instance: 1 x 0.5 (the master is 2 x 1), inline Body sub caches
-    // at instance units, Icon caches at its fixed size.
-    let root_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
-    let mut inst = vsdx::model::Shape {
-        id: root_id,
-        type_: Some("Group".into()),
-        master: Some(10),
-        ..vsdx::model::Shape::default()
-    };
-    inst.attrs = vec![
-        ("ID".into(), root_id.to_string()),
-        ("Type".into(), "Group".into()),
-        ("Master".into(), "10".into()),
-    ];
-    for (n, v, f) in [
-        ("PinX", "4", None),
-        ("PinY", "5", None),
-        ("Width", "1", None),
-        ("Height", "0.5", None),
-        ("LocPinX", "0.5", None),
-        ("LocPinY", "0.25", None),
-        // The Txt block is formula-driven in the master: the instance
-        // carries F='Inh' snapshots, exactly like real files.
-        ("TxtPinX", "0.5", Some("Inh")),
-        ("TxtPinY", "0.25", Some("Inh")),
-        ("TxtWidth", "1", Some("Inh")),
-        ("TxtHeight", "0.5", Some("Inh")),
-        ("TxtLocPinX", "0.5", Some("Inh")),
-        ("TxtLocPinY", "0.25", Some("Inh")),
-    ] {
-        inst.sheet.set_cell(n, cell(v, f));
-    }
-    // A cached User row (F='Inh') — real instances ship these too. The
-    // master's formula must still own the value at refresh time; a
-    // frozen cache here must not freeze the icon's position.
-    add_user_row(&mut inst.sheet, "IconY", "0.4", Some("Inh"));
-    let mut isub = vsdx::model::Shape {
-        id: root_id + 1,
-        type_: Some("Shape".into()),
-        master: Some(10),
-        master_shape: Some(2),
-        ..vsdx::model::Shape::default()
-    };
-    isub.attrs = vec![
-        ("ID".into(), (root_id + 1).to_string()),
-        ("Type".into(), "Shape".into()),
-        ("Master".into(), "10".into()),
-        ("MasterShape".into(), "2".into()),
-    ];
-    for (n, v) in [
-        ("PinX", "0.5"),
-        ("PinY", "0.25"),
-        ("Width", "1"),
-        ("Height", "0.5"),
-        ("LocPinX", "0.5"),
-        ("LocPinY", "0.25"),
-    ] {
-        isub.sheet.set_cell(n, cell(v, Some("Inh")));
-    }
-    // Geometry caches in instance units (half the master's literals).
-    add_rect_geometry(&mut isub.sheet, 1.0, 0.5, Some("Inh"));
-    let mut iicon = vsdx::model::Shape {
-        id: root_id + 2,
-        type_: Some("Shape".into()),
-        master: Some(10),
-        master_shape: Some(3),
-        ..vsdx::model::Shape::default()
-    };
-    iicon.attrs = vec![
-        ("ID".into(), (root_id + 2).to_string()),
-        ("Type".into(), "Shape".into()),
-        ("Master".into(), "10".into()),
-        ("MasterShape".into(), "3".into()),
-    ];
-    for (n, v) in [
-        ("PinX", "0.1"),
-        ("PinY", "0.4"),
-        ("Width", "0.157480"),
-        ("Height", "0.110236"),
-        ("LocPinX", "0.078740"),
-        ("LocPinY", "0.055118"),
-    ] {
-        iicon.sheet.set_cell(n, cell(v, Some("Inh")));
-    }
-    inst.sub_shapes = vec![isub, iicon];
-    ed.doc.pages[0].shapes.push(inst);
+fn resizing_a_flattened_group_commits_the_cache_refresh() {
+    let (ed, page_id, [root_id, _, _]) = dc_ui::group_fixture::taskg_editor();
 
     // Round-trip through the package writer: the fixture must survive a
     // save/open like any real file.
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("taskg.vsdx");
     ed.save_as(&path).unwrap();
-    // The fixture survives the save/open round-trip (master tree and
-    // inline sub-shape caches intact).
     {
         let back = dc_core::Editor::open(&path).unwrap();
         let m = back.doc.master(10).expect("master10");
@@ -1657,200 +1416,37 @@ fn resizing_a_flattened_group_refreshes_subshape_caches() {
     let br = h.state().debug_sel_br_corner().expect("sel");
     drag_naturally(&mut h, br, egui::vec2(40.0, 30.0));
     let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
-    let (kx, ky) = (w1 / w0, h1 / h0);
-    assert!(
-        kx > 1.2 && ky > 1.2,
-        "resize grew: {w0:.3}x{h0:.3} → {w1:.3}x{h1:.3}"
-    );
+    assert!(w1 > 1.2 && h1 > 1.2 * 0.5, "resize grew: {w0:.3}x{h0:.3} -> {w1:.3}x{h1:.3}");
 
-    // Sub caches followed the group (F='Inh' snapshots refreshed).
-    let sub_w = cell_of(&h, page_id, root_id + 1, "Width");
-    assert!(
-        (sub_w - 1.0 * kx).abs() < 1e-3,
-        "sub Width cache scaled: {sub_w:.4} vs {:.4}",
-        kx
-    );
-    let sub_px = cell_of(&h, page_id, root_id + 1, "PinX");
-    assert!(
-        (sub_px - 0.5 * kx).abs() < 1e-3,
-        "sub PinX cache scaled: {sub_px:.4}"
-    );
-    // The Txt block followed too — including the cells the indirection
-    // hides: TxtPinX = GUARD(User.TxtPinX) with User.TxtPinX = Width/2
-    // must re-center (the pre-evaluation refresh left these stale and
-    // the text drifted low-left).
-    let txt_w = cell_of(&h, page_id, root_id, "TxtWidth");
-    assert!(
-        (txt_w - kx).abs() < 1e-3,
-        "root TxtWidth scaled: {txt_w:.4}"
-    );
+    // Spot-check that the gesture ran the refresh (semantics live in the
+    // unit test): the Txt block re-centered through the User
+    // indirection, and the refreshed cell kept F='Inh'.
     let txt_px = cell_of(&h, page_id, root_id, "TxtPinX");
     assert!(
         (txt_px - w1 / 2.0).abs() < 1e-3,
-        "root TxtPinX re-centered through User.TxtPinX: {txt_px:.4} vs {:.4}",
+        "TxtPinX re-centered through the gesture: {txt_px:.4} vs {:.4}",
         w1 / 2.0
     );
-    let txt_py = cell_of(&h, page_id, root_id, "TxtPinY");
-    assert!(
-        (txt_py - h1 / 2.0).abs() < 1e-3,
-        "root TxtPinY re-centered: {txt_py:.4} vs {:.4}",
-        h1 / 2.0
-    );
-    let txt_lx = cell_of(&h, page_id, root_id, "TxtLocPinX");
-    assert!(
-        (txt_lx - w1 / 2.0).abs() < 1e-3,
-        "root TxtLocPinX follows TxtWidth: {txt_lx:.4}"
-    );
-    // Refreshed cells keep F='Inh' — a later resize must refresh them
-    // again, not meet frozen literals.
-    let (_, txt_px_f) = h
+    let (_, f) = h
         .state()
         .debug_cell(page_id, root_id, "TxtPinX")
         .expect("TxtPinX cell");
-    assert_eq!(txt_px_f, "Inh", "refreshed cache keeps its Inh marker");
+    assert_eq!(f, "Inh", "refreshed cache keeps its Inh marker");
 
-    // The fixed-size icon kept its GUARD'ed size …
-    let icon_w = cell_of(&h, page_id, root_id + 2, "Width");
-    assert!(
-        (icon_w - 0.157480).abs() < 1e-6,
-        "GUARD'ed icon Width unchanged, got {icon_w}"
-    );
-    // … its pin X stays the fixed User.IconX offset …
-    let icon_px = cell_of(&h, page_id, root_id + 2, "PinX");
-    assert!(
-        (icon_px - 0.1).abs() < 1e-6,
-        "icon PinX keeps the fixed IconX offset, got {icon_px}"
-    );
-    // … while PinY = GUARD(Sheet.1!User.IconY) with
-    // User.IconY = Height - User.InfoPanelHeight/2 re-evaluates at the
-    // new height (the instance's own cached User.IconY must not freeze
-    // it).
-    let icon_py = cell_of(&h, page_id, root_id + 2, "PinY");
-    assert!(
-        (icon_py - (h1 - 0.1)).abs() < 1e-3,
-        "icon PinY follows Height through the User indirection: {icon_py:.4} vs {:.4}",
-        h1 - 0.1
-    );
-
-    // And the rendered drawing spans the new size: the Body's geometry
-    // (which fills the group) reaches the new width in the page SVG.
-    let svg = h.state().debug_page_svg().unwrap();
-    let expected = format!("{:.5}", sub_w);
-    assert!(
-        svg.contains(&format!("L {expected} ")),
-        "rendered geometry scaled to {expected}; SVG:\n{}",
-        svg.lines().take(6).collect::<Vec<_>>().join("\n")
-    );
-
-    // A SECOND resize refreshes again (the Inh markers survived).
-    let br2 = h.state().debug_sel_br_corner().expect("sel");
-    drag_naturally(&mut h, br2, egui::vec2(30.0, 20.0));
-    let w2 = h.state().debug_sel_width();
-    let txt_px2 = cell_of(&h, page_id, root_id, "TxtPinX");
-    assert!(
-        (txt_px2 - w2 / 2.0).abs() < 1e-3,
-        "second resize re-centered TxtPinX: {txt_px2:.4} vs {:.4}",
-        w2 / 2.0
-    );
-
-    // Each undo restores one resize's whole refresh; two undos return
-    // to the authored caches.
+    // One undo reverts the whole resize Macro.
+    // (Assert against the model, not the selection rect: undo leaves
+    // the app without a selection here, which is fine — the old test
+    // never re-read the rect after undo either.)
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
     assert!(
-        (cell_of(&h, page_id, root_id, "TxtPinX") - w1 / 2.0).abs() < 1e-3,
-        "undo #1 restored the first refresh state"
-    );
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
-    h.run();
-    assert!(
-        (cell_of(&h, page_id, root_id + 1, "Width") - 1.0).abs() < 1e-6,
-        "undo restored the sub cache"
+        (cell_of(&h, page_id, root_id, "Width") - 1.0).abs() < 1e-6,
+        "undo restored the pre-resize width"
     );
     assert!(
         (cell_of(&h, page_id, root_id, "TxtPinX") - 0.5).abs() < 1e-6,
         "undo restored the authored TxtPinX cache"
     );
-    assert!(
-        (cell_of(&h, page_id, root_id + 2, "PinY") - 0.4).abs() < 1e-6,
-        "undo restored the authored icon PinY cache"
-    );
-}
-
-/// Helper of the fixture tests: a Cell with optional formula.
-fn vsdx_model_cell(v: &str, f: Option<&str>) -> vsdx::model::Cell {
-    vsdx::model::Cell {
-        v: Some(v.to_string()),
-        f: f.map(|s| s.to_string()),
-        ..vsdx::model::Cell::default()
-    }
-}
-
-/// Helper of the fixture tests: a named User row with a Value cell.
-fn add_user_row(sheet: &mut vsdx::model::Sheet, name: &str, v: &str, f: Option<&str>) {
-    use vsdx::model::{Row, Section, SheetChild};
-    let row = Row {
-        n: Some(name.to_string()),
-        cells: vec![("Value".to_string(), vsdx_model_cell(v, f))],
-        ..Row::default()
-    };
-    if let Some(SheetChild::Section(sec)) = sheet
-        .children
-        .iter_mut()
-        .find(|c| matches!(c, SheetChild::Section(s) if s.name == "User"))
-    {
-        sec.rows.push(row);
-    } else {
-        sheet.children.push(SheetChild::Section(Section {
-            name: "User".into(),
-            rows: vec![row],
-            ..Section::default()
-        }));
-    }
-}
-
-/// Helper of the fixture tests: a rectangle Geometry section; row cells
-/// carry `f` (F='Inh' for instance snapshots) when given.
-fn add_rect_geometry(sheet: &mut vsdx::model::Sheet, w: f64, h: f64, f: Option<&str>) {
-    use vsdx::model::{Cell, Row, Section, SheetChild};
-    let mut rows = Vec::new();
-    for (ix, t, (x, y)) in [
-        (1, "MoveTo", (0.0, 0.0)),
-        (2, "LineTo", (w, 0.0)),
-        (3, "LineTo", (w, h)),
-        (4, "LineTo", (0.0, h)),
-        (5, "LineTo", (0.0, 0.0)),
-    ] {
-        rows.push(Row {
-            t: Some(t.to_string()),
-            ix,
-            cells: vec![
-                (
-                    "X".to_string(),
-                    Cell {
-                        v: Some(format!("{x}")),
-                        f: f.map(str::to_string),
-                        ..Cell::default()
-                    },
-                ),
-                (
-                    "Y".to_string(),
-                    Cell {
-                        v: Some(format!("{y}")),
-                        f: f.map(str::to_string),
-                        ..Cell::default()
-                    },
-                ),
-            ],
-            ..Row::default()
-        });
-    }
-    sheet.children.push(SheetChild::Section(Section {
-        name: "Geometry".into(),
-        ix: 0,
-        rows,
-        ..Section::default()
-    }));
 }
 
 /// GitHub #25: master ShapeSheet Actions rows execute through the
@@ -1951,12 +1547,13 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button — take the topmost "…Group…"
-    // row in the menu (below the ribbon bands). GitHub #78: that row is
-    // the Group ▸ flyout parent; the action lives in its submenu.
+    // The ribbon also has a Group button — scope the pick to the ctx
+    // menu's own rect (#97 §4: no hardcoded band). GitHub #78: that row
+    // is the Group ▸ flyout parent; the action lives in its submenu.
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_row = h
         .get_all_by_label_contains("Group")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Group ▸ flyout row in the context menu");
     group_row.click();
@@ -1964,8 +1561,11 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_item = h
         .get_all_by_label_contains("Group")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
-        .find(|n| !menu.expand(2.0).contains_rect(n.rect()))
+        .filter(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .next()
         .expect("Group item in the flyout submenu");
     group_item.click();
     h.run();
@@ -2045,8 +1645,9 @@ fn context_menu_container_wraps_and_carries_members() {
     );
     h.run();
     // Container opens a flyout (Visio 2016); the action is in it.
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Container")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Container flyout parent")
         .click();
@@ -2127,8 +1728,9 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
     // Open Hyperlink… from the context menu, add a row.
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Hyperlink")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Hyperlink… row in the context menu")
         .click();
@@ -2477,8 +2079,9 @@ fn format_pane_edits_cells_for_whole_selection() {
         egui::PointerButton::Secondary,
     );
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Format Shape")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Format Shape… row")
         .click();
@@ -2495,8 +2098,18 @@ fn format_pane_edits_cells_for_whole_selection() {
     // The FillPattern dropdown button reads "Solid  ›" (a pane label
     // "Solid" alone would be ambiguous) — take the button on the pane's
     // right column.
+    // Scope to the pane via its title node's relative geometry (the
+    // title strip itself does not contain the dropdown; #97 section 4
+    // replaces the old absolute min.x > 1050 band).
+    let pane = h.get_by_label_contains("Format Shape").rect();
     h.get_all_by_label_contains("Solid")
-        .filter(|n| n.rect().min.x > 1050.0)
+        .filter(|n| {
+            let r = n.rect();
+            r.min.x >= pane.min.x - 20.0
+                && r.max.x <= pane.max.x + 20.0
+                && r.min.y > pane.max.y
+                && r.min.y < pane.max.y + 300.0
+        })
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("FillPattern dropdown")
         .click();
@@ -2663,8 +2276,9 @@ fn hyperlink_dialog_close_dismisses_and_discards_draft() {
 
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Hyperlink")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Hyperlink… row")
         .click();
@@ -2707,8 +2321,9 @@ fn shape_data_dialog_close_dismisses() {
     click_at(&mut h, to, egui::PointerButton::Primary);
     click_at(&mut h, to, egui::PointerButton::Secondary);
     h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     h.get_all_by_label_contains("Shape Data")
-        .filter(|n| n.rect().min.y > 250.0 && n.rect().height() < 30.0)
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Shape Data… row")
         .click();

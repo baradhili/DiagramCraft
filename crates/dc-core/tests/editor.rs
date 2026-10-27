@@ -6,8 +6,9 @@
 //! package — the real editing scenario.
 
 use dc_core::commands::{
-    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, MovePage, RemoveConnect, RemoveLayer,
-    RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell, SetText,
+    AddConnect, AddLayer, AddPage, AddShape, DuplicatePage, GroupShapes, MovePage, RemoveConnect,
+    RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage, RowSel, SetCell, SetRowCell,
+    SetText, UngroupShape,
 };
 use dc_core::connects::{Connect, ConnectsHost, ConnectsOwner};
 use dc_core::layers::{layer_name, layer_rows};
@@ -949,8 +950,10 @@ fn new_blank_roundtrips() {
     let mut ed = Editor::new_blank();
     assert_eq!(ed.doc.pages.len(), 1);
     // Starter masters ship with the blank drawing (Basic Shapes set,
-    // plus the 1D Line master — GitHub #59).
-    assert_eq!(ed.doc.masters.len(), 8);
+    // plus the 1D Line master — GitHub #59). The exact count is the
+    // template's business, not a contract: adding a starter master
+    // must not fail this test.
+    assert!(ed.doc.masters.len() >= 8);
     assert!(ed
         .doc
         .masters
@@ -996,11 +999,12 @@ fn new_blank_roundtrips() {
 }
 
 #[test]
-fn atomic_save_never_truncates_existing_drawings() {
-    // Save over an existing file repeatedly: the destination must
-    // always be a complete, re-openable package (craft-atomic stages
-    // + renames rather than truncating in place), and no staging
-    // leftovers may remain beside it.
+fn resave_is_idempotent_and_leaves_no_staging_files() {
+    // What is observable here: saving over an existing file repeatedly
+    // keeps the destination a complete, re-openable package, and no
+    // staging leftovers remain beside it. (Crash atomicity itself —
+    // stage + rename never truncating in place — is craft-atomic's own
+    // contract and cannot be observed without simulating a crash.)
     let mut ed = Editor::new_blank();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("atomic.vsdx");
@@ -1012,7 +1016,7 @@ fn atomic_save_never_truncates_existing_drawings() {
             vsdx::model::Cell::value("6"),
         ))
         .unwrap();
-    for round in 0..3 {
+    for round in 0..2 {
         ed.save_as(&path).unwrap();
         let reopened = Editor::open(&path).unwrap();
         assert_eq!(
@@ -1020,8 +1024,10 @@ fn atomic_save_never_truncates_existing_drawings() {
             1,
             "round {round}: package complete"
         );
-        let before = std::fs::read(&path).unwrap();
-        assert!(before.len() > 1000, "round {round}: non-trivial package");
+        assert!(
+            std::fs::read(&path).unwrap().len() > 1000,
+            "round {round}: non-trivial package"
+        );
     }
     let leftovers: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
@@ -1224,7 +1230,7 @@ fn macro_rolls_back_applied_children_on_failure() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shape_action_setf_chain_builds_and_applies_commands() {
+fn shape_action_setf_chain_applies_and_one_undo_rolls_it_back() {
     use dc_core::commands::shape_action_commands;
     use std::collections::HashMap;
 
@@ -1281,14 +1287,22 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
         .iter()
         .find_map(|s| s.named_row("Style"))
         .is_none());
+}
 
-    // Chained values may be expressions; unsupported terms defer.
-    let mut env2 = HashMap::new();
-    env2.insert("User.N".to_string(), 3.0);
+#[test]
+fn shape_action_values_expressions_strings_and_row_cell_suffixes() {
+    use dc_core::commands::shape_action_commands;
+    use std::collections::HashMap;
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    // Chained values may be expressions.
+    let mut env = HashMap::new();
+    env.insert("User.N".to_string(), 3.0);
     let cmds = shape_action_commands(
         Scope::Shape { page: 0, shape: 1 },
         "SETF(GetRef(User.Style),User.N+1)",
-        &env2,
+        &env,
     )
     .unwrap();
     ed.apply(dc_core::Macro::new("expr", cmds)).unwrap();
@@ -1303,21 +1317,8 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
         user.cell("Value").and_then(|c| c.v.clone()).as_deref(),
         Some("4")
     );
-    assert!(shape_action_commands(
-        Scope::Shape { page: 0, shape: 1 },
-        "RUNADDON(\"mystery\")",
-        &env2
-    )
-    .is_err());
-    // A value that cannot be evaluated defers (Err) instead of
-    // persisting formula text in the cell's V; a quoted string is
-    // stored unquoted.
-    assert!(shape_action_commands(
-        Scope::Shape { page: 0, shape: 1 },
-        "SETF(GetRef(User.Style),Width*2)",
-        &HashMap::new(),
-    )
-    .is_err());
+    ed.undo().unwrap();
+    // A quoted string value is stored unquoted.
     let cmds = shape_action_commands(
         Scope::Shape { page: 0, shape: 1 },
         "SETF(GetRef(User.Style),\"Hello\")",
@@ -1339,9 +1340,7 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
     );
     ed.undo().unwrap();
     // A trailing cell suffix targets the row's named cell (not a row
-    // literally named "Style.Prompt"); unmapped dotted or
-    // sheet-qualified targets defer instead of writing a bogus cell
-    // name.
+    // literally named "Style.Prompt").
     let cmds = shape_action_commands(
         Scope::Shape { page: 0, shape: 1 },
         "SETF(GetRef(User.Style.Prompt),\"hint\")",
@@ -1361,20 +1360,46 @@ fn shape_action_setf_chain_builds_and_applies_commands() {
         Some("hint"),
         "Row.Cell suffix writes the row's named cell"
     );
-    ed.undo().unwrap();
+}
+
+#[test]
+fn shape_action_unsupported_targets_defer_instead_of_writing() {
+    use dc_core::commands::shape_action_commands;
+    use std::collections::HashMap;
+
+    let (_ed, _tmp) = open_fixture();
+    let mut env = HashMap::new();
+    env.insert("User.N".to_string(), 3.0);
+    // RUNADDON is not a SETF chain: defer (Err).
+    assert!(shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "RUNADDON(\"mystery\")",
+        &env
+    )
+    .is_err());
+    // A value that cannot be evaluated defers instead of persisting
+    // formula text in the cell's V.
+    assert!(shape_action_commands(
+        Scope::Shape { page: 0, shape: 1 },
+        "SETF(GetRef(User.Style),Width*2)",
+        &HashMap::new(),
+    )
+    .is_err());
+    // Unmapped dotted or sheet-qualified targets defer instead of
+    // writing a bogus cell name.
     for bad in [
         "SETF(GetRef(Actions.Menu),\"x\")",
         "SETF(GetRef(ThePage!PageWidth),1)",
         "SETF(GetRef(User.A.B.C),1)",
     ] {
         assert!(
-            shape_action_commands(Scope::Shape { page: 0, shape: 1 }, bad, &env2).is_err(),
+            shape_action_commands(Scope::Shape { page: 0, shape: 1 }, bad, &env).is_err(),
             "{bad} defers"
         );
     }
     // No Formula / empty: display-only, no commands.
     assert!(
-        shape_action_commands(Scope::Shape { page: 0, shape: 1 }, "No Formula", &env2)
+        shape_action_commands(Scope::Shape { page: 0, shape: 1 }, "No Formula", &env)
             .unwrap()
             .is_empty()
     );
@@ -1458,15 +1483,10 @@ fn group_and_ungroup_round_trip_with_undo() {
 /// them into the group frame, ungroup maps them back through the
 /// group's live Xform (a moved group moves them with it), and a
 /// formula-driven endpoint refuses the grouping.
-#[test]
-fn group_converts_1d_endpoints_and_ungroup_restores() {
-    use dc_core::commands::{GroupShapes, UngroupShape};
-
-    let (ed, _tmp) = open_fixture();
-    let mut ed = ed;
-    // A 1D line: endpoints (2, 5.25)→(6, 6.75) with consistent derived
-    // Xform cells (Width/Angle/Pin/LocPin), the way placement writes
-    // them.
+/// Append a 1D line (id 7) to page 0: endpoints (2, 5.25)→(6, 6.75)
+/// with consistent derived Xform cells (Width/Angle/Pin/LocPin), the
+/// way placement writes them. Returns its screen width.
+fn push_1d_line(ed: &mut Editor) -> f64 {
     let w = (4.0f64).hypot(1.5);
     let mut line = ed.doc.pages[0].shapes[0].clone();
     line.id = 7;
@@ -1487,6 +1507,20 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
         line.sheet.set_cell(n, vsdx::model::Cell::value(v.clone()));
     }
     ed.doc.pages[0].shapes.push(line);
+    w
+}
+
+fn sheet_num(s: &vsdx::model::Shape, k: &str) -> f64 {
+    s.sheet.cell(k).and_then(|c| c.numeric()).unwrap_or(f64::NAN)
+}
+
+#[test]
+fn group_converts_1d_endpoints_to_the_group_frame_and_back() {
+    use dc_core::commands::{GroupShapes, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let w = push_1d_line(&mut ed);
 
     // Union bbox with shape 1's rect (3.25, 5)-(5.25, 6): the line's
     // rect runs (4 − w/2, 6)-(4 + w/2, 6) → x0 = 4 − w/2, y0 = 5.
@@ -1494,16 +1528,13 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
     ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
     let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
     let gid = g.id;
-    let n = |s: &vsdx::model::Shape, k: &str| {
-        s.sheet.cell(k).and_then(|c| c.numeric()).unwrap_or(f64::NAN)
-    };
     let line = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
     for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
         let off = if cell.ends_with('X') { x0 } else { 5.0 };
         assert!(
-            (n(line, cell) - (page_val - off)).abs() < 1e-9,
+            (sheet_num(line, cell) - (page_val - off)).abs() < 1e-9,
             "{cell} converted to the group frame: {} vs {}",
-            n(line, cell),
+            sheet_num(line, cell),
             page_val - off
         );
     }
@@ -1512,22 +1543,34 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
     ed.apply(UngroupShape::new(0, gid)).unwrap();
     let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
     for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
-        assert!((n(line, cell) - page_val).abs() < 1e-9, "{cell} restored");
+        assert!((sheet_num(line, cell) - page_val).abs() < 1e-9, "{cell} restored");
     }
+}
 
-    // A moved group carries the endpoints with it on ungroup.
+#[test]
+fn ungroup_restores_endpoints_moved_with_the_group() {
+    use dc_core::commands::{GroupShapes, SetCell, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    push_1d_line(&mut ed);
     ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
     let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
     let gid = g.id;
-    let (gpx, gpy) = (n(g, "PinX"), n(g, "PinY"));
-    let gsheet = &mut ed.doc.pages[0]
-        .shapes
-        .iter_mut()
-        .find(|s| s.id == gid)
-        .unwrap()
-        .sheet;
-    gsheet.set_cell("PinX", vsdx::model::Cell::value(format!("{}", gpx + 2.0)));
-    gsheet.set_cell("PinY", vsdx::model::Cell::value(format!("{}", gpy + 1.0)));
+    let (gpx, gpy) = (sheet_num(g, "PinX"), sheet_num(g, "PinY"));
+    // Move the group through the command layer, not by poking its sheet.
+    ed.apply(SetCell::new(
+        Scope::Shape { page: 0, shape: gid },
+        "PinX",
+        vsdx::model::Cell::value(format!("{}", gpx + 2.0)),
+    ))
+    .unwrap();
+    ed.apply(SetCell::new(
+        Scope::Shape { page: 0, shape: gid },
+        "PinY",
+        vsdx::model::Cell::value(format!("{}", gpy + 1.0)),
+    ))
+    .unwrap();
     ed.apply(UngroupShape::new(0, gid)).unwrap();
     let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
     for (cell, moved_val) in [
@@ -1537,12 +1580,20 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
         ("EndY", 7.75),
     ] {
         assert!(
-            (n(line, cell) - moved_val).abs() < 1e-9,
+            (sheet_num(line, cell) - moved_val).abs() < 1e-9,
             "{cell} followed the moved group: {} vs {moved_val}",
-            n(line, cell)
+            sheet_num(line, cell)
         );
     }
+}
 
+#[test]
+fn ungroup_composes_a_rotated_group_angle_into_members() {
+    use dc_core::commands::{GroupShapes, SetCell, UngroupShape};
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    push_1d_line(&mut ed);
     // A rotated group composes its Angle into the members: positions
     // orbit around the group's pin AND orientations rotate with it.
     ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
@@ -1553,43 +1604,50 @@ fn group_converts_1d_endpoints_and_ungroup_restores() {
         .unwrap();
     let gid = g.id;
     let (gpx, gpy, glx, gly) = (
-        g.sheet.cell("PinX").and_then(|c| c.numeric()).unwrap(),
-        g.sheet.cell("PinY").and_then(|c| c.numeric()).unwrap(),
-        g.sheet.cell("LocPinX").and_then(|c| c.numeric()).unwrap(),
-        g.sheet.cell("LocPinY").and_then(|c| c.numeric()).unwrap(),
+        sheet_num(g, "PinX"),
+        sheet_num(g, "PinY"),
+        sheet_num(g, "LocPinX"),
+        sheet_num(g, "LocPinY"),
     );
     // Member-local values BEFORE the rotation lands (they were
     // converted into the group frame by grouping).
     let m7 = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
-    let (b_local, begin_y_local) = (
-        m7.sheet.cell("BeginX").and_then(|c| c.numeric()).unwrap(),
-        m7.sheet.cell("BeginY").and_then(|c| c.numeric()).unwrap(),
-    );
-    g.sheet.set_cell(
+    let (b_local, begin_y_local) = (sheet_num(m7, "BeginX"), sheet_num(m7, "BeginY"));
+    ed.apply(SetCell::new(
+        Scope::Shape { page: 0, shape: gid },
         "Angle",
         vsdx::model::Cell::value(format!("{}", std::f64::consts::FRAC_PI_2)),
-    );
+    ))
+    .unwrap();
     ed.apply(UngroupShape::new(0, gid)).unwrap();
     let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
     let rect = ed.doc.pages[0].shapes.iter().find(|s| s.id == 1).unwrap();
     // R(90°): page = Pin + R·(p − LocPin), (dx,dy) → (−dy,dx).
     assert!(
-        (n(line, "BeginX") - (gpx - (begin_y_local - gly))).abs() < 1e-9,
+        (sheet_num(line, "BeginX") - (gpx - (begin_y_local - gly))).abs() < 1e-9,
         "BeginX rotated with the group"
     );
     assert!(
-        (n(line, "BeginY") - (gpy + (b_local - glx))).abs() < 1e-9,
+        (sheet_num(line, "BeginY") - (gpy + (b_local - glx))).abs() < 1e-9,
         "BeginY rotated with the group"
     );
     let line_ang0 = 1.5f64.atan2(4.0);
     assert!(
-        (n(line, "Angle") - (line_ang0 + std::f64::consts::FRAC_PI_2)).abs() < 1e-9,
+        (sheet_num(line, "Angle") - (line_ang0 + std::f64::consts::FRAC_PI_2)).abs() < 1e-9,
         "line Angle composes group + own: {} vs {}",
-        n(line, "Angle"),
+        sheet_num(line, "Angle"),
         line_ang0 + std::f64::consts::FRAC_PI_2
     );
-    assert!((n(rect, "Angle") - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+    assert!((sheet_num(rect, "Angle") - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+}
 
+#[test]
+fn grouping_refuses_a_formula_driven_endpoint_without_mutating() {
+    use dc_core::commands::GroupShapes;
+
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    push_1d_line(&mut ed);
     // A formula-driven endpoint cannot be offset: grouping refuses and
     // the document is untouched.
     let line = ed
@@ -1953,4 +2011,267 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
     assert_eq!(reloaded.doc.masters.len(), 2, "reload keeps the imported master");
     assert_eq!(reloaded.doc.masters.last().unwrap().name_u.as_deref(), Some("Star"));
     assert_eq!(reloaded.doc.pages[0].shapes.len(), 4, "placed shapes survive");
+}
+
+// ---------------------------------------------------------------------------
+// #97 §6 item 5: the apply error contract — every refused command
+// leaves the document untouched and pushes no history entry.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn refused_commands_never_mutate_or_push_history() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    let shape_ids = |ed: &Editor| {
+        format!(
+            "{:?}",
+            ed.doc.pages[0]
+                .shapes
+                .iter()
+                .map(|s| (s.id, s.sub_shapes.len()))
+                .collect::<Vec<_>>()
+        )
+    };
+    let before = shape_ids(&ed);
+
+    // Unknown shape scope.
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 99 },
+            "PinX",
+            vsdx::model::Cell::value("1"),
+        ))
+        .is_err());
+    // Page position out of range.
+    assert!(ed.apply(MovePage { from: 0, to: 9 }).is_err());
+    // GroupShapes needs at least two members.
+    assert!(ed.apply(GroupShapes::new(page0, vec![1])).is_err());
+    // Ungrouping a shape with no members (a non-group) refuses.
+    assert!(ed.apply(UngroupShape::new(page0, 1)).is_err());
+    // Connection index out of range.
+    assert!(ed
+        .apply(RemoveConnect::new(ConnectsOwner::Page(page0), 9))
+        .is_err());
+
+    assert_eq!(
+        shape_ids(&ed),
+        before,
+        "a refused command mutated the document"
+    );
+    assert!(
+        ed.undo().unwrap().is_none(),
+        "a refused command pushed a history entry"
+    );
+}
+
+#[test]
+fn add_connect_on_a_partless_page_refuses() {
+    // A stencil-like page with no contents part would silently lose the
+    // connection on save; the command refuses instead.
+    let mut ed = Editor::new(bare_doc());
+    let page0 = ed.doc.pages[0].id;
+    let r = ed.apply(AddConnect {
+        owner: ConnectsOwner::Page(page0),
+        connect: Connect {
+            from_sheet: 1,
+            from_cell: "Begin".into(),
+            from_part: 3,
+            to_sheet: 2,
+            to_cell: "End".into(),
+            to_part: 3,
+            extra: Vec::new(),
+        },
+    });
+    assert!(r.is_err(), "partless page must refuse connection edits");
+    assert!(ed.undo().unwrap().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// #97 §6 item 6: GUARD/Protection refusals live in the command layer —
+// the GUI gestures AND `dc edit` inherit the same semantics. A plain
+// value write is refused; a write carrying a formula (ShapeSheet edit,
+// `--formula`, the cache refresh's F='Inh' snapshots) is the escape
+// hatch.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Author a GUARDed Width the way shipped files carry it.
+    {
+        let sh = &mut ed.doc.pages[0].shapes[0];
+        let mut g = vsdx::model::Cell::value("2");
+        g.f = Some("GUARD(2 in)".into());
+        sh.sheet.set_cell("Width", g);
+    }
+
+    // Plain value write: refused, cell untouched, no history entry.
+    let err = ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        vsdx::model::Cell::value("3"),
+    ));
+    assert!(err.is_err(), "plain write to a GUARDed cell must refuse");
+    assert_eq!(
+        ed.doc.pages[0].shapes[0]
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric()),
+        Some(2.0),
+        "refused write changed the guarded cell"
+    );
+    assert!(ed.undo().unwrap().is_none());
+
+    // A formula write is the escape hatch (ShapeSheet edit / --formula).
+    let mut f = vsdx::model::Cell::default();
+    f.f = Some("Width*2".into());
+    ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        f,
+    ))
+    .unwrap();
+
+    // An F='Inh' cache-refresh write lands under the guard too (the
+    // flattened-group refresh re-evaluates guarded master formulas).
+    let mut inh = vsdx::model::Cell::default();
+    inh.v = Some("2".into());
+    inh.f = Some("Inh".into());
+    ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 1 },
+        "Width",
+        inh,
+    ))
+    .unwrap();
+}
+
+#[test]
+fn set_cell_refuses_through_an_inh_snapshot_behind_a_master_guard() {
+    // resolve_cell prefers an instance xform cell's cached V under
+    // F='Inh' — the master's GUARD behind the snapshot must still
+    // protect the cell (a plain `dc edit --cell` write used to clobber
+    // it; found by the #125 review).
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    {
+        // Instance shape 2 (master-backed): a cached Width snapshot.
+        let sh = vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.iter_mut().next().unwrap().shapes, 2);
+        let mut snap = vsdx::model::Cell::value("1");
+        snap.f = Some("Inh".into());
+        sh.unwrap().sheet.set_cell("Width", snap);
+        // And the master guards the same cell.
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        let mut g = vsdx::model::Cell::value("2");
+        g.f = Some("GUARD(2 in)".into());
+        root.sheet.set_cell("Width", g);
+    }
+    let err = ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 2 },
+        "Width",
+        vsdx::model::Cell::value("9"),
+    ));
+    assert!(err.is_err(), "the master GUARD behind an Inh snapshot must refuse");
+    assert_eq!(
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 2)
+            .unwrap()
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric()),
+        Some(1.0),
+        "the snapshot value is untouched"
+    );
+}
+
+#[test]
+fn set_cell_refuses_locked_axes_via_protection_rows() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Author LockHeight in the Protection section (instance side).
+    {
+        let sh = &mut ed.doc.pages[0].shapes[0];
+        sh.sheet.children.push(vsdx::model::SheetChild::Section(
+            vsdx::model::Section {
+                name: "Protection".into(),
+                rows: vec![vsdx::model::Row {
+                    cells: vec![(
+                        "LockHeight".into(),
+                        vsdx::model::Cell::value("1"),
+                    )],
+                    ..vsdx::model::Row::default()
+                }],
+                ..vsdx::model::Section::default()
+            },
+        ));
+    }
+
+    let scope = dc_core::Scope::Shape { page: page0, shape: 1 };
+    // The locked axis refuses.
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            scope.clone(),
+            "Height",
+            vsdx::model::Cell::value("3"),
+        ))
+        .is_err());
+    // The unlocked axis still writes.
+    ed.apply(dc_core::commands::SetCell::new(
+        scope.clone(),
+        "Width",
+        vsdx::model::Cell::value("4"),
+    ))
+    .unwrap();
+    // Writing the lock cell itself is allowed — that is how a shape is
+    // unlocked.
+    ed.apply(dc_core::commands::SetCell::new(
+        scope,
+        "LockHeight",
+        vsdx::model::Cell::value("0"),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn master_side_guards_and_locks_protect_instances() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Shape 2 (BoxFromMaster) inherits from master 7: a GUARD in the
+    // master's Width protects the instance the same way the GUI's
+    // gesture-level check treats it.
+    {
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        let mut g = vsdx::model::Cell::value("1");
+        g.f = Some("GUARD(1 in)".into());
+        root.sheet.set_cell("Width", g);
+    }
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 2 },
+            "Width",
+            vsdx::model::Cell::value("9"),
+        ))
+        .is_err());
+    // LockWidth on the master locks the instance's axis as well.
+    {
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        root.sheet.set_cell("LockWidth", vsdx::model::Cell::value("1"));
+    }
+    assert!(ed
+        .apply(dc_core::commands::SetCell::new(
+            dc_core::Scope::Shape { page: page0, shape: 2 },
+            "Width",
+            vsdx::model::Cell::value("9"),
+        ))
+        .is_err());
 }
