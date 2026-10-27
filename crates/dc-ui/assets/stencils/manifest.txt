@@ -1,20 +1,220 @@
-# Built-in stencil catalog manifest (GitHub #87).
+# Built-in stencil catalog manifest (GitHub #87, expanded per the #85 follow-up 2026-10-27).
 #
 # One line per catalog entry:
 #   slug | category | display title | source file in Visio Content/1033
 #
-# The initial set follows the shipped Visio 2016 auto-opened companion
-# stencils (REA evidence, VISLIB.DLL references): basic shapes plus the
-# containers/callouts companions. Categories mirror the observed More
-# Shapes menu taxonomy. Expansion is a manifest edit + re-run of
-# `cargo run -p vsdx --example extract-stencils`.
+# Coverage: every shipped US-units stencil (187 entries) except:
+#   - *_VISIO2013_U.VSSX backward-compat variants (21 files; the modern set ships)
+#   - duplicate display titles within a category — the richer stencil wins
+#     (most masters, then largest file): LEGEND_U.VSSX → LGND, COMPS_U.VSSX → COMPME, NETLME_U.VSSX → NETLOC, NETSME_U.VSSX → NETSYM, SERVME_U.VSSX → SERVER
+#   - DVCALL_U.VSSX "Data Graphics" (all its masters are hidden/special —
+#     data-graphic definitions, not droppable shapes)
+#   - SDCALL_U.VSSX, the auto-open callouts companion (its menu entry is the richer
+#     CALOUT "Callouts"; sdcall stays an auto-open default for #105)
 #
-# Provenance: masters are copied from the shipped Visio 2016 stencils
-# into this repository as built-in stencil assets under the scoped
-# owner exception of 2026-10-25 (AGENTS.md). Sample/Office16 itself
-# stays untracked; tests never regenerate these files — a dc-ui test
-# verifies the committed bytes against digests.txt.
+# Categories follow the observed Visio 2016 More Shapes taxonomy (owner screenshots);
+# the per-stencil assignment is our curation over each stencil's dc:title. Editing this
+# file and re-running extract-stencils.rs regenerates the catalog deterministically.
+#
+# Provenance: masters are copied from the shipped Visio 2016 stencils into this
+# repository as built-in stencil assets under the scoped owner exception of 2026-10-25
+# (AGENTS.md). Sample/Office16 stays untracked; a dc-ui test verifies the committed
+# bytes against digests.txt.
 
-general-basic-shapes | General | Basic Shapes | BASIC_U.VSSX
-accessories-containers | Accessories | Containers | SDCONT_U.VSSX
-accessories-callouts | Accessories | Callouts | SDCALL_U.VSSX
+# General: 19 stencils
+# Accessories: 5 stencils
+# Flowchart: 16 stencils
+# Network: 17 stencils
+# Software and Database: 36 stencils
+# Maps and Floor Plans: 41 stencils
+# Engineering: 33 stencils
+# Schedule: 4 stencils
+# Organization Chart: 11 stencils
+# Business: 5 stencils
+
+annot | General | Annotations | ANNOT_U.VSSX
+arrows | General | Arrow Shapes | ARROWS_U.VSSX
+basic | General | Basic Shapes | BASIC_U.VSSX
+block | General | Blocks | BLOCK_U.VSSX
+block3 | General | Blocks Raised | BLOCK3_U.VSSX
+blockp | General | Blocks with Perspective | BLOCKP_U.VSSX
+chart | General | Charting Shapes | CHART_U.VSSX
+connec | General | Connectors | CONNEC_U.VSSX
+linpat | General | Custom Line Patterns | LINPAT_U.VSSX
+ptscld | General | Custom Patterns - Scaled | PTSCLD_U.VSSX
+ptuscl | General | Custom Patterns - Unscaled | PTUSCL_U.VSSX
+ba_dec | General | Decorative Shapes | BA_DEC_U.VSSX
+drawtl | General | Drawing Tool Shapes | DRAWTL_U.VSSX
+embell | General | Embellishments | EMBELL_U.VSSX
+ba_grp | General | Graphs and Math Shapes | BA_GRP_U.VSSX
+dgicon | General | Icon Sets | DGICON_U.VSSX
+drilld | General | PivotDiagram Shapes | DRILLD_U.VSSX
+symbol | General | Symbols | SYMBOL_U.VSSX
+bckgrn | Accessories | Backgrounds Gallery | BCKGRN_U.VSSX
+bordrs | Accessories | Borders & Titles Gallery | BORDRS_U.VSSX
+calout | Accessories | Callouts | CALOUT_U.VSSX
+sdcont | Accessories | Containers | SDCONT_U.VSSX
+lgnd | Accessories | Legend | LGND_U.VSSX
+audit | Flowchart | Audit Diagram Shapes | AUDIT_U.VSSX
+basflo | Flowchart | Basic Flowchart Shapes | BASFLO_U.VSSX
+bpmn | Flowchart | BPMN Shapes | BPMN_U.VSSX
+causef | Flowchart | Cause and Effect Diagram Shapes | CAUSEF_U.VSSX
+xfunc | Flowchart | Cross-Functional Flowchart Shapes | XFUNC_U.VSSX
+epc | Flowchart | EPC Diagram Shapes | EPC_U.VSSX
+fault | Flowchart | Fault Tree Analysis Shapes | FAULT_U.VSSX
+metro | Flowchart | Metro Shapes | METRO_U.VSSX
+floshp | Flowchart | Miscellaneous Flowchart Shapes | FLOSHP_U.VSSX
+peannt | Flowchart | Process Annotations | PEANNT_U.VSSX
+sdl | Flowchart | SDL Diagram Shapes | SDL_U.VSSX
+ssflow | Flowchart | Six Sigma Flowchart Shapes | SSFLOW_U.VSSX
+sshoq | Flowchart | Six Sigma House of Quality Shapes | SSHOQ_U.VSSX
+tqm | Flowchart | TQM Diagram Shapes | TQM_U.VSSX
+vsm | Flowchart | Value Stream Map Shapes | VSM_U.VSSX
+wrkflo | Flowchart | Work Flow Diagram Shapes | WRKFLO_U.VSSX
+ado | Network | Active Directory Objects | ADO_U.VSSX
+ads | Network | Active Directory Sites and Services | ADS_U.VSSX
+compme | Network | Computers and Monitors | COMPME_U.VSSX
+dtlnet | Network | Detailed Network | DTLNET_U.VSSX
+dtlnme | Network | Detailed Network Diagram | DTLNME_U.VSSX
+excobj | Network | Exchange Objects | EXCOBJ_U.VSSX
+freeqp | Network | Free-standing Rack Equipment | FREEQP_U.VSSX
+ldapob | Network | LDAP Objects | LDAPOB_U.VSSX
+perime | Network | Network and Peripherals | PERIME_U.VSSX
+netloc | Network | Network Locations | NETLOC_U.VSSX
+netrm | Network | Network Room Elements | NETRM_U.VSSX
+netsym | Network | Network Symbols | NETSYM_U.VSSX
+periph | Network | Networks and Peripherals | PERIPH_U.VSSX
+rcksme | Network | Rack Mounted Servers | RCKSME_U.VSSX
+rcksvr | Network | Rack Mounted Servers (US Units) | RCKSVR_U.VSSX
+rckeqp | Network | Rack-mounted Equipment | RCKEQP_U.VSSX
+server | Network | Servers | SERVER_U.VSSX
+spwa | Software and Database | Actions - SharePoint 2010 Workflow | SPWA_U.VSSX
+spwa2 | Software and Database | Actions - SharePoint 2013 Workflow | SPWA2_U.VSSX
+dbchen | Software and Database | Chen’s Database Notation Shapes | DBCHEN_U.VSSX
+comole | Software and Database | COM and OLE | COMOLE_U.VSSX
+wfcicn | Software and Database | Common Icons | WFCICN_U.VSSX
+websit | Software and Database | Conceptual Web Site Shapes | WEBSIT_U.VSSX
+spwc | Software and Database | Conditions - SharePoint 2010 Workflow | SPWC_U.VSSX
+spwc2 | Software and Database | Conditions - SharePoint 2013 Workflow | SPWC2_U.VSSX
+spwt2 | Software and Database | Containers & Terminators - SharePoint 2013 Workflow | SPWT2_U.VSSX
+wfctrl | Software and Database | Controls | WFCTRL_U.VSSX
+dbcrow | Software and Database | Crow’s Foot Database Notation Shapes | DBCROW_U.VSSX
+wfcrs | Software and Database | Cursors | WFCRS_U.VSSX
+datflo | Software and Database | Data Flow Diagram Shapes | DATFLO_U.VSSX
+wfdeme | Software and Database | Department | WFDEME_U.VSSX
+entapp | Software and Database | Enterprise Application | ENTAPP_U.VSSX
+wfdlgs | Software and Database | Forms and Dialogs | WFDLGS_U.VSSX
+ganesa | Software and Database | Gane-Sarson | GANESA_U.VSSX
+idef0 | Software and Database | IDEF0 Diagram Shapes | IDEF0_U.VSSX
+dbidef1x | Software and Database | IDEF1X Database Notation Shapes | DBIDEF1X_U.VSSX
+langlv | Software and Database | Language Level Shapes | LANGLV_U.VSSX
+memobj | Software and Database | Memory Objects | MEMOBJ_U.VSSX
+spwt | Software and Database | Terminators - SharePoint 2010 Workflow | SPWT_U.VSSX
+wftlbr | Software and Database | Toolbars and Menus | WFTLBR_U.VSSX
+uactme | Software and Database | UML Activity Diagram Shapes | UACTME_U.VSSX
+ustrme | Software and Database | UML Class Diagram Shapes | USTRME_U.VSSX
+dbuml | Software and Database | UML Database Notation | DBUML_U.VSSX
+useqme | Software and Database | UML Sequence Diagram Shapes | USEQME_U.VSSX
+ustame | Software and Database | UML State Machine Shapes | USTAME_U.VSSX
+uuseme | Software and Database | UML Use Case Shapes | UUSEME_U.VSSX
+wfwicn | Software and Database | Web and Media Icons | WFWICN_U.VSSX
+webmap | Software and Database | Web Site Map Shapes (US units) | WEBMAP_U.VSSX
+wfobme | Software and Database | Work Flow Objects | WFOBME_U.VSSX
+wfstme | Software and Database | Work Flow Steps | WFSTME_U.VSSX
+wfdep | Software and Database | Workflow Departments | WFDEP_U.VSSX
+wfobj | Software and Database | Workflow Objects | WFOBJ_U.VSSX
+wfstep | Software and Database | Workflow Steps | WFSTEP_U.VSSX
+alarm | Maps and Floor Plans | Alarm and Access Control | ALARM_U.VSSX
+appl | Maps and Floor Plans | Appliances | APPL_U.VSSX
+bthkt | Maps and Floor Plans | Bath And Kitchen Plan | BTHKT_U.VSSX
+bldcor | Maps and Floor Plans | Building Core | BLDCOR_U.VSSX
+cabnt | Maps and Floor Plans | Cabinets | CABNT_U.VSSX
+cubicl | Maps and Floor Plans | Cubicles | CUBICL_U.VSSX
+dimarc | Maps and Floor Plans | Dimensioning - Architectural | DIMARC_U.VSSX
+map3d | Maps and Floor Plans | Directional Map Shapes 3D | MAP3D_U.VSSX
+eletel | Maps and Floor Plans | Electrical and Telecom | ELETEL_U.VSSX
+furn | Maps and Floor Plans | Furniture | FURN_U.VSSX
+garden | Maps and Floor Plans | Garden Accessories | GARDEN_U.VSSX
+hvacc | Maps and Floor Plans | HVAC Controls | HVACC_U.VSSX
+hvacce | Maps and Floor Plans | HVAC Controls Equipment | HVACCE_U.VSSX
+hvacd | Maps and Floor Plans | HVAC Ductwork | HVACD_U.VSSX
+hvaceq | Maps and Floor Plans | HVAC Equipment | HVACEQ_U.VSSX
+irrig | Maps and Floor Plans | Irrigation | IRRIG_U.VSSX
+lndmrk | Maps and Floor Plans | Landmark Shapes | LNDMRK_U.VSSX
+offacc | Maps and Floor Plans | Office Accessories | OFFACC_U.VSSX
+offeqp | Maps and Floor Plans | Office Equipment | OFFEQP_U.VSSX
+offfrn | Maps and Floor Plans | Office Furniture | OFFFRN_U.VSSX
+prkrd | Maps and Floor Plans | Parking and Roads | PRKRD_U.VSSX
+pipe1 | Maps and Floor Plans | Pipes and Valves - Pipes 1 | PIPE1_U.VSSX
+pipe2 | Maps and Floor Plans | Pipes and Valves - Pipes 2 | PIPE2_U.VSSX
+valve1 | Maps and Floor Plans | Pipes and Valves - Valves 1 | VALVE1_U.VSSX
+valve2 | Maps and Floor Plans | Pipes and Valves - Valves 2 | VALVE2_U.VSSX
+plant | Maps and Floor Plans | Planting | PLANT_U.VSSX
+plumb | Maps and Floor Plans | Plumbing | PLUMB_U.VSSX
+ptsint | Maps and Floor Plans | Points Of Interest | PTSINT_U.VSSX
+recshp | Maps and Floor Plans | Recreation Shapes | RECSHP_U.VSSX
+regstr | Maps and Floor Plans | Registers, Grilles and Diffusers | REGSTR_U.VSSX
+road | Maps and Floor Plans | Road Shapes | ROAD_U.VSSX
+shpmch | Maps and Floor Plans | Shop Floor - Machines and Equipment | SHPMCH_U.VSSX
+shpstr | Maps and Floor Plans | Shop Floor - Storage and Distribution | SHPSTR_U.VSSX
+sitacc | Maps and Floor Plans | Site Accessories | SITACC_U.VSSX
+recrt | Maps and Floor Plans | Sport Fields and Recreation | RECRT_U.VSSX
+transp | Maps and Floor Plans | Transportation Shapes | TRANSP_U.VSSX
+vehicl | Maps and Floor Plans | Vehicles | VEHICL_U.VSSX
+vidsur | Maps and Floor Plans | Video Surveillance | VIDSUR_U.VSSX
+wadowi | Maps and Floor Plans | Walls, Doors and Windows | WADOWI_U.VSSX
+wall | Maps and Floor Plans | Walls, Shell and Structure | WALL_U.VSSX
+shprec | Maps and Floor Plans | Warehouse - Shipping and Receiving | SHPREC_U.VSSX
+logic | Engineering | Analog and Digital Logic | LOGIC_U.VSSX
+eecomp | Engineering | Composite Assemblies | EECOMP_U.VSSX
+dimeng | Engineering | Dimensioning - Engineering | DIMENG_U.VSSX
+peeqp | Engineering | Equipment - General | PEEQP_U.VSSX
+peheat | Engineering | Equipment - Heat Exchangers | PEHEAT_U.VSSX
+pepump | Engineering | Equipment - Pumps | PEPUMP_U.VSSX
+pevess | Engineering | Equipment - Vessels | PEVESS_U.VSSX
+fastn1 | Engineering | Fasteners 1 | FASTN1_U.VSSX
+fastn2 | Engineering | Fasteners 2 | FASTN2_U.VSSX
+fpeqp | Engineering | Fluid Power - Equipment | FPEQP_U.VSSX
+fpassm | Engineering | Fluid Power - Valve Assembly | FPASSM_U.VSSX
+fpvalv | Engineering | Fluid Power - Valves | FPVALV_U.VSSX
+eefund | Engineering | Fundamental Items | EEFUND_U.VSSX
+gdt | Engineering | Geometric Dimensioning and Tolerancing | GDT_U.VSSX
+intann | Engineering | Initiation and Annunciation | INTANN_U.VSSX
+peinst | Engineering | Instruments | PEINST_U.VSSX
+eechip | Engineering | Integrated Circuit Components | EECHIP_U.VSSX
+eemain | Engineering | Maintenance Symbols | EEMAIN_U.VSSX
+eemaps | Engineering | Maps and Charts | EEMAPS_U.VSSX
+pepipe | Engineering | Pipelines | PEPIPE_U.VSSX
+eequal | Engineering | Qualifying Symbols | EEQUAL_U.VSSX
+eemech | Engineering | Rotating Equip and Mech Functions | EEMECH_U.VSSX
+eesemi | Engineering | Semiconductors And Electron Tubes | EESEMI_U.VSSX
+sprbr | Engineering | Springs and Bearings | SPRBR_U.VSSX
+eeswch | Engineering | Switches And Relays | EESWCH_U.VSSX
+eetcom | Engineering | Telecom Switch and Peripheral Equip | EETCOM_U.VSSX
+eeterm | Engineering | Terminals and Connectors | EETERM_U.VSSX
+title | Engineering | Title Blocks | TITLE_U.VSSX
+eetran | Engineering | Transformers and Windings | EETRAN_U.VSSX
+eepath | Engineering | Transmission Paths | EEPATH_U.VSSX
+pevalv | Engineering | Valves and Fittings | PEVALV_U.VSSX
+eevhf | Engineering | VHF-UHF-SHF | EEVHF_U.VSSX
+weld | Engineering | Welding Symbols | WELD_U.VSSX
+calndr | Schedule | Calendar Shapes (US units) | CALNDR_U.VSSX
+gantt | Schedule | Gantt Chart Shapes | GANTT_U.VSSX
+pert | Schedule | PERT Chart Shapes | PERT_U.VSSX
+timeln | Schedule | Timeline Shapes | TIMELN_U.VSSX
+orgblt | Organization Chart | Belt - Organization Chart Shapes | ORGBLT_U.VSSX
+orgbnd | Organization Chart | Bound - Organization Chart Shapes | ORGBND_U.VSSX
+orgcns | Organization Chart | Coin - Organization Chart Shapes | ORGCNS_U.VSSX
+orgnch | Organization Chart | Notch - Organization Chart Shapes | ORGNCH_U.VSSX
+orgch | Organization Chart | Organization Chart Shapes | ORGCH_U.VSSX
+orgpan | Organization Chart | Panel - Organization Chart Shapes | ORGPAN_U.VSSX
+orgper | Organization Chart | Perspective - Organization Chart Shapes | ORGPER_U.VSSX
+orgpet | Organization Chart | Petal - Organization Chart Shapes | ORGPET_U.VSSX
+orgpip | Organization Chart | Pip - Organization Chart Shapes | ORGPIP_U.VSSX
+orgtac | Organization Chart | Shapetacular - Organization Chart Shapes | ORGTAC_U.VSSX
+orgsto | Organization Chart | Stone - Organization Chart Shapes | ORGSTO_U.VSSX
+bstorm | Business | Brainstorming | BSTORM_U.VSSX
+compln | Business | Compliance Shapes | COMPLN_U.VSSX
+itil | Business | ITIL Shapes | ITIL_U.VSSX
+mrktdg | Business | Marketing Diagrams | MRKTDG_U.VSSX
+bpres | Business | Resources | BPRES_U.VSSX

@@ -1,9 +1,20 @@
-# Built-in stencil catalog assets (GitHub #87)
+# Built-in stencil catalog assets (GitHub #87, expanded 2026-10-27)
 
 Synthetic `.vssx` stencils embedded as the app's built-in More Shapes
 catalog (`crates/dc-ui/src/stencil/builtin.rs` — the code module is the
 catalog's single source of truth for slug/category/title/embedded
-bytes).
+bytes; its table is regenerated alongside the manifest and the digest
+test fails if the two drift apart).
+
+**Coverage:** every shipped US-units Visio 2016 stencil — 186 entries
+across the observed More Shapes taxonomy: General, Accessories,
+Flowchart, Network, Software and Database, Maps and Floor Plans,
+Engineering, Schedule, Organization Chart, Business. Skips:
+`*_VISIO2013_U` backward-compat variants, duplicate display titles
+(richer stencil wins), DVCALL (all masters hidden — data-graphic
+definitions, not shapes), and the SDCALL auto-open companion (its menu
+entry is the richer CALOUT "Callouts"). The full skip list and the
+per-stencil category curation live in `manifest.txt`.
 
 ## Provenance
 
@@ -45,13 +56,6 @@ repository's copies are tamper-evident.
 
 ## Current entries
 
-| file | category | title | source | masters |
-|---|---|---|---|---|
-| general-basic-shapes.vssx | General | Basic Shapes | BASIC_U.VSSX | 48 |
-| accessories-containers.vssx | Accessories | Containers | SDCONT_U.VSSX | 14 |
-| accessories-callouts.vssx | Accessories | Callouts | SDCALL_U.VSSX | 14 |
-
-The initial set follows the shipped auto-opened companion stencils
-(REA evidence: VISLIB.DLL references Basic, containers, callouts among
-the nine auto-opened stencils). Expanding the catalog is a
-`manifest.txt` edit plus a re-run of the extractor.
+Per-category counts are recorded as comments at the top of
+`manifest.txt`; the manifest is the catalog. Expanding or re-curation
+is a manifest edit plus a re-run of the extractor.

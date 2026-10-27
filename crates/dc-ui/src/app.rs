@@ -771,6 +771,18 @@ impl App {
     /// path (re-opening expands and focuses the existing entry),
     /// reveals the entry, and notes the status. Parse failures surface
     /// as a status note, like other load failures.
+    /// The user's My Shapes folder (Visio convention, owner direction
+    /// 2026-10-27): `<home>/Documents/My Shapes`. Created on demand —
+    /// the Open Existing Stencil dialog starts there (#105 will grow
+    /// the auto-open default set out of it).
+    fn my_shapes_dir() -> std::path::PathBuf {
+        let dir = my_shapes_path(
+            std::env::var_os("HOME").map(std::path::PathBuf::from),
+        );
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
     fn open_stencil(&mut self, path: PathBuf) {
         let stem = path
             .file_stem()
@@ -880,6 +892,7 @@ impl App {
                         .pick_file(),
                     PendingKind::OpenStencil => rfd::FileDialog::new()
                         .add_filter("Visio stencil", &["vssx"])
+                        .set_directory(Self::my_shapes_dir())
                         .pick_file(),
                     PendingKind::SaveAs => rfd::FileDialog::new()
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
@@ -7828,6 +7841,14 @@ fn protection_flag(doc: &Document, sh: &Shape, chain: &[&Shape], name: &str) -> 
 /// Title of the stencil list entry: the open file's stem (a .vssx
 /// stencil is the whole document), else the document's own master set
 /// (GitHub #53: the pane lists its stencil like Visio does).
+/// `My Shapes` under a home directory (pure half of
+/// [`App::my_shapes_dir`] for testing).
+fn my_shapes_path(home: Option<PathBuf>) -> PathBuf {
+    home.unwrap_or_else(|| PathBuf::from("."))
+        .join("Documents")
+        .join("My Shapes")
+}
+
 fn stencil_title(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
@@ -7837,6 +7858,14 @@ fn stencil_title(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn my_shapes_defaults_under_documents() {
+        assert_eq!(
+            my_shapes_path(Some(PathBuf::from("/home/bret"))),
+            PathBuf::from("/home/bret/Documents/My Shapes")
+        );
+    }
 
     // Dialogs must never block the UI thread; these tests drive the
     // polling half directly (no real native dialog is ever spawned).

@@ -210,16 +210,20 @@ impl Stencil {
                     // 2016 menu behavior).
                     for cat in builtin::categories() {
                         ui.menu_button(cat, |ui| {
-                            for b in builtin::by_category(cat) {
-                                let source = builtin::source_path(b.slug);
-                                let mut open = set
-                                    .iter()
-                                    .any(|(_, st)| st.source == source);
-                                if ui.checkbox(&mut open, b.title).changed() {
-                                    self.request = Some(Request::ToggleBuiltin(b.slug));
-                                    ui.close();
+                            // The full catalog's largest category holds 41
+                            // stencils — cap the flyout at a scrollable
+                            // height instead of running past the window.
+                            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                                for b in builtin::by_category(cat) {
+                                    let source = builtin::source_path(b.slug);
+                                    let mut open =
+                                        set.iter().any(|(_, st)| st.source == source);
+                                    if ui.checkbox(&mut open, b.title).changed() {
+                                        self.request = Some(Request::ToggleBuiltin(b.slug));
+                                        ui.close();
+                                    }
                                 }
-                            }
+                            });
                         });
                     }
                     ui.separator();
