@@ -2149,6 +2149,48 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
 }
 
 #[test]
+fn set_cell_refuses_through_an_inh_snapshot_behind_a_master_guard() {
+    // resolve_cell prefers an instance xform cell's cached V under
+    // F='Inh' — the master's GUARD behind the snapshot must still
+    // protect the cell (a plain `dc edit --cell` write used to clobber
+    // it; found by the #125 review).
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    {
+        // Instance shape 2 (master-backed): a cached Width snapshot.
+        let sh = vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.iter_mut().next().unwrap().shapes, 2);
+        let mut snap = vsdx::model::Cell::value("1");
+        snap.f = Some("Inh".into());
+        sh.unwrap().sheet.set_cell("Width", snap);
+        // And the master guards the same cell.
+        let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
+        let root = m.shapes.first_mut().unwrap();
+        let mut g = vsdx::model::Cell::value("2");
+        g.f = Some("GUARD(2 in)".into());
+        root.sheet.set_cell("Width", g);
+    }
+    let err = ed.apply(dc_core::commands::SetCell::new(
+        dc_core::Scope::Shape { page: page0, shape: 2 },
+        "Width",
+        vsdx::model::Cell::value("9"),
+    ));
+    assert!(err.is_err(), "the master GUARD behind an Inh snapshot must refuse");
+    assert_eq!(
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 2)
+            .unwrap()
+            .sheet
+            .cell("Width")
+            .and_then(|c| c.numeric()),
+        Some(1.0),
+        "the snapshot value is untouched"
+    );
+}
+
+#[test]
 fn set_cell_refuses_locked_axes_via_protection_rows() {
     let (ed, _tmp) = open_fixture();
     let mut ed = ed;

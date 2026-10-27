@@ -255,6 +255,31 @@ fn sheet_locked(sheet: &vsdx::model::Sheet, name: &str) -> bool {
             .any(|sec| on(sec.cell(name)) || sec.rows.iter().any(|r| on(r.cell(name))))
 }
 
+/// The effective formula for `name` on `sh`: the instance cell's own
+/// formula, or — when the instance carries only an `F='Inh'` snapshot
+/// (`resolve_cell` prefers the instance cell for xform cells) — the
+/// master-source formula behind it. A `GUARD(` there guards the
+/// instance even though the snapshot's `V` sits in front of it.
+pub fn effective_formula(
+    doc: &Document,
+    sh: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    name: &str,
+) -> Option<String> {
+    let mut f = doc
+        .resolve_cell(sh, chain, name)
+        .and_then(|c| c.f.clone())
+        .filter(|f| f != "Inh");
+    if f.is_none() {
+        f = doc
+            .instance_source(sh, chain)
+            .and_then(|m| m.sheet.cell(name))
+            .and_then(|c| c.f.clone())
+            .filter(|f| f != "Inh");
+    }
+    f
+}
+
 /// Visio protection semantics shared by every surface (#97 §6 item 6):
 /// a **plain value** write to a shape cell is refused when the cell —
 /// resolved instance → master — carries a `GUARD(...)` formula, or the
@@ -266,7 +291,7 @@ fn sheet_locked(sheet: &vsdx::model::Sheet, name: &str) -> bool {
 /// master formulas. Before this lived only in the GUI's gestures,
 /// `dc edit --cell` silently clobbered every protection the GUI
 /// honored.
-fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell) -> Option<String> {
+pub fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell) -> Option<String> {
     if new.f.is_some() {
         return None;
     }
@@ -276,8 +301,7 @@ fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell) -> 
     let p = doc.pages.iter().find(|p| p.id == *page)?;
     let sh = vsdx::model::find_shape_by_id(&p.shapes, *shape)?;
     let chain = crate::scope::shape_chain(doc, *page, *shape).ok()?;
-    let resolved = doc.resolve_cell(sh, &chain, name);
-    if let Some(f) = resolved.as_ref().and_then(|c| c.f.as_deref()) {
+    if let Some(f) = effective_formula(doc, sh, &chain, name) {
         let guard = f.trim().trim_start_matches('=').trim();
         if guard.to_ascii_uppercase().starts_with("GUARD(") {
             return Some(format!("{name} is GUARDed ({f}) — edit the formula to change it"));

@@ -1811,6 +1811,14 @@ impl App {
             shape: sid,
         };
         let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // Real 1D masters commonly derive PinX/PinY through
+        // GUARD((BeginX+EndX)/2) — a formula-driven pin must not be
+        // literal-written (the command layer now refuses it, which
+        // would abort the whole move Macro); the endpoints carry the
+        // geometry, exactly as apply_line_move's guard documents.
+        let formula_pinned = |n: &str| {
+            dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_some()
+        };
         let cmds: Vec<Box<dyn dc_core::Command>> = [
             ("BeginX", bx + dx),
             ("BeginY", by + dy),
@@ -1820,6 +1828,7 @@ impl App {
             ("PinY", py + dy),
         ]
         .into_iter()
+        .filter(|(n, _)| !matches!(*n, "PinX" | "PinY") || !formula_pinned(n))
         .map(|(n, v)| {
             Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
         })
