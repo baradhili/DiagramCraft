@@ -30,8 +30,12 @@ current dev rate, monthly review is too slow)
 Count of `UPDATE_SNAPSHOTS=1` regenerations per week (19 tracked
 goldens; high churn means goldens pin the wrong granularity):
 
-- Week of 2026-10-27: 0 (baseline — no regenerations needed by the
-  #89–#93/#96 perf waves; the §4 wave also landed byte-identical).
+- Week of 2026-10-27: **1 event** — the owner-selected title-band
+  accent change (#817e7b warm gray, 2026-10-27) legitimately re-rendered
+  every golden that shows the band: 24 of 24 regenerated. (Before it:
+  0 — the #89–#93/#96 perf waves and the entire §4 wave landed
+  byte-identical.) A deliberate full-set repaint like this is healthy
+  churn; the metric watches for *unexpected* regeneration counts.
 
 ## Platform-failure log (OS-only CI failures)
 

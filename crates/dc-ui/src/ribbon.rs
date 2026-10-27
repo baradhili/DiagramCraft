@@ -302,7 +302,7 @@ impl Icon {
         };
         let lit = |col: Color32| if enabled { lift(col) } else { dim };
         let blue = lit(Color32::from_rgb(0x2a, 0x6f, 0xb5));
-        let green = lit(theme::ACCENT);
+        let accent_ink = lit(theme::ACCENT);
         let orange = lit(Color32::from_rgb(0xd8, 0x7b, 0x0b));
         let gray = if enabled {
             Color32::from_rgb(0x77, 0x77, 0x77)
@@ -697,7 +697,7 @@ impl Icon {
                         Pos2::new(c.x + 3.5, c.y + 6.0),
                         Pos2::new(c.x + 8.0, c.y - 4.0),
                     ],
-                    Stroke::new(1.8, green),
+                    Stroke::new(1.8, accent_ink),
                 );
             }
             Icon::DataGraphic => {
@@ -726,7 +726,7 @@ impl Icon {
                         Pos2::new(c.x + 3.0, c.y + 4.0),
                         Pos2::new(c.x - 5.0, c.y + 4.0),
                     ],
-                    Stroke::new(1.7, green),
+                    Stroke::new(1.7, accent_ink),
                 );
                 p.line(
                     vec![
@@ -734,7 +734,7 @@ impl Icon {
                         Pos2::new(c.x - 8.0, c.y - 4.0),
                         Pos2::new(c.x - 5.0, c.y - 1.0),
                     ],
-                    stroke(green),
+                    stroke(accent_ink),
                 );
             }
             Icon::Swimlane => {
@@ -766,7 +766,7 @@ impl Icon {
                         Pos2::new(c.x - 2.0, c.y + 4.0),
                         Pos2::new(c.x + 7.0, c.y - 5.0),
                     ],
-                    Stroke::new(2.0, green),
+                    Stroke::new(2.0, accent_ink),
                 );
             }
             Icon::Picture => {
@@ -784,7 +784,7 @@ impl Icon {
                         Pos2::new(c.x + 2.0, c.y + 2.0),
                         Pos2::new(c.x + 5.0, c.y - 1.0),
                     ],
-                    stroke(green),
+                    stroke(accent_ink),
                 );
             }
             Icon::OnlinePic => {
@@ -889,11 +889,11 @@ impl Icon {
                 );
                 p.line_segment(
                     [c + Vec2::new(-4.0, 0.0), c + Vec2::new(5.0, 0.0)],
-                    Stroke::new(1.6, green),
+                    Stroke::new(1.6, accent_ink),
                 );
                 p.line_segment(
                     [c + Vec2::new(0.5, -5.0), c + Vec2::new(0.5, 5.0)],
-                    Stroke::new(1.6, green),
+                    Stroke::new(1.6, accent_ink),
                 );
             }
             Icon::Theme => {
@@ -906,7 +906,7 @@ impl Icon {
                 p.rect_filled(
                     Rect::from_center_size(c + Vec2::new(5.0, 4.0), Vec2::new(5.0, 5.0)),
                     1.0,
-                    green,
+                    accent_ink,
                 );
             }
             Icon::Fit => {
@@ -1000,7 +1000,7 @@ impl Icon {
                     0.5,
                     orange,
                 );
-                p.circle_filled(c + Vec2::new(4.0, -3.0), 3.5, green);
+                p.circle_filled(c + Vec2::new(4.0, -3.0), 3.5, accent_ink);
                 p.add(egui::Shape::convex_polygon(
                     vec![
                         c + Vec2::new(0.0, 3.0),
@@ -1015,16 +1015,16 @@ impl Icon {
                 p.rect_stroke(
                     Rect::from_center_size(c, Vec2::new(12.0, 9.0)),
                     1.0,
-                    stroke(green),
+                    stroke(accent_ink),
                     egui::StrokeKind::Middle,
                 );
                 p.line_segment(
                     [c + Vec2::new(-4.0, -1.0), c + Vec2::new(4.0, -1.0)],
-                    Stroke::new(1.4, green),
+                    Stroke::new(1.4, accent_ink),
                 );
                 p.line_segment(
                     [c + Vec2::new(-4.0, 2.0), c + Vec2::new(2.0, 2.0)],
-                    Stroke::new(1.4, green),
+                    Stroke::new(1.4, accent_ink),
                 );
             }
             Icon::ShapeSheet => {
@@ -1051,7 +1051,7 @@ impl Icon {
                     Align2::CENTER_CENTER,
                     "mm",
                     egui::FontId::monospace(12.0),
-                    green,
+                    accent_ink,
                 );
             }
             Icon::Delete => {

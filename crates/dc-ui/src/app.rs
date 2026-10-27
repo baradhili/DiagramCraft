@@ -2250,7 +2250,8 @@ impl App {
     // -- shell panels -----------------------------------------------------
 
     fn title_band(&mut self, ui: &mut Ui) {
-        // Visio 2016: green band, tiny QAT (Save/Undo/Redo + chevron) at
+        // Visio 2016-style accent band (owner-selected warm gray,
+// 2026-10-27), tiny QAT (Save/Undo/Redo + chevron) at
         // the far left, document title centered. The brand green band
         // stays green in dark mode (GitHub #52).
         let t = theme::shell_tokens(ui.visuals());
