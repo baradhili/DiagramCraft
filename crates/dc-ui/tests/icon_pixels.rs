@@ -127,19 +127,3 @@ fn icon_paints_in_full_shell() {
         "full-shell ribbon band has only {n} ink px — icons missing"
     );
 }
-
-#[test]
-#[ignore]
-fn dump_shell_render() {
-    let mut app = dc_ui::app::App::with_blank();
-    let mut h = egui_kittest::Harness::builder()
-        .with_size(egui::vec2(1280.0, 800.0))
-        .build_ui(move |ui| {
-            dc_ui::theme::install(ui.ctx());
-            app.draw(ui);
-        });
-    h.run();
-    h.run();
-    let img = h.render().unwrap();
-    img.save("/tmp/shell_render.png").unwrap();
-}

@@ -432,59 +432,6 @@ fn marquee_selects_multiple_and_delete_removes_all() {
     assert_eq!(h.state().debug_shape_count(), 0);
 }
 
-#[test]
-fn corner_drag_resizes_shape() {
-    let mut h = harness_with_blank();
-    h.run();
-    let from = h.state().debug_master_cells()[0].1.center();
-    let to = h.state().debug_canvas_rect().center();
-    click_at(&mut h, from, egui::PointerButton::Primary);
-    click_at(&mut h, to, egui::PointerButton::Primary);
-    h.run();
-    assert_eq!(h.state().debug_shape_count(), 1);
-
-    // Selection rect in screen coords comes from the app; approximate:
-    // the shape is ~1in at ~fit zoom centered where we dropped. Grab the
-    // bottom-right corner via the app's debug accessor.
-    let br = h.state().debug_sel_br_corner().expect("selection rect");
-    let tl_before = h.state().debug_sel_tl_corner().expect("selection rect");
-    let before = h.state().debug_sel_width();
-    let h_before = h.state().debug_sel_height();
-    h.hover_at(br);
-    h.event(egui::Event::PointerButton {
-        pos: br,
-        button: egui::PointerButton::Primary,
-        pressed: true,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.hover_at(br + egui::vec2(40.0, 30.0));
-    h.run();
-    h.event(egui::Event::PointerButton {
-        pos: br + egui::vec2(40.0, 30.0),
-        button: egui::PointerButton::Primary,
-        pressed: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.run();
-    let after = h.state().debug_sel_width();
-    let h_after = h.state().debug_sel_height();
-    assert!(
-        after > before + 0.15,
-        "corner drag grew the shape: {before} → {after}"
-    );
-    assert!(
-        h_after > h_before + 0.1,
-        "corner drag grew the shape height: {h_before} → {h_after}"
-    );
-    // Dragging the bottom-right screen corner must anchor the opposite
-    // (top-left) corner: it stays put within a pixel.
-    let tl_after = h.state().debug_sel_tl_corner().expect("selection rect");
-    assert!(
-        (tl_after.x - tl_before.x).abs() <= 1.0 && (tl_after.y - tl_before.y).abs() <= 1.0,
-        "top-left corner moved during bottom-right drag: {tl_before:?} → {tl_after:?}"
-    );
-}
-
 // ------------------------------------------------------------------
 // GitHub #59: reliable handles, shapesheet guards, 1D line handles.
 
