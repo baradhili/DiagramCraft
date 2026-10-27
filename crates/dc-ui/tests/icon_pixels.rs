@@ -53,6 +53,7 @@ fn icon_paints_pixels_inside_content_row() {
             RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
         )],
     )];
+    // Bare content row (no theme, no panel chrome).
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
         .build_ui(|ui| {
@@ -67,17 +68,10 @@ fn icon_paints_pixels_inside_content_row() {
         n > 800,
         "content-row Paste painted only {n} px — icon missing"
     );
-}
 
-#[test]
-fn icon_paints_with_theme_and_panel() {
-    // Same structure as the shell: theme installed, panel with frame.
-    let groups = vec![Group::new(
-        "Clipboard",
-        vec![big(
-            RibbonButton::new(Icon::Paste, "Paste", Action::Macros).enabled(false)
-        )],
-    )];
+    // Same row inside the shell's chrome: theme installed and a panel
+    // frame around it (folded in from the former theme+panel test; the
+    // theme path is what every full-shell harness exercises).
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
         .build_ui(|ui| {
