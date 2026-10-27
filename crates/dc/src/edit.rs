@@ -6,7 +6,7 @@
 //! undoes the most recent command before saving (proof the history is
 //! live); `--history` prints the applied labels.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context as _, Result};
 use dc_core::commands::{
     AddConnect, AddLayer, AddPage, AddShape, MovePage, RemoveConnect, RemoveLayer, RemovePage,
     RemoveShape, RenameLayer, RenamePage, SetCell, SetText,
@@ -58,7 +58,7 @@ pub fn connect_owner(s: &str) -> Result<dc_core::connects::ConnectsOwner> {
 }
 
 pub fn run(file: &Path, out: &Path, args: EditArgs) -> Result<()> {
-    let mut ed = Editor::open(file)?;
+    let mut ed = Editor::open(file).with_context(|| format!("opening {}", file.display()))?;
     apply_all(&mut ed, &args)?;
     for _ in 0..args.undo_count {
         match ed.undo()? {

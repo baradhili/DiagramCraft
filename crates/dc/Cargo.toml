@@ -10,3 +10,6 @@ vsdx = { path = "../vsdx" }
 dc-core = { path = "../dc-core" }
 anyhow.workspace = true
 clap.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
