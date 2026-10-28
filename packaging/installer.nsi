@@ -31,7 +31,7 @@ Section "${APPNAME} (required)"
   SetOutPath "$INSTDIR\licenses"
   File /oname=LICENSE-MIT "${LICENSEDIR}\LICENSE-MIT"
   File /oname=LICENSE-APACHE "${LICENSEDIR}\LICENSE-APACHE"
-  File /oname=LICENSE-Carlito "${LICENSEDIR}\crates\dc-ui\assets\fonts\LICENSE-Carlito"
+  File /oname=LICENSE-Carlito "${LICENSEDIR}\crates\dc\assets\fonts\LICENSE-Carlito"
   SetOutPath "$INSTDIR"
   WriteRegStr HKLM "Software\${APPNAME}" "InstallDir" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \

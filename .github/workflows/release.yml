@@ -160,7 +160,7 @@ jobs:
           cp packaging/Info.plist "DiagramCraft.app/Contents/Info.plist"
           mkdir -p "DiagramCraft.app/Contents/Resources/licenses"
           cp LICENSE-MIT LICENSE-APACHE "DiagramCraft.app/Contents/Resources/licenses/"
-          cp crates/dc-ui/assets/fonts/LICENSE-Carlito "DiagramCraft.app/Contents/Resources/licenses/"
+          cp crates/dc/assets/fonts/LICENSE-Carlito "DiagramCraft.app/Contents/Resources/licenses/"
           codesign --force --sign - --deep "DiagramCraft.app"
           mkdir -p dist
           hdiutil create -volname "DiagramCraft" \
