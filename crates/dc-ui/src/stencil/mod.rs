@@ -759,14 +759,20 @@ fn quick_cells<'a>(
     for ix in 0..set.len() {
         let Some(st) = set.get(ix) else { continue };
         // No stable identity (non-UTF-8 path): that source keeps its
-        // default membership — per-user edits need a stable key.
-        let Some(identity) = st.source.to_str() else { continue };
+        // DEFAULT membership — per-user edits need a stable key, but
+        // dropping the source wholesale would hide its heads (#143
+        // review).
+        let identity = st.source.to_str();
         let defaults = quick_default_ids(&st.doc);
         let mut ordered: Vec<&vsdx::Master> =
             st.doc.masters.iter().filter(|m| visible_master(m)).collect();
         ordered.sort_by_key(|m| m.id);
         for m in ordered {
-            if membership.is_member(identity, m.id, defaults.contains(&m.id)) {
+            let member = match identity {
+                Some(id) => membership.is_member(id, m.id, defaults.contains(&m.id)),
+                None => defaults.contains(&m.id),
+            };
+            if member {
                 cells.push(Cell {
                     key: (StencilId::Open(ix), m.id),
                     serial: st.serial(),
@@ -850,5 +856,41 @@ fn short(s: &str) -> String {
     } else {
         let t: String = s.chars().take(MAX - 1).collect();
         format!("{t}…")
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// #143 branch review: a stencil whose source path is not UTF-8
+    /// has no membership identity, but its DEFAULT heads stay in
+    /// Quick Shapes — the source must not vanish wholesale.
+    #[test]
+    fn non_utf8_source_keeps_its_default_quick_heads() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let ed = dc_core::Editor::new_blank();
+        let doc = vsdx::parse::parse(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../dc-core/assets/blank.vsdx"
+        )))
+        .unwrap();
+        let total = doc.masters.len();
+        let mut set = StencilSet::default();
+        let bad = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![
+            0xff, b'.', b'v', b's', b's', b'x',
+        ]));
+        set.open_parsed(doc, bad, "weird".into(), Origin::File);
+        let cells = quick_cells(&ed, &set, &crate::quickshapes::QuickShapes::ephemeral());
+        let from_source = cells
+            .iter()
+            .filter(|c| matches!(c.key.0, StencilId::Open(0)))
+            .count();
+        assert_eq!(
+            from_source,
+            QUICK_PER_SOURCE.min(total),
+            "the non-UTF-8 source contributes its default head set"
+        );
     }
 }

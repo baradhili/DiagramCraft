@@ -716,6 +716,12 @@ impl App {
         }) else {
             return;
         };
+        // An in-place text edit ends on the page switch (Visio commits
+        // on the focus change; #22 review) — before the view parks, so
+        // the parked view is the pre-edit one.
+        if self.text_edit.is_some() {
+            self.end_text_edit(true);
+        }
         {
             self.page_states.insert(
                 cur_id,
@@ -5962,7 +5968,11 @@ impl App {
                             crate::ribbon::Icon::Rotate,
                             "Rotate Right 90°",
                             true,
-                            Act::Rot(std::f64::consts::FRAC_PI_2),
+                            // The text row's sign: page coordinates are
+                            // y-up, so clockwise (right) is NEGATIVE
+                            // radians (#77 branch review — the bar had
+                            // it backwards).
+                            Act::Rot(-std::f64::consts::FRAC_PI_2),
                         ),
                         (crate::ribbon::Icon::Group, "Group", can_group, Act::Group),
                     ] {

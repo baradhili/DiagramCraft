@@ -210,6 +210,27 @@ fn ctx_menu_icon_bar_dispatches_and_mirrors_enablement() {
         1,
         "the enabled Group icon grouped the selection"
     );
+
+    // The Rotate icon matches its label's direction: the text row
+    // "Rotate Right 90°" is Rot(−π/2) — page coordinates are y-up, so
+    // clockwise is NEGATIVE radians (branch review: the bar had it
+    // backwards).
+    let (_, gid) = h.state().debug_sel().expect("group selected");
+    let cg = h.state().debug_shape_screen_rect(gid).unwrap().center();
+    click_at(&mut h, cg, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Rotate Right 90°").click();
+    h.run();
+    let angle = h
+        .state()
+        .debug_cell_for_test(gid, "Angle")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(999.0);
+    assert!(
+        (angle + std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+        "Rotate Right is clockwise: −π/2, got {angle}"
+    );
 }
 
 #[test]
@@ -1321,6 +1342,55 @@ fn text_edit_skip_toggle_keeps_other_layers_cached() {
         h.state().debug_layer_version_for_test(bystander),
         v_by0,
         "the unedited shape's content version is still unchanged"
+    );
+}
+
+/// #22 branch review: switching pages mid-edit ends the in-place
+/// editor AND commits the draft (Visio commits on the focus change).
+#[test]
+fn page_switch_commits_the_text_edit() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two pages (insert activates Page-2).
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "Page-2");
+
+    // Back to Page-1: place a shape and open its editor with a draft.
+    h.get_by_label("Page-1").click();
+    h.run();
+    let (_p, sid) = place_master(&mut h, 2);
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("committed");
+    h.run();
+    assert!(h.state().debug_text_edit().is_some(), "editor open");
+
+    // Switching to Page-2 ends the edit and commits the draft.
+    h.get_by_label("Page-2").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_text_edit(),
+        None,
+        "the edit ended on the page switch"
+    );
+    // The commit landed on PAGE-1's shape — shape reads are
+    // active-page-scoped, so switch back before asserting.
+    h.get_by_label("Page-1").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("committed"),
+        "the draft committed through SetText"
     );
 }
 
