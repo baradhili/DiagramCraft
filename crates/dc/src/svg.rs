@@ -1426,7 +1426,16 @@ fn emit_text(
                 word.to_string()
             };
             if started && width_in(&candidate) > usable_w {
-                lines.push(std::mem::take(&mut cur));
+                if cur.is_empty() {
+                    // The break lands on a pending separator space (an
+                    // authored space run or a leading indent too wide
+                    // to share a line with the word): the space is
+                    // content (#144 review) — it becomes a line of its
+                    // own, never an empty line, never dropped.
+                    lines.push(" ".to_string());
+                } else {
+                    lines.push(std::mem::take(&mut cur));
+                }
                 cur = word.to_string();
             } else {
                 cur = candidate;
@@ -3894,6 +3903,32 @@ mod tests {
         assert!(
             out.contains(r#"<text text-anchor="middle" xml:space="preserve""#),
             "the text element carries xml:space=preserve: {out}"
+        );
+    }
+
+    /// #144 review: when a block is too narrow for `"a "` and `" b"`,
+    /// the wrap breaks inside the `"a  b"` space run — the surviving
+    /// space is a line of its own, not an empty line and not a dropped
+    /// character.
+    #[test]
+    fn narrow_wrap_breaking_in_a_space_run_keeps_the_space() {
+        let doc = Document::default();
+        let size = 0.13889; // the text-block default (10 pt)
+        let face = crate::textmetrics::resolve(None, false);
+        let usable = face.width_in("a", size) + 0.4 * face.width_in(" ", size);
+        let mut s = Shape::default();
+        s.sheet.text = Some("a  b".into());
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value(&format!("{usable:.6}")));
+        s.sheet.set_cell("LeftMargin", Cell::value("0"));
+        s.sheet.set_cell("RightMargin", Cell::value("0"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        assert_eq!(
+            text_lines(&out),
+            vec!["a", " ", "b"],
+            "the surviving space is its own line: {out}"
         );
     }
 
