@@ -2203,8 +2203,10 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
     assert!(ed.undo().unwrap().is_none());
 
     // A formula write is the escape hatch (ShapeSheet edit / --formula).
-    let mut f = vsdx::model::Cell::default();
-    f.f = Some("Width*2".into());
+    let f = vsdx::model::Cell {
+        f: Some("Width*2".into()),
+        ..Default::default()
+    };
     ed.apply(dc_core::commands::SetCell::new(
         dc_core::Scope::Shape { page: page0, shape: 1 },
         "Width",
@@ -2214,9 +2216,11 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
 
     // An F='Inh' cache-refresh write lands under the guard too (the
     // flattened-group refresh re-evaluates guarded master formulas).
-    let mut inh = vsdx::model::Cell::default();
-    inh.v = Some("2".into());
-    inh.f = Some("Inh".into());
+    let inh = vsdx::model::Cell {
+        v: Some("2".into()),
+        f: Some("Inh".into()),
+        ..Default::default()
+    };
     ed.apply(dc_core::commands::SetCell::new(
         dc_core::Scope::Shape { page: page0, shape: 1 },
         "Width",
@@ -2236,7 +2240,7 @@ fn set_cell_refuses_through_an_inh_snapshot_behind_a_master_guard() {
     let page0 = ed.doc.pages[0].id;
     {
         // Instance shape 2 (master-backed): a cached Width snapshot.
-        let sh = vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.iter_mut().next().unwrap().shapes, 2);
+        let sh = vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.first_mut().unwrap().shapes, 2);
         let mut snap = vsdx::model::Cell::value("1");
         snap.f = Some("Inh".into());
         sh.unwrap().sheet.set_cell("Width", snap);

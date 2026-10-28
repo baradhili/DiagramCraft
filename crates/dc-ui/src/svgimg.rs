@@ -303,6 +303,7 @@ impl TextureCache {
     /// seam (kittest) the job runs inline and the handle is back this
     /// frame. A failed build/parse inserts nothing (the failure shows
     /// once, then the next frame retries).
+    #[allow(clippy::too_many_arguments)]
     pub fn get(
         &mut self,
         ctx: &Context,
@@ -412,6 +413,7 @@ impl TextureCache {
     /// Land a worker completion for a page key (#92) — called from
     /// `App`'s pool drain. Results for stale versions insert
     /// harmlessly and are evicted by the next `get`'s retain.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_page_done(
         &mut self,
         ctx: &Context,

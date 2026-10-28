@@ -425,6 +425,7 @@ impl Stencil {
 
     /// One entry's master grid: thumbnails from each cell's own source
     /// document, click-to-arm and drag-to-carry per cell (#53/#63).
+    #[allow(clippy::too_many_arguments)]
     fn entry_grid(
         &mut self,
         ui: &mut Ui,

@@ -2,6 +2,9 @@
 //! many-shape .vsdx builder that raster_async and render_perf carried
 //! as byte-identical copies (modulo comments and a filename prefix —
 //! each suite writes into its own tempdir, so one filename serves).
+/// A synthetic document: `n_shapes` text-bearing rectangles on a grid
+/// (shape 1 sits at the page center so a center click selects it) and
+/// `n_masters` stencil masters, packaged as a minimal .vsdx.
 pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usize) -> std::path::PathBuf {
     let rect = |id: usize, pin_x: f64, pin_y: f64, w: f64, h: f64, text: &str| {
         let (lw, lh) = (w / 2.0, h / 2.0);

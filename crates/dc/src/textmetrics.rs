@@ -171,9 +171,10 @@ impl ResolvedFace {
     /// unique per `Database`, and the system and embedded statics can
     /// coexist in one test process.
     fn advance_of(&self, id: fontdb::ID, c: char) -> Option<f64> {
-        static ADVANCES: OnceLock<
-            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, char), Option<f64>>>,
-        > = OnceLock::new();
+        // (database, face, char) → advance, missing ones included.
+        type Advances =
+            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, char), Option<f64>>>;
+        static ADVANCES: OnceLock<Advances> = OnceLock::new();
         let m = metrics();
         let key = (m as *const MetricsDb as usize, id, c);
         let cache = ADVANCES.get_or_init(Default::default);

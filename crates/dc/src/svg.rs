@@ -3683,7 +3683,7 @@ mod tests {
         group.sheet.text = Some("hello".into());
         group.sheet.set_cell("TxtWidth", Cell::value("3"));
         let (doc, page) = page_fixture(vec![group]);
-        let (x, y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
+        let (x, _y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
         // Group box page x∈[3,5]; sub-shape local x∈[2,3] → page
         // x∈[5,6]; text 3 wide centered → x∈[2.5,5.5].
         let right = x + w - PAD;
@@ -3919,7 +3919,7 @@ mod tests {
         let mut s = Shape::default();
         s.sheet.text = Some("a  b".into());
         s.sheet.set_cell("Width", Cell::value("2.0"));
-        s.sheet.set_cell("TxtWidth", Cell::value(&format!("{usable:.6}")));
+        s.sheet.set_cell("TxtWidth", Cell::value(format!("{usable:.6}")));
         s.sheet.set_cell("LeftMargin", Cell::value("0"));
         s.sheet.set_cell("RightMargin", Cell::value("0"));
         let chain = [&s];

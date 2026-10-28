@@ -376,7 +376,7 @@ mod tests {
         ));
         for _ in 0..600 {
             landed.extend(pool.drain());
-            if landed.len() >= PER_FRAME_POST_CAP + 1 {
+            if landed.len() > PER_FRAME_POST_CAP {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));

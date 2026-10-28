@@ -2188,9 +2188,7 @@ impl App {
                     self.stencil.armed = None;
                     return None;
                 };
-                let Some(ed) = self.ed.as_ref() else {
-                    return None;
-                };
+                let ed = self.ed.as_ref()?;
                 let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
                 let cmd = dc_core::place_master_from_stencil(&ed.doc, page_id, &src, page_pos);
                 self.apply(cmd);

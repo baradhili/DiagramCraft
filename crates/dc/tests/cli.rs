@@ -42,7 +42,7 @@ fn fails(out: &Output) -> &str {
 /// The blank starter document (one Letter page, starter masters) — the
 /// same base every surface opens.
 fn blank_doc(dir: &Path, name: &str) -> PathBuf {
-    let mut ed = dc_core::Editor::new_blank();
+    let ed = dc_core::Editor::new_blank();
     let path = dir.join(name);
     ed.save_as(&path).unwrap();
     path
@@ -155,7 +155,6 @@ fn roundtrip_verify_passes_and_the_output_reopens() {
 fn edit_flags_roundtrip_every_mutation_family() {
     let tmp = tempfile::tempdir().unwrap();
     let doc = shape_doc(tmp.path(), "in.vsdx");
-    let page = "page:1";
     let shape = "page:1/shape:1";
 
     // cell

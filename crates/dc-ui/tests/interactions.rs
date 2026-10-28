@@ -1781,11 +1781,10 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_item = h
         .get_all_by_label_contains("Group")
-        .filter(|n| {
+        .find(|n| {
             let r = n.rect();
             !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
         })
-        .next()
         .expect("Group item in the flyout submenu");
     group_item.click();
     h.run();
@@ -2759,7 +2758,7 @@ fn drag_moves_the_shape_live_under_the_cursor() {
     // Select the placed shape (placement may not carry selection).
     let r = h.state().debug_shape_screen_rect(shape).expect("placed");
     click_at(&mut h, r.center(), egui::PointerButton::Primary);
-    assert_eq!(h.state().debug_sel().map(|(p, s)| (p, s)), Some((page, shape)));
+    assert_eq!(h.state().debug_sel(), Some((page, shape)));
     let from = r.center();
     let b = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -2984,8 +2983,8 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
         .1;
     click_at(&mut h, header.center(), egui::PointerButton::Primary);
     let entries = h.state().debug_stencil_entries();
-    assert_eq!(entries[0].1, false, "alpha collapsed by its own header");
-    assert_eq!(entries[1].1, true, "beta's expansion is independent");
+    assert!(!entries[0].1, "alpha collapsed by its own header");
+    assert!(entries[1].1, "beta's expansion is independent");
     assert_eq!(
         count(&h, StencilId::Open(0)),
         2,
