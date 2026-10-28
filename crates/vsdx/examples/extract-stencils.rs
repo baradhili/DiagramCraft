@@ -54,7 +54,7 @@ fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&out_dir)?;
 
     let mut digests = String::new();
-    let mut emit = |slug: &str,
+    let emit = |_slug: &str,
                     category: &str,
                     title: &str,
                     source: &str,

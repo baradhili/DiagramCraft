@@ -25,11 +25,26 @@ use crate::svgimg::TextureCache;
 use crate::theme;
 
 /// Draft row for the Hyperlinks dialog (#28): `edit_row` names the
-/// instance row being edited (None = adding).
+/// instance row being edited (None = adding). `from_master` marks a
+/// draft opened on a master-inherited row (#139): OK materializes the
+/// row onto the instance sheet instead of replacing a local one.
 #[derive(Clone)]
 struct HyperlinkDraft {
     edit_row: Option<i64>,
+    from_master: bool,
     address: String,
+    sub: String,
+    desc: String,
+}
+
+/// One hyperlink row for list display: its values, its row ix, and
+/// whether it lives on the instance sheet or is inherited from the
+/// shape's master (#139).
+#[derive(Clone)]
+struct HyperRow {
+    ix: i64,
+    inherited: bool,
+    addr: String,
     sub: String,
     desc: String,
 }
@@ -185,14 +200,18 @@ pub struct App {
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
+    /// The Quick Shapes membership menu (#143): the right-clicked
+    /// master cell (source key) and the popup anchor.
+    quick_menu: Option<((StencilId, i64), egui::Pos2)>,
     /// Last frame's context-menu rect in screen coords; None while the
     /// menu is closed (kept for the placement tests, issue #49).
     ctx_menu_rect: Option<egui::Rect>,
     /// In-app shape clipboard (Cut/Copy/Paste within DiagramCraft; rich
     /// OS-clipboard formats arrive with a later milestone).
     clipboard: Option<Shape>,
-    /// Inline text editor target: (shape id, draft text).
-    text_edit: Option<(i64, String)>,
+    /// In-place WYSIWYG text editor session (GitHub #22); the state
+    /// and overlay live in `crate::textedit`, this is the shell glue.
+    text_edit: Option<crate::textedit::TextEditSession>,
     /// The last canvas click placed a stencil master — a double-click
     /// completing that click pair must not open a text editor.
     placed_last_click: bool,
@@ -202,6 +221,9 @@ pub struct App {
     /// Ephemeral in the headless constructors; `App::new` swaps in the
     /// persistent on-disk list.
     recent: RecentFiles,
+    /// Per-user Quick Shapes membership (#143) — app-side, persisted
+    /// beside the MRU; ephemeral in every headless constructor.
+    quick_shapes: crate::quickshapes::QuickShapes,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -213,6 +235,9 @@ enum ColorTarget {
     Fill,
     FillBkgnd,
     Line,
+    /// Character row-0 Color (#73): writes a section-row cell, not a
+    /// plain one.
+    Text,
 }
 
 enum PendingDialog {
@@ -304,6 +329,7 @@ impl App {
         // (tests and kittest constructors stay ephemeral so they never
         // touch the user's real config dir).
         app.recent = RecentFiles::open();
+        app.quick_shapes = crate::quickshapes::QuickShapes::open();
         if let Some(p) = path {
             app.load(p);
         }
@@ -367,12 +393,14 @@ impl App {
             debug_close_vetoes: 0,
             debug_close_issued: 0,
             ctx_menu: None,
+            quick_menu: None,
             ctx_menu_rect: None,
             clipboard: None,
             text_edit: None,
             placed_last_click: false,
             color_pick: None,
             recent: RecentFiles::ephemeral(),
+            quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
             os_theme: None,
         };
         if let Some(p) = path {
@@ -566,6 +594,98 @@ impl App {
         }
     }
 
+    /// Undo/redo selection restore (#136): instead of dropping the
+    /// selection, map it through the command. The pre-command selection
+    /// simply survives when its shapes are still on the page — undoing
+    /// a move or resize keeps the shape selected (handles stay live),
+    /// and the Format pane it drove stays up. When the selection died
+    /// with the command — a delete cleared it, or an undone placement
+    /// removed its shape — the command's membership touches that
+    /// resolve again become the selection: undoing a delete restores
+    /// *and selects* the shape (observed Visio 2016 behavior), redoing
+    /// a placement lands it selected like a fresh placement. Clearing
+    /// is the fallback when neither yields anything (page-structure
+    /// edits, commands that only touched other pages).
+    fn restore_selection_after_history(&mut self, touched: &dc_core::TouchList) {
+        // Group-edit mode (#78) selects members of the open group and
+        // defers nested handle semantics; a command's touched rollup is
+        // top-level, and mapping it here would jump the selection out
+        // of the open group. Keep the member selection and only prune
+        // entries whose shapes no longer resolve.
+        if !self.group_edit.is_empty() {
+            let alive: Vec<(i64, i64)> = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                .map(|page| {
+                    self.sel_set
+                        .iter()
+                        .copied()
+                        .filter(|(_, s)| {
+                            vsdx::model::find_shape_by_id(&page.shapes, *s).is_some()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.sel = match self.sel {
+                Some(entry) if alive.contains(&entry) => Some(entry),
+                _ => alive.last().copied(),
+            };
+            self.sel_set = alive;
+            return;
+        }
+        let picked: Option<Vec<(i64, i64)>> = self.ed().and_then(|ed| {
+            let page = ed
+                .doc
+                .pages
+                .get(self.page_idx.min(ed.doc.pages.len().saturating_sub(1)))?;
+            // The pre-command selection, pruned to entries that are
+            // still TOP-LEVEL on the active page after the
+            // inverse/apply. Top-level only (not find_shape_by_id,
+            // which resolves nested members): page-mode selection is
+            // top-level by construction, and a re-nesting inverse —
+            // undo of an ungroup puts the selected member back inside
+            // its group — must drop it, or handles and Delete would
+            // act on a hidden nested shape (#136 review).
+            let old_alive: Vec<(i64, i64)> = self
+                .sel_set
+                .iter()
+                .copied()
+                .filter(|(p, s)| *p == page.id && page.shapes.iter().any(|sh| sh.id == *s))
+                .collect();
+            if !old_alive.is_empty() {
+                return Some(old_alive);
+            }
+            // Membership touches (shapes that entered or left the page)
+            // that exist again, in page z-order — the same order a
+            // marquee pick produces.
+            let restored: std::collections::HashSet<i64> = touched
+                .shapes
+                .iter()
+                .filter(|t| t.page == page.id && t.touch == dc_core::Touch::Membership)
+                .map(|t| t.shape)
+                .collect();
+            Some(
+                page.shapes
+                    .iter()
+                    .filter(|s| restored.contains(&s.id))
+                    .map(|s| (page.id, s.id))
+                    .collect(),
+            )
+        });
+        let picked = picked.unwrap_or_default();
+        if picked.is_empty() {
+            self.set_selection(None);
+            return;
+        }
+        // Primary: the pre-history primary when it survived; otherwise
+        // the top-most survivor, matching a fresh marquee pick.
+        self.sel = match self.sel {
+            Some(entry) if picked.contains(&entry) => Some(entry),
+            _ => Some(picked[picked.len() - 1]),
+        };
+        self.sel_set = picked;
+    }
+
     fn do_undo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.undo() {
@@ -574,7 +694,7 @@ impl App {
                     self.dirty = true;
                     self.version += 1;
                     self.layers.touch(&touched, self.page_id().unwrap_or(-1));
-                    self.set_selection(None);
+                    self.restore_selection_after_history(&touched);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -596,6 +716,12 @@ impl App {
         }) else {
             return;
         };
+        // An in-place text edit ends on the page switch (Visio commits
+        // on the focus change; #22 review) — before the view parks, so
+        // the parked view is the pre-edit one.
+        if self.text_edit.is_some() {
+            self.end_text_edit(true);
+        }
         {
             self.page_states.insert(
                 cur_id,
@@ -673,7 +799,13 @@ impl App {
     /// layer (undoable) and lands the user on the affected page.
     fn tab_cmd_insert(&mut self, after: usize) {
         let name = self.next_page_name();
-        self.apply(AddPage::new(name));
+        // #68: Visio's Insert Page copies the current page's setup —
+        // seed the new sheet from the active page.
+        let add = match self.page_id() {
+            Some(id) => AddPage::seeded_from(name, id),
+            None => AddPage::new(name),
+        };
+        self.apply(add);
         if let Some(n) = self.ed().map(|e| e.doc.pages.len()) {
             if n > 1 && after + 1 < n {
                 self.apply(MovePage {
@@ -747,6 +879,10 @@ impl App {
                     self.dirty = true;
                     self.version += 1;
                     self.layers.touch(&touched, self.page_id().unwrap_or(-1));
+                    // Same selection mapping as undo (#136) — redo never
+                    // touched the selection before, so a redo-of-delete
+                    // could leave a selection pointing at a removed shape.
+                    self.restore_selection_after_history(&touched);
                 }
                 Ok(None) => self.status = "nothing to redo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -1244,7 +1380,8 @@ impl App {
                 if i.key_pressed(egui::Key::F2) {
                     if let Some((_, s)) = self.sel {
                         let draft = self.selected_text(s).unwrap_or_default();
-                        self.text_edit = Some((s, draft));
+                        self.begin_text_edit(s, draft);
+                        self.status = format!("editing text of shape {s}");
                     }
                 }
             }
@@ -2069,9 +2206,7 @@ impl App {
                     self.stencil.armed = None;
                     return None;
                 };
-                let Some(ed) = self.ed.as_ref() else {
-                    return None;
-                };
+                let ed = self.ed.as_ref()?;
                 let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
                 let cmd = dc_core::place_master_from_stencil(&ed.doc, page_id, &src, page_pos);
                 self.apply(cmd);
@@ -2174,9 +2309,9 @@ impl App {
         match classify_dbl_click(formula.as_deref()) {
             DblClick::OpenText => {
                 // The F2 path reached by mouse: seed the draft and let
-                // `text_edit_window` run it.
+                // the in-place editor run it.
                 let draft = self.selected_text(shape_id).unwrap_or_default();
-                self.text_edit = Some((shape_id, draft));
+                self.begin_text_edit(shape_id, draft);
                 self.status = format!("editing text of shape {shape_id}");
             }
             DblClick::Deferred(msg) => self.status = msg,
@@ -2192,13 +2327,17 @@ impl App {
             Action::Undo => self.do_undo(),
             Action::Redo => self.do_redo(),
             Action::NewPage => {
-                if let Some(page_id) = self.page_id() {
-                    let _ = page_id;
-                }
-                self.apply(AddPage::new(format!(
+                // #68: like the tab menu's Insert Page, the new sheet
+                // copies the active page's setup.
+                let name = format!(
                     "Page-{}",
                     self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1)
-                )));
+                );
+                let add = match self.page_id() {
+                    Some(id) => AddPage::seeded_from(name, id),
+                    None => AddPage::new(name),
+                };
+                self.apply(add);
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
@@ -3503,6 +3642,15 @@ impl App {
                         ));
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui
+                        .button(self.eff_row_str("Character", "Color").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Text);
+                    }
+                });
                 let cur = self
                     .eff_row_str("Paragraph", "HorzAlign")
                     .unwrap_or_else(|| "0".into());
@@ -3893,6 +4041,10 @@ impl App {
                 vp,
                 self.group_edit.first().copied(),
                 &hidden,
+                // While the in-place editor is open (#22) its shape's
+                // layer renders without the text — the editor overlay
+                // is the only copy on screen.
+                self.text_edit.as_ref().map(|s| s.shape),
             )
         };
         if let Some(msg) = layer_status {
@@ -3929,22 +4081,35 @@ impl App {
             armed,
             &hit,
             &mut mouse,
+            // While the in-place text editor is open (#22) the canvas
+            // is interaction-locked: a plain click ends the edit and
+            // nothing else reports (no select/marquee/dbl-click).
+            self.text_edit.is_some(),
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
-        if let Some(pos) = out.dbl_click_page_pos {
-            // The second click of the pair completes a double-click
-            // instead of a plain click: the first click already ran its
-            // select (and possible drag-start) semantics on its frame.
-            self.on_canvas_dbl_click(pos);
-        } else if let Some(pos) = out.click_page_pos {
-            self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
-        }
-        if let Some(pos) = out.press_page_pos {
-            self.on_canvas_press(pos);
-        }
-        if let Some((x0, y0, x1, y1)) = out.marquee_done {
-            self.apply_marquee(x0, y0, x1, y1);
+        if self.text_edit.is_some() {
+            // Click anywhere on the canvas = click outside the text:
+            // end the edit (commit; the editor decided Esc the same
+            // way). No other canvas event is reported while locked.
+            if out.click_page_pos.is_some() {
+                self.end_text_edit(true);
+            }
+        } else {
+            if let Some(pos) = out.dbl_click_page_pos {
+                // The second click of the pair completes a double-click
+                // instead of a plain click: the first click already ran its
+                // select (and possible drag-start) semantics on its frame.
+                self.on_canvas_dbl_click(pos);
+            } else if let Some(pos) = out.click_page_pos {
+                self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+            }
+            if let Some(pos) = out.press_page_pos {
+                self.on_canvas_press(pos);
+            }
+            if let Some((x0, y0, x1, y1)) = out.marquee_done {
+                self.apply_marquee(x0, y0, x1, y1);
+            }
         }
         // Comment badges (#29 rework): a small bubble at the top-left
         // corner of every commented shape — the shipped 2016 indicator,
@@ -4089,7 +4254,51 @@ impl App {
                 None => self.ctx_menu = None,
             }
         }
+        // In-place WYSIWYG text editor overlay (GitHub #22): laid over
+        // the canvas at the shape's text-block rect, styled from the
+        // same resolved cells the renderer paints with. The entry zoom
+        // (once) focuses the block; ending flows (Esc, click outside)
+        // commit through the retired dialog's SetText path.
+        if self.text_edit.is_some() {
+            if let Some(sess) = self.text_edit.as_mut() {
+                if let Some(ed) = self.ed.as_ref() {
+                    if let Some(page) = ed.doc.pages.iter().find(|p| p.id == sess.page) {
+                        if let Some(b) = dc::svg::text_block_page_rect(&ed.doc, page, sess.shape) {
+                            sess.enter_zoom(&mut self.view, b, self.canvas_rect, &geom);
+                        }
+                    }
+                }
+            }
+            let mut flow = crate::textedit::EditFlow::Active;
+            if let Some(sess) = self.text_edit.as_mut() {
+                if let Some(ed) = self.ed.as_ref() {
+                    // The session's page, not the active tab: the edit
+                    // can outlive a page switch (tabs sit outside the
+                    // canvas's interaction lock), and shape ids collide
+                    // across pages — indexing by page_idx would lay the
+                    // overlay over the wrong shape's text block. No
+                    // matching page: skip the overlay this frame (#22
+                    // review).
+                    if let Some(page) = ed.doc.pages.iter().find(|p| p.id == sess.page) {
+                        flow = crate::textedit::show_overlay(
+                            ui,
+                            sess,
+                            &ed.doc,
+                            page,
+                            &geom,
+                            &self.view,
+                        );
+                    }
+                }
+            }
+            match flow {
+                crate::textedit::EditFlow::Commit => self.end_text_edit(true),
+                crate::textedit::EditFlow::Abandon => self.end_text_edit(false),
+                crate::textedit::EditFlow::Active => {}
+            }
+        }
         self.shape_context_menu(ui.ctx());
+        self.quick_shapes_menu(ui.ctx());
         self.tab_context_menu(ui.ctx());
     }
 
@@ -4190,8 +4399,24 @@ impl App {
     }
 
     /// The shape's hyperlink rows (#28): instance rows first, then the
-    /// master's (resolved like every other cell read).
+    /// master's (resolved like every other cell read). A master row
+    /// whose ix an instance row already carries is SHADOWED — the
+    /// local row is the override (first-edit materialization, #139) —
+    /// so a materialized row replaces its inherited twin here instead
+    /// of duplicating it.
     fn shape_hyperlinks(&self, shape_id: i64) -> Vec<(String, String, String)> {
+        self.hyperlink_rows(shape_id)
+            .into_iter()
+            .map(|r| (r.addr, r.sub, r.desc))
+            .collect()
+    }
+
+    /// The shape's hyperlink rows with their origin (#139): instance
+    /// rows first, then the master's (shadowed ixs dropped). The
+    /// master lookup walks its top-level shapes; a multi-shape master
+    /// with same-ix Hyperlink rows across sub-shapes is beyond v1
+    /// (the blank-catalog masters are single-shape).
+    fn hyperlink_rows(&self, shape_id: i64) -> Vec<HyperRow> {
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -4206,15 +4431,28 @@ impl App {
                 .iter()
                 .flat_map(|s| s.sheet.sections_named("Hyperlink"))
                 .flat_map(|sec| sec.rows.iter())
-                .map(|r| {
-                    let t = |n: &str| r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default();
-                    (t("Address"), t("SubAddress"), t("Description"))
+                .map(|r| HyperRow {
+                    ix: r.ix,
+                    inherited: false,
+                    addr: r.cell("Address").and_then(|c| c.v.clone()).unwrap_or_default(),
+                    sub: r.cell("SubAddress").and_then(|c| c.v.clone()).unwrap_or_default(),
+                    desc: r.cell("Description").and_then(|c| c.v.clone()).unwrap_or_default(),
                 })
                 .collect::<Vec<_>>()
         };
         let mut out = collect(std::slice::from_ref(sh));
         if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
-            out.extend(collect(&m.shapes));
+            let shadowed: std::collections::HashSet<i64> =
+                out.iter().map(|r| r.ix).collect();
+            out.extend(
+                collect(&m.shapes)
+                    .into_iter()
+                    .filter(|r| !shadowed.contains(&r.ix))
+                    .map(|mut r| {
+                        r.inherited = true;
+                        r
+                    }),
+            );
         }
         out
     }
@@ -4278,7 +4516,7 @@ impl App {
     /// add / edit / remove through the command layer (one undo per
     /// change) and Go to follow a link. The draft lives OUTSIDE the
     /// window closure (a per-frame clone would drop typed text — the
-    /// text_edit_window pattern).
+    /// retired text-edit-window pattern).
     fn add_comment(&mut self, shape_id: i64, body: &str) {
         let Some(page_id) = self.page_id() else {
             return;
@@ -5014,27 +5252,10 @@ impl App {
             page: page_id,
             shape: shape_id,
         };
-        let rows: Vec<(i64, String, String, String)> = self
-            .ed()
-            .map(|ed| {
-                let page = &ed.doc.pages[self.page_idx];
-                vsdx::model::find_shape_by_id(&page.shapes, shape_id)
-                    .map(|sh| {
-                        sh.sheet
-                            .sections_named("Hyperlink")
-                            .iter()
-                            .flat_map(|sec| sec.rows.iter())
-                            .map(|r| {
-                                let t = |n: &str| {
-                                    r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default()
-                                };
-                                (r.ix, t("Address"), t("SubAddress"), t("Description"))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        // Instance rows plus the master's, inherited-origin visible
+        // (#139) — `hyperlink_rows` keeps instance-first order and
+        // drops master rows an instance row already shadows.
+        let rows = self.hyperlink_rows(shape_id);
         let mut draft = self.hyperlink_draft.take();
         // Cancel mechanism (live report + the 2016 dialog's Cancel):
         // the title-bar X and an explicit Close button both discard
@@ -5052,34 +5273,48 @@ impl App {
                 if rows.is_empty() && draft.is_none() {
                     ui.weak("No hyperlinks on this shape.");
                 }
-                for (ix, addr, sub, desc) in &rows {
+                for row in &rows {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(if desc.is_empty() {
-                                addr.clone()
+                            egui::RichText::new(if row.desc.is_empty() {
+                                row.addr.clone()
                             } else {
-                                format!("{desc} — {addr}")
+                                format!("{} — {}", row.desc, row.addr)
                             })
                             .size(12.0),
                         );
+                        if row.inherited {
+                            // Origin marker + read-only Remove: the row
+                            // belongs to the master (Visio keeps
+                            // inherited row sets read-only until
+                            // overridden); Edit materializes the
+                            // override (#139).
+                            ui.weak("inherited");
+                        }
                         if ui.button("Go").clicked() {
-                            let (a, s) = (addr.clone(), sub.clone());
+                            let (a, s) = (row.addr.clone(), row.sub.clone());
                             self.follow_hyperlink(&a, &s);
                         }
                         if ui.button("Edit").clicked() {
                             draft = Some(HyperlinkDraft {
-                                edit_row: Some(*ix),
-                                address: addr.clone(),
-                                sub: sub.clone(),
-                                desc: desc.clone(),
+                                edit_row: Some(row.ix),
+                                from_master: row.inherited,
+                                address: row.addr.clone(),
+                                sub: row.sub.clone(),
+                                desc: row.desc.clone(),
                             });
                         }
-                        if ui.button("Remove").clicked() {
+                        let remove = ui.add_enabled(!row.inherited, egui::Button::new("Remove"));
+                        if row.inherited {
+                            remove.on_disabled_hover_text(
+                                "Inherited from the shape's master — edit it to override it on this shape",
+                            );
+                        } else if remove.clicked() {
                             self.apply(dc_core::commands::RemoveSectionRow::new(
                                 scope.clone(),
                                 "Hyperlink",
                                 0,
-                                dc_core::commands::RowSel::Ix(*ix),
+                                dc_core::commands::RowSel::Ix(row.ix),
                             ));
                         }
                     });
@@ -5106,29 +5341,51 @@ impl App {
                             field(ui, "Description", &mut d.desc);
                             ui.end_row();
                         });
-                    let (edit_row, address, sub, desc) =
-                        (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
+                    let (edit_row, from_master, address, sub, desc) = (
+                        d.edit_row,
+                        d.from_master,
+                        d.address.clone(),
+                        d.sub.clone(),
+                        d.desc.clone(),
+                    );
                     let mut close_draft = false;
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
                             let ix = edit_row.unwrap_or_else(|| {
-                                rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
+                                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
                             });
                             let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
                             if let Some(old) = edit_row {
-                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
-                                    scope.clone(),
-                                    "Hyperlink",
-                                    0,
-                                    dc_core::commands::RowSel::Ix(old),
-                                )));
+                                // An instance edit replaces its row. A
+                                // master-inherited row has no local row
+                                // to replace: SetRowCell's first-edit
+                                // materialization seeds the local
+                                // section+row (inherited values
+                                // included) — the master stays
+                                // untouched (#139).
+                                if !from_master {
+                                    cmds.push(Box::new(
+                                        dc_core::commands::RemoveSectionRow::new(
+                                            scope.clone(),
+                                            "Hyperlink",
+                                            0,
+                                            dc_core::commands::RowSel::Ix(old),
+                                        ),
+                                    ));
+                                }
                             }
                             for (name, val) in [
                                 ("Address", &address),
                                 ("SubAddress", &sub),
                                 ("Description", &desc),
                             ] {
-                                if !val.trim().is_empty() {
+                                // A materializing edit writes every
+                                // field, cleared ones as explicit
+                                // empty values: the materialized row
+                                // is seeded with the inherited cells,
+                                // so a skipped field would silently
+                                // keep its master value (#139 review).
+                                if from_master || !val.trim().is_empty() {
                                     cmds.push(Box::new(dc_core::SetRowCell::new(
                                         scope.clone(),
                                         "Hyperlink",
@@ -5139,7 +5396,11 @@ impl App {
                                     )));
                                 }
                             }
-                            self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            // An all-empty draft writes nothing (and
+                            // must not record a no-op undo step).
+                            if !cmds.is_empty() {
+                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            }
                             close_draft = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -5158,6 +5419,7 @@ impl App {
                     if draft.is_none() && ui.button("New…").clicked() {
                         draft = Some(HyperlinkDraft {
                             edit_row: None,
+                            from_master: false,
                             address: String::new(),
                             sub: String::new(),
                             desc: String::new(),
@@ -5485,10 +5747,20 @@ impl App {
 
     /// Apply a picked color to FillForegnd or LineColor on the selection.
     fn apply_color(&mut self, target: ColorTarget, color: &str) {
+        // Text color lives in the Character section's row 0 (#73): the
+        // whole-selection SetRowCell macro the pane's other text
+        // fields use (first-edit materialization seeds the row with
+        // the inherited cells).
+        if matches!(target, ColorTarget::Text) {
+            self.fmt_set_row("Character", "Color", color);
+            return;
+        }
         let cell_name = match target {
             ColorTarget::Fill => "FillForegnd",
             ColorTarget::FillBkgnd => "FillBkgnd",
             ColorTarget::Line => "LineColor",
+            // Handled by the SetRowCell path above.
+            ColorTarget::Text => unreachable!("text color writes a row cell"),
         };
         let targets = self.sel_set.clone();
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
@@ -5508,6 +5780,79 @@ impl App {
     }
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
+    /// The Quick Shapes membership menu (#143), opened by
+    /// right-clicking a master cell — in its source entry or in Quick
+    /// Shapes (a quick cell's key IS its source key). One item whose
+    /// label follows live membership; Visio persists membership
+    /// app-side and so does this (never the .vsdx, #88's rule).
+    fn quick_shapes_menu(&mut self, ctx: &egui::Context) {
+        let Some(((src_id, master_id), anchor)) = self.quick_menu else {
+            return;
+        };
+        let identity = crate::stencil::quick_source_id(src_id, &self.stencils);
+        let in_default = match src_id {
+            StencilId::Document => self
+                .ed
+                .as_ref()
+                .map(|e| crate::stencil::quick_default_ids(&e.doc).contains(&master_id)),
+            StencilId::Open(ix) => self.stencils.get(ix).map(|st| {
+                crate::stencil::quick_default_ids(&st.doc).contains(&master_id)
+            }),
+        };
+        // A closed source whose pane slot shifted has no stable
+        // identity for the menu — drop it.
+        let (Some(identity), Some(in_default)) = (identity, in_default) else {
+            self.quick_menu = None;
+            return;
+        };
+        let member = self.quick_shapes.is_member(&identity, master_id, in_default);
+        let mut act: Option<bool> = None; // true = add, false = remove
+        let menu = egui::Popup::new(
+            egui::Id::unique("dc-quick-shapes-menu"),
+            ctx.clone(),
+            anchor,
+            egui::LayerId::background(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let popup = menu.show(|ui| {
+            ui.set_min_width(214.0);
+            let label = if member {
+                "Remove from Quick Shapes"
+            } else {
+                "Add to Quick Shapes"
+            };
+            if ui.button(label).clicked() {
+                act = Some(!member);
+            }
+        });
+        if let Some(add) = act {
+            if add {
+                self.quick_shapes.add(&identity, master_id);
+                self.status = "added to Quick Shapes".into();
+            } else {
+                self.quick_shapes.remove(&identity, master_id);
+                self.status = "removed from Quick Shapes".into();
+            }
+            self.quick_menu = None;
+            return;
+        }
+        // Close on an outside PRIMARY click (the shape menu's
+        // idiom): the opening right-click's own release is a
+        // secondary click and must not dismiss the menu it opened.
+        let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
+        if let Some(ir) = &popup {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
+                self.quick_menu = None;
+            }
+        }
+    }
+
     fn shape_context_menu(&mut self, ctx: &egui::Context) {
         let Some((shape_id, pointer_anchor, _page_pos)) = self.ctx_menu else {
             self.ctx_menu_rect = None;
@@ -5550,7 +5895,7 @@ impl App {
         // measured size (used only for the right-edge flip decision).
         const MENU_MIN_W: f32 = 244.0;
         let mut menu = egui::Popup::new(
-            egui::Id::new("dc-shape-ctx-menu"), // stable per-menu id is intended
+            egui::Id::unique("dc-shape-ctx-menu"), // stable per-menu id is intended
             ctx.clone(),
             pointer_anchor,
             egui::LayerId::background(),
@@ -5596,6 +5941,70 @@ impl App {
             // separators ride the token too (egui's dark default is too
             // faint on the dark menu fill)
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
+            // The icon action bar (#77): Visio 2016's menu header — a
+            // row of command accelerators over a hairline, ahead of
+            // the text rows. Icons dispatch the SAME Act variants and
+            // mirror the rows' enablement; tooltips and accessible
+            // names carry the row labels (#56). Flip stays out of v1:
+            // one glyph cannot choose between Flip Vertical and Flip
+            // Horizontal (and the vendored MDI set carries no flip
+            // icon) — wiring a guess would be worse than omitting.
+            {
+                let can_group = self.sel_set.len() >= 2;
+                ui.horizontal(|ui| {
+                    ui.add_space(5.0);
+                    for (icon, label, enabled, a) in [
+                        (crate::ribbon::Icon::TextBox, "Edit Text…", true, Act::EditText),
+                        (crate::ribbon::Icon::Bucket, "Format Shape…", true, Act::FormatShape),
+                        (crate::ribbon::Icon::Pen, "Format Shape…", true, Act::FormatShape),
+                        (crate::ribbon::Icon::FontA, "Format Shape…", true, Act::FormatShape),
+                        (
+                            crate::ribbon::Icon::BringFront,
+                            "Bring to Front",
+                            true,
+                            Act::Front,
+                        ),
+                        (
+                            crate::ribbon::Icon::Rotate,
+                            "Rotate Right 90°",
+                            true,
+                            // The text row's sign: page coordinates are
+                            // y-up, so clockwise (right) is NEGATIVE
+                            // radians (#77 branch review — the bar had
+                            // it backwards).
+                            Act::Rot(-std::f64::consts::FRAC_PI_2),
+                        ),
+                        (crate::ribbon::Icon::Group, "Group", can_group, Act::Group),
+                    ] {
+                        // A real (possibly disabled) button — egui-level
+                        // disablement keeps a Menu-kind popup open on
+                        // click, exactly like the disabled text rows.
+                        let resp = ui.add_enabled(
+                            enabled,
+                            egui::Button::new("").min_size(Vec2::splat(22.0)),
+                        );
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label)
+                        });
+                        let resp = if enabled {
+                            resp.on_hover_text(label)
+                        } else {
+                            resp.on_disabled_hover_text(label)
+                        };
+                        let r = resp.rect;
+                        let p = ui.painter();
+                        if enabled && resp.hovered() {
+                            p.rect_filled(r, 3.0, tokens.hover_fill);
+                        }
+                        let ir = Rect::from_center_size(r.center(), Vec2::splat(16.0));
+                        icon.paint_tinted(ui, ir, tokens.icon_tint(icon.office_color(), enabled));
+                        if enabled && resp.clicked() {
+                            act = Some(a);
+                        }
+                    }
+                });
+                ui.separator();
+            }
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
             // Actions rows are live (#25): evaluated checkmarks and
@@ -5924,7 +6333,8 @@ impl App {
             }
             Act::EditText => {
                 let draft = self.selected_text(shape_id).unwrap_or_default();
-                self.text_edit = Some((shape_id, draft));
+                self.begin_text_edit(shape_id, draft);
+                self.status = format!("editing text of shape {shape_id}");
             }
             Act::ShapeSheet => self.show_shapesheet = true,
         }
@@ -5985,13 +6395,65 @@ impl App {
             .and_then(|c| c.numeric())
     }
 
-    /// Current text of a shape (draft seed for the Edit Text dialog).
+    /// Current text of a shape (draft seed for the in-place editor).
     fn selected_text(&self, shape_id: i64) -> Option<String> {
         let page_id = self.page_id()?;
         let ed = self.ed.as_ref()?;
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let s = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
         s.sheet.text.clone()
+    }
+
+    /// Open the in-place WYSIWYG editor on a shape (GitHub #22): the
+    /// session captures the view (restored on exit) and the central
+    /// panel applies the entry zoom, lays the editor over the text
+    /// block, and suppresses the shape's text in its canvas layer.
+    fn begin_text_edit(&mut self, shape_id: i64, draft: String) {
+        let Some(page_id) = self.page_id() else { return };
+        self.text_edit = Some(crate::textedit::TextEditSession::new(
+            page_id,
+            shape_id,
+            draft,
+            &self.view,
+        ));
+    }
+
+    /// End the in-place editor: restore the pre-edit view, and commit
+    /// the draft through `SetText` (one undo step, dirty, texture
+    /// invalidation — the retired dialog's commit path). A no-change
+    /// exit (open, close, type nothing) applies nothing — Visio does
+    /// not record an undo step for it.
+    fn end_text_edit(&mut self, commit: bool) {
+        let Some(sess) = self.text_edit.take() else {
+            return;
+        };
+        sess.restore_view(&mut self.view);
+        if !commit {
+            return;
+        }
+        // The shape must still exist to receive the commit — the edit
+        // can outlive it (Ctrl+Z of its placement is not keyboard-
+        // gated). Resolve first and drop the draft when the page or
+        // shape is gone instead of applying SetText at a dead scope
+        // (#22 review).
+        let current = self
+            .ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == sess.page))
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sess.shape))
+            .map(|s| s.sheet.text.clone().unwrap_or_default());
+        let Some(current) = current else {
+            return;
+        };
+        if sess.draft != current {
+            self.apply(SetText::new(
+                Scope::Shape {
+                    page: sess.page,
+                    shape: sess.shape,
+                },
+                sess.draft,
+            ));
+        }
     }
 
     /// Test/introspection hooks for the kittest interaction tests.
@@ -6041,6 +6503,31 @@ impl App {
     #[doc(hidden)]
     pub fn debug_canvas_rect(&self) -> Rect {
         self.canvas_rect
+    }
+    /// kittest: the active view zoom (#22 asserts the entry zoom and
+    /// the restore).
+    #[doc(hidden)]
+    pub fn debug_view_zoom(&self) -> f32 {
+        self.view.zoom
+    }
+    /// kittest: the open in-place editor session as (page, shape)
+    /// (#22).
+    #[doc(hidden)]
+    pub fn debug_text_edit(&self) -> Option<(i64, i64)> {
+        self.text_edit.as_ref().map(|s| (s.page, s.shape))
+    }
+    /// kittest: the screen rect the editor overlay covers — the
+    /// shape's text block mapped through the live view (#22).
+    #[doc(hidden)]
+    pub fn debug_text_edit_rect(&self) -> Option<Rect> {
+        let sess = self.text_edit.as_ref()?;
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == sess.page)?;
+        let (x, y, w, h) = dc::svg::text_block_page_rect(&ed.doc, page, sess.shape)?;
+        let geom = self.page_geom();
+        let tl = canvas::page_to_screen(x, y + h, &self.view, &geom);
+        let br = canvas::page_to_screen(x + w, y, &self.view, &geom);
+        Some(Rect::from_two_pos(tl, br))
     }
     #[doc(hidden)]
     /// kittest: multi-selection size (#26).
@@ -6282,6 +6769,37 @@ impl App {
         self.layers.tex_id_for_test(shape_id)
     }
 
+    /// kittest: a shape layer's content version (#22 review) — the
+    /// cache probe that a ppi-bucket re-raster cannot perturb.
+    #[doc(hidden)]
+    pub fn debug_layer_version_for_test(&self, shape_id: i64) -> u64 {
+        self.layers.version_for_test(shape_id)
+    }
+
+    /// kittest (#143): the Quick Shapes entry's cell keys from the
+    /// last stencil layout, in display order.
+    #[doc(hidden)]
+    pub fn debug_quick_cells_for_test(&self) -> Vec<(StencilId, i64)> {
+        self.stencil.quick_keys.clone()
+    }
+
+    /// kittest (#143): point Quick Shapes persistence at an explicit
+    /// store (loading any existing membership) — the restart
+    /// simulation. Never persisted by the ephemeral constructors.
+    #[doc(hidden)]
+    pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
+        self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#68): the active page's geometry in inches — an
+    /// inserted page must carry its source's sheet size, not the
+    /// 0.1-in missing-cell clamp.
+    #[doc(hidden)]
+    pub fn debug_page_geom_for_test(&self) -> (f64, f64) {
+        let g = self.page_geom();
+        (g.w_in, g.h_in)
+    }
+
     /// kittest: how many live drag ghosts the last frame drew (#96).
     #[doc(hidden)]
     pub fn debug_drag_ghosts_for_test(&self) -> usize {
@@ -6331,14 +6849,60 @@ impl App {
             .cell("Value")?
             .numeric()
     }
-    /// kittest: a shape's hyperlink rows as (address, sub-address)
-    /// from the instance section (#28).
+    /// kittest: a shape's effective hyperlink rows as (address,
+    /// sub-address) — instance rows first, then unshadowed
+    /// master-inherited rows (#28, #139).
     #[doc(hidden)]
     pub fn debug_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
         self.shape_hyperlinks(shape_id)
             .into_iter()
             .map(|(a, s, _)| (a, s))
             .collect()
+    }
+    /// kittest: the shape's INSTANCE hyperlink rows as (ix, address,
+    /// sub-address, description) — empty until a row is materialized
+    /// onto the instance sheet (#139).
+    #[doc(hidden)]
+    pub fn debug_instance_hyperlinks_for_test(
+        &self,
+        shape_id: i64,
+    ) -> Vec<(i64, String, String, String)> {
+        self.hyperlink_rows(shape_id)
+            .into_iter()
+            .filter(|r| !r.inherited)
+            .map(|r| (r.ix, r.addr, r.sub, r.desc))
+            .collect()
+    }
+    /// kittest: the shape's MASTER's hyperlink rows verbatim as
+    /// (address, sub-address) — the edit-materialization path must
+    /// leave these unchanged (#139).
+    #[doc(hidden)]
+    pub fn debug_master_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        sh.master
+            .and_then(|id| ed.doc.master(id))
+            .map(|m| {
+                m.shapes
+                    .iter()
+                    .flat_map(|s| s.sheet.sections_named("Hyperlink"))
+                    .flat_map(|sec| sec.rows.iter())
+                    .map(|r| {
+                        (
+                            r.cell("Address").and_then(|c| c.v.clone()).unwrap_or_default(),
+                            r.cell("SubAddress").and_then(|c| c.v.clone()).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// kittest: annotation shapes on the Annotation layer (#29) as
     /// (shape id, text).
@@ -6623,53 +7187,6 @@ impl App {
         self.version += 1;
     }
 
-    /// The inline text editor opened by Edit Text… (Visio F2).
-    fn text_edit_window(&mut self, ctx: &egui::Context) {
-        let Some((shape_id, mut draft)) = self.text_edit.take() else {
-            return;
-        };
-        let mut apply = false;
-        let mut cancel = false;
-        let mut open = true;
-        let win = egui::Window::new("Edit Text")
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .open(&mut open)
-            .min_width(340.0)
-            .show(ctx, |ui| {
-                ui.add(
-                    egui::TextEdit::multiline(&mut draft)
-                        .hint_text("Shape text")
-                        .desired_rows(5)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("OK").clicked() {
-                        apply = true;
-                    }
-                    if ui.button("Cancel").clicked() {
-                        // closed below via the flag
-                        cancel = true;
-                    }
-                });
-            });
-        let _ = win;
-        if apply {
-            if let Some(page_id) = self.page_id() {
-                self.apply(SetText::new(
-                    Scope::Shape {
-                        page: page_id,
-                        shape: shape_id,
-                    },
-                    draft,
-                ));
-            }
-        } else if cancel || !open {
-            // discarded
-        } else {
-            self.text_edit = Some((shape_id, draft));
-        }
-    }
-
     /// The Visio theme palette shown by the ribbon Fill/Line buttons.
     fn color_palette_window(&mut self, ctx: &egui::Context) {
         let Some(target) = self.color_pick else {
@@ -6680,6 +7197,7 @@ impl App {
             ColorTarget::Fill => "Fill Color",
             ColorTarget::FillBkgnd => "Fill Background",
             ColorTarget::Line => "Line Color",
+            ColorTarget::Text => "Text Color",
         })
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
         .open(&mut open)
@@ -6698,6 +7216,9 @@ impl App {
                         let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
                         let (r, resp) =
                             ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, c)
+                        });
                         ui.painter().rect_filled(r, 2.0, color);
                         ui.painter().rect_stroke(
                             r,
@@ -6868,7 +7389,6 @@ impl App {
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
-        self.text_edit_window(&ctx);
         self.reorder_pages_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
@@ -6952,9 +7472,18 @@ impl App {
                         let mut request = None;
                         let title = stencil_title(&self.path);
                         {
-                            let App { ed, stencil, stencils, pool, .. } = self;
+                            let App {
+                                ed,
+                                stencil,
+                                stencils,
+                                pool,
+                                quick_shapes,
+                                ..
+                            } = self;
                             if let Some(ed) = ed.as_ref() {
-                                if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
+                                if let Some(id) =
+                                    stencil.show(ui, ed, stencils, &title, pool, quick_shapes)
+                                {
                                     armed = Some(id);
                                 }
                                 request = stencil.request.take();
@@ -6969,6 +7498,12 @@ impl App {
                             }
                             Some(crate::stencil::Request::ToggleBuiltin(slug)) => {
                                 self.toggle_builtin(slug);
+                            }
+                            Some(crate::stencil::Request::QuickShapesMenu(key)) => {
+                                let anchor = ui
+                                    .input(|i| i.pointer.interact_pos())
+                                    .unwrap_or(egui::Pos2::ZERO);
+                                self.quick_menu = Some((key, anchor));
                             }
                             None => {}
                         }
@@ -8108,11 +8643,11 @@ mod tests {
         // No EventDblClick cell: Visio's default — open the editor.
         let (mut app, sid) = app_with_event_formula(None);
         app.on_canvas_dbl_click((4.0, 5.5));
-        assert_eq!(
-            app.text_edit,
-            Some((sid, String::new())),
-            "default opens the editor"
-        );
+        let sess = app.text_edit.as_ref().expect("default opens the editor");
+        assert_eq!((sess.page, sess.shape), (app.page_id().unwrap(), sid));
+        assert_eq!(sess.draft, "", "draft seeds from the shape's text");
+        app.end_text_edit(true);
+        assert!(app.text_edit.is_none(), "a no-change exit applies nothing");
 
         // RUNADDON: deferral status, no editor.
         let (mut app, _) = app_with_event_formula(Some("RUNADDON(\"x\")"));

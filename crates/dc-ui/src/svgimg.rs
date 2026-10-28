@@ -40,11 +40,15 @@ pub(crate) fn sync_forced() -> bool {
     FORCE_SYNC.load(Ordering::Relaxed)
 }
 
-/// One-call kittest determinism: pinned fonts + synchronous rasters.
+/// One-call kittest determinism: pinned fonts + synchronous rasters
+/// + wrap metrics from the embedded face only (#21 — without the
+/// metrics pin, a machine with different installed fonts would wrap
+/// lines differently inside the very SVG the pinned raster draws).
 #[doc(hidden)]
 pub fn pin_determinism_for_tests() {
     pin_embedded_fonts_for_tests();
     force_sync_raster_for_tests();
+    dc::textmetrics::pin_embedded_for_tests();
 }
 
 /// Rasterize an SVG string to a `target_width`-pixel-wide RGBA image
@@ -58,7 +62,7 @@ pub fn pin_determinism_for_tests() {
 /// (Arial renders as Arial where installed — what the desktop app is
 /// for), and a chain nothing satisfies pins to the embedded Carlito
 /// (metric-compatible with Calibri, OFL-1.1 — see
-/// assets/fonts/LICENSE-Carlito). Text without any font-family
+/// dc/assets/fonts/LICENSE-Carlito). Text without any font-family
 /// defaults to Carlito as well (`Options::font_family`): usvg's own
 /// default is "Times New Roman", which rendered default text in a
 /// serif on machines with the MS core fonts. System fonts stay
@@ -78,8 +82,8 @@ fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
         std::sync::OnceLock::new();
     DB.get_or_init(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
-        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf").to_vec());
         db.set_sans_serif_family("Carlito");
         db.set_serif_family("Carlito");
         db.set_monospace_family("Carlito");
@@ -186,7 +190,7 @@ fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> Strin
 /// (Arial renders as Arial where installed — what the desktop app is
 /// for), and a chain nothing satisfies pins to the embedded Carlito
 /// (metric-compatible with Calibri, OFL-1.1 — see
-/// assets/fonts/LICENSE-Carlito). Text without any font-family
+/// dc/assets/fonts/LICENSE-Carlito). Text without any font-family
 /// defaults to Carlito as well (`Options::font_family`): usvg's own
 /// default is "Times New Roman", which rendered default text in a
 /// serif on machines with the MS core fonts. System fonts stay
@@ -299,6 +303,7 @@ impl TextureCache {
     /// seam (kittest) the job runs inline and the handle is back this
     /// frame. A failed build/parse inserts nothing (the failure shows
     /// once, then the next frame retries).
+    #[allow(clippy::too_many_arguments)]
     pub fn get(
         &mut self,
         ctx: &Context,
@@ -408,6 +413,7 @@ impl TextureCache {
     /// Land a worker completion for a page key (#92) — called from
     /// `App`'s pool drain. Results for stale versions insert
     /// harmlessly and are evicted by the next `get`'s retain.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_page_done(
         &mut self,
         ctx: &Context,
@@ -453,8 +459,8 @@ mod tests {
     /// system fonts — the same faces every machine (and CI) has.
     fn carlito_only_db() -> resvg::usvg::fontdb::Database {
         let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
-        db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf").to_vec());
+        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf").to_vec());
         db
     }
 

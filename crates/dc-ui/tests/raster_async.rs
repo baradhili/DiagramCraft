@@ -21,9 +21,6 @@ use std::time::{Duration, Instant};
 
 mod common;
 use common::many_shape_fixture as fixture;
-/// A synthetic document: `n_shapes` text-bearing rectangles on a grid,
-/// `n_masters` stencil masters — the same minimal .vsdx layout the
-/// other harnesses use (see render_perf.rs).
 
 fn mount(app: App) -> Harness<'static, App> {
     Harness::builder()

@@ -61,6 +61,9 @@ pub enum Request {
     /// stencil, or close it when its entry is already open (the menu
     /// checkbox state, #87).
     ToggleBuiltin(&'static str),
+    /// A master cell was right-clicked (#143): App opens the
+    /// add/remove Quick Shapes menu for that master.
+    QuickShapesMenu(MasterKey),
 }
 
 /// The pane's state: which master — addressed by (source, id) — is
@@ -105,6 +108,9 @@ pub struct Stencil {
     /// Quick Shapes header rect from the last layout (screen coords);
     /// kittest drives its toggle through this.
     pub quick_rect: Option<egui::Rect>,
+    /// The Quick Shapes entry's cell keys from the last layout (#143
+    /// kittest): (source, master) per cell, in display order.
+    pub quick_keys: Vec<MasterKey>,
     /// Search box rect from the last layout (kittest diagnostics).
     pub search_rect: Option<egui::Rect>,
     /// Entry to scroll into view next frame (#83: a just-opened or
@@ -164,6 +170,7 @@ impl Stencil {
             metric_units: false,
             quick_expanded: false,
             quick_rect: None,
+            quick_keys: Vec::new(),
             search_rect: None,
             reveal: None,
             request: None,
@@ -180,6 +187,7 @@ impl Stencil {
         set: &mut StencilSet,
         stencil_title: &str,
         pool: &mut crate::rasterpool::RasterPool,
+        quick_membership: &crate::quickshapes::QuickShapes,
     ) -> Option<MasterKey> {
         // Pane chrome follows the active visual mode (GitHub #52);
         // thumbnails keep their own light raster (paper-like tiles).
@@ -265,6 +273,7 @@ impl Stencil {
         self.cell_rects.clear();
         self.entry_rects.clear();
         self.quick_rect = None;
+        self.quick_keys.clear();
 
         // Visio lists the open stencils as independently expandable
         // entries, the document's own masters first (the document
@@ -325,7 +334,8 @@ impl Stencil {
                 // open stencil, so it has no close menu and never
                 // moves: closing a stencil just removes its
                 // contributions.
-                let quick = quick_cells(ed, set);
+                let quick = quick_cells(ed, set, quick_membership);
+                self.quick_keys = quick.iter().map(|c| c.key).collect();
                 let resp = stencil_list_entry(ui, t, "Quick Shapes", self.quick_expanded);
                 self.quick_rect = Some(resp.rect);
                 if resp.clicked() {
@@ -425,6 +435,7 @@ impl Stencil {
 
     /// One entry's master grid: thumbnails from each cell's own source
     /// document, click-to-arm and drag-to-carry per cell (#53/#63).
+    #[allow(clippy::too_many_arguments)]
     fn entry_grid(
         &mut self,
         ui: &mut Ui,
@@ -514,6 +525,13 @@ impl Stencil {
                     if resp.clicked() {
                         self.armed = Some(key);
                         *clicked = Some(key);
+                    }
+                    // Right-click opens the Quick Shapes membership
+                    // menu (#143) — on a source cell or a Quick Shapes
+                    // cell alike (a quick cell's key IS its source
+                    // key).
+                    if resp.secondary_clicked() {
+                        self.request = Some(Request::QuickShapesMenu(key));
                     }
                     if resp.drag_started_by(egui::PointerButton::Primary) {
                         self.carry = Some(key);
@@ -682,36 +700,86 @@ fn visible_master(m: &vsdx::Master) -> bool {
 /// How many masters each source contributes to Quick Shapes (#88).
 const QUICK_PER_SOURCE: usize = 6;
 
-/// The Quick Shapes virtual entry's cells: every source's head
-/// masters, in pane order, each cell addressed by its own source key
-/// so placement imports exactly like dropping from the source entry.
-fn quick_cells<'a>(ed: &'a Editor, set: &'a StencilSet) -> Vec<Cell<'a>> {
+/// The default Quick Shapes head ids of one source (#88): visible
+/// masters in id order, first [`QUICK_PER_SOURCE`] of them. Shared by
+/// the cell list (membership) and App's menu (its add/remove choice).
+pub fn quick_default_ids(doc: &vsdx::Document) -> Vec<i64> {
+    let mut ordered: Vec<&vsdx::Master> =
+        doc.masters.iter().filter(|m| visible_master(m)).collect();
+    ordered.sort_by_key(|m| m.id);
+    ordered
+        .into_iter()
+        .take(QUICK_PER_SOURCE)
+        .map(|m| m.id)
+        .collect()
+}
+
+/// A source's Quick Shapes identity (#143): the document set is every
+/// session's own masters; open stencils key by their source path
+/// (`builtin/…` pseudo-paths included) so membership survives close
+/// and reopen. A non-UTF-8 path has no identity — only that source's
+/// default membership applies (per-user edits need a stable key).
+pub fn quick_source_id(id: StencilId, set: &StencilSet) -> Option<String> {
+    match id {
+        StencilId::Document => Some(crate::quickshapes::DOCUMENT.to_string()),
+        StencilId::Open(ix) => set
+            .get(ix)
+            .and_then(|st| st.source.to_str())
+            .map(|s| s.to_string()),
+    }
+}
+
+/// The Quick Shapes virtual entry's cells: every source's default head
+/// masters plus per-user additions (minus removals) in pane order,
+/// each cell addressed by its own source key so placement imports
+/// exactly like dropping from the source entry (#88, #143).
+fn quick_cells<'a>(
+    ed: &'a Editor,
+    set: &'a StencilSet,
+    membership: &crate::quickshapes::QuickShapes,
+) -> Vec<Cell<'a>> {
     let mut cells = Vec::new();
     {
+        let identity = crate::quickshapes::DOCUMENT;
+        let defaults = quick_default_ids(&ed.doc);
         let mut ordered: Vec<&vsdx::Master> =
             ed.doc.masters.iter().filter(|m| visible_master(m)).collect();
         ordered.sort_by_key(|m| m.id);
-        for m in ordered.into_iter().take(QUICK_PER_SOURCE) {
-            cells.push(Cell {
-                key: (StencilId::Document, m.id),
-                serial: DOC_SERIAL,
-                src: &ed.doc,
-                master: m,
-            });
+        for m in ordered {
+            if membership.is_member(identity, m.id, defaults.contains(&m.id)) {
+                cells.push(Cell {
+                    key: (StencilId::Document, m.id),
+                    serial: DOC_SERIAL,
+                    src: &ed.doc,
+                    master: m,
+                });
+            }
         }
     }
     for ix in 0..set.len() {
         let Some(st) = set.get(ix) else { continue };
+        // No stable identity (non-UTF-8 path): that source keeps its
+        // DEFAULT membership — per-user edits need a stable key, but
+        // dropping the source wholesale would hide its heads (#143
+        // review).
+        let identity = st.source.to_str();
+        let defaults = quick_default_ids(&st.doc);
         let mut ordered: Vec<&vsdx::Master> =
             st.doc.masters.iter().filter(|m| visible_master(m)).collect();
         ordered.sort_by_key(|m| m.id);
-        for m in ordered.into_iter().take(QUICK_PER_SOURCE) {
-            cells.push(Cell {
-                key: (StencilId::Open(ix), m.id),
-                serial: st.serial(),
-                src: &st.doc,
-                master: m,
-            });
+        for m in ordered {
+            let member = match identity {
+                Some(id) => membership.is_member(id, m.id, defaults.contains(&m.id)),
+                None => defaults.contains(&m.id),
+            };
+            if member {
+                cells.push(Cell {
+                    key: (StencilId::Open(ix), m.id),
+                    serial: st.serial(),
+                    src: &st.doc,
+                    master: m,
+                });
+            }
         }
     }
     cells
@@ -788,5 +856,41 @@ fn short(s: &str) -> String {
     } else {
         let t: String = s.chars().take(MAX - 1).collect();
         format!("{t}…")
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// #143 branch review: a stencil whose source path is not UTF-8
+    /// has no membership identity, but its DEFAULT heads stay in
+    /// Quick Shapes — the source must not vanish wholesale.
+    #[test]
+    fn non_utf8_source_keeps_its_default_quick_heads() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let ed = dc_core::Editor::new_blank();
+        let doc = vsdx::parse::parse(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../dc-core/assets/blank.vsdx"
+        )))
+        .unwrap();
+        let total = doc.masters.len();
+        let mut set = StencilSet::default();
+        let bad = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![
+            0xff, b'.', b'v', b's', b's', b'x',
+        ]));
+        set.open_parsed(doc, bad, "weird".into(), Origin::File);
+        let cells = quick_cells(&ed, &set, &crate::quickshapes::QuickShapes::ephemeral());
+        let from_source = cells
+            .iter()
+            .filter(|c| matches!(c.key.0, StencilId::Open(0)))
+            .count();
+        assert_eq!(
+            from_source,
+            QUICK_PER_SOURCE.min(total),
+            "the non-UTF-8 source contributes its default head set"
+        );
     }
 }

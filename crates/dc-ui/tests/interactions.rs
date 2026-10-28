@@ -115,6 +115,124 @@ fn stencil_drag_places_shape() {
     );
 }
 
+
+/// GitHub #77: the icon action bar heads the shape context menu —
+/// icons dispatch the same commands as the text rows, and enablement
+/// mirrors them. (The bar's accessible labels are exact: the text
+/// rows carry leading-space layout text, so `get_by_label` picks the
+/// icon and `…_contains` sees both.)
+#[test]
+fn ctx_menu_icon_bar_dispatches_and_mirrors_enablement() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+
+    // Open the menu: the bar renders above the rows. Two runs settle
+    // the popup's screen-edge re-anchoring before rects are read.
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    assert!(
+        h.get_all_by_label_contains("Edit Text…").count() >= 2,
+        "the bar icon and the text row are both present"
+    );
+    let bar_icon = h.get_by_label("Edit Text…").rect();
+
+    // The Group icon mirrors the row's enablement: one selected shape
+    // cannot group — the click does nothing and the menu stays open.
+    // (Icon vs row vs the ribbon's own Group button: the icon is the
+    // narrow node INSIDE the menu rect.)
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_icon = h
+        .get_all_by_label("Group")
+        .into_iter()
+        .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+        .expect("the Group bar icon");
+    group_icon.click();
+    h.run();
+    assert!(h.state().debug_ctx_menu_rect().is_some(), "no dispatch, menu open");
+    assert_eq!(h.state().debug_shape_count(), 1, "nothing grouped");
+
+    // The Edit-Text icon opens the in-place editor (#20 path).
+    click_at(&mut h, bar_icon.center(), egui::PointerButton::Primary);
+    h.run();
+    assert!(
+        h.state().debug_text_edit().is_some(),
+        "the bar icon opened the text editor"
+    );
+    h.key_press(egui::Key::Escape);
+    h.run();
+
+    // A multi-selection enables the Group icon: it groups through the
+    // same Act::Group dispatch as the text row. (The two placements
+    // overlap at the canvas center, so a marquee is the reliable
+    // multi-select — a shift-click at a's center would hit the
+    // topmost shape and toggle it off.)
+    let (_p2, b) = place_master(&mut h, 2);
+    let _ = b;
+    let c = h.state().debug_canvas_rect().center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both shapes selected");
+    let ca = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, ca, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_icon = h
+        .get_all_by_label("Group")
+        .into_iter()
+        .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+        .expect("the Group bar icon");
+    group_icon.click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "the enabled Group icon grouped the selection"
+    );
+
+    // The Rotate icon matches its label's direction: the text row
+    // "Rotate Right 90°" is Rot(−π/2) — page coordinates are y-up, so
+    // clockwise is NEGATIVE radians (branch review: the bar had it
+    // backwards).
+    let (_, gid) = h.state().debug_sel().expect("group selected");
+    let cg = h.state().debug_shape_screen_rect(gid).unwrap().center();
+    click_at(&mut h, cg, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Rotate Right 90°").click();
+    h.run();
+    let angle = h
+        .state()
+        .debug_cell_for_test(gid, "Angle")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(999.0);
+    assert!(
+        (angle + std::f64::consts::FRAC_PI_2).abs() < 1e-6,
+        "Rotate Right is clockwise: −π/2, got {angle}"
+    );
+}
+
 #[test]
 fn right_click_menu_delete_removes_shape() {
     let mut h = harness_with_blank();
@@ -471,6 +589,102 @@ fn redo_restores_an_undone_move_via_keyboard_and_the_qat_button() {
     assert!(
         (cell_of(&h, page, shape, "PinX") - x1).abs() < 1e-6,
         "QAT Redo redid the move"
+    );
+}
+
+/// GitHub #136: undo/redo restores the shapes the command touched
+/// instead of clearing the selection. Move undo/redo keeps the shape
+/// selected (handles stay visible); undoing a placement clears (its id
+/// no longer resolves); undoing a delete restores *and selects* the
+/// shape (observed Visio 2016 behavior).
+#[test]
+fn undo_redo_restores_the_touched_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, 2);
+    let x0 = cell_of(&h, page, shape, "PinX");
+
+    // Move it right; the drag keeps it selected.
+    let c = h.state().debug_shape_screen_rect(shape).expect("shape rect");
+    drag_naturally(&mut h, c.center(), egui::vec2(60.0, 0.0));
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "the moved shape is still selected"
+    );
+
+    // Ctrl+Z: the move reverts AND the shape stays selected, handles
+    // live.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x0).abs() < 1e-6,
+        "undo restored the original pin"
+    );
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: undo keeps the moved shape selected"
+    );
+    assert!(
+        h.state().debug_sel_br_corner().is_some(),
+        "the selection still resolves (handles visible) after undo"
+    );
+
+    // Ctrl+Shift+Z: the move returns and the shape stays selected.
+    h.key_press_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: redo keeps the moved shape selected"
+    );
+
+    // Undo the move, then the placement: the shape leaves the page and
+    // the selection clears naturally.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "the placement is undone");
+    assert_eq!(
+        h.state().debug_sel(),
+        None,
+        "#136: undoing a placement clears the selection"
+    );
+
+    // Redo the placement: the shape comes back selected (a placed
+    // shape lands selected in Visio).
+    h.key_press_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the placement is redone");
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: redoing a placement selects the restored shape"
+    );
+
+    // Delete, then undo the delete: the shape returns SELECTED.
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "deleted");
+    assert_eq!(h.state().debug_sel(), None, "delete cleared the selection");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the delete is undone");
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: undoing a delete restores AND selects the shape"
+    );
+    assert_eq!(
+        h.state().debug_sel_set(),
+        vec![(page, shape)],
+        "the restored selection set is exactly the touched shape"
+    );
+    assert!(
+        h.state().debug_sel_br_corner().is_some(),
+        "handles are live on the restored shape"
     );
 }
 
@@ -943,11 +1157,14 @@ fn ribbon_zoom_buttons_zoom_and_refit() {
     );
 }
 
-/// GitHub #20: double-clicking a shape opens its linked text for
-/// editing (the F2 window reached by mouse, honoring EventDblClick — a
-/// placed shape has no formula, so Visio's default: open the editor).
+/// GitHub #20/#22: double-clicking a shape opens its linked text for
+/// IN-PLACE editing (honoring EventDblClick — a placed shape has no
+/// formula, so Visio's default: open the editor). The overlay — not a
+/// modal window — sits on the shape's text-block rect, the view zooms
+/// into the block and back out on exit, and the committed text lands
+/// through SetText (one undo step restores the pre-edit text).
 #[test]
-fn double_click_opens_text_editor_and_edits_shape_text() {
+fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
     let mut h = dblclick_harness_with_blank();
     h.run();
     let from = h.state().debug_master_cells()[0].1.center();
@@ -962,37 +1179,62 @@ fn double_click_opens_text_editor_and_edits_shape_text() {
         None,
         "a fresh master instance carries no text"
     );
+    let zoom_before = h.state().debug_view_zoom();
 
     dbl_click_at(&mut h, to);
-    assert!(
-        h.query_all_by_label_contains("Edit Text").count() > 0,
-        "double-click opened the Edit Text window"
-    );
-
-    // Set the field's value the accesskit way (the stencil pane's
-    // search box is another TextInput, so scope the query to the
-    // window), then OK: the text lands through SetText (one undo step).
-    h.get_by_label_contains("Edit Text")
-        .get_by_role(egui::Role::MultilineTextInput)
-        .set_text_value_accesskit("Server");
     h.run();
     assert_eq!(
-        h.get_by_label_contains("Edit Text")
-            .get_by_role(egui::Role::MultilineTextInput)
-            .value()
-            .as_deref(),
-        Some("Server"),
-        "typed text visible in the field"
+        h.state().debug_text_edit(),
+        Some(h.state().debug_sel().unwrap()),
+        "double-click opened the in-place editor on the shape"
     );
-    h.get_by_label_contains("OK").click();
+    // The overlay — not a modal window — is up, at the shape's block.
+    let editor = h.get_by_role(egui::Role::MultilineTextInput);
+    let block = h
+        .state()
+        .debug_text_edit_rect()
+        .expect("text block resolves on screen");
+    let er = editor.rect();
+    assert!(
+        block.expand(6.0).contains_rect(er),
+        "editor {er:?} sits on the text block {block:?}"
+    );
+    // The edited text stays where it renders (owner report on #22):
+    // content vertically centered in the block per the default
+    // VertAlign — no jump to the block's top-left on entry.
+    assert!(
+        (er.center().y - block.center().y).abs() < 4.0,
+        "editor content anchored mid-block: editor {er:?} vs block {block:?}"
+    );
+    assert!(
+        h.state().debug_view_zoom() > zoom_before,
+        "entry zoomed into the block: {} -> {}",
+        zoom_before,
+        h.state().debug_view_zoom()
+    );
+
+    // Type the accesskit way, then click EMPTY canvas: the click
+    // outside ends the edit and commits (Visio semantics; one undo
+    // step — the retired dialog's commit path).
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Server");
+    h.run();
+    click_at(&mut h, to + egui::vec2(200.0, 200.0), egui::PointerButton::Primary);
     h.run();
     assert_eq!(
         h.state().debug_shape_text(sid).as_deref(),
         Some("Server"),
-        "OK committed the typed text"
+        "click-outside committed the typed text"
+    );
+    assert_eq!(h.state().debug_text_edit(), None, "editor closed");
+    assert!(
+        (h.state().debug_view_zoom() - zoom_before).abs() < 1e-4,
+        "view restored to the pre-edit zoom: {} vs {}",
+        h.state().debug_view_zoom(),
+        zoom_before
     );
 
-    // Ctrl+Z restores the shape's original (empty) text.
+    // One Ctrl+Z restores the shape's original (empty) text.
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
     assert_eq!(
@@ -1001,14 +1243,190 @@ fn double_click_opens_text_editor_and_edits_shape_text() {
         "undo restores the pre-edit text"
     );
 
+    // Esc DISCARDS: the shape's text reverts to its pre-edit value
+    // (owner review, 2026-10-27).
+    dbl_click_at(&mut h, to);
+    h.run();
+    assert!(h.state().debug_text_edit().is_some());
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Router");
+    h.run();
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_text_edit(), None, "Esc closed the editor");
+    assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "Esc reverted the typed text (the pre-edit value was empty — the earlier undo)"
+    );
+    // And a following edit still commits normally.
+    dbl_click_at(&mut h, to);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Router");
+    h.run();
+    click_at(&mut h, to + egui::vec2(200.0, 200.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Router"),
+        "editing still commits after an Esc revert"
+    );
+
     // A double-click on empty page area (well off the shape) opens
     // nothing — folded in from the former no-op test; same harness.
     dbl_click_at(&mut h, to + egui::vec2(200.0, 200.0));
-    assert!(
-        h.query_all_by_label_contains("Edit Text").count() == 0,
+    assert_eq!(
+        h.state().debug_text_edit(),
+        None,
         "double-click on empty page must not open an editor"
     );
     assert_eq!(h.state().debug_shape_count(), 1);
+}
+
+/// #22 review: the text-suppression toggle bumps only the previously
+/// and newly skipped shapes' content versions — another shape's layer
+/// entry survives an edit session uncached-free (the toggle used to
+/// clear the whole store). Probed by CONTENT VERSION, not texture id:
+/// the editor's entry zoom changes the ppi bucket, which legitimately
+/// re-rasters every on-screen entry (new texture ids) without
+/// invalidating anything.
+#[test]
+fn text_edit_skip_toggle_keeps_other_layers_cached() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (_page, bystander) = place_master(&mut h, 2);
+    // The second placement lands on the same spot and stays selected
+    // (the topmost shape) — F2 edits the SELECTION, so the bystander
+    // underneath is the cache probe.
+    let (_, edited) = place_master(&mut h, 2);
+    h.run_steps(3);
+    assert!(
+        h.state().debug_layer_tex_id_for_test(bystander).is_some()
+            && h.state().debug_layer_tex_id_for_test(edited).is_some(),
+        "both layers landed (sync raster)"
+    );
+    let (v_by0, v_ed0) = (
+        h.state().debug_layer_version_for_test(bystander),
+        h.state().debug_layer_version_for_test(edited),
+    );
+
+    // F2 opens the in-place editor on the selection: its entry is
+    // invalidated (re-render textless); the bystander's version must
+    // not move.
+    h.key_press(egui::Key::F2);
+    h.run_steps(3);
+    assert!(h.state().debug_text_edit().is_some(), "editor open");
+    assert_ne!(
+        h.state().debug_layer_version_for_test(edited),
+        v_ed0,
+        "the edited shape's entry was invalidated"
+    );
+    assert_eq!(
+        h.state().debug_layer_version_for_test(bystander),
+        v_by0,
+        "the unedited shape's content version survived the toggle"
+    );
+
+    // Esc ends the edit: the text returns (another bump); the
+    // bystander untouched.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().debug_text_edit().is_none(), "editor closed");
+    assert_ne!(
+        h.state().debug_layer_version_for_test(edited),
+        v_ed0,
+        "the edited shape re-rendered with its text back"
+    );
+    assert_eq!(
+        h.state().debug_layer_version_for_test(bystander),
+        v_by0,
+        "the unedited shape's content version is still unchanged"
+    );
+}
+
+/// #22 branch review: switching pages mid-edit ends the in-place
+/// editor AND commits the draft (Visio commits on the focus change).
+#[test]
+fn page_switch_commits_the_text_edit() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two pages (insert activates Page-2).
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "Page-2");
+
+    // Back to Page-1: place a shape and open its editor with a draft.
+    h.get_by_label("Page-1").click();
+    h.run();
+    let (_p, sid) = place_master(&mut h, 2);
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("committed");
+    h.run();
+    assert!(h.state().debug_text_edit().is_some(), "editor open");
+
+    // Switching to Page-2 ends the edit and commits the draft.
+    h.get_by_label("Page-2").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_text_edit(),
+        None,
+        "the edit ended on the page switch"
+    );
+    // The commit landed on PAGE-1's shape — shape reads are
+    // active-page-scoped, so switch back before asserting.
+    h.get_by_label("Page-1").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("committed"),
+        "the draft committed through SetText"
+    );
+
+    // Same-frame edge (branch review): a typing event and the tab
+    // click queued in ONE harness pass — the click's switch_page runs
+    // before the editor widget sees the text. The pending input must
+    // ride along into the commit, not vanish.
+    let (_p2, sid2) = place_master(&mut h, 2);
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("edge");
+    h.run();
+    assert!(h.state().debug_text_edit().is_some());
+    // Deliver a keystroke AND the Page-2 tab click together.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    h.event(egui::Event::Text("!".into()));
+    h.event(egui::Event::PointerButton {
+        pos: tab2,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: tab2,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.get_by_label("Page-1").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid2).as_deref(),
+        Some("edge!"),
+        "the same-frame keystroke survived into the commit"
+    );
 }
 
 /// GitHub #48: the context menu must derive every color it paints from
@@ -1433,12 +1851,16 @@ fn resizing_a_flattened_group_commits_the_cache_refresh() {
         .expect("TxtPinX cell");
     assert_eq!(f, "Inh", "refreshed cache keeps its Inh marker");
 
-    // One undo reverts the whole resize Macro.
-    // (Assert against the model, not the selection rect: undo leaves
-    // the app without a selection here, which is fine — the old test
-    // never re-read the rect after undo either.)
+    // One undo reverts the whole resize Macro. Since #136 the undo
+    // also restores the touched selection: the group stays selected
+    // (this test used to dodge the selection because undo cleared it).
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page_id, root_id)),
+        "#136: undoing the resize keeps the resized group selected"
+    );
     assert!(
         (cell_of(&h, page_id, root_id, "Width") - 1.0).abs() < 1e-6,
         "undo restored the pre-resize width"
@@ -1547,13 +1969,17 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button — scope the pick to the ctx
-    // menu's own rect (#97 §4: no hardcoded band). GitHub #78: that row
-    // is the Group ▸ flyout parent; the action lives in its submenu.
+    h.run(); // the popup's screen-edge re-anchor settles after a frame
+    // The ribbon also has a Group button and the icon bar has a Group
+    // icon (#77) — scope the pick to the ctx menu's own rect (#97 §4:
+    // no hardcoded band) and to full-width ROWS (the 22 px bar icon
+    // dispatches immediately instead of opening the flyout). GitHub
+    // #78: that row is the Group ▸ flyout parent; the action lives in
+    // its submenu.
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_row = h
         .get_all_by_label_contains("Group")
-        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Group ▸ flyout row in the context menu");
     group_row.click();
@@ -1561,11 +1987,10 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_item = h
         .get_all_by_label_contains("Group")
-        .filter(|n| {
+        .find(|n| {
             let r = n.rect();
             !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
         })
-        .next()
         .expect("Group item in the flyout submenu");
     group_item.click();
     h.run();
@@ -1793,6 +2218,185 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
 
     // The dialog auto-closed when the page switched (the alive check);
     // the explicit cancel path is covered by its own test below.
+}
+
+/// A blank-vsdx copy whose Rectangle master (2) carries a Hyperlink
+/// row (#139): instances inherit it into the follow list and the
+/// dialog. Synthetic content — no Microsoft bits beyond the blank
+/// template this repo already ships.
+fn hyperlink_master_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let src =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dc-core/assets/blank.vsdx");
+    let injection = "  <Section N='Hyperlink'>\
+<Row IX='1'><Cell N='Address' V='https://master.example/doc'/><Cell N='Description' V='Inherited link'/></Row>\
+</Section>\n</Shape>";
+    let path = dir.join("hyperlink-master.vsdx");
+    let in_pkg = vsdx::Package::open(&src).unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for name in in_pkg.part_names() {
+        let data = in_pkg.part(name).unwrap().to_vec();
+        let data = if name == "visio/masters/master2.xml" {
+            String::from_utf8(data)
+                .unwrap()
+                .replacen("</Shape>", injection, 1)
+                .into_bytes()
+        } else {
+            data
+        };
+        w.start_file(name, opts).unwrap();
+        std::io::Write::write_all(&mut w, &data).unwrap();
+    }
+    w.finish().unwrap();
+    path
+}
+
+/// GitHub #139: the Hyperlink dialog edits master-inherited rows —
+/// Edit materializes the row onto the instance sheet (one undo Macro,
+/// master untouched), the override shadows the inherited row in the
+/// list, and Remove stays read-only on inherited rows (Visio keeps
+/// inherited row sets read-only until overridden).
+#[test]
+fn hyperlink_dialog_edits_master_inherited_rows() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = hyperlink_master_fixture(tmp.path());
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_doc(&doc),
+        );
+    h.run();
+    h.run();
+
+    // Place a Rectangle instance (master 2): the inherited row shows
+    // in the follow list, nothing on the instance sheet yet.
+    let (_page, sid) = place_master(&mut h, 2);
+    let inherited = ("https://master.example/doc".to_string(), String::new());
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "nothing materialized before any edit"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the follow list carries the inherited row"
+    );
+
+    // Open Hyperlink… — the dialog lists the row with its origin.
+    let to = h.state().debug_shape_screen_rect(sid).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row in the context menu")
+        .click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Inherited link").count() > 0,
+        "the dialog lists the inherited row"
+    );
+    assert!(
+        h.query_all_by_label_contains("inherited").count() > 0,
+        "the inherited origin is visible"
+    );
+
+    // Remove is read-only on the inherited row: clicking it applies
+    // nothing.
+    h.get_by_label("Remove").click();
+    h.run();
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "Remove on an inherited row changed nothing"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master's row is still there"
+    );
+
+    // Edit the inherited row: the draft is prefilled with its values;
+    // change the address and OK.
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://instance.example/override");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+
+    let overridden = ("https://instance.example/override".to_string(), String::new());
+    assert_eq!(
+        h.state().debug_instance_hyperlinks_for_test(sid),
+        vec![(1, overridden.0.clone(), overridden.1.clone(), "Inherited link".into())],
+        "the row materialized on the instance sheet with the new address"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master's row is unchanged by the edit"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![overridden.clone()],
+        "the override shadows the inherited row — no duplicate"
+    );
+
+    // One undo removes the materialized row; the inherited row
+    // returns unshadowed.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "one undo removed the materialized row"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the inherited row is back and the master untouched"
+    );
+
+    // Clearing an inherited field sticks: the materialized row is
+    // seeded with the master's cells, so a skipped write would
+    // silently keep the inherited description (#139 review).
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Description"),
+    )
+    .set_text_value_accesskit("");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_instance_hyperlinks_for_test(sid),
+        vec![(
+            1,
+            "https://master.example/doc".into(),
+            String::new(),
+            String::new()
+        )],
+        "the cleared description stayed cleared (address seeded from the master)"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master is still untouched"
+    );
 }
 
 /// GitHub #29: Add Comment creates an annotation shape on the
@@ -2129,20 +2733,82 @@ fn format_pane_edits_cells_for_whole_selection() {
         "one undo restored Solid"
     );
 
-    // Undo clears the selection (and with it the pane); reselect the
-    // shape for the Text section leg.
-    click_at(
-        &mut h,
-        canvas.center() + egui::vec2(40.0, -40.0),
-        egui::PointerButton::Primary,
+    // Since #136 the undo keeps the selection (and with it the pane) —
+    // this leg used to reselect the shape by clicking its start-of-test
+    // screen position, which only worked while the closed pane kept the
+    // canvas at full width. The Text section leg goes straight on.
+    assert_eq!(
+        h.state().debug_sel().map(|(_, s)| s),
+        Some(sid),
+        "#136: undo keeps the formatted shape selected"
     );
-    h.run();
     h.get_by_label("Bold").click();
     h.run();
     assert_eq!(
         h.state().debug_cell_for_test(sid, "Char.Style"),
         Some("1".into()),
         "bold wrote Character Style"
+    );
+
+    // #73: the Text section's Color button opens the palette; a pick
+    // writes the Character row-0 Color cell through the same
+    // whole-selection macro (first-edit materialization), the canvas
+    // renders it (WYSIWYG by construction — emit_text reads the
+    // cell), and one undo removes the materialized row.
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Red");
+    h.run();
+    let off = h.state().debug_canvas_rect().right_bottom() - egui::vec2(10.0, 10.0);
+    click_at(&mut h, off, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Red"),
+        "the shape carries text for the color to render on"
+    );
+
+    // The pane carries two "Color" rows (Line above, Text below); the
+    // labels are static text — the BUTTON beside the label carries
+    // the value. Take the lowest "Color" label (Text's) and click the
+    // button in its row.
+    let color_label = h
+        .get_all_by_label("Color")
+        .map(|n| n.rect())
+        .max_by_key(|r| r.min.y as i64)
+        .expect("the Text section's Color label");
+    let text_color_btn = h
+        .query_all_by_role(egui::Role::Button)
+        .map(|n| n.rect())
+        .find(|r| {
+            r.min.x > color_label.right()
+                && r.center().y > color_label.min.y - 4.0
+                && r.center().y < color_label.max.y + 4.0
+        })
+        .expect("the Color value button beside its label");
+    click_at(&mut h, text_color_btn.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label("#FFC000").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        Some("#FFC000".into()),
+        "the palette wrote the Character row-0 Color cell"
+    );
+    assert!(
+        h.state()
+            .debug_page_svg()
+            .unwrap_or_default()
+            .contains("fill=\"#FFC000\""),
+        "the text renders in the picked color"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        None,
+        "one undo removed the materialized Color cell"
     );
 }
 
@@ -2359,7 +3025,7 @@ fn drag_moves_the_shape_live_under_the_cursor() {
     // Select the placed shape (placement may not carry selection).
     let r = h.state().debug_shape_screen_rect(shape).expect("placed");
     click_at(&mut h, r.center(), egui::PointerButton::Primary);
-    assert_eq!(h.state().debug_sel().map(|(p, s)| (p, s)), Some((page, shape)));
+    assert_eq!(h.state().debug_sel(), Some((page, shape)));
     let from = r.center();
     let b = |pos, pressed| egui::Event::PointerButton {
         pos,
@@ -2584,8 +3250,8 @@ fn stencil_pane_lists_multiple_open_stencils_independently() {
         .1;
     click_at(&mut h, header.center(), egui::PointerButton::Primary);
     let entries = h.state().debug_stencil_entries();
-    assert_eq!(entries[0].1, false, "alpha collapsed by its own header");
-    assert_eq!(entries[1].1, true, "beta's expansion is independent");
+    assert!(!entries[0].1, "alpha collapsed by its own header");
+    assert!(entries[1].1, "beta's expansion is independent");
     assert_eq!(
         count(&h, StencilId::Open(0)),
         2,
@@ -3253,6 +3919,221 @@ fn document_stencil_entry_is_opt_in() {
         .filter(|(k, _)| k.0 == StencilId::Document)
         .count();
     assert_eq!(doc_cells, 6, "Quick Shapes still aggregates the heads");
+}
+
+
+/// Scroll the stencil pane until `key`'s cell is on screen, returning
+/// its current rect (#143: deep grids — the document entry's full set,
+/// a stencil's non-head masters — sit below the fold).
+fn reveal_stencil_cell(
+    h: &mut egui_kittest::Harness<'_, App>,
+    key: (dc_ui::stencil::StencilId, i64),
+) -> egui::Rect {
+    let mut wheels = 0;
+    loop {
+        let cell = h
+            .state()
+            .debug_master_cells()
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("cell {key:?} in the stencil pane"));
+        if cell.center().y < 760.0 {
+            return cell;
+        }
+        wheels += 1;
+        assert!(wheels < 80, "pane never scrolled {key:?} into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(3);
+    }
+}
+
+/// GitHub #143: per-user Quick Shapes membership, persisted app-side.
+/// Add a non-head master from the revealed Document Stencil entry →
+/// it joins Quick Shapes and places; a fresh app loading the same
+/// store keeps it (the restart simulation); removing restores the
+/// default membership. An open built-in's addition survives closing
+/// and reopening the stencil (identity = its source path).
+#[test]
+fn quick_shapes_user_membership_persists_and_toggles() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("quickshapes.json");
+    let mut h = harness_with_blank();
+    h.state_mut().set_quick_shapes_store_for_test(&store);
+    h.run();
+
+    // Blank carries masters 2–9; the default head set is 2–7, so
+    // master 8 (Cross) is not in Quick Shapes.
+    let quick = |h: &egui_kittest::Harness<'_, App>| {
+        h.state()
+            .debug_quick_cells_for_test()
+            .into_iter()
+            .filter(|(id, _)| *id == StencilId::Document)
+            .map(|(_, m)| m)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(quick(&h), vec![2, 3, 4, 5, 6, 7], "the default head set");
+
+    // Reveal the Document Stencil entry (the full master grid), then
+    // right-click master 8's cell → Add to Quick Shapes.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    let cell = reveal_stencil_cell(&mut h, (StencilId::Document, 8));
+    click_at(&mut h, cell.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Add to Quick Shapes").click();
+    h.run();
+    assert_eq!(
+        quick(&h),
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "the addition joined Quick Shapes after the defaults"
+    );
+    assert_eq!(h.state().debug_status(), "added to Quick Shapes");
+
+    // The added cell places through the normal quick-cell wiring
+    // (its key is the source key, #88's placement path).
+    let quick_cell = reveal_stencil_cell(&mut h, (StencilId::Document, 8));
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, quick_cell.center(), egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "the added quick cell places like any other"
+    );
+
+    // Restart simulation: a fresh app loading the same store keeps
+    // the addition.
+    let mut h2 = harness_with_blank();
+    h2.state_mut().set_quick_shapes_store_for_test(&store);
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "the addition survived the restart (config reload)"
+    );
+
+    // Removing the added master restores the default membership.
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 8));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Remove from Quick Shapes").click();
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7],
+        "removing the addition restores the default membership"
+    );
+
+    // Removing a DEFAULT head works too, and re-adding restores it.
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 2));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Remove from Quick Shapes").click();
+    h2.run();
+    assert_eq!(quick(&h2), vec![3, 4, 5, 6, 7], "a default head can leave");
+    // Re-add through the Document Stencil entry (with 2 out of Quick
+    // Shapes, its only cell lives in the full document grid).
+    h2.get_by_label("More Shapes").click();
+    h2.run();
+    h2.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h2.run();
+    }
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 2));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Add to Quick Shapes").click();
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7],
+        "re-adding restores the default member (cells stay id-ordered)"
+    );
+}
+
+/// #143: an open stencil's additions key by its source path, so they
+/// survive closing and reopening the stencil (pane index shifts do
+/// not matter).
+#[test]
+fn quick_shapes_additions_survive_stencil_close_and_reopen() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("quickshapes.json");
+    let mut h = harness_with_blank();
+    h.state_mut().set_quick_shapes_store_for_test(&store);
+    h.run();
+
+    // More Shapes ▸ General ▸ Basic Shapes opens a built-in stencil.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click();
+    for _ in 0..4 {
+        h.run();
+    }
+    // A non-head master of the stencil: its id is absent from Quick
+    // Shapes' open-stencil cells (the default head set).
+    let head_ids: Vec<i64> = h
+        .state()
+        .debug_quick_cells_for_test()
+        .into_iter()
+        .filter(|(id, _)| matches!(id, StencilId::Open(_)))
+        .map(|(_, m)| m)
+        .collect();
+    let target = h
+        .state()
+        .debug_master_cells()
+        .into_iter()
+        .find(|(k, _)| matches!(k.0, StencilId::Open(_)) && !head_ids.contains(&k.1))
+        .map(|(k, _)| k)
+        .expect("a non-head master cell in the open stencil");
+    let cell = reveal_stencil_cell(&mut h, target);
+    click_at(&mut h, cell.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Add to Quick Shapes").click();
+    h.run();
+    let quick_has = |h: &egui_kittest::Harness<'_, App>| {
+        h.state()
+            .debug_quick_cells_for_test()
+            .iter()
+            .any(|k| k.1 == target.1 && matches!(k.0, StencilId::Open(_)))
+    };
+    assert!(quick_has(&h), "the stencil master joined Quick Shapes");
+
+    // Close the stencil (the menu checkbox toggles it off), reopen
+    // it — the addition must survive (identity is the source path,
+    // not the pane slot).
+    for _ in 0..2 {
+        h.get_by_label("More Shapes").click();
+        h.run();
+        h.get_by_label("General").click();
+        h.run();
+        h.get_by_label("Basic Shapes").click();
+        for _ in 0..4 {
+            h.run();
+        }
+    }
+    assert!(
+        quick_has(&h),
+        "the addition survived close and reopen (pane slot changed)"
+    );
 }
 
 /// #85 follow-up: the More Shapes "Metric Stencils" session toggle —

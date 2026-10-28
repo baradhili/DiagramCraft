@@ -62,11 +62,6 @@ impl Command for MoveShape {
     }
 }
 
-/// Place a new instance of a master onto a page — `AddMasterInstance`
-/// moved to dc-core with #84 (it mutates the model; dc-ui keeps UI
-/// glue only). Import + place as one undo step:
-/// `dc_core::place_master_from_stencil`.
-
 /// Refresh a flattened group's inherited cell caches after a resize
 /// (GitHub #59). Visio instances carry `F='Inh'` snapshots of every
 /// formula-driven cell — sub-shape XForms, the Txt* block, Connection

@@ -73,6 +73,41 @@ impl View {
     pub fn wants_refit(&self, content: Vec2) -> bool {
         self.fit_mode && (self.last_content - content).length() > 0.5
     }
+
+    /// Zoom into a page rect and center it in the content area
+    /// (GitHub #22 — entering in-place text edit focuses the shape's
+    /// text block like Visio's F2). `rect` is page inches, y-up
+    /// `(x, y, w, h)`. The block is sized to fill roughly half the
+    /// content area, clamped to comfortable bounds (≥ 100 % so text
+    /// stays legible, ≤ 400 %), and never zooms OUT below the current
+    /// zoom. Leaves fit mode (the caller restores the pre-edit view
+    /// explicitly when editing ends); a manual zoom during the edit
+    /// is respected — this runs once, on entry.
+    pub fn zoom_to_rect(
+        &mut self,
+        rect: (f64, f64, f64, f64),
+        content: Vec2,
+        origin: Vec2,
+        page: &PageGeom,
+    ) {
+        let (x, y, w, h) = rect;
+        // Degenerate blocks (a hairline block on an empty shape) must
+        // not produce absurd zooms: floor each side at 0.25 in.
+        let w = (w as f32).max(0.25);
+        let h = (h as f32).max(0.25);
+        let zx = content.x * 0.5 / (w * 96.0);
+        let zy = content.y * 0.5 / (h * 96.0);
+        let target = zx.min(zy).clamp(1.0, 4.0);
+        self.zoom = target.max(self.zoom).clamp(0.1, 8.0);
+        // Center the block's page center (x, page_h − y) at the
+        // content area's center: pan = center − block_center_screen.
+        let cx = x as f32 + w / 2.0;
+        let cy = page.h_in as f32 - (y as f32 + h / 2.0);
+        let ppi = self.px_per_in();
+        self.pan = origin + content / 2.0 - Vec2::new(cx * ppi, cy * ppi);
+        self.fit_mode = false;
+        self.fit_pending = false;
+    }
 }
 
 /// Page geometry in inches (y-down on screen after the flip).
@@ -82,6 +117,23 @@ pub struct PageGeom {
 }
 
 pub const RULER: f32 = 22.0;
+
+/// The drawable content area of a canvas rect: (origin, size), the
+/// origin shifted past the rulers when they are showing, minus the
+/// page margin `show`/`apply_fit`/`zoom_to_rect` all keep. Shared so
+/// the fit math and the text-edit zoom (#22) target the same pixels.
+pub fn content_area(canvas_rect: Rect, show_rulers: bool) -> (Pos2, Vec2) {
+    let content_origin = if show_rulers {
+        canvas_rect.left_top() + Vec2::new(RULER, RULER)
+    } else {
+        canvas_rect.left_top()
+    };
+    let content = Vec2::new(
+        (canvas_rect.right() - content_origin.x - 12.0).max(50.0),
+        (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
+    );
+    (content_origin, content)
+}
 
 /// Ruler subdivision depth (#62): 4 = half + quarter ticks (the Visio
 /// default); the Ruler & Grid Fine/Normal/Coarse setting can lower it.
@@ -211,6 +263,7 @@ pub fn show(
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
+    interaction_lock: bool, // in-place text edit (#22): clicks end it, nothing else arms
 ) -> CanvasOut {
     let mut out = CanvasOut {
         page_rect: Rect::NOTHING,
@@ -233,11 +286,7 @@ pub fn show(
     out.canvas_rect = canvas_r;
 
     // Content area origin (below/right of rulers).
-    let content_origin = if view.show_rulers {
-        canvas_r.left_top() + Vec2::new(RULER, RULER)
-    } else {
-        canvas_r.left_top()
-    };
+    let (content_origin, content) = content_area(canvas_r, view.show_rulers);
 
     // Wheel zoom around the hovered point — a manual zoom: leaves fit
     // mode so later resizes keep the user's view.
@@ -258,10 +307,6 @@ pub fn show(
     // Fit on first layout, and — while in fit mode — again whenever the
     // content area itself changes size (window resize, side panes
     // toggling), so the page stays centered and fully visible.
-    let content = Vec2::new(
-        (canvas_r.right() - content_origin.x - 12.0).max(50.0),
-        (canvas_r.bottom() - content_origin.y - 12.0).max(50.0),
-    );
     if view.fit_pending || view.wants_refit(content) {
         view.apply_fit(content, content_origin.to_vec2(), page);
         view.fit_pending = false;
@@ -300,7 +345,7 @@ pub fn show(
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
-    if primary_pressed && resp.contains_pointer() {
+    if primary_pressed && resp.contains_pointer() && !interaction_lock {
         // `press_origin` is where this press began (set by the press
         // event itself), so it is always Some on this frame.
         let p = ui
@@ -735,6 +780,11 @@ pub fn show(
         }
     }
 
+    // While the in-place text editor holds the canvas (#22), a plain
+    // click anywhere on the page ends the edit (Visio: click outside
+    // the text) — and NOTHING else reports: no double-click, no
+    // right-click, no stencil drop, so the ending click cannot also
+    // select, open a menu, or re-enter the editor.
     // Clicks / drops: report page position; the app hit-tests.
     if resp.clicked() {
         out.shift_click = ui.input(|i| i.modifiers.shift);
@@ -745,19 +795,19 @@ pub fn show(
             out.click_page_pos = Some((x_in, y_up));
         }
     }
-    if resp.secondary_clicked() {
+    if resp.secondary_clicked() && !interaction_lock {
         if let Some(mp) = resp.interact_pointer_pos() {
             let x_in = (mp.x - view.pan.x) as f64 / view.px_per_in() as f64;
             let y_up = page.h_in - (mp.y - view.pan.y) as f64 / view.px_per_in() as f64;
             out.right_click_page_pos = Some((x_in, y_up));
         }
     }
-    if resp.double_clicked() {
+    if resp.double_clicked() && !interaction_lock {
         if let Some(mp) = resp.interact_pointer_pos() {
             out.dbl_click_page_pos = Some(screen_to_page(mp, view, page));
         }
     }
-    if stencil_hover {
+    if stencil_hover && !interaction_lock {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
         if resp.clicked() {
             if let Some(mp) = resp.interact_pointer_pos() {

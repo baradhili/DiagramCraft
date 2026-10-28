@@ -25,7 +25,7 @@ assets = [
     ["../../packaging/diagramcraft.png", "usr/share/icons/hicolor/512x512/apps/diagramcraft.png", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/diagramcraft/LICENSE-MIT", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/diagramcraft/LICENSE-APACHE", "644"],
-    ["assets/fonts/LICENSE-Carlito", "usr/share/doc/diagramcraft/LICENSE-Carlito", "644"],
+    ["../../crates/dc/assets/fonts/LICENSE-Carlito", "usr/share/doc/diagramcraft/LICENSE-Carlito", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -35,7 +35,7 @@ assets = [
     { source = "../../packaging/diagramcraft.png", dest = "/usr/share/icons/hicolor/512x512/apps/diagramcraft.png", mode = "644" },
     { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/diagramcraft/LICENSE-MIT", mode = "644" },
     { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/diagramcraft/LICENSE-APACHE", mode = "644" },
-    { source = "assets/fonts/LICENSE-Carlito", dest = "/usr/share/licenses/diagramcraft/LICENSE-Carlito", mode = "644" },
+    { source = "../../crates/dc/assets/fonts/LICENSE-Carlito", dest = "/usr/share/licenses/diagramcraft/LICENSE-Carlito", mode = "644" },
 ]
 
 [dependencies]

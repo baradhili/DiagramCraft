@@ -1025,7 +1025,9 @@ dependencies = [
  "anyhow",
  "clap",
  "dc-core",
+ "fontdb",
  "tempfile",
+ "ttf-parser",
  "vsdx",
 ]
 

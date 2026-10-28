@@ -21,10 +21,6 @@ use std::time::Instant;
 
 mod common;
 use common::many_shape_fixture;
-/// A synthetic document: `n_shapes` text-bearing rectangles on a grid
-/// (shape 1 sits at the page center so a center click selects it) and
-/// `n_masters` stencil masters, packaged as a minimal .vsdx the same
-/// way the shell fixtures are.
 
 fn mount(app: App) -> Harness<'static, App> {
     // Sync rasters (fonts NOT pinned — the bench measures the

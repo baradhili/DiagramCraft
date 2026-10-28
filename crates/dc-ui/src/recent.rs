@@ -116,7 +116,9 @@ fn default_path() -> Option<PathBuf> {
     config_base().map(|b| b.join("diagramcraft").join("recent.json"))
 }
 
-fn config_base() -> Option<PathBuf> {
+/// The per-user config base shared by the app-side stores (MRU here,
+/// Quick Shapes membership in `quickshapes.rs`).
+pub(crate) fn config_base() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         if !x.is_empty() {
             return Some(PathBuf::from(x));

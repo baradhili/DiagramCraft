@@ -28,11 +28,13 @@ If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or
 
 ## Helping
 
-Right now it is pretty raw AI generated code and UI.. yes it suck and yes it does only a fraction of what it should do - but hey it does manage to mostly draw vsdx correctly!
+It's sort of usable!
 
 How can you help?
 
 1. Create issues - it gives me and my agent a way to track what could be fixed
+
+2. Close issues - there are plenty now and I only have so much token quota 
 
 2. Create PR - awesome! - but please keep the PRs on a narrow feature (no 10000 line PRs please!) and make sure they are at least checked by CodeRabbit - or better Greptile
 
@@ -49,11 +51,16 @@ How can you help?
   `info` / `inspect`, `roundtrip` (re-write + verify), and `edit`
   (undoable cell/text/shape edits).
 - **`crates/dc-core`** — the editing core: `Command` trait, undo/redo
-  history, scope addressing (`page:1/shape:5`), crash-safe saves.
+  history, scope addressing (`page:1/shape:5`), shape/page/layer/connect
+  edits, stencil-master import, crash-safe saves.
 - **`crates/dc-ui`** — the native desktop GUI (egui/eframe): Visio-2016
-  shell with ribbon/QAT/status bar, canvas with rulers/grid/zoom, stencil
-  pane with master thumbnails, drag-to-page placement, right-click
-  context menus (including master Actions), ShapeSheet inspector, and
+  shell with ribbon/QAT/status bar, canvas with rulers/grid/zoom, the
+  Shapes pane (multiple open stencils, pane-wide search, Quick Shapes,
+  and a built-in catalog of Visio-derived stencils), drag-to-page
+  placement that imports stencil masters into the drawing, selection /
+  resize / 1D-endpoint handles with live drag previews, double-click
+  text editing, right-click context menus (including master Actions),
+  ShapeSheet inspector, off-thread progressive rasterization, and
   headless kittest pixel/interaction tests.
 - **`third_party/craft-ui`** — vendored egui widget library (see its
   README for provenance).
@@ -102,7 +109,7 @@ universal macOS dmg, and Linux deb / rpm / AppImage packages. Push a tag
 to cut a release:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.2.5 && git push origin v0.2.5
 ```
 
 Packaging metadata lives in the `dc-ui` manifest (`[package.metadata.deb]`,
@@ -124,29 +131,52 @@ Bypass a single commit with `COMMITLINT_SKIP=1`.
 
 ## Roadmap
 
-### M5 - GUI - Current
+### M1–M5 — Current
 
-Working on getting the GUI to a usable point
-Key Items remaining:
+M1–M4 (read VSDX, render to SVG, lossless write/round-trip, editing
+core) shipped before the first public release. M5 — the GUI — shipped
+as v0.1.0 and has deepened through the 0.2.x waves:
 
-- Stop full page re-renders of svg to screen.
-- Clean up ribbon
+- **v0.1.1** — render-fidelity wave (text-block placement, HorzAlign
+  mapping, ArcTo bulge direction, LinePattern 0 stroke suppression).
+- **0.2.1** — ShapeSheet inspector for every shape (#76).
+- **0.2.2** — render-path performance (#66): render-on-miss texture
+  cache, parsed-tree reuse, off-thread rasterization, and per-shape
+  canvas layers (moves re-render nothing, edits re-render only the
+  touched shape); live drag previews (#96); AppImage glibc-2.39 floor
+  fix (#100).
+- **0.2.3** — Shapes pane wave (#63): multiple open stencils (#82),
+  open `.vssx` through More Shapes / File→Open (#83), stencil masters
+  imported into the drawing on first placement (#84), source-keyed
+  thumbnail cache (#85), pane-wide search (#86), the built-in stencil
+  catalog (#87), and Quick Shapes (#88).
+- **0.2.4** — test-architecture wave (#97): de-duplicated and
+  de-brittled suites across all four crates (#125).
 
-### M6 — Ecosystem 
+Open GUI depth (not yet scheduled to a release): full-screen
+presentation mode (#130), Change Shape (#131), freeform geometry
+drawing (#132), native table shapes (#135), plus the standing
+carry-forward — contextual ribbon tabs, snap/glue indicators,
+connector routing UX, and the template flow.
 
-- Data linking (`data` crate): CSV/SQLite recordsets → shape data (URS category "Data Linking"; spec'd in VeeTrace).
+### M6 — Ecosystem
 
-- Validation rules; org-chart/auto-layout (`layout` crate — cleanroom  analog of `@Visgrf` concepts); export filters (SVG/PNG/PDF).
-
-- Legacy `.vsd` reader: OLE compound + `VisioDocument` stream reversal —
-  
-  needs deeper RE (the `CDMConvert*` inventory in VISLIB marks the
-  
+- Data linking (`data` crate): CSV/SQLite recordsets → shape data
+  (URS category "Data Linking"; spec'd in VeeTrace).
+- Validation rules; automatic diagram layout (#134) and org-chart
+  layout (`layout` crate — cleanroom analog of `@Visgrf` concepts).
+- Export filters beyond SVG/PNG: PDF, interactive HTML (#127),
+  PowerPoint (#128); competitor-format import — draw.io, Gliffy,
+  Lucidchart (#126).
+- Document version history and restore (#133); LaTeX math typesetting
+  in shape text (#129). From the 2026-10-27 competitive review of
+  ConceptDraw, draw.io, Lucidchart, SmartDraw, EdrawMax, OmniGraffle,
+  Creately and ProcessOn (URS-1219…1228 in the VeeTrace pack).
+- Legacy `.vsd` reader: OLE compound + `VisioDocument` stream reversal
+  — needs deeper RE (the `CDMConvert*` inventory in VISLIB marks the
   migration seams to study).
-
-- The "scripting/automation facade" formerly listed here has grown into
-  
-  M7/M8 below (owner direction 2026-10-16).
+- The "scripting/automation facade" formerly listed here has grown
+  into M7/M8 below (owner direction 2026-10-16).
 
 ### M7 — VBA / `.vsdm` macro execution (planned)
 
@@ -163,11 +193,9 @@ Key Items remaining:
 
 ### M8 — Real Visio add-in hosting (planned, spike-gated)
 
-  Goal: run real Visio add-ins, not reimplement them. First target:
-
-  `Sample/graphvisio` — GraphVizio, a 2014 x86 Windows MSI Visio add-in
-
-  for Graphviz layout (untracked sample, like all of `Sample/`).
+Goal: run real Visio add-ins, not reimplement them. First target:
+`Sample/graphvisio` — GraphVizio, a 2014 x86 Windows MSI Visio add-in
+for Graphviz layout (untracked sample, like all of `Sample/`).
 
 - **Feasibility spike (gate)**: extract the MSI, identify the add-in binary type (COM DLL / VSL / .NET) and enumerate the Visio object model surface it touches (deep RE: REA + Ghidra on the extracted binary; add to the deep-RE queue).
 
@@ -177,7 +205,8 @@ Key Items remaining:
 
 ### M9 — Plugin system + diagram-language imports (nice-to-have)
 
-  Plugins, not core (owner direction 2026-10-16). Rides on the M8   automation facade or a lighter native plugin API if M8 lands after it.
+  Plugins, not core (owner direction 2026-10-16). Rides on the M8
+  automation facade or a lighter native plugin API if M8 lands after it.
 
 - Plugin architecture: out-of-tree diagram sources, shape mappers, and command packs with a stable API over `dc-core`.
 
