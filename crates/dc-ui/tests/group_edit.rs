@@ -297,6 +297,20 @@ fn flyout_groups_and_ungroups() {
     flyout_item(&h, "Ungroup", menu).expect("Ungroup item").click();
     h.run();
     assert_eq!(h.state().debug_shape_count(), 3, "flyout Ungroup restored");
+    // Ungroup leaves the first member selected (a top-level shape).
+    let member = h.state().debug_sel().expect("first member selected").1;
+
+    // Undoing the ungroup re-nests the member: the selection must NOT
+    // survive on the now-hidden nested shape (#136 review — handles
+    // and Delete would act on it while the page shows only top-level
+    // shapes).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "ungroup undone");
+    assert!(
+        h.state().debug_sel().is_none(),
+        "the re-nested member {member} is not left selected"
+    );
 }
 
 #[test]

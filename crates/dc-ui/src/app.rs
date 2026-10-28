@@ -611,16 +611,19 @@ impl App {
                 .doc
                 .pages
                 .get(self.page_idx.min(ed.doc.pages.len().saturating_sub(1)))?;
-            // The pre-command selection, pruned to entries that still
-            // resolve on the active page after the inverse/apply.
+            // The pre-command selection, pruned to entries that are
+            // still TOP-LEVEL on the active page after the
+            // inverse/apply. Top-level only (not find_shape_by_id,
+            // which resolves nested members): page-mode selection is
+            // top-level by construction, and a re-nesting inverse —
+            // undo of an ungroup puts the selected member back inside
+            // its group — must drop it, or handles and Delete would
+            // act on a hidden nested shape (#136 review).
             let old_alive: Vec<(i64, i64)> = self
                 .sel_set
                 .iter()
                 .copied()
-                .filter(|(p, s)| {
-                    *p == page.id
-                        && vsdx::model::find_shape_by_id(&page.shapes, *s).is_some()
-                })
+                .filter(|(p, s)| *p == page.id && page.shapes.iter().any(|sh| sh.id == *s))
                 .collect();
             if !old_alive.is_empty() {
                 return Some(old_alive);
