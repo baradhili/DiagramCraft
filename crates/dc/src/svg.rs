@@ -1349,11 +1349,17 @@ fn emit_text(
     if skip {
         return;
     }
+    // Authored leading spacing is content (#144): trim only the END —
+    // the first paragraph's leading space run must survive into its
+    // line, while the trailing trim keeps the corpus-standard
+    // "text ends with CRLF" authoring pattern (Enter after the last
+    // line) at the same line count Visio shows instead of adding an
+    // empty line and shifting the block's vertical centering.
     let Some(text) = s
         .sheet
         .text
         .as_deref()
-        .map(str::trim)
+        .map(str::trim_end)
         .filter(|t| !t.is_empty())
     else {
         return;
@@ -1401,24 +1407,31 @@ fn emit_text(
     // Visio stores line breaks as CRLF: breaking on each of \r and \n
     // separately would insert an empty paragraph between every pair of
     // lines, so normalize CRLF (and lone CR) to one break first.
+    // Character-exact lines (#144): each paragraph is reconstructed
+    // verbatim — `split(' ')` words joined back with their separator
+    // spaces — so a paragraph-leading space run (empty first words)
+    // survives into the first line, interior runs stay, and a
+    // whitespace-only paragraph emits its spaces instead of an empty
+    // line. `started` distinguishes "no words consumed yet" from "an
+    // empty word consumed" (a pending leading space): a bare
+    // `cur.is_empty()` test cannot tell them apart, which is how the
+    // leading run used to vanish.
     for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
-        if para.trim().is_empty() {
-            lines.push(String::new());
-            continue;
-        }
         let mut cur = String::new();
+        let mut started = false;
         for word in para.split(' ') {
-            let candidate = if cur.is_empty() {
-                word.to_string()
-            } else {
+            let candidate = if started {
                 format!("{cur} {word}")
+            } else {
+                word.to_string()
             };
-            if !cur.is_empty() && width_in(&candidate) > usable_w {
+            if started && width_in(&candidate) > usable_w {
                 lines.push(std::mem::take(&mut cur));
                 cur = word.to_string();
             } else {
                 cur = candidate;
             }
+            started = true;
             // A single word wider than the line: hard-split at the
             // longest character prefix that fits (always ≥1 char, so
             // the loop makes progress).
@@ -1490,11 +1503,17 @@ fn emit_text(
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = write!(transform, " translate({x:.5},{y:.5})", x = -tx, y = ty);
     }
+    // xml:space="preserve" (#144): SVG's default whitespace handling
+    // strips leading/trailing spaces of text-node content, so the
+    // spaces the splitter now preserves would be dropped again at
+    // raster time. usvg (resvg 0.49) honors the attribute — inherited
+    // by every tspan — and skips its stripping only for preserve, so
+    // the authored spacing reaches the pixels.
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" {f}>{b}</text>"#,
+            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
             a = anchor,
             f = font_attrs,
             b = body
@@ -1503,7 +1522,7 @@ fn emit_text(
     } else {
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" {f}>{b}</text>"#,
+            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
             a = anchor,
             f = font_attrs,
             b = body
@@ -3823,7 +3842,8 @@ mod tests {
     /// #21: measured wrap keeps the authored line "Is implanted or"
     /// on one line — real per-glyph advances at 8 pt measure ≈0.70 in
     /// against the 0.8159 in block, where the 0.5 em guess capped the
-    /// line at 14 characters and split it.
+    /// line at 14 characters and split it. Since #144 the third line's
+    /// leading space survives too.
     #[test]
     fn measured_wrap_keeps_the_utilisation_1065_lines() {
         let doc = Document::default();
@@ -3832,12 +3852,48 @@ mod tests {
         let mut out = String::new();
         emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
         let lines = text_lines(&out);
-        // (A line's leading space has always been dropped by the
-        // splitter — unchanged behavior, noted on the issue.)
         assert_eq!(
             lines,
-            vec!["If allograft", "Is implanted or", "opened"],
-            "the three authored lines survive: {out}"
+            vec!["If allograft", "Is implanted or", " opened"],
+            "the three authored lines survive character-exact: {out}"
+        );
+    }
+
+    /// #144: lines are character-exact — a paragraph's leading space
+    /// run survives (first paragraph included: only the trailing end
+    /// of the block is trimmed), interior runs stay, a whitespace-only
+    /// paragraph emits its spaces, an empty paragraph stays an empty
+    /// line, and the emitted `<text>` carries xml:space="preserve" so
+    /// the rasterizer keeps the spacing.
+    #[test]
+    fn wrap_is_character_exact_on_spaces() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
+        {
+            let chain = [&s];
+            let mut out = String::new();
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            assert!(out.is_empty(), "no text, no text element: {out}");
+        }
+
+        // First-paragraph leading run, interior run, whitespace-only
+        // paragraph, empty paragraph. The final paragraph's trailing
+        // space is trimmed with the block's end (corpus texts end with
+        // CRLF; that trailing break must not grow the line count).
+        s.sheet.text = Some("  opened\r\na  b\n   \n\nend ".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        assert_eq!(
+            text_lines(&out),
+            vec!["  opened", "a  b", "   ", "", "end"],
+            "every authored space survives into its line: {out}"
+        );
+        assert!(
+            out.contains(r#"<text text-anchor="middle" xml:space="preserve""#),
+            "the text element carries xml:space=preserve: {out}"
         );
     }
 
