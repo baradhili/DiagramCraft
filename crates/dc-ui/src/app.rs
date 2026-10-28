@@ -5913,6 +5913,66 @@ impl App {
             // separators ride the token too (egui's dark default is too
             // faint on the dark menu fill)
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
+            // The icon action bar (#77): Visio 2016's menu header — a
+            // row of command accelerators over a hairline, ahead of
+            // the text rows. Icons dispatch the SAME Act variants and
+            // mirror the rows' enablement; tooltips and accessible
+            // names carry the row labels (#56). Flip stays out of v1:
+            // one glyph cannot choose between Flip Vertical and Flip
+            // Horizontal (and the vendored MDI set carries no flip
+            // icon) — wiring a guess would be worse than omitting.
+            {
+                let can_group = self.sel_set.len() >= 2;
+                ui.horizontal(|ui| {
+                    ui.add_space(5.0);
+                    for (icon, label, enabled, a) in [
+                        (crate::ribbon::Icon::TextBox, "Edit Text…", true, Act::EditText),
+                        (crate::ribbon::Icon::Bucket, "Format Shape…", true, Act::FormatShape),
+                        (crate::ribbon::Icon::Pen, "Format Shape…", true, Act::FormatShape),
+                        (crate::ribbon::Icon::FontA, "Format Shape…", true, Act::FormatShape),
+                        (
+                            crate::ribbon::Icon::BringFront,
+                            "Bring to Front",
+                            true,
+                            Act::Front,
+                        ),
+                        (
+                            crate::ribbon::Icon::Rotate,
+                            "Rotate Right 90°",
+                            true,
+                            Act::Rot(std::f64::consts::FRAC_PI_2),
+                        ),
+                        (crate::ribbon::Icon::Group, "Group", can_group, Act::Group),
+                    ] {
+                        // A real (possibly disabled) button — egui-level
+                        // disablement keeps a Menu-kind popup open on
+                        // click, exactly like the disabled text rows.
+                        let resp = ui.add_enabled(
+                            enabled,
+                            egui::Button::new("").min_size(Vec2::splat(22.0)),
+                        );
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label)
+                        });
+                        let resp = if enabled {
+                            resp.on_hover_text(label)
+                        } else {
+                            resp.on_disabled_hover_text(label)
+                        };
+                        let r = resp.rect;
+                        let p = ui.painter();
+                        if enabled && resp.hovered() {
+                            p.rect_filled(r, 3.0, tokens.hover_fill);
+                        }
+                        let ir = Rect::from_center_size(r.center(), Vec2::splat(16.0));
+                        icon.paint_tinted(ui, ir, tokens.icon_tint(icon.office_color(), enabled));
+                        if enabled && resp.clicked() {
+                            act = Some(a);
+                        }
+                    }
+                });
+                ui.separator();
+            }
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
             // Actions rows are live (#25): evaluated checkmarks and

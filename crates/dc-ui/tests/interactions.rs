@@ -115,6 +115,103 @@ fn stencil_drag_places_shape() {
     );
 }
 
+
+/// GitHub #77: the icon action bar heads the shape context menu —
+/// icons dispatch the same commands as the text rows, and enablement
+/// mirrors them. (The bar's accessible labels are exact: the text
+/// rows carry leading-space layout text, so `get_by_label` picks the
+/// icon and `…_contains` sees both.)
+#[test]
+fn ctx_menu_icon_bar_dispatches_and_mirrors_enablement() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+
+    // Open the menu: the bar renders above the rows. Two runs settle
+    // the popup's screen-edge re-anchoring before rects are read.
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    assert!(
+        h.get_all_by_label_contains("Edit Text…").count() >= 2,
+        "the bar icon and the text row are both present"
+    );
+    let bar_icon = h.get_by_label("Edit Text…").rect();
+
+    // The Group icon mirrors the row's enablement: one selected shape
+    // cannot group — the click does nothing and the menu stays open.
+    // (Icon vs row vs the ribbon's own Group button: the icon is the
+    // narrow node INSIDE the menu rect.)
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_icon = h
+        .get_all_by_label("Group")
+        .into_iter()
+        .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+        .expect("the Group bar icon");
+    group_icon.click();
+    h.run();
+    assert!(h.state().debug_ctx_menu_rect().is_some(), "no dispatch, menu open");
+    assert_eq!(h.state().debug_shape_count(), 1, "nothing grouped");
+
+    // The Edit-Text icon opens the in-place editor (#20 path).
+    click_at(&mut h, bar_icon.center(), egui::PointerButton::Primary);
+    h.run();
+    assert!(
+        h.state().debug_text_edit().is_some(),
+        "the bar icon opened the text editor"
+    );
+    h.key_press(egui::Key::Escape);
+    h.run();
+
+    // A multi-selection enables the Group icon: it groups through the
+    // same Act::Group dispatch as the text row. (The two placements
+    // overlap at the canvas center, so a marquee is the reliable
+    // multi-select — a shift-click at a's center would hit the
+    // topmost shape and toggle it off.)
+    let (_p2, b) = place_master(&mut h, 2);
+    let _ = b;
+    let c = h.state().debug_canvas_rect().center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both shapes selected");
+    let ca = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, ca, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_icon = h
+        .get_all_by_label("Group")
+        .into_iter()
+        .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+        .expect("the Group bar icon");
+    group_icon.click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "the enabled Group icon grouped the selection"
+    );
+}
+
 #[test]
 fn right_click_menu_delete_removes_shape() {
     let mut h = harness_with_blank();
@@ -1767,13 +1864,17 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
         egui::PointerButton::Secondary,
     );
     h.run();
-    // The ribbon also has a Group button — scope the pick to the ctx
-    // menu's own rect (#97 §4: no hardcoded band). GitHub #78: that row
-    // is the Group ▸ flyout parent; the action lives in its submenu.
+    h.run(); // the popup's screen-edge re-anchor settles after a frame
+    // The ribbon also has a Group button and the icon bar has a Group
+    // icon (#77) — scope the pick to the ctx menu's own rect (#97 §4:
+    // no hardcoded band) and to full-width ROWS (the 22 px bar icon
+    // dispatches immediately instead of opening the flyout). GitHub
+    // #78: that row is the Group ▸ flyout parent; the action lives in
+    // its submenu.
     let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
     let group_row = h
         .get_all_by_label_contains("Group")
-        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
         .min_by_key(|n| n.rect().min.y as i64)
         .expect("Group ▸ flyout row in the context menu");
     group_row.click();
