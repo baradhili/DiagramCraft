@@ -25,36 +25,17 @@
 //!   dialog's commit path — and restores the pre-edit view (Visio
 //!   zooms back out).
 //!
-//! End-of-edit semantics: Visio's text editing is LIVE — the shape's
-//! text tracks the edit as you type and Esc only exits the mode, so
-//! Esc KEEPS the typed text (a following Ctrl+Z reverts the whole
-//! edit in one step). [`ESC_COMMIT_TEXT`] pins that decision; flip it
-//! if a run against the shipped Visio 2016 install ever shows the
-//! opposite. (A live observation from repo automation was attempted
-//! 2026-10-27: the wine launch from the agent session exits
-//! immediately, so the live check remains open — the shipped install
-//! is the oracle when someone is next at the desktop.)
+//! End-of-edit semantics (owner review, 2026-10-27): a click outside
+//! commits the draft through `SetText` (one undo step reverts it);
+//! **Esc discards** — the shape's text reverts to its pre-edit value.
 //!
 //! v1 scope: unrotated placement — a rotated shape (`Angle`/
 //! `TxtAngle`) yields the block's axis-aligned box; italic renders as
-//! regular (the embedded canvas family carries Regular/Bold only);
-//! the editor fills the block vertically rather than re-implementing
-//! the renderer's VertAlign baseline math.
+//! regular (the overlay picks Regular/Bold faces only).
 
 use crate::canvas::{self, PageGeom, View};
 use dc::svg::{text_block, text_block_page_rect};
 use egui::{Color32, FontId, Pos2, Rect, Ui, Vec2};
-
-/// The registered canvas font family (embedded Carlito —
-/// metric-compatible with Calibri, the Visio default; the same face
-/// `svgimg` pins documents to when nothing installed matches). Bold
-/// text uses the `… Bold` sibling family, because egui `FontId` has
-/// no weight of its own.
-const CANVAS_FAMILY: &str = "DiagramCraft Canvas";
-
-/// Esc exits the editor and KEEPS the typed text (Visio's live-text
-/// model — see the module docs).
-const ESC_COMMIT_TEXT: bool = true;
 
 /// One open editing session. Created by the app's entry points;
 /// `prev_view` restores the zoom/pan the user had before the edit.
@@ -75,10 +56,6 @@ pub struct TextEditSession {
     /// the same frame may carry the click that opened the session,
     /// which must not count as click-away).
     pub focus_requested: bool,
-    /// Last frame's rendered editor height — the VertAlign anchor is
-    /// computed from it (the galley estimate is only close; the real
-    /// widget height converges here from frame two on).
-    pub last_h: Option<f32>,
 }
 
 impl TextEditSession {
@@ -90,7 +67,6 @@ impl TextEditSession {
             prev_view: view.clone(),
             zoomed_in: false,
             focus_requested: false,
-            last_h: None,
         }
     }
 
@@ -124,10 +100,11 @@ impl TextEditSession {
 pub enum EditFlow {
     /// Keep editing.
     Active,
-    /// End the session, committing the session's draft via `SetText`.
+    /// End the session, committing the session's draft via `SetText`
+    /// (click outside).
     Commit,
-    /// End the session WITHOUT committing (only reachable by flipping
-    /// [`ESC_COMMIT_TEXT`] off).
+    /// End the session WITHOUT committing: Esc — the shape's text
+    /// reverts to its pre-edit value (owner review, 2026-10-27).
     Abandon,
 }
 
@@ -172,43 +149,41 @@ pub fn show_overlay(
         egui::StrokeKind::Middle,
     );
 
-    // WYSIWYG metrics from the same cells the renderer reads: font
-    // size in egui points (≈ logical px) = inches × 96 × zoom, and
-    // the block insets scaled to the screen (egui margins are i8
-    // points, hence the clamp).
+    // WYSIWYG (owner review, 2026-10-27): the overlay renders in the
+    // shape's ACTUAL font — the same face the rasterizer draws (a
+    // system font where installed, the vendored Carlito otherwise) —
+    // and its first baseline sits exactly where the renderer puts it
+    // (`dc::svg::text_first_baseline`), so entering and leaving the
+    // editor never translates the text. Font size in egui points
+    // (≈ logical px) = inches × 96 × zoom.
     let ppi = view.px_per_in();
-    ensure_fonts(ui.ctx());
     let font_pts = (tb.font_size as f32 * 96.0 * view.zoom).clamp(4.0, 400.0);
-    let font_id = FontId::new(
-        font_pts,
-        if tb.bold {
-            egui::FontFamily::Name(std::sync::Arc::from(format!("{CANVAS_FAMILY} Bold")))
-        } else {
-            egui::FontFamily::Name(std::sync::Arc::from(CANVAS_FAMILY))
-        },
-    );
+    let (family, ascent_em) = overlay_font(ui.ctx(), tb.font.as_deref(), tb.bold);
+    let font_id = FontId::new(font_pts, family);
     let color = parse_hex_color(&tb.color);
     let line_pts = (tb.line_height as f32 * 96.0 * view.zoom).clamp(font_pts, 1000.0);
-    let (ins_l, _ins_r, ins_t, _ins_b) = tb.insets;
-    let m_left = ((ins_l as f32 * ppi).round().max(2.0)).clamp(0.0, 120.0) as i8;
-    let m_top = ((ins_t as f32 * ppi).round().max(1.0)).clamp(0.0, 120.0) as i8;
+    // The renderer's text area: the block insets, symmetric.
+    let (ins_l, ins_r, _ins_t, _ins_b) = tb.insets;
+    let m_left = ((ins_l as f32 * ppi).round().max(0.0)).clamp(0.0, 120.0) as i8;
+    let m_right = ((ins_r as f32 * ppi).round().max(0.0)).clamp(0.0, 120.0) as i8;
     let margin = egui::Margin {
         left: m_left,
-        right: 4,
-        top: m_top,
-        bottom: 2,
+        right: m_right,
+        top: 0,
+        bottom: 0,
     };
 
     // Paragraph alignment through a custom layouter: the job's halign
     // and per-section line height make wrapped lines follow the
     // shape's HorzAlign and the renderer's spacing inside the
-    // block-width widget.
+    // block-width widget (the wrap region is the renderer's: block
+    // width minus BOTH insets, symmetric).
     let halign = match tb.halign {
         0 | 3 => egui::Align::Min,
         2 => egui::Align::Max,
         _ => egui::Align::Center,
     };
-    let wrap_width = (screen.width() - m_left as f32 - 4.0).max(8.0);
+    let wrap_width = (screen.width() - m_left as f32 - m_right as f32).max(8.0);
     let build_job = |text: &str| {
         let mut job = egui::text::LayoutJob::simple(
             text.to_owned(),
@@ -227,6 +202,13 @@ pub fn show_overlay(
         let job = build_job(text.as_str());
         ui.fonts_mut(|f| f.layout_job(job))
     };
+    // The wrapped line count drives the renderer's vertical band
+    // (VertAlign centers total_h, not the glyph ink).
+    let n_lines = ui
+        .fonts_mut(|f| f.layout_job(build_job(session.draft.as_str())))
+        .rows
+        .len()
+        .max(1) as f64;
 
     #[allow(deprecated)] // Id::new: one editor, stable identity wanted
     let id = egui::Id::new("dc-canvas-text-edit");
@@ -236,33 +218,20 @@ pub fn show_overlay(
         session.focus_requested = true;
     }
 
-    // Anchor the edited text where the renderer draws it (owner
-    // report on #22: the text must not jump to the block's top-left
-    // on entry). The editor spans the block's WIDTH (so the layouter's
-    // HorzAlign positions lines); its height is the content's, placed
-    // per the renderer's VertAlign (1 top, 2 middle default, 3
-    // bottom) — egui's own main_align cannot do this against its
-    // infinite layout cursor, so the anchor is computed here from the
-    // same galley the layouter will build.
-    let valign = match tb.valign {
-        1 => egui::Align::Min,
-        3 => egui::Align::Max,
-        _ => egui::Align::Center,
-    };
-    let est_h = {
-        let g = ui.fonts_mut(|f| f.layout_job(build_job(session.draft.as_str())));
-        g.size().y + m_top as f32 + 2.0 + 6.0
-    }
-    .max(line_pts + m_top as f32 + 8.0);
-    let content_h = session.last_h.unwrap_or(est_h).min(screen.height());
-    let free = (screen.height() - content_h).max(0.0);
-    let anchor_y = match valign {
-        egui::Align::Min => 0.0,
-        egui::Align::Max => free,
-        _ => free / 2.0,
-    };
+    // Baseline-exact anchoring (owner review: the edited text was
+    // translated left-and-up). The renderer places the first baseline
+    // `text_first_baseline` below the block's top edge (VertAlign
+    // band of the wrapped height); egui's first row puts its baseline
+    // `ascent` below the editor's text-area top. Solving for that top
+    // makes the caret sit ON the rendered line — entering the editor
+    // moves nothing.
+    let baseline_off_in = dc::svg::text_first_baseline(&tb, n_lines * tb.line_height);
+    let baseline_page_y_up = (by + bh) - baseline_off_in;
+    let baseline_screen = canvas::page_to_screen(bx, baseline_page_y_up, view, geom).y;
+    let editor_top = baseline_screen - (ascent_em * font_pts as f64) as f32;
+    let content_h = (n_lines as f32 * line_pts + 2.0).clamp(line_pts, screen.height());
     let place = Rect::from_min_size(
-        Pos2::new(screen.left(), screen.top() + anchor_y),
+        Pos2::new(screen.left(), editor_top),
         Vec2::new(screen.width(), content_h),
     );
     let edit = egui::TextEdit::multiline(&mut session.draft)
@@ -277,15 +246,11 @@ pub fn show_overlay(
                 .stroke(egui::Stroke::NONE),
         );
     let resp = ui.put(place, edit);
-    session.last_h = Some(resp.rect.height());
 
-    // Esc: exit per the pinned Visio semantics (keep — module docs).
+    // Esc discards: the shape's text reverts to its pre-edit value
+    // (owner review, 2026-10-27).
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-        return if ESC_COMMIT_TEXT {
-            EditFlow::Commit
-        } else {
-            EditFlow::Abandon
-        };
+        return EditFlow::Abandon;
     }
     // A click outside the editor ends the edit. Frame 0 is exempt:
     // the opening click pair is still in this frame's input.
@@ -301,32 +266,73 @@ pub fn show_overlay(
     EditFlow::Active
 }
 
-/// Register the embedded Carlito faces under the canvas family
-/// names. `Context::add_font` is idempotent by font name (it checks
-/// the installed `font_data` first), so calling this every overlay
-/// frame is a cheap map lookup.
-fn ensure_fonts(ctx: &egui::Context) {
-    insert_font(
-        ctx,
-        CANVAS_FAMILY,
-        include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf"),
-    );
-    insert_font(
-        ctx,
-        &format!("{CANVAS_FAMILY} Bold"),
-        include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf"),
-    );
-}
-
-fn insert_font(ctx: &egui::Context, name: &str, ttf: &'static [u8]) {
-    ctx.add_font(egui::FontInsert::new(
-        name,
-        egui::FontData::from_static(ttf),
-        vec![egui::InsertFontFamily {
-            family: egui::FontFamily::Name(std::sync::Arc::from(name)),
-            priority: egui::FontPriority::Highest,
-        }],
-    ));
+/// The egui family + ascent for the shape's ACTUAL font: the face the
+/// rasterizer draws (system font where installed, vendored Carlito
+/// otherwise — `dc::textmetrics::face_data`), registered into egui
+/// under a canvas name. One registration per (document family, bold);
+/// `Context::add_font` is idempotent by name, and the resolver cache
+/// keeps even the registration call off the per-frame path.
+fn overlay_font(
+    ctx: &egui::Context,
+    font: Option<&str>,
+    bold: bool,
+) -> (egui::FontFamily, f64) {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    /// (document family, bold) → (egui family, ascender em).
+    type Resolved = (egui::FontFamily, f64);
+    static CACHE: OnceLock<Mutex<HashMap<(String, bool), Resolved>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (font.unwrap_or_default().to_string(), bold);
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return hit.clone();
+    }
+    let resolved = dc::textmetrics::face_data(font, bold);
+    let out = match resolved {
+        Some(fd) => {
+            let name = format!(
+                "dc-canvas-{}-{}",
+                fd.family,
+                if bold { "bold" } else { "regular" }
+            );
+            let data = egui::FontData {
+                font: fd.data.clone(),
+                index: fd.index,
+                tweak: Default::default(),
+            };
+            let family = egui::FontFamily::Name(Arc::from(name.as_str()));
+            ctx.add_font(egui::FontInsert::new(
+                &name,
+                data,
+                vec![egui::InsertFontFamily {
+                    family: family.clone(),
+                    priority: egui::FontPriority::Highest,
+                }],
+            ));
+            (family, fd.ascent_em)
+        }
+        // face_data fails only when a system font file cannot be read
+        // back: fall back to the vendored Carlito so the editor still
+        // renders (and stays metric-compatible with the raster).
+        None => {
+            let name = format!("dc-canvas-carlito-{}", if bold { "bold" } else { "regular" });
+            let bold_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf");
+            let reg_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf");
+            let ttf: &[u8] = if bold { bold_ttf } else { reg_ttf };
+            let family = egui::FontFamily::Name(Arc::from(name.as_str()));
+            ctx.add_font(egui::FontInsert::new(
+                &name,
+                egui::FontData::from_static(ttf),
+                vec![egui::InsertFontFamily {
+                    family: family.clone(),
+                    priority: egui::FontPriority::Highest,
+                }],
+            ));
+            (family, 0.75)
+        }
+    };
+    cache.lock().unwrap().insert(key, out.clone());
+    out
 }
 
 /// Parse "#rrggbb" (the renderer's resolved form) with a black

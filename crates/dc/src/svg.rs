@@ -1116,7 +1116,7 @@ impl Mat {
 /// Width/Height, LocPin centered in the block. Styling resolves
 /// through the instance → master chain exactly like the renderer
 /// (Character `Font`/`Size`/`Color`/`Style`, Paragraph `HorzAlign`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextBlock {
     /// `TxtPinX`/`TxtPinY` — the block's pin in the shape's local frame.
     pub pin: (f64, f64),
@@ -1223,6 +1223,23 @@ pub fn text_block_page_rect(
         ys.fold(f64::NEG_INFINITY, f64::max),
     );
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
+}
+
+/// The first baseline's offset below the text-block's TOP edge, in
+/// the block's local inches (y-down) — the single placement authority
+/// shared by `emit_text` and the GUI's in-place editor overlay, so
+/// the editing caret sits on the very line the renderer draws (the
+/// #22 review's "no translation between edit and render"). Subsequent
+/// lines sit one [`TextBlock::line_height`] lower. `total_h` is the
+/// wrapped text's height (lines × line height).
+pub fn text_first_baseline(tb: &TextBlock, total_h: f64) -> f64 {
+    let (_ins_l, _ins_r, ins_t, ins_b) = tb.insets;
+    let th = tb.size.1;
+    match tb.valign {
+        1 => ins_t + tb.font_size * 0.8,                // top
+        3 => th - ins_b - total_h + tb.font_size * 0.8, // bottom
+        _ => (th - total_h) / 2.0 + tb.font_size * 0.8, // middle
+    }
 }
 
 /// The cell resolution behind [`TextBlock`] — shared by `emit_text`
@@ -1346,7 +1363,7 @@ fn emit_text(
     let (tw, th) = tb.size;
     let angle = tb.angle;
     let size = tb.font_size;
-    let color = tb.color;
+    let color = tb.color.clone();
     let style_bits = (tb.bold as u32) | ((tb.italic as u32) << 1);
     let font_attrs = format!(
         r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
@@ -1434,11 +1451,8 @@ fn emit_text(
     // is -(ty - lpy + th).
     let (lpx, lpy) = tb.loc_pin;
     let top_edge = -(ty - lpy + th);
-    let first_baseline = match valign {
-        1 => top_edge + ins_t + size * 0.8,                // top
-        3 => top_edge + th - ins_b - total_h + size * 0.8, // bottom
-        _ => top_edge + (th - total_h) / 2.0 + size * 0.8, // middle
-    };
+    let first_baseline = top_edge + text_first_baseline(&tb, total_h);
+    let _ = (valign, ins_t, ins_b);
     // Line x per alignment: left edge of the text area, center, or right.
     let left_x = tx - lpx + ins_l;
     let (anchor, x) = match halign {
@@ -3897,6 +3911,30 @@ mod tests {
             vec!["one", "two", "three"],
             "no empty paragraph between CRLF pairs"
         );
+    }
+
+    /// #22 review: the in-place editor anchors its caret on the
+    /// renderer's own first-baseline formula — pin the numbers so the
+    /// helper and `emit_text` can never drift (block 1 in tall, 10 pt
+    /// text, default insets, two wrapped lines of 0.1667 in each).
+    #[test]
+    fn text_first_baseline_matches_the_valign_bands() {
+        let mut tb = TextBlock::default();
+        tb.size.1 = 1.0;
+        tb.font_size = 0.13889;
+        tb.insets = (0.1, 0.1, 0.0555, 0.0555);
+        let total = 2.0 * 0.16667;
+        let ascent = 0.13889 * 0.8;
+        tb.valign = 1; // top
+        assert!((text_first_baseline(&tb, total) - (0.0555 + ascent)).abs() < 1e-9);
+        tb.valign = 2; // middle (default)
+        assert!((text_first_baseline(&tb, total) - ((1.0 - total) / 2.0 + ascent)).abs() < 1e-9);
+        tb.valign = 3; // bottom
+        assert!((text_first_baseline(&tb, total) - (1.0 - 0.0555 - total + ascent)).abs() < 1e-9);
+        // More wrapped lines raise the first line in the middle band.
+        let two = text_first_baseline(&tb, total);
+        let four = text_first_baseline(&tb, total * 2.0);
+        assert!(four < two, "taller text starts its first line higher");
     }
 
     /// GitHub #22's no-ghost guarantee: `render_page_no_text` drops

@@ -175,6 +175,70 @@ impl ResolvedFace {
     pub fn width_in(&self, text: &str, size_in: f64) -> f64 {
         text.chars().map(|c| self.char_em(c)).sum::<f64>() * size_in
     }
+
+    /// The face's ascender in em units (hhea) — the GUI overlay places
+    /// its editor from the renderer's baseline math, so it needs the
+    /// same face's ascent (#22 review).
+    pub fn ascent_em(&self) -> f64 {
+        metrics()
+            .db
+            .with_face_data(self.id, |data, index| {
+                ttf_parser::Face::parse(data, index)
+                    .ok()
+                    .map(|f| f.ascender() as f64 / f.units_per_em() as f64)
+            })
+            .flatten()
+            .unwrap_or(0.8)
+    }
+}
+
+/// The actual face a shape's text rasterizes in, as bytes — for
+/// consumers that must RENDER with the same font (the GUI's in-place
+/// editor draws its overlay in the shape's real face, not the
+/// embedded default: #22 review — WYSIWYG means the actual font).
+#[derive(Clone)]
+pub struct FaceData {
+    /// The face's canonical family name ("Arial" when the system's
+    /// Arial won the chain, "Carlito" for the vendored fallback).
+    pub family: String,
+    /// The font file's bytes (a collection's face comes with its
+    /// `index`).
+    pub data: std::sync::Arc<Vec<u8>>,
+    /// Face index inside a collection (0 for plain files).
+    pub index: u32,
+    /// The ascender in em units (see [`ResolvedFace::ascent_em`]).
+    pub ascent_em: f64,
+}
+
+/// The bytes + identity of the face `resolve` picks for `font` —
+/// reading a system font file on first use (vendored faces are
+/// embedded; callers cache what they register from this).
+pub fn face_data(font: Option<&str>, bold: bool) -> Option<FaceData> {
+    let m = metrics();
+    let face = resolve(font, bold);
+    let info = m.db.faces().find(|f| f.id == face.id)?;
+    let family = info
+        .families
+        .first()
+        .map(|(n, _)| n.clone())
+        .unwrap_or_else(|| "Carlito".to_string());
+    let data = match &info.source {
+        fontdb::Source::Binary(arc) => {
+            // The vendored faces (and any memory-registered font).
+            let bytes: &[u8] = (**arc).as_ref();
+            std::sync::Arc::new(bytes.to_vec())
+        }
+        fontdb::Source::File(path) => std::sync::Arc::new(std::fs::read(path).ok()?),
+        fontdb::Source::SharedFile(path, _) => std::sync::Arc::new(std::fs::read(path).ok()?),
+        #[allow(unreachable_patterns)] // memmap-off builds see only Binary+File
+        _ => return None,
+    };
+    Some(FaceData {
+        family,
+        data,
+        index: info.index,
+        ascent_em: face.ascent_em(),
+    })
 }
 
 #[cfg(test)]

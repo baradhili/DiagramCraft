@@ -1029,8 +1029,8 @@ fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
         "undo restores the pre-edit text"
     );
 
-    // Esc exits the editor and KEEPS the typed text (Visio's live-text
-    // model; the module docs pin the decision).
+    // Esc DISCARDS: the shape's text reverts to its pre-edit value
+    // (owner review, 2026-10-27).
     dbl_click_at(&mut h, to);
     h.run();
     assert!(h.state().debug_text_edit().is_some());
@@ -1041,9 +1041,22 @@ fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
     h.run();
     assert_eq!(h.state().debug_text_edit(), None, "Esc closed the editor");
     assert_eq!(
+        h.state().debug_shape_text(sid),
+        None,
+        "Esc reverted the typed text (the pre-edit value was empty — the earlier undo)"
+    );
+    // And a following edit still commits normally.
+    dbl_click_at(&mut h, to);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Router");
+    h.run();
+    click_at(&mut h, to + egui::vec2(200.0, 200.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
         h.state().debug_shape_text(sid).as_deref(),
         Some("Router"),
-        "Esc kept the typed text"
+        "editing still commits after an Esc revert"
     );
 
     // A double-click on empty page area (well off the shape) opens
