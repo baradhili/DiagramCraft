@@ -474,6 +474,102 @@ fn redo_restores_an_undone_move_via_keyboard_and_the_qat_button() {
     );
 }
 
+/// GitHub #136: undo/redo restores the shapes the command touched
+/// instead of clearing the selection. Move undo/redo keeps the shape
+/// selected (handles stay visible); undoing a placement clears (its id
+/// no longer resolves); undoing a delete restores *and selects* the
+/// shape (observed Visio 2016 behavior).
+#[test]
+fn undo_redo_restores_the_touched_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (page, shape) = place_master(&mut h, 2);
+    let x0 = cell_of(&h, page, shape, "PinX");
+
+    // Move it right; the drag keeps it selected.
+    let c = h.state().debug_shape_screen_rect(shape).expect("shape rect");
+    drag_naturally(&mut h, c.center(), egui::vec2(60.0, 0.0));
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "the moved shape is still selected"
+    );
+
+    // Ctrl+Z: the move reverts AND the shape stays selected, handles
+    // live.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, shape, "PinX") - x0).abs() < 1e-6,
+        "undo restored the original pin"
+    );
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: undo keeps the moved shape selected"
+    );
+    assert!(
+        h.state().debug_sel_br_corner().is_some(),
+        "the selection still resolves (handles visible) after undo"
+    );
+
+    // Ctrl+Shift+Z: the move returns and the shape stays selected.
+    h.key_press_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: redo keeps the moved shape selected"
+    );
+
+    // Undo the move, then the placement: the shape leaves the page and
+    // the selection clears naturally.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "the placement is undone");
+    assert_eq!(
+        h.state().debug_sel(),
+        None,
+        "#136: undoing a placement clears the selection"
+    );
+
+    // Redo the placement: the shape comes back selected (a placed
+    // shape lands selected in Visio).
+    h.key_press_modifiers(egui::Modifiers::SHIFT | egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the placement is redone");
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: redoing a placement selects the restored shape"
+    );
+
+    // Delete, then undo the delete: the shape returns SELECTED.
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "deleted");
+    assert_eq!(h.state().debug_sel(), None, "delete cleared the selection");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the delete is undone");
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page, shape)),
+        "#136: undoing a delete restores AND selects the shape"
+    );
+    assert_eq!(
+        h.state().debug_sel_set(),
+        vec![(page, shape)],
+        "the restored selection set is exactly the touched shape"
+    );
+    assert!(
+        h.state().debug_sel_br_corner().is_some(),
+        "handles are live on the restored shape"
+    );
+}
+
 // ------------------------------------------------------------------
 // GitHub #59: reliable handles, shapesheet guards, 1D line handles.
 
@@ -1492,12 +1588,16 @@ fn resizing_a_flattened_group_commits_the_cache_refresh() {
         .expect("TxtPinX cell");
     assert_eq!(f, "Inh", "refreshed cache keeps its Inh marker");
 
-    // One undo reverts the whole resize Macro.
-    // (Assert against the model, not the selection rect: undo leaves
-    // the app without a selection here, which is fine — the old test
-    // never re-read the rect after undo either.)
+    // One undo reverts the whole resize Macro. Since #136 the undo
+    // also restores the touched selection: the group stays selected
+    // (this test used to dodge the selection because undo cleared it).
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
+    assert_eq!(
+        h.state().debug_sel(),
+        Some((page_id, root_id)),
+        "#136: undoing the resize keeps the resized group selected"
+    );
     assert!(
         (cell_of(&h, page_id, root_id, "Width") - 1.0).abs() < 1e-6,
         "undo restored the pre-resize width"
@@ -2188,14 +2288,15 @@ fn format_pane_edits_cells_for_whole_selection() {
         "one undo restored Solid"
     );
 
-    // Undo clears the selection (and with it the pane); reselect the
-    // shape for the Text section leg.
-    click_at(
-        &mut h,
-        canvas.center() + egui::vec2(40.0, -40.0),
-        egui::PointerButton::Primary,
+    // Since #136 the undo keeps the selection (and with it the pane) —
+    // this leg used to reselect the shape by clicking its start-of-test
+    // screen position, which only worked while the closed pane kept the
+    // canvas at full width. The Text section leg goes straight on.
+    assert_eq!(
+        h.state().debug_sel().map(|(_, s)| s),
+        Some(sid),
+        "#136: undo keeps the formatted shape selected"
     );
-    h.run();
     h.get_by_label("Bold").click();
     h.run();
     assert_eq!(

@@ -567,6 +567,95 @@ impl App {
         }
     }
 
+    /// Undo/redo selection restore (#136): instead of dropping the
+    /// selection, map it through the command. The pre-command selection
+    /// simply survives when its shapes are still on the page — undoing
+    /// a move or resize keeps the shape selected (handles stay live),
+    /// and the Format pane it drove stays up. When the selection died
+    /// with the command — a delete cleared it, or an undone placement
+    /// removed its shape — the command's membership touches that
+    /// resolve again become the selection: undoing a delete restores
+    /// *and selects* the shape (observed Visio 2016 behavior), redoing
+    /// a placement lands it selected like a fresh placement. Clearing
+    /// is the fallback when neither yields anything (page-structure
+    /// edits, commands that only touched other pages).
+    fn restore_selection_after_history(&mut self, touched: &dc_core::TouchList) {
+        // Group-edit mode (#78) selects members of the open group and
+        // defers nested handle semantics; a command's touched rollup is
+        // top-level, and mapping it here would jump the selection out
+        // of the open group. Keep the member selection and only prune
+        // entries whose shapes no longer resolve.
+        if !self.group_edit.is_empty() {
+            let alive: Vec<(i64, i64)> = self
+                .ed()
+                .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                .map(|page| {
+                    self.sel_set
+                        .iter()
+                        .copied()
+                        .filter(|(_, s)| {
+                            vsdx::model::find_shape_by_id(&page.shapes, *s).is_some()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.sel = match self.sel {
+                Some(entry) if alive.contains(&entry) => Some(entry),
+                _ => alive.last().copied(),
+            };
+            self.sel_set = alive;
+            return;
+        }
+        let picked: Option<Vec<(i64, i64)>> = self.ed().and_then(|ed| {
+            let page = ed
+                .doc
+                .pages
+                .get(self.page_idx.min(ed.doc.pages.len().saturating_sub(1)))?;
+            // The pre-command selection, pruned to entries that still
+            // resolve on the active page after the inverse/apply.
+            let old_alive: Vec<(i64, i64)> = self
+                .sel_set
+                .iter()
+                .copied()
+                .filter(|(p, s)| {
+                    *p == page.id
+                        && vsdx::model::find_shape_by_id(&page.shapes, *s).is_some()
+                })
+                .collect();
+            if !old_alive.is_empty() {
+                return Some(old_alive);
+            }
+            // Membership touches (shapes that entered or left the page)
+            // that exist again, in page z-order — the same order a
+            // marquee pick produces.
+            let restored: std::collections::HashSet<i64> = touched
+                .shapes
+                .iter()
+                .filter(|t| t.page == page.id && t.touch == dc_core::Touch::Membership)
+                .map(|t| t.shape)
+                .collect();
+            Some(
+                page.shapes
+                    .iter()
+                    .filter(|s| restored.contains(&s.id))
+                    .map(|s| (page.id, s.id))
+                    .collect(),
+            )
+        });
+        let picked = picked.unwrap_or_default();
+        if picked.is_empty() {
+            self.set_selection(None);
+            return;
+        }
+        // Primary: the pre-history primary when it survived; otherwise
+        // the top-most survivor, matching a fresh marquee pick.
+        self.sel = match self.sel {
+            Some(entry) if picked.contains(&entry) => Some(entry),
+            _ => Some(picked[picked.len() - 1]),
+        };
+        self.sel_set = picked;
+    }
+
     fn do_undo(&mut self) {
         if let Some(ed) = self.ed_mut() {
             match ed.undo() {
@@ -575,7 +664,7 @@ impl App {
                     self.dirty = true;
                     self.version += 1;
                     self.layers.touch(&touched, self.page_id().unwrap_or(-1));
-                    self.set_selection(None);
+                    self.restore_selection_after_history(&touched);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
                 Err(e) => self.status = format!("{e:#}"),
@@ -748,6 +837,10 @@ impl App {
                     self.dirty = true;
                     self.version += 1;
                     self.layers.touch(&touched, self.page_id().unwrap_or(-1));
+                    // Same selection mapping as undo (#136) — redo never
+                    // touched the selection before, so a redo-of-delete
+                    // could leave a selection pointing at a removed shape.
+                    self.restore_selection_after_history(&touched);
                 }
                 Ok(None) => self.status = "nothing to redo".into(),
                 Err(e) => self.status = format!("{e:#}"),
