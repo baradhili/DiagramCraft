@@ -5353,7 +5353,13 @@ impl App {
                                 ("SubAddress", &sub),
                                 ("Description", &desc),
                             ] {
-                                if !val.trim().is_empty() {
+                                // A materializing edit writes every
+                                // field, cleared ones as explicit
+                                // empty values: the materialized row
+                                // is seeded with the inherited cells,
+                                // so a skipped field would silently
+                                // keep its master value (#139 review).
+                                if from_master || !val.trim().is_empty() {
                                     cmds.push(Box::new(dc_core::SetRowCell::new(
                                         scope.clone(),
                                         "Hyperlink",
@@ -6666,17 +6672,17 @@ impl App {
             .collect()
     }
     /// kittest: the shape's INSTANCE hyperlink rows as (ix, address,
-    /// sub-address) — empty until a row is materialized onto the
-    /// instance sheet (#139).
+    /// sub-address, description) — empty until a row is materialized
+    /// onto the instance sheet (#139).
     #[doc(hidden)]
     pub fn debug_instance_hyperlinks_for_test(
         &self,
         shape_id: i64,
-    ) -> Vec<(i64, String, String)> {
+    ) -> Vec<(i64, String, String, String)> {
         self.hyperlink_rows(shape_id)
             .into_iter()
             .filter(|r| !r.inherited)
-            .map(|r| (r.ix, r.addr, r.sub))
+            .map(|r| (r.ix, r.addr, r.sub, r.desc))
             .collect()
     }
     /// kittest: the shape's MASTER's hyperlink rows verbatim as

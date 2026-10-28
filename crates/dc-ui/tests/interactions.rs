@@ -2135,7 +2135,7 @@ fn hyperlink_dialog_edits_master_inherited_rows() {
     let overridden = ("https://instance.example/override".to_string(), String::new());
     assert_eq!(
         h.state().debug_instance_hyperlinks_for_test(sid),
-        vec![(1, overridden.0.clone(), overridden.1.clone())],
+        vec![(1, overridden.0.clone(), overridden.1.clone(), "Inherited link".into())],
         "the row materialized on the instance sheet with the new address"
     );
     assert_eq!(
@@ -2161,6 +2161,36 @@ fn hyperlink_dialog_edits_master_inherited_rows() {
         h.state().debug_hyperlinks_for_test(sid),
         vec![inherited.clone()],
         "the inherited row is back and the master untouched"
+    );
+
+    // Clearing an inherited field sticks: the materialized row is
+    // seeded with the master's cells, so a skipped write would
+    // silently keep the inherited description (#139 review).
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Description"),
+    )
+    .set_text_value_accesskit("");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_instance_hyperlinks_for_test(sid),
+        vec![(
+            1,
+            "https://master.example/doc".into(),
+            String::new(),
+            String::new()
+        )],
+        "the cleared description stayed cleared (address seeded from the master)"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master is still untouched"
     );
 }
 
