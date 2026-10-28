@@ -28,7 +28,7 @@ If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or
 
 ## Helping
 
-Its sort of usable!
+It's sort of usable!
 
 How can you help?
 

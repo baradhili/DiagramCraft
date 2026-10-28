@@ -161,13 +161,33 @@ impl ResolvedFace {
         UNCOVERED_EM
     }
 
+    /// Per-(database, face, char) advance cache (#21 review):
+    /// `with_face_data` re-opens and re-parses the face file on every
+    /// call, and the wrap loop measures text char by char — repeated
+    /// glyphs would reopen the file each time. Missing advances are
+    /// cached too (the fallback chain re-asks the same face). The
+    /// database is keyed by its static's address (as `usize` — a
+    /// static Mutex must be `Send`): fontdb IDs are slotmap keys,
+    /// unique per `Database`, and the system and embedded statics can
+    /// coexist in one test process.
     fn advance_of(&self, id: fontdb::ID, c: char) -> Option<f64> {
-        metrics().db.with_face_data(id, |data, index| {
+        static ADVANCES: OnceLock<
+            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, char), Option<f64>>>,
+        > = OnceLock::new();
+        let m = metrics();
+        let key = (m as *const MetricsDb as usize, id, c);
+        let cache = ADVANCES.get_or_init(Default::default);
+        if let Some(hit) = cache.lock().unwrap().get(&key) {
+            return *hit;
+        }
+        let out = m.db.with_face_data(id, |data, index| {
             let face = ttf_parser::Face::parse(data, index).ok()?;
             let gid = face.glyph_index(c)?;
             let adv = face.glyph_hor_advance(gid)?;
             Some(adv as f64 / face.units_per_em() as f64)
-        })?
+        })?;
+        cache.lock().unwrap().insert(key, out);
+        out
     }
 
     /// Width of `text` at `size_in` inches (Char.Size units): the sum

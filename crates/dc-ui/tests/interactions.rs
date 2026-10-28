@@ -1166,6 +1166,67 @@ fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
     assert_eq!(h.state().debug_shape_count(), 1);
 }
 
+/// #22 review: the text-suppression toggle bumps only the previously
+/// and newly skipped shapes' content versions — another shape's layer
+/// entry survives an edit session uncached-free (the toggle used to
+/// clear the whole store). Probed by CONTENT VERSION, not texture id:
+/// the editor's entry zoom changes the ppi bucket, which legitimately
+/// re-rasters every on-screen entry (new texture ids) without
+/// invalidating anything.
+#[test]
+fn text_edit_skip_toggle_keeps_other_layers_cached() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (_page, bystander) = place_master(&mut h, 2);
+    // The second placement lands on the same spot and stays selected
+    // (the topmost shape) — F2 edits the SELECTION, so the bystander
+    // underneath is the cache probe.
+    let (_, edited) = place_master(&mut h, 2);
+    h.run_steps(3);
+    assert!(
+        h.state().debug_layer_tex_id_for_test(bystander).is_some()
+            && h.state().debug_layer_tex_id_for_test(edited).is_some(),
+        "both layers landed (sync raster)"
+    );
+    let (v_by0, v_ed0) = (
+        h.state().debug_layer_version_for_test(bystander),
+        h.state().debug_layer_version_for_test(edited),
+    );
+
+    // F2 opens the in-place editor on the selection: its entry is
+    // invalidated (re-render textless); the bystander's version must
+    // not move.
+    h.key_press(egui::Key::F2);
+    h.run_steps(3);
+    assert!(h.state().debug_text_edit().is_some(), "editor open");
+    assert_ne!(
+        h.state().debug_layer_version_for_test(edited),
+        v_ed0,
+        "the edited shape's entry was invalidated"
+    );
+    assert_eq!(
+        h.state().debug_layer_version_for_test(bystander),
+        v_by0,
+        "the unedited shape's content version survived the toggle"
+    );
+
+    // Esc ends the edit: the text returns (another bump); the
+    // bystander untouched.
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
+    assert!(h.state().debug_text_edit().is_none(), "editor closed");
+    assert_ne!(
+        h.state().debug_layer_version_for_test(edited),
+        v_ed0,
+        "the edited shape re-rendered with its text back"
+    );
+    assert_eq!(
+        h.state().debug_layer_version_for_test(bystander),
+        v_by0,
+        "the unedited shape's content version is still unchanged"
+    );
+}
+
 /// GitHub #48: the context menu must derive every color it paints from
 /// the theme mapping over the live visuals — hover fill, label,
 /// disabled label, shortcut hint, separators and icon tints — so the

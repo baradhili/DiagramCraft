@@ -83,9 +83,11 @@ pub struct ShapeLayers {
     stale_bbox: std::collections::HashSet<i64>,
     gone: std::collections::HashSet<i64>,
     /// The shape whose TEXT is currently suppressed in layer renders
-    /// (the in-place editor, #22). When it changes the store clears —
-    /// every retained SVG/texture either has the text baked in or
-    /// must gain it back; the refill is progressive/off-thread.
+    /// (the in-place editor, #22). When it changes, only the two
+    /// affected shapes' rasters change — the previously suppressed
+    /// shape's texture must gain its text back, the newly suppressed
+    /// one's must lose it — so their content versions bump and the
+    /// rest of the store stays cached (#22 review).
     text_skip: Option<i64>,
 }
 
@@ -218,6 +220,14 @@ impl ShapeLayers {
     pub fn landed_count_for_test(&self) -> usize {
         self.entries.values().filter(|e| e.tex.is_some()).count()
     }
+    /// kittest (#22 review): the content version a shape's entry is
+    /// keyed by — unchanged exactly when nothing invalidated it (the
+    /// ppi bucket may still re-raster a valid entry, so texture ids
+    /// are NOT a cache probe).
+    #[doc(hidden)]
+    pub fn version_for_test(&self, id: i64) -> u64 {
+        self.versions.get(&id).copied().unwrap_or(self.base_version)
+    }
 
     /// The frame pass: refresh stale bounds, post raster jobs for
     /// entries that are missing/stale/out-of-bucket (viewport-culled,
@@ -239,12 +249,17 @@ impl ShapeLayers {
         hidden: &[i64],
         skip_text: Option<i64>,
     ) -> (Vec<ShapeQuad>, Option<String>) {
-        // Text suppression toggle (#22): the retained SVGs (and landed
-        // textures) were serialized under the previous setting, so a
-        // change clears the store; refill is progressive and pooled.
+        // Text suppression toggle (#22): only the previously and newly
+        // skipped shapes' rasters change — bump their content versions
+        // (the Ink discipline) so both the retained SVG and the texture
+        // re-render under the new setting. The rest of the store stays
+        // cached (a change used to clear it all; #22 review).
         if self.text_skip != skip_text {
+            for id in [self.text_skip, skip_text].into_iter().flatten() {
+                self.next_version = self.next_version.max(self.base_version) + 1;
+                self.versions.insert(id, self.next_version);
+            }
             self.text_skip = skip_text;
-            self.clear();
         }
         self.set_page(page.id);
         let bucket = (ppi * 4.0).round().max(4.0) as u32; // ±0.25 ppi

@@ -4222,9 +4222,23 @@ impl App {
             let mut flow = crate::textedit::EditFlow::Active;
             if let Some(sess) = self.text_edit.as_mut() {
                 if let Some(ed) = self.ed.as_ref() {
-                    let page =
-                        &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
-                    flow = crate::textedit::show_overlay(ui, sess, &ed.doc, page, &geom, &self.view);
+                    // The session's page, not the active tab: the edit
+                    // can outlive a page switch (tabs sit outside the
+                    // canvas's interaction lock), and shape ids collide
+                    // across pages — indexing by page_idx would lay the
+                    // overlay over the wrong shape's text block. No
+                    // matching page: skip the overlay this frame (#22
+                    // review).
+                    if let Some(page) = ed.doc.pages.iter().find(|p| p.id == sess.page) {
+                        flow = crate::textedit::show_overlay(
+                            ui,
+                            sess,
+                            &ed.doc,
+                            page,
+                            &geom,
+                            &self.view,
+                        );
+                    }
                 }
             }
             match flow {
@@ -6166,13 +6180,20 @@ impl App {
         if !commit {
             return;
         }
+        // The shape must still exist to receive the commit — the edit
+        // can outlive it (Ctrl+Z of its placement is not keyboard-
+        // gated). Resolve first and drop the draft when the page or
+        // shape is gone instead of applying SetText at a dead scope
+        // (#22 review).
         let current = self
             .ed
             .as_ref()
             .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == sess.page))
             .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sess.shape))
-            .and_then(|s| s.sheet.text.clone())
-            .unwrap_or_default();
+            .map(|s| s.sheet.text.clone().unwrap_or_default());
+        let Some(current) = current else {
+            return;
+        };
         if sess.draft != current {
             self.apply(SetText::new(
                 Scope::Shape {
@@ -6495,6 +6516,13 @@ impl App {
     #[doc(hidden)]
     pub fn debug_layer_tex_id_for_test(&self, shape_id: i64) -> Option<egui::TextureId> {
         self.layers.tex_id_for_test(shape_id)
+    }
+
+    /// kittest: a shape layer's content version (#22 review) — the
+    /// cache probe that a ppi-bucket re-raster cannot perturb.
+    #[doc(hidden)]
+    pub fn debug_layer_version_for_test(&self, shape_id: i64) -> u64 {
+        self.layers.version_for_test(shape_id)
     }
 
     /// kittest: how many live drag ghosts the last frame drew (#96).

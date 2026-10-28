@@ -269,9 +269,16 @@ pub fn show_overlay(
 /// The egui family + ascent for the shape's ACTUAL font: the face the
 /// rasterizer draws (system font where installed, vendored Carlito
 /// otherwise — `dc::textmetrics::face_data`), registered into egui
-/// under a canvas name. One registration per (document family, bold);
-/// `Context::add_font` is idempotent by name, and the resolver cache
-/// keeps even the registration call off the per-frame path.
+/// under a canvas name. The RESOLUTION (file read, family name, the
+/// shared FontData payload) is cached per (document family, bold); the
+/// REGISTRATION is re-asserted on every call — egui's `add_font`
+/// checks the live font definitions and no-ops when the name is
+/// already registered, and applies the insert immediately when nothing
+/// has been laid out yet this pass. Re-asserting matters because the
+/// cache is process-global while a Context is not: a fresh context
+/// (a second kittest harness in the same binary) or a `set_fonts`
+/// reset would otherwise silently lay the overlay out in the fallback
+/// font (#22 review).
 fn overlay_font(
     ctx: &egui::Context,
     font: Option<&str>,
@@ -279,60 +286,62 @@ fn overlay_font(
 ) -> (egui::FontFamily, f64) {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    /// (document family, bold) → (egui family, ascender em).
-    type Resolved = (egui::FontFamily, f64);
+    /// (document family, bold) → (egui family, ascender em, canvas
+    /// name, payload). All clones are Arc-grade — the payload is
+    /// shared, never copied.
+    type Resolved = (egui::FontFamily, f64, Arc<str>, egui::FontData);
     static CACHE: OnceLock<Mutex<HashMap<(String, bool), Resolved>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = (font.unwrap_or_default().to_string(), bold);
-    if let Some(hit) = cache.lock().unwrap().get(&key) {
-        return hit.clone();
-    }
-    let resolved = dc::textmetrics::face_data(font, bold);
-    let out = match resolved {
-        Some(fd) => {
-            let name = format!(
-                "dc-canvas-{}-{}",
-                fd.family,
-                if bold { "bold" } else { "regular" }
-            );
-            let data = egui::FontData {
-                font: fd.data.clone(),
-                index: fd.index,
-                tweak: Default::default(),
-            };
-            let family = egui::FontFamily::Name(Arc::from(name.as_str()));
-            ctx.add_font(egui::FontInsert::new(
-                &name,
-                data,
-                vec![egui::InsertFontFamily {
-                    family: family.clone(),
-                    priority: egui::FontPriority::Highest,
-                }],
-            ));
-            (family, fd.ascent_em)
-        }
-        // face_data fails only when a system font file cannot be read
-        // back: fall back to the vendored Carlito so the editor still
-        // renders (and stays metric-compatible with the raster).
+    let hit = cache.lock().unwrap().get(&key).cloned();
+    let (family, ascent, name, data) = match hit {
+        Some(r) => r,
         None => {
-            let name = format!("dc-canvas-carlito-{}", if bold { "bold" } else { "regular" });
-            let bold_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf");
-            let reg_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf");
-            let ttf: &[u8] = if bold { bold_ttf } else { reg_ttf };
-            let family = egui::FontFamily::Name(Arc::from(name.as_str()));
-            ctx.add_font(egui::FontInsert::new(
-                &name,
-                egui::FontData::from_static(ttf),
-                vec![egui::InsertFontFamily {
-                    family: family.clone(),
-                    priority: egui::FontPriority::Highest,
-                }],
-            ));
-            (family, 0.75)
+            let out = match dc::textmetrics::face_data(font, bold) {
+                Some(fd) => {
+                    let name: Arc<str> = Arc::from(format!(
+                        "dc-canvas-{}-{}",
+                        fd.family,
+                        if bold { "bold" } else { "regular" }
+                    ));
+                    let data = egui::FontData {
+                        font: fd.data.clone(),
+                        index: fd.index,
+                        tweak: Default::default(),
+                    };
+                    let family = egui::FontFamily::Name(name.clone());
+                    (family, fd.ascent_em, name, data)
+                }
+                // face_data fails only when a system font file cannot
+                // be read back: fall back to the vendored Carlito so
+                // the editor still renders (and stays
+                // metric-compatible with the raster).
+                None => {
+                    let name: Arc<str> = Arc::from(format!(
+                        "dc-canvas-carlito-{}",
+                        if bold { "bold" } else { "regular" }
+                    ));
+                    let bold_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf");
+                    let reg_ttf: &[u8] =
+                        include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf");
+                    let ttf: &[u8] = if bold { bold_ttf } else { reg_ttf };
+                    let family = egui::FontFamily::Name(name.clone());
+                    (family, 0.75, name, egui::FontData::from_static(ttf))
+                }
+            };
+            cache.lock().unwrap().insert(key, out.clone());
+            out
         }
     };
-    cache.lock().unwrap().insert(key, out.clone());
-    out
+    ctx.add_font(egui::FontInsert::new(
+        &name,
+        data,
+        vec![egui::InsertFontFamily {
+            family: family.clone(),
+            priority: egui::FontPriority::Highest,
+        }],
+    ));
+    (family, ascent)
 }
 
 /// Parse "#rrggbb" (the renderer's resolved form) with a black
