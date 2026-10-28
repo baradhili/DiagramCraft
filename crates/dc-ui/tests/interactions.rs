@@ -2015,6 +2015,155 @@ fn hyperlink_dialog_edits_rows_and_ctrl_click_navigates() {
     // the explicit cancel path is covered by its own test below.
 }
 
+/// A blank-vsdx copy whose Rectangle master (2) carries a Hyperlink
+/// row (#139): instances inherit it into the follow list and the
+/// dialog. Synthetic content — no Microsoft bits beyond the blank
+/// template this repo already ships.
+fn hyperlink_master_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let src =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dc-core/assets/blank.vsdx");
+    let injection = "  <Section N='Hyperlink'>\
+<Row IX='1'><Cell N='Address' V='https://master.example/doc'/><Cell N='Description' V='Inherited link'/></Row>\
+</Section>\n</Shape>";
+    let path = dir.join("hyperlink-master.vsdx");
+    let in_pkg = vsdx::Package::open(&src).unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    for name in in_pkg.part_names() {
+        let data = in_pkg.part(name).unwrap().to_vec();
+        let data = if name == "visio/masters/master2.xml" {
+            String::from_utf8(data)
+                .unwrap()
+                .replacen("</Shape>", injection, 1)
+                .into_bytes()
+        } else {
+            data
+        };
+        w.start_file(name, opts).unwrap();
+        std::io::Write::write_all(&mut w, &data).unwrap();
+    }
+    w.finish().unwrap();
+    path
+}
+
+/// GitHub #139: the Hyperlink dialog edits master-inherited rows —
+/// Edit materializes the row onto the instance sheet (one undo Macro,
+/// master untouched), the override shadows the inherited row in the
+/// list, and Remove stays read-only on inherited rows (Visio keeps
+/// inherited row sets read-only until overridden).
+#[test]
+fn hyperlink_dialog_edits_master_inherited_rows() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = hyperlink_master_fixture(tmp.path());
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_doc(&doc),
+        );
+    h.run();
+    h.run();
+
+    // Place a Rectangle instance (master 2): the inherited row shows
+    // in the follow list, nothing on the instance sheet yet.
+    let (_page, sid) = place_master(&mut h, 2);
+    let inherited = ("https://master.example/doc".to_string(), String::new());
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "nothing materialized before any edit"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the follow list carries the inherited row"
+    );
+
+    // Open Hyperlink… — the dialog lists the row with its origin.
+    let to = h.state().debug_shape_screen_rect(sid).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row in the context menu")
+        .click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Inherited link").count() > 0,
+        "the dialog lists the inherited row"
+    );
+    assert!(
+        h.query_all_by_label_contains("inherited").count() > 0,
+        "the inherited origin is visible"
+    );
+
+    // Remove is read-only on the inherited row: clicking it applies
+    // nothing.
+    h.get_by_label("Remove").click();
+    h.run();
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "Remove on an inherited row changed nothing"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master's row is still there"
+    );
+
+    // Edit the inherited row: the draft is prefilled with its values;
+    // change the address and OK.
+    h.get_by_label("Edit").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://instance.example/override");
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+
+    let overridden = ("https://instance.example/override".to_string(), String::new());
+    assert_eq!(
+        h.state().debug_instance_hyperlinks_for_test(sid),
+        vec![(1, overridden.0.clone(), overridden.1.clone())],
+        "the row materialized on the instance sheet with the new address"
+    );
+    assert_eq!(
+        h.state().debug_master_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the master's row is unchanged by the edit"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![overridden.clone()],
+        "the override shadows the inherited row — no duplicate"
+    );
+
+    // One undo removes the materialized row; the inherited row
+    // returns unshadowed.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        h.state().debug_instance_hyperlinks_for_test(sid).is_empty(),
+        "one undo removed the materialized row"
+    );
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![inherited.clone()],
+        "the inherited row is back and the master untouched"
+    );
+}
+
 /// GitHub #29: Add Comment creates an annotation shape on the
 /// Annotation layer; the Review toggle hides it; undo removes it.
 #[test]

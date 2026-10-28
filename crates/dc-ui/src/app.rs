@@ -25,11 +25,26 @@ use crate::svgimg::TextureCache;
 use crate::theme;
 
 /// Draft row for the Hyperlinks dialog (#28): `edit_row` names the
-/// instance row being edited (None = adding).
+/// instance row being edited (None = adding). `from_master` marks a
+/// draft opened on a master-inherited row (#139): OK materializes the
+/// row onto the instance sheet instead of replacing a local one.
 #[derive(Clone)]
 struct HyperlinkDraft {
     edit_row: Option<i64>,
+    from_master: bool,
     address: String,
+    sub: String,
+    desc: String,
+}
+
+/// One hyperlink row for list display: its values, its row ix, and
+/// whether it lives on the instance sheet or is inherited from the
+/// shape's master (#139).
+#[derive(Clone)]
+struct HyperRow {
+    ix: i64,
+    inherited: bool,
+    addr: String,
     sub: String,
     desc: String,
 }
@@ -4358,8 +4373,24 @@ impl App {
     }
 
     /// The shape's hyperlink rows (#28): instance rows first, then the
-    /// master's (resolved like every other cell read).
+    /// master's (resolved like every other cell read). A master row
+    /// whose ix an instance row already carries is SHADOWED — the
+    /// local row is the override (first-edit materialization, #139) —
+    /// so a materialized row replaces its inherited twin here instead
+    /// of duplicating it.
     fn shape_hyperlinks(&self, shape_id: i64) -> Vec<(String, String, String)> {
+        self.hyperlink_rows(shape_id)
+            .into_iter()
+            .map(|r| (r.addr, r.sub, r.desc))
+            .collect()
+    }
+
+    /// The shape's hyperlink rows with their origin (#139): instance
+    /// rows first, then the master's (shadowed ixs dropped). The
+    /// master lookup walks its top-level shapes; a multi-shape master
+    /// with same-ix Hyperlink rows across sub-shapes is beyond v1
+    /// (the blank-catalog masters are single-shape).
+    fn hyperlink_rows(&self, shape_id: i64) -> Vec<HyperRow> {
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -4374,15 +4405,28 @@ impl App {
                 .iter()
                 .flat_map(|s| s.sheet.sections_named("Hyperlink"))
                 .flat_map(|sec| sec.rows.iter())
-                .map(|r| {
-                    let t = |n: &str| r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default();
-                    (t("Address"), t("SubAddress"), t("Description"))
+                .map(|r| HyperRow {
+                    ix: r.ix,
+                    inherited: false,
+                    addr: r.cell("Address").and_then(|c| c.v.clone()).unwrap_or_default(),
+                    sub: r.cell("SubAddress").and_then(|c| c.v.clone()).unwrap_or_default(),
+                    desc: r.cell("Description").and_then(|c| c.v.clone()).unwrap_or_default(),
                 })
                 .collect::<Vec<_>>()
         };
         let mut out = collect(std::slice::from_ref(sh));
         if let Some(m) = sh.master.and_then(|id| ed.doc.master(id)) {
-            out.extend(collect(&m.shapes));
+            let shadowed: std::collections::HashSet<i64> =
+                out.iter().map(|r| r.ix).collect();
+            out.extend(
+                collect(&m.shapes)
+                    .into_iter()
+                    .filter(|r| !shadowed.contains(&r.ix))
+                    .map(|mut r| {
+                        r.inherited = true;
+                        r
+                    }),
+            );
         }
         out
     }
@@ -5182,27 +5226,10 @@ impl App {
             page: page_id,
             shape: shape_id,
         };
-        let rows: Vec<(i64, String, String, String)> = self
-            .ed()
-            .map(|ed| {
-                let page = &ed.doc.pages[self.page_idx];
-                vsdx::model::find_shape_by_id(&page.shapes, shape_id)
-                    .map(|sh| {
-                        sh.sheet
-                            .sections_named("Hyperlink")
-                            .iter()
-                            .flat_map(|sec| sec.rows.iter())
-                            .map(|r| {
-                                let t = |n: &str| {
-                                    r.cell(n).and_then(|c| c.v.clone()).unwrap_or_default()
-                                };
-                                (r.ix, t("Address"), t("SubAddress"), t("Description"))
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            })
-            .unwrap_or_default();
+        // Instance rows plus the master's, inherited-origin visible
+        // (#139) — `hyperlink_rows` keeps instance-first order and
+        // drops master rows an instance row already shadows.
+        let rows = self.hyperlink_rows(shape_id);
         let mut draft = self.hyperlink_draft.take();
         // Cancel mechanism (live report + the 2016 dialog's Cancel):
         // the title-bar X and an explicit Close button both discard
@@ -5220,34 +5247,48 @@ impl App {
                 if rows.is_empty() && draft.is_none() {
                     ui.weak("No hyperlinks on this shape.");
                 }
-                for (ix, addr, sub, desc) in &rows {
+                for row in &rows {
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new(if desc.is_empty() {
-                                addr.clone()
+                            egui::RichText::new(if row.desc.is_empty() {
+                                row.addr.clone()
                             } else {
-                                format!("{desc} — {addr}")
+                                format!("{} — {}", row.desc, row.addr)
                             })
                             .size(12.0),
                         );
+                        if row.inherited {
+                            // Origin marker + read-only Remove: the row
+                            // belongs to the master (Visio keeps
+                            // inherited row sets read-only until
+                            // overridden); Edit materializes the
+                            // override (#139).
+                            ui.weak("inherited");
+                        }
                         if ui.button("Go").clicked() {
-                            let (a, s) = (addr.clone(), sub.clone());
+                            let (a, s) = (row.addr.clone(), row.sub.clone());
                             self.follow_hyperlink(&a, &s);
                         }
                         if ui.button("Edit").clicked() {
                             draft = Some(HyperlinkDraft {
-                                edit_row: Some(*ix),
-                                address: addr.clone(),
-                                sub: sub.clone(),
-                                desc: desc.clone(),
+                                edit_row: Some(row.ix),
+                                from_master: row.inherited,
+                                address: row.addr.clone(),
+                                sub: row.sub.clone(),
+                                desc: row.desc.clone(),
                             });
                         }
-                        if ui.button("Remove").clicked() {
+                        let remove = ui.add_enabled(!row.inherited, egui::Button::new("Remove"));
+                        if row.inherited {
+                            remove.on_disabled_hover_text(
+                                "Inherited from the shape's master — edit it to override it on this shape",
+                            );
+                        } else if remove.clicked() {
                             self.apply(dc_core::commands::RemoveSectionRow::new(
                                 scope.clone(),
                                 "Hyperlink",
                                 0,
-                                dc_core::commands::RowSel::Ix(*ix),
+                                dc_core::commands::RowSel::Ix(row.ix),
                             ));
                         }
                     });
@@ -5274,22 +5315,38 @@ impl App {
                             field(ui, "Description", &mut d.desc);
                             ui.end_row();
                         });
-                    let (edit_row, address, sub, desc) =
-                        (d.edit_row, d.address.clone(), d.sub.clone(), d.desc.clone());
+                    let (edit_row, from_master, address, sub, desc) = (
+                        d.edit_row,
+                        d.from_master,
+                        d.address.clone(),
+                        d.sub.clone(),
+                        d.desc.clone(),
+                    );
                     let mut close_draft = false;
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
                             let ix = edit_row.unwrap_or_else(|| {
-                                rows.iter().map(|r| r.0).max().unwrap_or(-1) + 1
+                                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
                             });
                             let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
                             if let Some(old) = edit_row {
-                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
-                                    scope.clone(),
-                                    "Hyperlink",
-                                    0,
-                                    dc_core::commands::RowSel::Ix(old),
-                                )));
+                                // An instance edit replaces its row. A
+                                // master-inherited row has no local row
+                                // to replace: SetRowCell's first-edit
+                                // materialization seeds the local
+                                // section+row (inherited values
+                                // included) — the master stays
+                                // untouched (#139).
+                                if !from_master {
+                                    cmds.push(Box::new(
+                                        dc_core::commands::RemoveSectionRow::new(
+                                            scope.clone(),
+                                            "Hyperlink",
+                                            0,
+                                            dc_core::commands::RowSel::Ix(old),
+                                        ),
+                                    ));
+                                }
                             }
                             for (name, val) in [
                                 ("Address", &address),
@@ -5307,7 +5364,11 @@ impl App {
                                     )));
                                 }
                             }
-                            self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            // An all-empty draft writes nothing (and
+                            // must not record a no-op undo step).
+                            if !cmds.is_empty() {
+                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                            }
                             close_draft = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -5326,6 +5387,7 @@ impl App {
                     if draft.is_none() && ui.button("New…").clicked() {
                         draft = Some(HyperlinkDraft {
                             edit_row: None,
+                            from_master: false,
                             address: String::new(),
                             sub: String::new(),
                             desc: String::new(),
@@ -6593,14 +6655,60 @@ impl App {
             .cell("Value")?
             .numeric()
     }
-    /// kittest: a shape's hyperlink rows as (address, sub-address)
-    /// from the instance section (#28).
+    /// kittest: a shape's effective hyperlink rows as (address,
+    /// sub-address) — instance rows first, then unshadowed
+    /// master-inherited rows (#28, #139).
     #[doc(hidden)]
     pub fn debug_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
         self.shape_hyperlinks(shape_id)
             .into_iter()
             .map(|(a, s, _)| (a, s))
             .collect()
+    }
+    /// kittest: the shape's INSTANCE hyperlink rows as (ix, address,
+    /// sub-address) — empty until a row is materialized onto the
+    /// instance sheet (#139).
+    #[doc(hidden)]
+    pub fn debug_instance_hyperlinks_for_test(
+        &self,
+        shape_id: i64,
+    ) -> Vec<(i64, String, String)> {
+        self.hyperlink_rows(shape_id)
+            .into_iter()
+            .filter(|r| !r.inherited)
+            .map(|r| (r.ix, r.addr, r.sub))
+            .collect()
+    }
+    /// kittest: the shape's MASTER's hyperlink rows verbatim as
+    /// (address, sub-address) — the edit-materialization path must
+    /// leave these unchanged (#139).
+    #[doc(hidden)]
+    pub fn debug_master_hyperlinks_for_test(&self, shape_id: i64) -> Vec<(String, String)> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.get(self.page_idx) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        sh.master
+            .and_then(|id| ed.doc.master(id))
+            .map(|m| {
+                m.shapes
+                    .iter()
+                    .flat_map(|s| s.sheet.sections_named("Hyperlink"))
+                    .flat_map(|sec| sec.rows.iter())
+                    .map(|r| {
+                        (
+                            r.cell("Address").and_then(|c| c.v.clone()).unwrap_or_default(),
+                            r.cell("SubAddress").and_then(|c| c.v.clone()).unwrap_or_default(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// kittest: annotation shapes on the Annotation layer (#29) as
     /// (shape id, text).
