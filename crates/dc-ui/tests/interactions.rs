@@ -1392,6 +1392,41 @@ fn page_switch_commits_the_text_edit() {
         Some("committed"),
         "the draft committed through SetText"
     );
+
+    // Same-frame edge (branch review): a typing event and the tab
+    // click queued in ONE harness pass — the click's switch_page runs
+    // before the editor widget sees the text. The pending input must
+    // ride along into the commit, not vanish.
+    let (_p2, sid2) = place_master(&mut h, 2);
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("edge");
+    h.run();
+    assert!(h.state().debug_text_edit().is_some());
+    // Deliver a keystroke AND the Page-2 tab click together.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    h.event(egui::Event::Text("!".into()));
+    h.event(egui::Event::PointerButton {
+        pos: tab2,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: tab2,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.get_by_label("Page-1").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid2).as_deref(),
+        Some("edge!"),
+        "the same-frame keystroke survived into the commit"
+    );
 }
 
 /// GitHub #48: the context menu must derive every color it paints from
