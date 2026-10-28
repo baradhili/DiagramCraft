@@ -3654,6 +3654,221 @@ fn document_stencil_entry_is_opt_in() {
     assert_eq!(doc_cells, 6, "Quick Shapes still aggregates the heads");
 }
 
+
+/// Scroll the stencil pane until `key`'s cell is on screen, returning
+/// its current rect (#143: deep grids — the document entry's full set,
+/// a stencil's non-head masters — sit below the fold).
+fn reveal_stencil_cell(
+    h: &mut egui_kittest::Harness<'_, App>,
+    key: (dc_ui::stencil::StencilId, i64),
+) -> egui::Rect {
+    let mut wheels = 0;
+    loop {
+        let cell = h
+            .state()
+            .debug_master_cells()
+            .into_iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, r)| r)
+            .unwrap_or_else(|| panic!("cell {key:?} in the stencil pane"));
+        if cell.center().y < 760.0 {
+            return cell;
+        }
+        wheels += 1;
+        assert!(wheels < 80, "pane never scrolled {key:?} into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(3);
+    }
+}
+
+/// GitHub #143: per-user Quick Shapes membership, persisted app-side.
+/// Add a non-head master from the revealed Document Stencil entry →
+/// it joins Quick Shapes and places; a fresh app loading the same
+/// store keeps it (the restart simulation); removing restores the
+/// default membership. An open built-in's addition survives closing
+/// and reopening the stencil (identity = its source path).
+#[test]
+fn quick_shapes_user_membership_persists_and_toggles() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("quickshapes.json");
+    let mut h = harness_with_blank();
+    h.state_mut().set_quick_shapes_store_for_test(&store);
+    h.run();
+
+    // Blank carries masters 2–9; the default head set is 2–7, so
+    // master 8 (Cross) is not in Quick Shapes.
+    let quick = |h: &egui_kittest::Harness<'_, App>| {
+        h.state()
+            .debug_quick_cells_for_test()
+            .into_iter()
+            .filter(|(id, _)| *id == StencilId::Document)
+            .map(|(_, m)| m)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(quick(&h), vec![2, 3, 4, 5, 6, 7], "the default head set");
+
+    // Reveal the Document Stencil entry (the full master grid), then
+    // right-click master 8's cell → Add to Quick Shapes.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h.run();
+    }
+    let cell = reveal_stencil_cell(&mut h, (StencilId::Document, 8));
+    click_at(&mut h, cell.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Add to Quick Shapes").click();
+    h.run();
+    assert_eq!(
+        quick(&h),
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "the addition joined Quick Shapes after the defaults"
+    );
+    assert_eq!(h.state().debug_status(), "added to Quick Shapes");
+
+    // The added cell places through the normal quick-cell wiring
+    // (its key is the source key, #88's placement path).
+    let quick_cell = reveal_stencil_cell(&mut h, (StencilId::Document, 8));
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, quick_cell.center(), egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "the added quick cell places like any other"
+    );
+
+    // Restart simulation: a fresh app loading the same store keeps
+    // the addition.
+    let mut h2 = harness_with_blank();
+    h2.state_mut().set_quick_shapes_store_for_test(&store);
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7, 8],
+        "the addition survived the restart (config reload)"
+    );
+
+    // Removing the added master restores the default membership.
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 8));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Remove from Quick Shapes").click();
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7],
+        "removing the addition restores the default membership"
+    );
+
+    // Removing a DEFAULT head works too, and re-adding restores it.
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 2));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Remove from Quick Shapes").click();
+    h2.run();
+    assert_eq!(quick(&h2), vec![3, 4, 5, 6, 7], "a default head can leave");
+    // Re-add through the Document Stencil entry (with 2 out of Quick
+    // Shapes, its only cell lives in the full document grid).
+    h2.get_by_label("More Shapes").click();
+    h2.run();
+    h2.get_by_label("Document Stencil").click();
+    for _ in 0..3 {
+        h2.run();
+    }
+    let cell = reveal_stencil_cell(&mut h2, (StencilId::Document, 2));
+    click_at(&mut h2, cell.center(), egui::PointerButton::Secondary);
+    h2.run();
+    h2.get_by_label("Add to Quick Shapes").click();
+    h2.run();
+    assert_eq!(
+        quick(&h2),
+        vec![2, 3, 4, 5, 6, 7],
+        "re-adding restores the default member (cells stay id-ordered)"
+    );
+}
+
+/// #143: an open stencil's additions key by its source path, so they
+/// survive closing and reopening the stencil (pane index shifts do
+/// not matter).
+#[test]
+fn quick_shapes_additions_survive_stencil_close_and_reopen() {
+    use dc_ui::stencil::StencilId;
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let store = tmp.path().join("quickshapes.json");
+    let mut h = harness_with_blank();
+    h.state_mut().set_quick_shapes_store_for_test(&store);
+    h.run();
+
+    // More Shapes ▸ General ▸ Basic Shapes opens a built-in stencil.
+    h.get_by_label("More Shapes").click();
+    h.run();
+    h.get_by_label("General").click();
+    h.run();
+    h.get_by_label("Basic Shapes").click();
+    for _ in 0..4 {
+        h.run();
+    }
+    // A non-head master of the stencil: its id is absent from Quick
+    // Shapes' open-stencil cells (the default head set).
+    let head_ids: Vec<i64> = h
+        .state()
+        .debug_quick_cells_for_test()
+        .into_iter()
+        .filter(|(id, _)| matches!(id, StencilId::Open(_)))
+        .map(|(_, m)| m)
+        .collect();
+    let target = h
+        .state()
+        .debug_master_cells()
+        .into_iter()
+        .find(|(k, _)| matches!(k.0, StencilId::Open(_)) && !head_ids.contains(&k.1))
+        .map(|(k, _)| k)
+        .expect("a non-head master cell in the open stencil");
+    let cell = reveal_stencil_cell(&mut h, target);
+    click_at(&mut h, cell.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label("Add to Quick Shapes").click();
+    h.run();
+    let quick_has = |h: &egui_kittest::Harness<'_, App>| {
+        h.state()
+            .debug_quick_cells_for_test()
+            .iter()
+            .any(|k| k.1 == target.1 && matches!(k.0, StencilId::Open(_)))
+    };
+    assert!(quick_has(&h), "the stencil master joined Quick Shapes");
+
+    // Close the stencil (the menu checkbox toggles it off), reopen
+    // it — the addition must survive (identity is the source path,
+    // not the pane slot).
+    for _ in 0..2 {
+        h.get_by_label("More Shapes").click();
+        h.run();
+        h.get_by_label("General").click();
+        h.run();
+        h.get_by_label("Basic Shapes").click();
+        for _ in 0..4 {
+            h.run();
+        }
+    }
+    assert!(
+        quick_has(&h),
+        "the addition survived close and reopen (pane slot changed)"
+    );
+}
+
 /// #85 follow-up: the More Shapes "Metric Stencils" session toggle —
 /// built-ins open from their metric twins when ticked (the shipped U/M
 /// pairs differ in master geometry only), and the status names the

@@ -200,6 +200,9 @@ pub struct App {
     /// Open shape context menu: (shape id, screen anchor, page-inches
     /// anchor y-up) — set by right-click, cleared on action/outside click.
     ctx_menu: Option<(i64, Pos2, (f64, f64))>,
+    /// The Quick Shapes membership menu (#143): the right-clicked
+    /// master cell (source key) and the popup anchor.
+    quick_menu: Option<((StencilId, i64), egui::Pos2)>,
     /// Last frame's context-menu rect in screen coords; None while the
     /// menu is closed (kept for the placement tests, issue #49).
     ctx_menu_rect: Option<egui::Rect>,
@@ -218,6 +221,9 @@ pub struct App {
     /// Ephemeral in the headless constructors; `App::new` swaps in the
     /// persistent on-disk list.
     recent: RecentFiles,
+    /// Per-user Quick Shapes membership (#143) — app-side, persisted
+    /// beside the MRU; ephemeral in every headless constructor.
+    quick_shapes: crate::quickshapes::QuickShapes,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -320,6 +326,7 @@ impl App {
         // (tests and kittest constructors stay ephemeral so they never
         // touch the user's real config dir).
         app.recent = RecentFiles::open();
+        app.quick_shapes = crate::quickshapes::QuickShapes::open();
         if let Some(p) = path {
             app.load(p);
         }
@@ -383,12 +390,14 @@ impl App {
             debug_close_vetoes: 0,
             debug_close_issued: 0,
             ctx_menu: None,
+            quick_menu: None,
             ctx_menu_rect: None,
             clipboard: None,
             text_edit: None,
             placed_last_click: false,
             color_pick: None,
             recent: RecentFiles::ephemeral(),
+            quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
             os_theme: None,
         };
         if let Some(p) = path {
@@ -4271,6 +4280,7 @@ impl App {
             }
         }
         self.shape_context_menu(ui.ctx());
+        self.quick_shapes_menu(ui.ctx());
         self.tab_context_menu(ui.ctx());
     }
 
@@ -5742,6 +5752,79 @@ impl App {
     }
 
     #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
+    /// The Quick Shapes membership menu (#143), opened by
+    /// right-clicking a master cell — in its source entry or in Quick
+    /// Shapes (a quick cell's key IS its source key). One item whose
+    /// label follows live membership; Visio persists membership
+    /// app-side and so does this (never the .vsdx, #88's rule).
+    fn quick_shapes_menu(&mut self, ctx: &egui::Context) {
+        let Some(((src_id, master_id), anchor)) = self.quick_menu else {
+            return;
+        };
+        let identity = crate::stencil::quick_source_id(src_id, &self.stencils);
+        let in_default = match src_id {
+            StencilId::Document => self
+                .ed
+                .as_ref()
+                .map(|e| crate::stencil::quick_default_ids(&e.doc).contains(&master_id)),
+            StencilId::Open(ix) => self.stencils.get(ix).map(|st| {
+                crate::stencil::quick_default_ids(&st.doc).contains(&master_id)
+            }),
+        };
+        // A closed source whose pane slot shifted has no stable
+        // identity for the menu — drop it.
+        let (Some(identity), Some(in_default)) = (identity, in_default) else {
+            self.quick_menu = None;
+            return;
+        };
+        let member = self.quick_shapes.is_member(&identity, master_id, in_default);
+        let mut act: Option<bool> = None; // true = add, false = remove
+        let menu = egui::Popup::new(
+            egui::Id::unique("dc-quick-shapes-menu"),
+            ctx.clone(),
+            anchor,
+            egui::LayerId::background(),
+        )
+        .kind(egui::PopupKind::Menu)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+        let popup = menu.show(|ui| {
+            ui.set_min_width(214.0);
+            let label = if member {
+                "Remove from Quick Shapes"
+            } else {
+                "Add to Quick Shapes"
+            };
+            if ui.button(label).clicked() {
+                act = Some(!member);
+            }
+        });
+        if let Some(add) = act {
+            if add {
+                self.quick_shapes.add(&identity, master_id);
+                self.status = "added to Quick Shapes".into();
+            } else {
+                self.quick_shapes.remove(&identity, master_id);
+                self.status = "removed from Quick Shapes".into();
+            }
+            self.quick_menu = None;
+            return;
+        }
+        // Close on an outside PRIMARY click (the shape menu's
+        // idiom): the opening right-click's own release is a
+        // secondary click and must not dismiss the menu it opened.
+        let outside_primary = ctx.input(|i| i.pointer.primary_clicked());
+        if let Some(ir) = &popup {
+            if outside_primary
+                && !ir
+                    .response
+                    .rect
+                    .contains(ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default())
+            {
+                self.quick_menu = None;
+            }
+        }
+    }
+
     fn shape_context_menu(&mut self, ctx: &egui::Context) {
         let Some((shape_id, pointer_anchor, _page_pos)) = self.ctx_menu else {
             self.ctx_menu_rect = None;
@@ -5784,7 +5867,7 @@ impl App {
         // measured size (used only for the right-edge flip decision).
         const MENU_MIN_W: f32 = 244.0;
         let mut menu = egui::Popup::new(
-            egui::Id::new("dc-shape-ctx-menu"), // stable per-menu id is intended
+            egui::Id::unique("dc-shape-ctx-menu"), // stable per-menu id is intended
             ctx.clone(),
             pointer_anchor,
             egui::LayerId::background(),
@@ -6601,6 +6684,21 @@ impl App {
         self.layers.version_for_test(shape_id)
     }
 
+    /// kittest (#143): the Quick Shapes entry's cell keys from the
+    /// last stencil layout, in display order.
+    #[doc(hidden)]
+    pub fn debug_quick_cells_for_test(&self) -> Vec<(StencilId, i64)> {
+        self.stencil.quick_keys.clone()
+    }
+
+    /// kittest (#143): point Quick Shapes persistence at an explicit
+    /// store (loading any existing membership) — the restart
+    /// simulation. Never persisted by the ephemeral constructors.
+    #[doc(hidden)]
+    pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
+        self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
     /// kittest (#68): the active page's geometry in inches — an
     /// inserted page must carry its source's sheet size, not the
     /// 0.1-in missing-cell clamp.
@@ -7278,9 +7376,18 @@ impl App {
                         let mut request = None;
                         let title = stencil_title(&self.path);
                         {
-                            let App { ed, stencil, stencils, pool, .. } = self;
+                            let App {
+                                ed,
+                                stencil,
+                                stencils,
+                                pool,
+                                quick_shapes,
+                                ..
+                            } = self;
                             if let Some(ed) = ed.as_ref() {
-                                if let Some(id) = stencil.show(ui, ed, stencils, &title, pool) {
+                                if let Some(id) =
+                                    stencil.show(ui, ed, stencils, &title, pool, quick_shapes)
+                                {
                                     armed = Some(id);
                                 }
                                 request = stencil.request.take();
@@ -7295,6 +7402,12 @@ impl App {
                             }
                             Some(crate::stencil::Request::ToggleBuiltin(slug)) => {
                                 self.toggle_builtin(slug);
+                            }
+                            Some(crate::stencil::Request::QuickShapesMenu(key)) => {
+                                let anchor = ui
+                                    .input(|i| i.pointer.interact_pos())
+                                    .unwrap_or(egui::Pos2::ZERO);
+                                self.quick_menu = Some((key, anchor));
                             }
                             None => {}
                         }
