@@ -2644,6 +2644,67 @@ fn format_pane_edits_cells_for_whole_selection() {
         Some("1".into()),
         "bold wrote Character Style"
     );
+
+    // #73: the Text section's Color button opens the palette; a pick
+    // writes the Character row-0 Color cell through the same
+    // whole-selection macro (first-edit materialization), the canvas
+    // renders it (WYSIWYG by construction — emit_text reads the
+    // cell), and one undo removes the materialized row.
+    h.key_press(egui::Key::F2);
+    h.run();
+    h.get_by_role(egui::Role::MultilineTextInput)
+        .set_text_value_accesskit("Red");
+    h.run();
+    let off = h.state().debug_canvas_rect().right_bottom() - egui::vec2(10.0, 10.0);
+    click_at(&mut h, off, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_text(sid).as_deref(),
+        Some("Red"),
+        "the shape carries text for the color to render on"
+    );
+
+    // The pane carries two "Color" rows (Line above, Text below); the
+    // labels are static text — the BUTTON beside the label carries
+    // the value. Take the lowest "Color" label (Text's) and click the
+    // button in its row.
+    let color_label = h
+        .get_all_by_label("Color")
+        .map(|n| n.rect())
+        .max_by_key(|r| r.min.y as i64)
+        .expect("the Text section's Color label");
+    let text_color_btn = h
+        .query_all_by_role(egui::Role::Button)
+        .map(|n| n.rect())
+        .find(|r| {
+            r.min.x > color_label.right()
+                && r.center().y > color_label.min.y - 4.0
+                && r.center().y < color_label.max.y + 4.0
+        })
+        .expect("the Color value button beside its label");
+    click_at(&mut h, text_color_btn.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label("#FFC000").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        Some("#FFC000".into()),
+        "the palette wrote the Character row-0 Color cell"
+    );
+    assert!(
+        h.state()
+            .debug_page_svg()
+            .unwrap_or_default()
+            .contains("fill=\"#FFC000\""),
+        "the text renders in the picked color"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        None,
+        "one undo removed the materialized Color cell"
+    );
 }
 
 /// GitHub #29 rework: the badge indicates a comment; the popup edits,

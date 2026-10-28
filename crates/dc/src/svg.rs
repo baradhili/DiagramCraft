@@ -1270,15 +1270,7 @@ fn resolve_text_block(
     // `char_cell`, so a LangID-only instance row picks them up from the
     // master/style rows instead of silently taking the built-in defaults.
     let color = char_cell(doc, s, chain, "Color")
-        .and_then(|c| c.v.clone())
-        .map(|v| match v.trim() {
-            v if v.starts_with('#') => v.to_string(),
-            v => v
-                .parse::<i64>()
-                .ok()
-                .map(|idx| doc.color(idx).cloned().unwrap_or_else(|| palette(idx)))
-                .unwrap_or_else(|| "#000000".into()),
-        })
+        .map(|c| color_value(doc, c.v.as_deref().unwrap_or(""), c.f.as_deref()))
         .unwrap_or_else(|| "#000000".into());
     let style_bits = char_cell(doc, s, chain, "Style")
         .and_then(|c| c.numeric())
@@ -2438,32 +2430,38 @@ fn theme_variant_colors(doc: &Document) -> Vec<String> {
 /// or — when the cell's formula is a THEMEVAL("VariantColorN") — the
 /// theme's variant color (Visio evaluates the formula, not the cached
 /// palette-index V, for themed shapes).
-fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) -> String {
-    let resolved = doc.resolve_cell(s, chain, cell);
-    if let Some(c) = &resolved {
-        if let Some(f) = c.f.as_deref() {
-            if f.contains("THEMEVAL") {
-                for n in 1..=8 {
-                    if f.contains(&format!("VariantColor{n}")) {
-                        let variants = theme_variant_colors(doc);
-                        if let Some(col) = variants.get(n - 1) {
-                            return col.clone();
-                        }
+/// One color cell's stored value as `#rrggbb` — the shared mapping
+/// behind the fill, line, and TEXT color paths (#73): a `#…` hex
+/// string verbatim, a palette/document-table index, or a THEMEVAL
+/// variant formula. Unresolvable values fall to black.
+fn color_value(doc: &Document, v: &str, f: Option<&str>) -> String {
+    if let Some(f) = f {
+        if f.contains("THEMEVAL") {
+            for n in 1..=8 {
+                if f.contains(&format!("VariantColor{n}")) {
+                    let variants = theme_variant_colors(doc);
+                    if let Some(col) = variants.get(n - 1) {
+                        return col.clone();
                     }
                 }
-                // THEMEVAL with no variant we model: fall through to V
             }
+            // THEMEVAL with no variant we model: fall through to V
         }
     }
-    match resolved {
-        Some(c) => match c.v.as_deref() {
-            Some(v) if v.starts_with('#') => v.to_string(),
-            Some(v) => match v.trim().parse::<i64>() {
-                Ok(idx) => doc.color(idx).cloned().unwrap_or_else(|| palette(idx)),
-                Err(_) => "#000000".into(),
-            },
-            None => "#000000".into(),
-        },
+    let v = v.trim();
+    if v.starts_with('#') {
+        v.to_string()
+    } else {
+        match v.parse::<i64>() {
+            Ok(idx) => doc.color(idx).cloned().unwrap_or_else(|| palette(idx)),
+            Err(_) => "#000000".into(),
+        }
+    }
+}
+
+fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) -> String {
+    match doc.resolve_cell(s, chain, cell) {
+        Some(c) => color_value(doc, c.v.as_deref().unwrap_or(""), c.f.as_deref()),
         None => palette(-1),
     }
 }
@@ -3063,6 +3061,58 @@ mod tests {
             ..Section::default()
         }));
         s
+    }
+
+    /// #73: Char.Color accepts both spellings with fill/line-parity
+    /// semantics — a `#rrggbb` hex string verbatim, a legacy palette
+    /// index through the [MS-VSDX] table — so a palette write and a
+    /// legacy file render identically.
+    #[test]
+    fn char_color_accepts_hex_and_palette_index() {
+        let doc = Document::default();
+        let emit = |color: &str| {
+            let mut s = Shape::default();
+            s.sheet.text = Some("colored".into());
+            s.sheet.set_cell("Width", Cell::value("2.0"));
+            s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Character".into(),
+                rows: vec![Row {
+                    cells: vec![("Color".to_string(), Cell::value(color))],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
+            let chain = [&s];
+            let mut out = String::new();
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            out
+        };
+        let hex = emit("#ED7D31");
+        assert!(
+            hex.contains(r##"fill="#ED7D31""##),
+            "hex Char.Color renders verbatim: {hex}"
+        );
+        // Palette index 4 is #0000FF in the [MS-VSDX] table; 2 is
+        // #FF0000 — the legacy spelling resolves through the same
+        // mapping as the fill/line path.
+        assert!(
+            emit("4").contains(r##"fill="#0000FF""##),
+            "an index Char.Color resolves through the palette table"
+        );
+        assert!(
+            emit("2").contains(r##"fill="#FF0000""##),
+            "index 2 is red"
+        );
+        // No Color cell: the built-in default is black.
+        let mut s = Shape::default();
+        s.sheet.text = Some("plain".into());
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        assert!(out.contains(r##"fill="#000000""##), "default text is black: {out}");
     }
 
     #[test]

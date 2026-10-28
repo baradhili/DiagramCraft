@@ -235,6 +235,9 @@ enum ColorTarget {
     Fill,
     FillBkgnd,
     Line,
+    /// Character row-0 Color (#73): writes a section-row cell, not a
+    /// plain one.
+    Text,
 }
 
 enum PendingDialog {
@@ -3633,6 +3636,15 @@ impl App {
                         ));
                     }
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Color");
+                    if ui
+                        .button(self.eff_row_str("Character", "Color").unwrap_or_else(|| "—".into()))
+                        .clicked()
+                    {
+                        color_pick = Some(ColorTarget::Text);
+                    }
+                });
                 let cur = self
                     .eff_row_str("Paragraph", "HorzAlign")
                     .unwrap_or_else(|| "0".into());
@@ -5729,10 +5741,20 @@ impl App {
 
     /// Apply a picked color to FillForegnd or LineColor on the selection.
     fn apply_color(&mut self, target: ColorTarget, color: &str) {
+        // Text color lives in the Character section's row 0 (#73): the
+        // whole-selection SetRowCell macro the pane's other text
+        // fields use (first-edit materialization seeds the row with
+        // the inherited cells).
+        if matches!(target, ColorTarget::Text) {
+            self.fmt_set_row("Character", "Color", color);
+            return;
+        }
         let cell_name = match target {
             ColorTarget::Fill => "FillForegnd",
             ColorTarget::FillBkgnd => "FillBkgnd",
             ColorTarget::Line => "LineColor",
+            // Handled by the SetRowCell path above.
+            ColorTarget::Text => unreachable!("text color writes a row cell"),
         };
         let targets = self.sel_set.clone();
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
@@ -7165,6 +7187,7 @@ impl App {
             ColorTarget::Fill => "Fill Color",
             ColorTarget::FillBkgnd => "Fill Background",
             ColorTarget::Line => "Line Color",
+            ColorTarget::Text => "Text Color",
         })
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
         .open(&mut open)
@@ -7183,6 +7206,9 @@ impl App {
                         let color = egui::Color32::from_hex(c).unwrap_or(egui::Color32::GRAY);
                         let (r, resp) =
                             ui.allocate_exact_size(egui::vec2(24.0, 24.0), Sense::click());
+                        resp.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, c)
+                        });
                         ui.painter().rect_filled(r, 2.0, color);
                         ui.painter().rect_stroke(
                             r,
