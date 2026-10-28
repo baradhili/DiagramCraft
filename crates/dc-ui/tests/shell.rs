@@ -629,6 +629,60 @@ fn page_tab_context_menu_manages_pages() {
     assert_eq!(h.state().debug_active_page_name(), "Page-2");
 }
 
+/// #68: an inserted page carries the source page's sheet setup — the
+/// tab menu's Insert Page on a letter blank produces a full letter
+/// page, not the 0.1-in missing-cell sliver `page_geom` clamps to.
+#[test]
+fn inserted_page_carries_the_source_page_size() {
+    use egui_kittest::kittest::Queryable;
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    h.run();
+    let (w0, h0) = h.state().debug_page_geom_for_test();
+    assert!(
+        (w0 - 8.5).abs() < 1e-9 && (h0 - 11.0).abs() < 1e-9,
+        "the blank's page is letter: {w0}×{h0}"
+    );
+
+    tab_menu_pick(&mut h, "Page-1", "Insert Page");
+    h.run();
+    assert_eq!(
+        h.state().debug_active_page_name(),
+        "Page-2",
+        "insert activates the new page"
+    );
+    let (w1, h1) = h.state().debug_page_geom_for_test();
+    assert!(
+        (w1 - w0).abs() < 1e-9 && (h1 - h0).abs() < 1e-9,
+        "#68: the inserted page keeps the source's sheet size: {w1}×{h1}"
+    );
+
+    // The ribbon's New Page button (Action::NewPage, on the Insert
+    // tab) seeds the same way — from the now-active Page-2.
+    h.state_mut().set_tab_for_test(dc_ui::ribbon::Tab::Insert);
+    h.run();
+    let add = h.get(egui_kittest::kittest::By::default()
+        .role(egui::Role::Button)
+        .label("New Page"));
+    add.click();
+    h.run();
+    assert_eq!(h.state().debug_active_page_name(), "Page-3");
+    let (w2, h2) = h.state().debug_page_geom_for_test();
+    assert!(
+        (w2 - w0).abs() < 1e-9 && (h2 - h0).abs() < 1e-9,
+        "#68: the New Page button's page also carries the source size: {w2}×{h2}"
+    );
+}
+
 #[test]
 fn page_tab_rename_edits_inline() {
     use egui_kittest::kittest::Queryable;

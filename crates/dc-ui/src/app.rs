@@ -766,7 +766,13 @@ impl App {
     /// layer (undoable) and lands the user on the affected page.
     fn tab_cmd_insert(&mut self, after: usize) {
         let name = self.next_page_name();
-        self.apply(AddPage::new(name));
+        // #68: Visio's Insert Page copies the current page's setup —
+        // seed the new sheet from the active page.
+        let add = match self.page_id() {
+            Some(id) => AddPage::seeded_from(name, id),
+            None => AddPage::new(name),
+        };
+        self.apply(add);
         if let Some(n) = self.ed().map(|e| e.doc.pages.len()) {
             if n > 1 && after + 1 < n {
                 self.apply(MovePage {
@@ -2290,13 +2296,17 @@ impl App {
             Action::Undo => self.do_undo(),
             Action::Redo => self.do_redo(),
             Action::NewPage => {
-                if let Some(page_id) = self.page_id() {
-                    let _ = page_id;
-                }
-                self.apply(AddPage::new(format!(
+                // #68: like the tab menu's Insert Page, the new sheet
+                // copies the active page's setup.
+                let name = format!(
                     "Page-{}",
                     self.ed().map(|e| e.doc.pages.len() + 1).unwrap_or(1)
-                )));
+                );
+                let add = match self.page_id() {
+                    Some(id) => AddPage::seeded_from(name, id),
+                    None => AddPage::new(name),
+                };
+                self.apply(add);
                 if let Some(ed) = self.ed() {
                     self.page_idx = ed.doc.pages.len() - 1;
                     self.view.fit_pending = true;
@@ -6523,6 +6533,15 @@ impl App {
     #[doc(hidden)]
     pub fn debug_layer_version_for_test(&self, shape_id: i64) -> u64 {
         self.layers.version_for_test(shape_id)
+    }
+
+    /// kittest (#68): the active page's geometry in inches — an
+    /// inserted page must carry its source's sheet size, not the
+    /// 0.1-in missing-cell clamp.
+    #[doc(hidden)]
+    pub fn debug_page_geom_for_test(&self) -> (f64, f64) {
+        let g = self.page_geom();
+        (g.w_in, g.h_in)
     }
 
     /// kittest: how many live drag ghosts the last frame drew (#96).

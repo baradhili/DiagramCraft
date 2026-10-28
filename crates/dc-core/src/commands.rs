@@ -1972,7 +1972,63 @@ fn scan_attrs(xml: &str, tag: &str) -> Vec<(String, String)> {
 /// A constructed page for [`AddPage`]: index entry with a fresh `r:id`,
 /// an assigned part, a `PageSheet` (every real page has one; it is the
 /// layer-section host), and standard attributes.
-pub fn new_page(doc: &Document, name: &str) -> Page {
+/// A4 landscape, Visio's inches — the no-source fallback for a page
+/// added to a document with no pages (#68; a fresh metric drawing's
+/// first sheet). 297×210 mm.
+const A4_LANDSCAPE_IN: (f64, f64) = (297.0 / 25.4, 210.0 / 25.4);
+
+/// The PageSheet setup cells a new page inherits from its source page
+/// (#68 — Visio's Insert Page defaults to "Copy settings from
+/// <current page>"): the sheet size always, the scale pair and its
+/// type when the source carries them, so scaled drawings behave.
+const PAGE_SEED_CELLS: [&str; 5] = [
+    "PageWidth",
+    "PageHeight",
+    "PageScale",
+    "DrawingScale",
+    "DrawingSizeType",
+];
+
+/// The setup cells for a page with no usable source: the A4-landscape
+/// size.
+fn a4_page_cells() -> Vec<vsdx::model::SheetChild> {
+    let (w, h) = A4_LANDSCAPE_IN;
+    vec![
+        vsdx::model::SheetChild::Cell("PageWidth".into(), Cell::value(format!("{w}"))),
+        vsdx::model::SheetChild::Cell("PageHeight".into(), Cell::value(format!("{h}"))),
+    ]
+}
+
+/// Build a new page whose PageSheet setup is seeded from `source`
+/// (#68): the source page's size and scale cells, the document's last
+/// page when `source` is None, A4 landscape when there is no usable
+/// source at all (no pages yet, or a source lacking the size cells —
+/// itself a pre-#68 inserted sliver). IDs, the relationship, and the
+/// part name are allocated fresh.
+pub fn new_page(doc: &Document, name: &str, source: Option<&Page>) -> Page {
+    let setup = match source.or_else(|| doc.pages.last()).and_then(|p| p.sheet()) {
+        Some(sheet) => {
+            let cells: Vec<vsdx::model::SheetChild> = PAGE_SEED_CELLS
+                .iter()
+                .filter_map(|n| {
+                    sheet
+                        .cell(n)
+                        .map(|c| vsdx::model::SheetChild::Cell(n.to_string(), c.clone()))
+                })
+                .collect();
+            let sized = cells.iter().any(|c| {
+                matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageWidth")
+            }) && cells
+                .iter()
+                .any(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageHeight"));
+            if sized {
+                cells
+            } else {
+                a4_page_cells()
+            }
+        }
+        None => a4_page_cells(),
+    };
     Page {
         id: next_page_id(doc),
         name: name.to_string(),
@@ -1990,6 +2046,7 @@ pub fn new_page(doc: &Document, name: &str) -> Page {
                         ("FillStyle".to_string(), "0".to_string()),
                         ("TextStyle".to_string(), "0".to_string()),
                     ],
+                    children: setup,
                     ..vsdx::model::Sheet::default()
                 },
             },
@@ -2001,18 +2058,39 @@ pub fn new_page(doc: &Document, name: &str) -> Page {
 }
 
 /// Append a page. The part name, relationship ID, and page ID are
-/// allocated at apply time (and captured, so redo reuses them).
+/// allocated at apply time (and captured, so redo reuses them). The
+/// new page's PageSheet setup is seeded from a source page (#68), and
+/// the seeded cells are captured at the first apply so redo replays
+/// them exactly even if the source's setup moved on in between.
 #[derive(Debug, Clone)]
 pub struct AddPage {
     pub name: String,
+    /// Page whose setup seeds the new PageSheet (#68, Visio's "Copy
+    /// settings from: <current page>"); None uses the document's last
+    /// page at apply time (the CLI's append).
+    pub source: Option<i64>,
     id: Option<i64>,
+    /// The seeded setup cells captured at the first apply.
+    seeded: Option<Vec<vsdx::model::SheetChild>>,
 }
 
 impl AddPage {
     pub fn new(name: impl Into<String>) -> AddPage {
         AddPage {
             name: name.into(),
+            source: None,
             id: None,
+            seeded: None,
+        }
+    }
+    /// Seed the new page's setup from `source` (the GUI's active
+    /// page).
+    pub fn seeded_from(name: impl Into<String>, source: i64) -> AddPage {
+        AddPage {
+            name: name.into(),
+            source: Some(source),
+            id: None,
+            seeded: None,
         }
     }
 }
@@ -2025,7 +2103,20 @@ impl crate::Command for AddPage {
         }
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
-        let page = new_page(doc, &self.name);
+        let src = self
+            .source
+            .and_then(|id| doc.pages.iter().find(|p| p.id == id));
+        let mut page = new_page(doc, &self.name, src);
+        if let Some(sheet) = page.children.iter_mut().find_map(|c| match c {
+            IndexChild::Sheet { sheet, .. } => Some(sheet),
+            _ => None,
+        }) {
+            match &self.seeded {
+                // Redo: replay the first apply's setup exactly.
+                Some(seeded) => sheet.children = seeded.clone(),
+                None => self.seeded = Some(sheet.children.clone()),
+            }
+        }
         self.id = Some(page.id);
         doc.pages.push(page);
         Ok(())

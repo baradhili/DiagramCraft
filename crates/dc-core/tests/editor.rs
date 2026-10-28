@@ -580,6 +580,78 @@ fn remove_page_undo_restores_it() {
     assert_eq!(ed.doc.pages[0].part, "visio/pages/page1.xml");
 }
 
+/// #68: a new page's PageSheet is seeded from its source — size
+/// always, the scale cells only when the source carries them — with
+/// the document's last page as the default source, an explicit page
+/// via `seeded_from`, and the capture replaying exactly across redo.
+#[test]
+fn add_page_seeds_sheet_setup_from_source() {
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    let cell = |ed: &Editor, page: usize, n: &str| -> Option<f64> {
+        ed.doc.pages[page]
+            .sheet()
+            .and_then(|s| s.cell(n))
+            .and_then(|c| c.numeric())
+    };
+
+    // Default source = the document's last page: the fixture's letter
+    // sheet. Scale cells the source lacks are not invented.
+    ed.apply(AddPage::new("Page-2")).unwrap();
+    assert_eq!(
+        cell(&ed, 1, "PageWidth"),
+        Some(8.5),
+        "width seeded from the source page"
+    );
+    assert_eq!(
+        cell(&ed, 1, "PageHeight"),
+        Some(11.0),
+        "height seeded from the source page"
+    );
+    assert_eq!(cell(&ed, 1, "PageScale"), None, "no scale cells invented");
+
+    // Save → reparse: the seeded cells persist in the written package.
+    let out = tmp.path().join("seeded.vsdx");
+    ed.save_as(&out).unwrap();
+    let back = Editor::open(&out).unwrap();
+    assert_eq!(cell(&back, 1, "PageWidth"), Some(8.5));
+    assert_eq!(cell(&back, 1, "PageHeight"), Some(11.0));
+
+    // An explicit source beats the last-page default: grow page 2,
+    // then add from page 0.
+    ed.apply(SetCell::new(
+        Scope::PageSheet { page: 1 },
+        "PageWidth",
+        Cell::value("5"),
+    ))
+    .unwrap();
+    ed.apply(AddPage::seeded_from("Page-3", 0)).unwrap();
+    assert_eq!(
+        cell(&ed, 2, "PageWidth"),
+        Some(8.5),
+        "seeded_from pins the source page"
+    );
+    ed.undo().unwrap(); // drop Page-3
+
+    // The default source follows the last page (now 5 in wide), and
+    // undo/redo replay the captured setup exactly.
+    ed.apply(AddPage::new("Page-4")).unwrap();
+    assert_eq!(
+        cell(&ed, 2, "PageWidth"),
+        Some(5.0),
+        "the default source is the last page"
+    );
+    ed.undo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 2, "undo removes the seeded page cleanly");
+    ed.redo().unwrap();
+    assert_eq!(ed.doc.pages.len(), 3, "redo brings it back");
+    assert_eq!(
+        cell(&ed, 2, "PageWidth"),
+        Some(5.0),
+        "redo replays the captured setup"
+    );
+}
+
 #[test]
 fn rename_and_move_page() {
     let (ed, _tmp) = open_fixture();
