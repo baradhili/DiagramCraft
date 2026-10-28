@@ -2103,9 +2103,18 @@ impl crate::Command for AddPage {
         }
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
-        let src = self
-            .source
-            .and_then(|id| doc.pages.iter().find(|p| p.id == id));
+        // An EXPLICIT source must resolve — falling back to the last
+        // page on a stale id would silently seed the wrong setup
+        // (#68 review); the fallback belongs to `source: None` only.
+        let src = match self.source {
+            Some(id) => Some(
+                doc.pages
+                    .iter()
+                    .find(|p| p.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("source page {id} not found"))?,
+            ),
+            None => None,
+        };
         let mut page = new_page(doc, &self.name, src);
         if let Some(sheet) = page.children.iter_mut().find_map(|c| match c {
             IndexChild::Sheet { sheet, .. } => Some(sheet),

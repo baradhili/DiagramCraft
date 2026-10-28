@@ -650,6 +650,11 @@ fn add_page_seeds_sheet_setup_from_source() {
         Some(5.0),
         "redo replays the captured setup"
     );
+
+    // A stale explicit source errors instead of silently seeding from
+    // the last page (#68 review).
+    assert!(ed.apply(AddPage::seeded_from("Bad", 999)).is_err());
+    assert_eq!(ed.doc.pages.len(), 3, "the failed add changed nothing");
 }
 
 #[test]
