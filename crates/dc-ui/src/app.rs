@@ -1883,6 +1883,102 @@ impl App {
             .collect()
     }
 
+    /// #75: the topmost container under the selection's centroid —
+    /// a candidate is a top-level shape that is the target of at
+    /// least one member-side `User.msvSDContainerShape` reference or
+    /// was created by the Add-to-New flow (its `Container.` name);
+    /// the selection's own shapes never qualify. Z-order decides
+    /// between overlapping containers (topmost wins).
+    fn underlying_container(&self, members: &[i64]) -> Option<i64> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let page_id = page.id;
+        // The selection's centroid (page inches, y-up).
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut n = 0.0;
+        for &sid in members {
+            let sh = page.shapes.iter().find(|s| s.id == sid)?;
+            let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, sh)?;
+            cx += x + w / 2.0;
+            cy += y + h / 2.0;
+            n += 1.0;
+        }
+        if n == 0.0 {
+            return None;
+        }
+        let centroid = (cx / n, cy / n);
+        let is_container = |s: &Shape, referenced: bool| {
+            referenced || s.name_u.as_deref().is_some_and(|n| n.starts_with("Container."))
+        };
+        // Which ids some member references (container identity by
+        // membership convention).
+        let referenced: std::collections::HashSet<i64> = page
+            .shapes
+            .iter()
+            .flat_map(|s| s.sheet.sections_named("User"))
+            .filter_map(|sec| {
+                sec.named_row("msvSDContainerShape")
+                    .and_then(|r| r.cell("Value"))
+                    .and_then(|c| c.numeric())
+                    .map(|v| v as i64)
+            })
+            .collect();
+        let mut found: Option<i64> = None;
+        for s in &page.shapes {
+            if members.contains(&s.id) {
+                continue;
+            }
+            if !is_container(s, referenced.contains(&s.id)) {
+                continue;
+            }
+            let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page_id, s) else {
+                continue;
+            };
+            if centroid.0 >= x && centroid.0 <= x + w && centroid.1 >= y && centroid.1 <= y + h {
+                found = Some(s.id); // later z-order wins (topmost)
+            }
+        }
+        found
+    }
+
+    /// #75: Add to Underlying Container — write the membership row on
+    /// each selected shape (the #27 convention, materialized on first
+    /// edit), one Macro, one undo.
+    fn add_selection_to_underlying_container(&mut self) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        let Some(container) = self.underlying_container(&members) else {
+            return;
+        };
+        let cmds: Vec<Box<dyn dc_core::Command>> = members
+            .iter()
+            .map(|&m| {
+                Box::new(dc_core::SetRowCell::new(
+                    Scope::Shape { page: page_id, shape: m },
+                    "User",
+                    0,
+                    dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
+                    "Value",
+                    vsdx::Cell::value(container.to_string()),
+                )) as Box<dyn dc_core::Command>
+            })
+            .collect();
+        if !cmds.is_empty() {
+            self.apply(Macro::new(
+                format!("add {0} shape(s) to container {container}", members.len()),
+                cmds,
+            ));
+        }
+    }
+
     /// Context-menu Container (#27): wrap the current selection's
     /// union bbox (padded) in a plain container shape at the back of
     /// the z-order; membership rides on the members. One undo step.
@@ -5944,6 +6040,24 @@ impl App {
             return;
         };
         let has_clip = self.clipboard.is_some();
+        // #75: the underlying-container membership item enables when a
+        // container sits under the selection AND the selection is not
+        // already entirely its member set (a pure no-op stays gray).
+        let sel_members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| Some(p) == self.page_id().as_ref())
+            .map(|(_, s)| *s)
+            .collect();
+        let underlying = self.underlying_container(&sel_members);
+        let can_underlying = match underlying {
+            Some(c) => {
+                let current = self.container_member_ids(self.page_id().unwrap_or(-1), c);
+                !sel_members.iter().all(|m| current.contains(m))
+                    || !current.iter().all(|m| sel_members.contains(m))
+            }
+            None => false,
+        };
         // Master-defined actions (the ShapeSheet Actions section) head the
         // menu in Visio — e.g. the Capability master's "Shape Layout"
         // flyout. Entries render with their flyout children indented;
@@ -5958,6 +6072,8 @@ impl App {
             /// Enter the selected group's edit mode (#78).
             OpenGroup(i64),
             Container,
+            /// #75: membership into the container under the selection.
+            AddToUnderlying,
             Hyperlink,
             AddComment,
             ShapeData,
@@ -6248,6 +6364,7 @@ impl App {
                 egui::Button::new(job).min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
             );
             let mut sub_action = false;
+            let mut underlying_action = false;
             egui::Popup::menu(&cont)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                 .show(|ui| {
@@ -6255,16 +6372,22 @@ impl App {
                     if ctx_item(ui, None, "Add to New Container", "", true) {
                         sub_action = true;
                     }
-                    ctx_item(
+                    if ctx_item(
                         ui,
                         None,
                         "Add to Underlying Container",
-                        "(later milestone)",
-                        false,
-                    );
+                        "",
+                        can_underlying,
+                    ) && can_underlying
+                    {
+                        underlying_action = true;
+                    }
                 });
             if sub_action {
                 act = Some(Act::Container);
+            }
+            if underlying_action {
+                act = Some(Act::AddToUnderlying);
             }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
@@ -6345,6 +6468,7 @@ impl App {
                 }
             }
             Act::Container => self.wrap_selection_in_container(),
+            Act::AddToUnderlying => self.add_selection_to_underlying_container(),
             Act::Hyperlink => {
                 self.hyperlink_open = Some(shape_id);
                 self.hyperlink_draft = None;
@@ -6897,6 +7021,15 @@ impl App {
     #[doc(hidden)]
     pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#75): the shapes whose membership row names
+    /// `container` (Visio's `User.msvSDContainerShape` convention).
+    #[doc(hidden)]
+    pub fn debug_container_members_for_test(&self, container: i64) -> Vec<i64> {
+        self.page_id()
+            .map(|p| self.container_member_ids(p, container))
+            .unwrap_or_default()
     }
 
     /// kittest (#69): a group's direct member ids.

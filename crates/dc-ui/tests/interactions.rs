@@ -2021,6 +2021,160 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
 
+/// #75: Add to Underlying Container — a shape placed over an existing
+/// container joins it through the flyout item, moves with it, and one
+/// Ctrl+Z removes only the membership write.
+#[test]
+fn add_to_underlying_container_members_and_carries() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes, wrapped in a container (#27 flow).
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to New Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to New Container row")
+        .click();
+    h.run();
+    let (_, cont) = h.state().debug_sel().expect("container selected");
+    assert_eq!(h.state().debug_shape_count(), 3, "two members + container");
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2],
+        "#27 membership"
+    );
+
+    // A third shape placed over the container, selected by placement.
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, c, egui::PointerButton::Primary);
+    h.run();
+    let (_, third) = h.state().debug_sel().expect("third placed + selected");
+    assert!(
+        !h.state()
+            .debug_container_members_for_test(cont)
+            .contains(&third),
+        "no membership yet"
+    );
+
+    // Right-click → Container ▸ → Add to Underlying Container (enabled
+    // now — a container sits under the selection and the shape is not
+    // its member).
+    click_at(&mut h, c, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to Underlying Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to Underlying row")
+        .click();
+    h.run();
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2, third],
+        "the third joined the underlying container"
+    );
+
+    // The third now moves with the container (#27 carry semantics).
+    // Press the CONTAINER, not its center — the third sits on top
+    // there and a center press would drag the shape directly. The
+    // left-edge margin is container-only; members 1 and 2 moving too
+    // proves the container itself was dragged.
+    let cont_grab = {
+        let r = h.state().debug_shape_screen_rect(cont).unwrap();
+        egui::pos2(r.left() + 8.0, r.center().y)
+    };
+    let third_before = h.state().debug_shape_screen_rect(third).unwrap();
+    let m1_before = h.state().debug_shape_screen_rect(1).unwrap();
+    drag_naturally(&mut h, cont_grab, egui::vec2(60.0, 0.0));
+    let third_after = h.state().debug_shape_screen_rect(third).unwrap();
+    let m1_after = h.state().debug_shape_screen_rect(1).unwrap();
+    assert!(
+        (third_after.min.x - third_before.min.x - 60.0).abs() < 1.5,
+        "the third carried with the container: {:?} -> {:?}",
+        third_before,
+        third_after
+    );
+    assert!(
+        (m1_after.min.x - m1_before.min.x - 60.0).abs() < 1.5,
+        "the container itself moved (member 1 carried)"
+    );
+
+    // Undo the container move, then undo ONLY the membership write:
+    // the third stays put on the next container drag.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2],
+        "one undo removed only the membership write"
+    );
+    let third_parked = h.state().debug_shape_screen_rect(third).unwrap();
+    let cont_grab = {
+        let r = h.state().debug_shape_screen_rect(cont).unwrap();
+        egui::pos2(r.left() + 8.0, r.center().y)
+    };
+    drag_naturally(&mut h, cont_grab, egui::vec2(40.0, 0.0));
+    let third_now = h.state().debug_shape_screen_rect(third).unwrap();
+    assert!(
+        (third_now.min.x - third_parked.min.x).abs() < 1.0,
+        "the third no longer carries after the membership undo"
+    );
+}
+
 /// #95 §1: grouping a selection of {one group + other shapes} nests a
 /// new group INSIDE the existing one — members keep their page-space
 /// positions through the local-frame conversion, and one undo
