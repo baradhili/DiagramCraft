@@ -203,6 +203,11 @@ pub struct App {
     /// The Quick Shapes membership menu (#143): the right-clicked
     /// master cell (source key) and the popup anchor.
     quick_menu: Option<((StencilId, i64), egui::Pos2)>,
+    /// The window title last pushed to the OS (sent on change only —
+    /// the viewport command is not free per frame). Tracked so
+    /// headless tests can assert it (#67: the OS draws the title, the
+    /// app band no longer duplicates it).
+    window_title: String,
     /// Last frame's context-menu rect in screen coords; None while the
     /// menu is closed (kept for the placement tests, issue #49).
     ctx_menu_rect: Option<egui::Rect>,
@@ -394,6 +399,7 @@ impl App {
             debug_close_issued: 0,
             ctx_menu: None,
             quick_menu: None,
+            window_title: String::new(),
             ctx_menu_rect: None,
             clipboard: None,
             text_edit: None,
@@ -2388,12 +2394,13 @@ impl App {
 
     // -- shell panels -----------------------------------------------------
 
-    fn title_band(&mut self, ui: &mut Ui) {
-        // Visio 2016-style accent band (owner-selected warm gray,
-// 2026-10-27), tiny QAT (Save/Undo/Redo + chevron) at
-        // the far left, document title centered. The brand green band
-        // stays green in dark mode (GitHub #52).
-        let t = theme::shell_tokens(ui.visuals());
+    /// #67 (option D, owner 2026-10-28): the OS window draws the
+    /// title — the app band that duplicated it is gone, and the
+    /// document title (name + dirty marker) is pushed to the OS
+    /// window on change instead. Headless tests assert through the
+    /// tracked field; the customize chevron is dropped with the band
+    /// (Visio's opens a real menu ours never had).
+    fn sync_window_title(&mut self, ctx: &egui::Context) {
         let name = self
             .path
             .file_name()
@@ -2403,42 +2410,10 @@ impl App {
             "{name} - DiagramCraft{}",
             if self.dirty { " *" } else { "" }
         );
-        egui::Panel::top("title_band")
-            .frame(
-                egui::Frame::new()
-                    .fill(t.accent_band)
-                    .inner_margin(egui::Margin::symmetric(8, 2)),
-            )
-            .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.set_height(30.0);
-                    qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
-                    qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
-                    qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
-                    let (cr, cresp) = ui.allocate_exact_size(Vec2::new(12.0, 12.0), Sense::click());
-                    if cresp.clicked() {
-                        self.status = "QAT customization is not configurable yet".into();
-                    }
-                    ui.painter().add(egui::Shape::convex_polygon(
-                        vec![
-                            cr.left_top(),
-                            cr.right_top(),
-                            Pos2::new(cr.center().x, cr.bottom()),
-                        ],
-                        Color32::WHITE,
-                        Stroke::NONE,
-                    ));
-                    // centered document title
-                    let r = ui.max_rect();
-                    ui.painter().text(
-                        Pos2::new(r.center().x, r.center().y),
-                        egui::Align2::CENTER_CENTER,
-                        &title,
-                        egui::FontId::proportional(12.5),
-                        Color32::WHITE,
-                    );
-                });
-            });
+        if self.window_title != title {
+            self.window_title = title.clone();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
     }
 
     fn tab_strip(&mut self, ui: &mut Ui) {
@@ -2561,6 +2536,17 @@ impl App {
                         if presp.clicked() {
                             self.status = "Tell Me search arrives with a later milestone".into();
                         }
+                        // The QAT cluster lands LEFT of Tell Me (this is
+                        // a right-to-left layout): Save/Undo/Redo as
+                        // window-level document controls on the menu
+                        // strip's right (#67 option D — with no menu
+                        // bar they are the only always-visible command
+                        // surface; the customize chevron is dropped
+                        // with the old title band).
+                        ui.add_space(10.0);
+                        qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
+                        qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
+                        qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
                     });
                 });
             });
@@ -6791,6 +6777,13 @@ impl App {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
     }
 
+    /// kittest (#67): the window title last pushed to the OS (name +
+    /// dirty marker) — headless stands in for the OS chrome.
+    #[doc(hidden)]
+    pub fn debug_window_title_for_test(&self) -> String {
+        self.window_title.clone()
+    }
+
     /// kittest (#68): the active page's geometry in inches — an
     /// inserted page must carry its source's sheet size, not the
     /// 0.1-in missing-cell clamp.
@@ -7416,8 +7409,9 @@ impl App {
         }
 
         // Shell order: top bands, bottom bands, side panels, canvas.
+        // #67: the OS window carries the title; no in-app title band.
+        self.sync_window_title(ui.ctx());
         let t = theme::shell_tokens(ui.visuals());
-        self.title_band(ui);
         self.tab_strip(ui);
         egui::Panel::top("ribbon_content")
             .frame(

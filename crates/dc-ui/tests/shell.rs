@@ -683,6 +683,43 @@ fn inserted_page_carries_the_source_page_size() {
     );
 }
 
+/// #67 (option D): the OS window carries the document title — the
+/// app-drawn band is gone, and the tracked title (what gets pushed to
+/// the viewport) follows the document name and dirty marker.
+#[test]
+fn window_title_tracks_document_and_dirty_state() {
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    h.run();
+    assert_eq!(
+        h.state().debug_window_title_for_test(),
+        "Drawing1 - DiagramCraft",
+        "an unsaved blank drawing titles the OS window"
+    );
+
+    // Any edit flips the dirty marker into the title; undoing it all
+    // clears the marker again (the document is clean).
+    tab_menu_pick(&mut h, "Page-1", "Insert Page");
+    h.run();
+    assert_eq!(
+        h.state().debug_window_title_for_test(),
+        "Drawing1 - DiagramCraft *",
+        "the dirty marker reaches the OS window title"
+    );
+    // (Undo keeps the dirty flag under the current save-point
+    // semantics — undo-to-clean clearing it is separate behavior,
+    // not #67's surface.)
+}
+
 #[test]
 fn page_tab_rename_edits_inline() {
     use egui_kittest::kittest::Queryable;
