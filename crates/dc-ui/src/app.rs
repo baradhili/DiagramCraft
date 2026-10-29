@@ -183,7 +183,13 @@ pub struct App {
     /// the next frame's update (the copy path has no Context).
     os_clipboard_text: Option<String>,
     /// An in-flight OS clipboard image probe (#113): RGBA result.
-    os_image_rx: Option<Receiver<Option<(u32, u32, Vec<u8>)>>>,
+    os_image_rx: Option<Receiver<Option<OsImage>>>,
+    /// The Backgrounds dialog is open (#113, URS-1158).
+    backgrounds_open: bool,
+    /// Background-page underlay cache (#113): one raster per chain
+    /// level, keyed (bg page, content version, ppi bucket) — the
+    /// handle converts to a quad's TextureId per frame.
+    bg_underlays: Vec<(i64, u64, u32, egui::TextureHandle)>,
     /// The last copy-as-picture PNG (test hook).
     last_picture: Option<Vec<u8>>,
     /// The Format Painter is armed for one target (#110, URS-1053):
@@ -357,6 +363,9 @@ impl BackPage {
 /// `snap_ctx_of` (#109).
 const SNAP_STRENGTH_PX: f32 = 8.0;
 
+/// An OS clipboard image probe's payload: (w, h, RGBA bytes).
+type OsImage = (u32, u32, Vec<u8>);
+
 /// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
 /// and drags; the Connector Tool (#108) draws connectors. Esc returns
 /// to the pointer, like Visio.
@@ -459,6 +468,8 @@ impl App {
             copypic_factor: 2,
             os_clipboard_text: None,
             os_image_rx: None,
+            backgrounds_open: false,
+            bg_underlays: Vec::new(),
             last_picture: None,
             painter_armed: None,
             shot_frames: 0,
@@ -3391,14 +3402,14 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
-            let img = std::panic::catch_unwind(arboard::Clipboard::new)
+            let img: Option<OsImage> = std::panic::catch_unwind(arboard::Clipboard::new)
                 .ok()
                 .and_then(|cb| cb.ok())
                 .and_then(|mut cb| {
                     cb.get_image().ok().map(|i| {
                         // RGBA bytes, row-major, top-down.
-                        let w = i.width as usize;
-                        let h = i.height as usize;
+                        let w = i.width;
+                        let h = i.height;
                         let mut bytes = Vec::with_capacity(w * h * 4);
                         for row in 0..h {
                             let line = &i.bytes[row * w * 4..(row + 1) * w * 4];
@@ -3442,6 +3453,201 @@ impl App {
                 self.status = "clipboard probe failed".into();
             }
         }
+    }
+
+    /// #113 (URS-1158): the page's background assignment — the
+    /// `BackPage` pages-index attribute names a page ID; `Background`
+    /// marks the page itself as one. Corpus: `BackPage='4'` /
+    /// `Background='1'` on the `<Page>` entries.
+    fn back_page_of(&self, page_id: i64) -> Option<i64> {
+        let ed = self.ed.as_ref()?;
+        let p = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        p.attrs
+            .iter()
+            .find(|(k, _)| k == "BackPage")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+    }
+
+    fn is_background_page(&self, page_id: i64) -> bool {
+        let Some(ed) = self.ed.as_ref() else { return false };
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .is_some_and(|p| {
+                p.attrs
+                    .iter()
+                    .any(|(k, v)| k == "Background" && v == "1")
+            })
+    }
+
+    /// Assign/clear the current page's background (direct model
+    /// write — a page-index flag, like Visio's non-undoable page
+    /// setup properties).
+    fn set_back_page(&mut self, bg: Option<i64>) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page_id) else {
+            return;
+        };
+        page.attrs.retain(|(k, _)| k != "BackPage");
+        if let Some(bg) = bg {
+            page.attrs
+                .push(("BackPage".to_string(), bg.to_string()));
+        }
+        self.dirty = true;
+        self.version += 1;
+        self.status = match bg {
+            Some(id) => {
+                let name = ed
+                    .doc
+                    .pages
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                format!("background page: {name}")
+            }
+            None => "background cleared".into(),
+        };
+    }
+
+    /// The Backgrounds dialog (#113, URS-1158): pick which page
+    /// renders behind the current one (chain: a background with its
+    /// own background stacks too), or none.
+    fn backgrounds_window(&mut self, ctx: &egui::Context) {
+        if !self.backgrounds_open {
+            return;
+        }
+        let mut open = true;
+        let mut pick: Option<Option<i64>> = None; // Some(None) = clear
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let entries: Vec<(i64, String)> = ed
+            .doc
+            .pages
+            .iter()
+            .filter(|p| p.id != page_id)
+            .map(|p| (p.id, p.name.clone()))
+            .collect();
+        let current = self.back_page_of(page_id);
+        let this_is_bg = self.is_background_page(page_id);
+        egui::Window::new("Backgrounds")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.label("This page renders behind:");
+                if this_is_bg {
+                    ui.weak("(this page is itself a background page)");
+                }
+                ui.separator();
+                if ui.radio(current.is_none(), "No background").clicked() {
+                    pick = Some(None);
+                }
+                for (id, name) in &entries {
+                    if ui
+                        .radio(current == Some(*id), format!("{name} (page {id})"))
+                        .clicked()
+                    {
+                        pick = Some(Some(*id));
+                    }
+                }
+            });
+        if let Some(bg) = pick {
+            self.set_back_page(bg);
+        }
+        if !open {
+            self.backgrounds_open = false;
+        }
+    }
+
+    /// #113 (URS-1158): the background chain's underlay quads —
+    /// deepest background first, each rasterized on demand at the
+    /// current zoom (cache keyed page/version/ppi-bucket).
+    fn build_bg_underlays(&mut self, ctx: &egui::Context) -> Vec<crate::layers::ShapeQuad> {
+        let Some(page_id) = self.page_id() else { return Vec::new() };
+        // Walk the chain (cycle-guarded, depth cap).
+        let mut chain: Vec<i64> = Vec::new();
+        let mut cur = self.back_page_of(page_id);
+        while let Some(id) = cur {
+            if chain.contains(&id) || chain.len() >= 8 {
+                break;
+            }
+            chain.push(id);
+            cur = self.ed.as_ref().and_then(|ed| {
+                let p = ed.doc.pages.iter().find(|p| p.id == id)?;
+                p.attrs
+                    .iter()
+                    .find(|(k, _)| k == "BackPage")
+                    .and_then(|(_, v)| v.parse::<i64>().ok())
+            });
+        }
+        let bucket = (self.view.px_per_in() * 4.0).round().max(4.0) as u32;
+        // Drop stale entries (page switch, version bump, zoom bucket).
+        self.bg_underlays
+            .retain(|(p, _, b, _)| chain.contains(p) && *b == bucket);
+        let mut out: Vec<crate::layers::ShapeQuad> = Vec::new();
+        for id in chain.iter().rev() {
+            let Some(ed) = self.ed.as_ref() else { break };
+            let Some(bg) = ed.doc.pages.iter().find(|p| p.id == *id) else {
+                continue;
+            };
+            let version = self.layer_base_version();
+            let (w, h) = (
+                bg.sheet()
+                    .and_then(|s| s.cell("PageWidth"))
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(8.5),
+                bg.sheet()
+                    .and_then(|s| s.cell("PageHeight"))
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(11.0),
+            );
+            if let Some(hh) = self
+                .bg_underlays
+                .iter()
+                .find(|(p, v, b, _)| *p == *id && *v == version && *b == bucket)
+                .map(|(_, _, _, hh)| hh)
+            {
+                out.push(crate::layers::ShapeQuad {
+                    id: -1000 - id,
+                    tex: hh.id(),
+                    bbox: (0.0, 0.0, w, h),
+                });
+                continue;
+            }
+            // Rasterize this background page's own content.
+            let Ok(svg) = dc::svg::render_page(&ed.doc, bg) else { continue };
+            let Ok(tree) = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Thumb) else {
+                continue;
+            };
+            let Ok(img) = crate::svgimg::render_tree(
+                &tree,
+                w as f32 * self.view.px_per_in(),
+                crate::perf::Kind::Thumb,
+            ) else {
+                continue;
+            };
+            let tex = ctx.load_texture(
+                format!("dc-bg-{id}"),
+                img,
+                egui::TextureOptions::default(),
+            );
+            out.push(crate::layers::ShapeQuad {
+                id: -1000 - id,
+                tex: tex.id(),
+                bbox: (0.0, 0.0, w, h),
+            });
+            self.bg_underlays.push((*id, version, bucket, tex));
+        }
+        out
+    }
+
+    /// The layer store's base version — the underlay invalidation key.
+    fn layer_base_version(&self) -> u64 {
+        self.version
     }
 
     /// #113 (URS-1012): open the picture picker (PNG/JPEG).
@@ -3635,19 +3841,21 @@ impl App {
         if sel.is_empty() {
             return None;
         }
-        // Selection bounds (page inches, y-up → y-down for the crop).
+        // Selection bounds (page inches, y-up → y-down for the crop):
+        // union of the rects' corner pairs.
         let geom = self.page_geom();
         let mut b: Option<(f64, f64, f64, f64)> = None;
         for sid in &sel {
             let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
             let r = self.shape_rect(&ed.doc, page_id, sh)?;
+            let corners = (r.0, r.1, r.0 + r.2, r.1 + r.3);
             b = Some(match b {
-                None => r,
+                None => corners,
                 Some((x0, y0, x1, y1)) => (
-                    x0.min(r.0),
-                    y0.min(r.1),
-                    (x1 + r.2).max(r.0 + r.2),
-                    (y1 + r.3).max(r.1 + r.3),
+                    x0.min(corners.0),
+                    y0.min(corners.1),
+                    x1.max(corners.2),
+                    y1.max(corners.3),
                 ),
             });
         }
@@ -3721,7 +3929,7 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                if ui.button("Copy").clicked() {
+                if ui.button("Copy Picture").clicked() {
                     copy = true;
                 }
                 ui.weak("The picture lands on the clipboard as a PNG bitmap.");
@@ -4606,6 +4814,7 @@ impl App {
             Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
             Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
             Action::InsertPicture => self.open_picture_dialog(),
+            Action::PageBackgrounds => self.backgrounds_open = !self.backgrounds_open,
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
@@ -5118,9 +5327,9 @@ impl App {
                     "Backgrounds",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros)
-                                .enabled(false)
-                                .tip("Page backgrounds — planned"),
+                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::PageBackgrounds)
+                                .selected(self.backgrounds_open)
+                                .tip("Assign a background page behind this one"),
                         ],
                         vec![
                             RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros)
@@ -6374,6 +6583,9 @@ impl App {
             self.status = msg;
         }
         quads.retain(|q| !hide_layers.contains(&q.id));
+        // Background pages render beneath this page's ink (#113) —
+        // built before the field borrows below.
+        let underlays = self.build_bg_underlays(ui.ctx());
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -6407,6 +6619,7 @@ impl App {
             &handles,
             &drag_fx,
             &guide_fx,
+            &underlays,
             self.tool == Tool::Connector,
             armed,
             &hit,
@@ -9399,6 +9612,38 @@ impl App {
         self.insert_picture_bytes(bytes);
     }
 
+    /// #113 tests: the current page's background assignment.
+    pub fn debug_back_page(&self) -> Option<i64> {
+        self.page_id().and_then(|p| self.back_page_of(p))
+    }
+
+    /// #113 tests: assign the current page's background (kittest
+    /// path — no dialog).
+    pub fn debug_set_back_page(&mut self, bg: Option<i64>) {
+        self.set_back_page(bg);
+    }
+
+    /// #113 tests: add a fresh page and return its id.
+    pub fn debug_add_page(&mut self) -> i64 {
+        let page_id = self.page_id().unwrap_or(0);
+        let _ = page_id;
+        // The AddPage command through the normal path.
+        let ed = self.ed.as_ref().expect("doc");
+        let id = ed
+            .doc
+            .pages
+            .iter()
+            .map(|p| p.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.apply(dc_core::commands::AddPage::new(format!(
+            "Page-{}",
+            id
+        )));
+        id
+    }
+
     /// #113 tests: the document's runtime media parts.
     pub fn debug_media_parts(&self) -> Vec<String> {
         self.ed
@@ -10356,6 +10601,7 @@ impl App {
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
         self.copy_picture_window(&ctx);
+        self.backgrounds_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);

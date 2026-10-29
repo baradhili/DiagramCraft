@@ -5831,3 +5831,138 @@ fn arrow_keys_nudge_the_selection() {
     let x3 = cell_of(&h, page, a, "PinX");
     assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
 }
+
+// ---- GitHub #113: the remaining slices -------------------------------------
+
+/// A picture inserts as a Foreign shape carrying real media: a PNG in,
+/// a media part + rel recorded, and the render path sees it.
+#[test]
+fn picture_inserts_as_foreign_shape_with_media() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // A 16×16 red PNG.
+    let png = {
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 30, 30, 255]));
+        let mut b = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
+        b
+    };
+    h.state_mut().debug_insert_picture_bytes(&png);
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the picture shape landed");
+    let media = h.state().debug_media_parts();
+    assert_eq!(media.len(), 1, "one media part: {media:?}");
+    assert!(media[0].starts_with("visio/media/image"), "{media:?}");
+    // Natural size: 16 px / 96 dpi = 1/6 in.
+    let (page, pic) = h.state().debug_sel().expect("picture selected");
+    let w = cell_of(&h, page, pic, "Width");
+    assert!((w - 16.0 / 96.0).abs() < 1e-5, "natural width: {w}");
+    // Undo removes it (the media ref rides the model — still present,
+    // but the shape is gone).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0);
+}
+
+/// Copy as Picture produces a real PNG of the selection (URS-1200).
+#[test]
+fn copy_as_picture_encodes_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    // Context menu → Copy as Picture… → Copy.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Copy as Picture").click();
+    h.run();
+    h.get_by_label("Copy Picture").click();
+    h.run();
+    let len = h.state().debug_last_picture_len().expect("a PNG encoded");
+    assert!(len > 100, "a real PNG, {len} bytes");
+    assert!(
+        h.state().debug_status().contains("picture copied"),
+        "status: {}",
+        h.state().debug_status()
+    );
+}
+
+/// Page size: a preset writes PageWidth/PageHeight undoably (URS-1122).
+#[test]
+fn page_size_preset_applies_and_undoes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (w0, h0) = h.state().debug_page_size();
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label("Size").click();
+    h.run();
+    h.get_by_label("A4").click();
+    h.run();
+    let (w1, h1) = h.state().debug_page_size();
+    assert!((w1 - 8.27).abs() < 0.01 && (h1 - 11.69).abs() < 0.01, "A4: {w1}×{h1}");
+    // Orientation swaps (the dialog is still open — its radio).
+    h.get_by_label("Landscape").click();
+    h.run();
+    let (w2, h2) = h.state().debug_page_size();
+    assert!(
+        (w2 - h1).abs() < 0.01 && (h2 - w1).abs() < 0.01,
+        "swapped: {w2}×{h2}"
+    );
+    // Two undoes return to the original.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let (w3, h3) = h.state().debug_page_size();
+    assert!((w3 - w0).abs() < 0.01 && (h3 - h0).abs() < 0.01);
+}
+
+/// Background pages: assign, and the flag persists on the page index
+/// attrs (URS-1158) — the underlay raster renders beneath.
+#[test]
+fn background_page_assignment_and_underlay() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, _a) = place_master(&mut h, 2);
+    assert_eq!(h.state().debug_back_page(), None);
+    // A second page becomes the background of page 1... actually the
+    // CURRENT page gets the background; add a page, put a shape on it,
+    // switch back, assign.
+    // A second page carries the background content; AddPage switches
+    // to it (the tab strip's insert semantics).
+    let _page2 = h.state_mut().debug_add_page();
+    h.run();
+    h.run();
+    // The tab: exact label "Page-2" (the dialog row is longer).
+    h.get_by_label("Page-2").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "fresh page is empty");
+    let (p2, b) = place_master(&mut h, 2);
+    let _ = (p2, b);
+    // Switch back to page 1 and assign page 2 as its background.
+    h.get_by_label_contains("Page-1").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "page 1 kept its shape");
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Backgrounds").click();
+    h.run();
+    // The dialog lists the other page; pick it (row text has the id).
+    h.get_by_label_contains("(page").click();
+    h.run();
+    let bp = h.state().debug_back_page();
+    assert!(bp.is_some(), "background assigned");
+    // The underlay chain renders beneath across repaints without
+    // panic, and the flag persists.
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_back_page(), bp);
+}

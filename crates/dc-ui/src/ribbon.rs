@@ -46,6 +46,7 @@ pub enum Action {
     PageSizeDialog,
     CopyAsPicture,
     InsertPicture,
+    PageBackgrounds,
     ShowShapeSheet,
     Macros,
     FillMenu,

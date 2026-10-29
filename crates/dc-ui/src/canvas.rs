@@ -349,6 +349,7 @@ pub fn show(
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
     guides: &[GuideFx],      // #113: guide overlay, above ink
+    underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
@@ -639,6 +640,23 @@ pub fn show(
         Stroke::new(1.0, t.page_edge),
         egui::StrokeKind::Middle,
     );
+    // Background pages (#113, URS-1158): stacked beneath everything
+    // drawn on this page — deepest background first.
+    for q in underlays {
+        let tl = page_to_screen(q.bbox.0, page.h_in - q.bbox.1, view, page);
+        let br = page_to_screen(
+            q.bbox.0 + q.bbox.2,
+            page.h_in - (q.bbox.1 + q.bbox.3),
+            view,
+            page,
+        );
+        p.image(
+            q.tex,
+            Rect::from_two_pos(tl, br),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
     // Per-shape layers (#93), z-order = model order: each quad is the
     // layer texture at its bounds (y-down viewBox inches —
     // page_to_screen flips to its y-up convention).
