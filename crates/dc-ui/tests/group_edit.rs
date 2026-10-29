@@ -262,6 +262,26 @@ fn open_group_via_flyout(h: &mut Harness<'_, App>, open_label: &str) {
     h.run();
 }
 
+/// A natural press-drag-release across frames (the #59 gesture shape;
+/// see interactions.rs).
+fn drag_naturally(h: &mut Harness<'_, App>, from: egui::Pos2, by: egui::Vec2) {
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(b(from, true));
+    h.run();
+    for t in [0.25, 0.5, 0.75, 1.0] {
+        h.hover_at(from + by * t);
+        h.run();
+    }
+    h.event(b(from + by, false));
+    h.run();
+}
+
 fn shape_center(h: &Harness<'_, App>, sid: i64) -> egui::Pos2 {
     h.state()
         .debug_shape_screen_rect_for_test(sid)
@@ -310,6 +330,63 @@ fn flyout_groups_and_ungroups() {
     assert!(
         h.state().debug_sel().is_none(),
         "the re-nested member {member} is not left selected"
+    );
+}
+
+/// #95: resize handles work for members inside group-edit mode — the
+/// member's own frame resizes (the group is untouched), and one undo
+/// restores it. Handle positions and drag deltas route through the
+/// renderer's XForm chain (`sel_page_rect` / the parent-local
+/// conversion in `apply_resize`).
+#[test]
+fn member_resize_handles_work_in_group_edit_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness_with(tmp.path(), false);
+    h.run();
+    h.run();
+    // Open the group, select member 10.
+    let g = shape_center(&h, 9);
+    click_at(&mut h, g, egui::PointerButton::Secondary);
+    h.run();
+    open_group_via_flyout(&mut h, "Open Panel.9");
+    let m = shape_center(&h, 10);
+    click_at(&mut h, m, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_sel().map(|s| s.1), Some(10));
+    h.run();
+
+    let (w0, h0) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!((w0 - 1.0).abs() < 1e-6, "member 10 starts 1 in wide");
+    let group_rect_before = h.state().debug_shape_screen_rect(9).expect("group rect");
+
+    // The corner handle exists in the mode (v1 suppressed all
+    // handles) and dragging it grows ONLY the member.
+    let br = h.state().debug_sel_br_corner().expect("member handles in the mode");
+    drag_naturally(&mut h, br, egui::vec2(30.0, 20.0));
+    let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!(
+        w1 > w0 * 1.2 && h1 > h0 * 1.2,
+        "the member resized: {w0:.3}x{h0:.3} -> {w1:.3}x{h1:.3}"
+    );
+    let group_rect_after = h.state().debug_shape_screen_rect(9).expect("group rect");
+    let grew = group_rect_after.width() > group_rect_before.width() + 1.0
+        || group_rect_after.height() > group_rect_before.height() + 1.0;
+    // The group's own Xform is untouched (its bbox may include the
+    // member's growth through shape_ink_bounds-style unions? No —
+    // the group's W/H are cells we never wrote).
+    assert!(
+        !grew,
+        "the group's own Xform is untouched: {:?} -> {:?}",
+        group_rect_before,
+        group_rect_after
+    );
+
+    // One undo restores the member.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let (w2, h2) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!(
+        (w2 - w0).abs() < 1e-3 && (h2 - h0).abs() < 1e-3,
+        "one undo restored the member: {w2:.3}x{h2:.3}"
     );
 }
 

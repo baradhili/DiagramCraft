@@ -1237,12 +1237,12 @@ impl App {
     /// handle at each endpoint plus the midpoint; everything else gets
     /// the four resize corners of its bounding box.
     fn selection_handles(&self) -> Vec<Handle> {
-        // Group-edit mode v1 (#78): resize/endpoint handles for nested
-        // members are deferred — the drag-move and edit paths work,
-        // but handle math through group transforms arrives separately.
-        if !self.group_edit.is_empty() {
-            return Vec::new();
-        }
+        // Group-edit mode (#95): member resize/endpoint handles work —
+        // 2D corners come from `sel_page_rect`, which already maps a
+        // member's parent-local rect through the renderer's XForm chain
+        // to page space; 1D endpoints map their parent-local cells to
+        // page below. The commit-side deltas convert through the same
+        // chain (apply_resize / apply_line_endpoint).
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -1258,6 +1258,15 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return Vec::new();
         };
+        let nested = chain.len() >= 2;
+        let page_h = Self::page_height(ed, page_id);
+        let to_page = |p: (f64, f64)| -> (f64, f64) {
+            if nested {
+                dc::svg::parent_local_point_to_page(&ed.doc, &chain, page_h, p)
+            } else {
+                p
+            }
+        };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         if let (Some(bx), Some(by), Some(ex), Some(ey)) =
             (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
@@ -1265,15 +1274,15 @@ impl App {
             return vec![
                 Handle {
                     id: HandleId::LineBegin,
-                    pos: (bx, by),
+                    pos: to_page((bx, by)),
                 },
                 Handle {
                     id: HandleId::LineEnd,
-                    pos: (ex, ey),
+                    pos: to_page((ex, ey)),
                 },
                 Handle {
                     id: HandleId::LineMid,
-                    pos: ((bx + ex) / 2.0, (by + ey) / 2.0),
+                    pos: to_page(((bx + ex) / 2.0, (by + ey) / 2.0)),
                 },
             ];
         }
@@ -1513,6 +1522,18 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return;
         };
+        // #95: a member's cells are parent-local — convert the
+        // page-space drag delta through the renderer's affine (any
+        // base point works; the translation cancels in the
+        // difference).
+        let (dx, dy) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            let l0 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (0.0, 0.0));
+            let l1 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (dx, dy));
+            (l1.0 - l0.0, l1.1 - l0.1)
+        } else {
+            (dx, dy)
+        };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(px), Some(py), Some(w), Some(h), Some(lx), Some(ly)) = (
             get("PinX"),
@@ -1669,6 +1690,15 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return;
         };
+        // #95: endpoint cells are parent-local for a member — the
+        // page-space target converts through the affine; the other
+        // endpoint already reads parent-local.
+        let to = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, to)
+        } else {
+            to
+        };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(bx), Some(by), Some(ex), Some(ey)) =
             (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
@@ -1778,7 +1808,17 @@ impl App {
         let Some((px, py)) = get("PinX").zip(get("PinY")) else {
             return;
         };
-        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        // #95: member cells are parent-local — convert the page-space
+        // drag through the affine (translation cancels).
+        let (dx, dy) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            let f0 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (0.0, 0.0));
+            let f1 =
+                dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (to.0 - from.0, to.1 - from.1));
+            (f1.0 - f0.0, f1.1 - f0.1)
+        } else {
+            (to.0 - from.0, to.1 - from.1)
+        };
         let scope = Scope::Shape {
             page: page_id,
             shape: shape_id,
@@ -2123,6 +2163,55 @@ impl App {
                 }
             }
         }
+    }
+
+    /// #95's UI guard: when `members` contains exactly one top-level
+    /// Group (plus at least one other shape), grouping nests into that
+    /// group — returns the parent id and the members' page-space bbox
+    /// origin converted into the parent's local frame.
+    fn nest_group_target(&self, members: &[i64]) -> Option<(i64, (f64, f64))> {
+        if members.len() < 2 {
+            return None;
+        }
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let page_id = page.id;
+        let mut groups = Vec::new();
+        for &id in members {
+            let s = page.shapes.iter().find(|s| s.id == id)?;
+            if s.type_.as_deref() == Some("Group") {
+                groups.push(id);
+            }
+        }
+        if groups.len() != 1 {
+            return None;
+        }
+        let parent = groups[0];
+        // The members' page-space bbox origin (the group-to-be's pin
+        // before conversion): union of the non-parent members' rects.
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        for &id in members {
+            if id == parent {
+                continue;
+            }
+            let s = page.shapes.iter().find(|s| s.id == id)?;
+            let chain = shape_chain(&ed.doc, page_id, id).ok()?;
+            let get = |n: &str| ed.doc.resolve_cell(s, &chain, n).and_then(|c| c.numeric());
+            let (px, py) = (get("PinX")?, get("PinY")?);
+            let lx = get("LocPinX").unwrap_or(0.0);
+            let ly = get("LocPinY").unwrap_or(0.0);
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+        }
+        let page_h = Self::page_height(ed, page_id);
+        // The conversion needs the PARENT as an ancestor — the affine
+        // maps the chain's last entry's parent-local frame, so append
+        // the new group's own slot (the parent twice).
+        let mut chain = shape_chain(&ed.doc, page_id, parent).ok()?;
+        chain.push(chain[0]);
+        let local = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (x0, y0));
+        Some((parent, local))
     }
 
     /// Route every single-selection write through here so `sel` and
@@ -6227,7 +6316,30 @@ impl App {
                 let new_id = self
                     .ed()
                     .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
-                self.apply(dc_core::commands::GroupShapes::new(page_id, members));
+                // #95: exactly one GROUP in the selection plus other
+                // top-level shapes → nest a new group INSIDE it (the
+                // members' bbox origin converted into the parent's
+                // local frame through the renderer's affine), Visio's
+                // group-into-group. Anything else groups at top level
+                // as before.
+                let nest = self.nest_group_target(&members);
+                let cmd = match nest {
+                    Some((parent, local_pin)) => {
+                        // The parent itself is the CONTAINER, never a
+                        // member (grouping it into itself would
+                        // self-nest).
+                        let nested: Vec<i64> = members
+                            .iter()
+                            .copied()
+                            .filter(|id| *id != parent)
+                            .collect();
+                        dc_core::commands::GroupShapes::into_group(
+                            page_id, nested, parent, local_pin,
+                        )
+                    }
+                    None => dc_core::commands::GroupShapes::new(page_id, members),
+                };
+                self.apply(cmd);
                 if let Some(nid) = new_id {
                     self.set_selection(Some((page_id, nid)));
                 }

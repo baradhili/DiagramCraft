@@ -1541,6 +1541,13 @@ pub struct GroupShapes {
     pub page: i64,
     /// Member ids, any order; the group preserves ascending z-order.
     pub members: Vec<i64>,
+    /// Nesting target (#95): the new group is inserted into this
+    /// top-level group's `sub_shapes` instead of the page, pinned at
+    /// `parent_local_pin` (the bbox origin converted into the parent's
+    /// local frame — computed by the UI through the renderer's affine,
+    /// which dc-core cannot reach).
+    pub parent: Option<i64>,
+    parent_local_pin: (f64, f64),
     id: Option<i64>,
     /// (member id, original z-position, rewritten cells with their
     /// originals) for undo.
@@ -1552,6 +1559,30 @@ impl GroupShapes {
         GroupShapes {
             page,
             members,
+            parent: None,
+            parent_local_pin: (0.0, 0.0),
+            id: None,
+            undo: None,
+        }
+    }
+
+    /// Nest the new group inside `parent` (a top-level Group), pinned
+    /// at `parent_local_pin` — the members' page-space bbox origin
+    /// mapped into the parent's local frame (#95). The members stay
+    /// top-level-resolved and are re-pinned into the NEW group's
+    /// frame exactly as the top-level variant; only where the new
+    /// group lands differs.
+    pub fn into_group(
+        page: i64,
+        members: Vec<i64>,
+        parent: i64,
+        parent_local_pin: (f64, f64),
+    ) -> GroupShapes {
+        GroupShapes {
+            page,
+            members,
+            parent: Some(parent),
+            parent_local_pin,
             id: None,
             undo: None,
         }
@@ -1580,8 +1611,14 @@ impl crate::Command for GroupShapes {
                     .map(|p| (p, *id))
             })
             .collect();
-        if found.len() < 2 {
+        // Top-level grouping needs two members (a lone group is a
+        // no-op); NESTING accepts one — dropping a single shape into
+        // an existing group as its own sub-group is the #95 flow.
+        if found.len() < 2 && self.parent.is_none() {
             bail!("grouping needs at least two member shapes");
+        }
+        if found.is_empty() {
+            bail!("grouping needs at least one member shape");
         }
         found.sort();
         // Union bbox from each member's absolute rect.
@@ -1654,14 +1691,22 @@ impl crate::Command for GroupShapes {
         for (pos, _) in found.iter().rev() {
             doc.pages[pi].shapes.remove(*pos);
         }
+        // #95: nested groups are pinned in the PARENT's local frame
+        // (the converted bbox origin); the group stays axis-aligned in
+        // page space at creation, so a rotated parent skews the frame
+        // v1 accepts.
+        let (gpx, gpy) = match self.parent {
+            Some(_) => self.parent_local_pin,
+            None => (x0, y0),
+        };
         let group = Shape {
             id: gid,
             name_u: Some(format!("Group.{gid}")),
             type_: Some("Group".into()),
             sheet: {
                 let mut sh = vsdx::model::Sheet::default();
-                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(x0)));
-                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(y0)));
+                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(gpx)));
+                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(gpy)));
                 sh.set_cell("Width", vsdx::model::Cell::value(fmt_num(x1 - x0)));
                 sh.set_cell("Height", vsdx::model::Cell::value(fmt_num(y1 - y0)));
                 sh.set_cell("LocPinX", vsdx::model::Cell::value("0"));
@@ -1672,8 +1717,23 @@ impl crate::Command for GroupShapes {
             flow: vec![vsdx::model::ShapeFlow::Shapes],
             ..Shape::default()
         };
-        let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
-        doc.pages[pi].shapes.insert(at, group);
+        match self.parent {
+            Some(pid) => {
+                let parent = doc.pages[pi]
+                    .shapes
+                    .iter_mut()
+                    .find(|s| s.id == pid)
+                    .ok_or_else(|| anyhow::anyhow!("parent group {pid} vanished"))?;
+                if parent.type_.as_deref() != Some("Group") {
+                    bail!("nest target {pid} is not a group");
+                }
+                parent.sub_shapes.push(group);
+            }
+            None => {
+                let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
+                doc.pages[pi].shapes.insert(at, group);
+            }
+        }
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
@@ -1687,12 +1747,29 @@ impl crate::Command for GroupShapes {
             .iter()
             .position(|p| p.id == self.page)
             .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
-        let gpos = doc.pages[pi]
-            .shapes
-            .iter()
-            .position(|s| s.id == gid)
-            .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
-        let mut extracted = doc.pages[pi].shapes.remove(gpos).sub_shapes;
+        let mut extracted = match self.parent {
+            Some(pid) => {
+                let parent = doc.pages[pi]
+                    .shapes
+                    .iter_mut()
+                    .find(|s| s.id == pid)
+                    .ok_or_else(|| anyhow::anyhow!("parent group {pid} vanished"))?;
+                let gpos = parent
+                    .sub_shapes
+                    .iter()
+                    .position(|s| s.id == gid)
+                    .ok_or_else(|| anyhow::anyhow!("group {gid} vanished from parent"))?;
+                parent.sub_shapes.remove(gpos).sub_shapes
+            }
+            None => {
+                let gpos = doc.pages[pi]
+                    .shapes
+                    .iter()
+                    .position(|s| s.id == gid)
+                    .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
+                doc.pages[pi].shapes.remove(gpos).sub_shapes
+            }
+        };
         // Restore original absolute Xform cells and z-positions.
         for (id, pos, cells) in &undo {
             let m = extracted

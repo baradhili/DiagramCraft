@@ -2021,6 +2021,174 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
 
+/// #95 §1: grouping a selection of {one group + other shapes} nests a
+/// new group INSIDE the existing one — members keep their page-space
+/// positions through the local-frame conversion, and one undo
+/// restores the top-level layout.
+#[test]
+fn group_into_existing_group_nests() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Three shapes: a pair to group first, plus a loner.
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32, 0.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 3);
+    // Marquee all three, right-click, Group — with THREE plain shapes
+    // this makes a top-level group (the pre-#95 behavior): G1 holds
+    // members 1, 2, 3 (placement ids are sequential).
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item");
+    group_item.click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "one top-level group");
+    let (_, g1) = h.state().debug_sel().expect("group selected");
+
+    // Place a fourth shape, then select {G1, shape4} and Group: with
+    // exactly one GROUP in the selection this NESTS (#95) — shape4
+    // lands inside a new sub-group of G1, page-space stable.
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, canvas.center() + egui::vec2(150.0, 0.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "group plus the new shape");
+    let s4 = h.state().debug_sel().expect("placed").1;
+    let s4_before = h.state().debug_shape_screen_rect(s4).expect("shape4 rect");
+
+    // Multi-select G1 + shape4: click G1, shift-click shape4.
+    let g1c = h.state().debug_shape_screen_rect(g1).unwrap().center();
+    let s4c = s4_before.center();
+    click_at(&mut h, g1c, egui::PointerButton::Primary);
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    h.event(egui::Event::ModifiersChanged(shift));
+    h.hover_at(s4c);
+    h.event(egui::Event::PointerButton {
+        pos: s4c,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: shift,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: s4c,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: shift,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "group + shape selected");
+
+    // Right-click the selection, Group.
+    click_at(&mut h, g1c, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item");
+    group_item.click();
+    h.run();
+
+    // Nested: still ONE top-level shape; the new group (selected) is a
+    // MEMBER of G1, holding shape4.
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "nesting kept one top-level group"
+    );
+    let (_, g2) = h.state().debug_sel().expect("the new sub-group is selected");
+    assert_ne!(g2, g1, "a new group was created");
+    assert_eq!(
+        h.state().debug_group_members_for_test(g1),
+        vec![1, 2, 3, g2],
+        "the new group joined G1's members"
+    );
+    assert_eq!(
+        h.state().debug_group_members_for_test(g2),
+        vec![s4],
+        "the sub-group holds shape4"
+    );
+    // Page-space stability through the local-frame conversion.
+    let s4_after = h.state().debug_shape_screen_rect(s4).expect("shape4 rect");
+    assert!(
+        (s4_after.min.x - s4_before.min.x).abs() < 1.0
+            && (s4_after.min.y - s4_before.min.y).abs() < 1.0
+            && (s4_after.width() - s4_before.width()).abs() < 1.0,
+        "shape4 renders where it was: {:?} -> {:?}",
+        s4_before,
+        s4_after
+    );
+
+    // One undo restores the top-level layout: G1 (with 1,2) + shape4.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "undo restored the layout");
+    assert_eq!(
+        h.state().debug_group_members_for_test(g1),
+        vec![1, 2, 3],
+        "G1 back to its original members"
+    );
+}
+
 /// #69: resizing a group SCALES its members — both member screen
 /// rects grow with the group's frame, and one Ctrl+Z restores the
 /// members and the group in a single step.
