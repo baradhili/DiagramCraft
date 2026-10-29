@@ -2150,28 +2150,107 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
         let mut attrs = String::new();
+        // #72: per-value arrowheads — Visio's named gallery subset,
+        // drawn from our own paths (behavior reference: observed Visio
+        // 2016; artwork ours). Unmapped gallery values fall back to
+        // the filled triangle. Sizes ride markerUnits=strokeWidth
+        // (LineWeight) times the ArrowSize factor.
         let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
             if arrow < 0.5 {
                 return;
             }
             let scale = 2.5 + sz.max(0.0) * 1.5;
+            let kind = arrow.round() as i64;
             let id = format!(
-                "dc-ah{}{:x}",
+                "dc-ah{}k{:x}",
                 if begin { 'b' } else { 'e' },
-                fnv(&format!("{}|{line_weight:.5}|{scale:.2}", line_color))
+                fnv(&format!("{kind}|{line_weight:.5}|{scale:.2}|{line_color}"))
             );
             if !out_all.contains(&format!(r#"id="{id}""#)) {
-                // Triangle along +x for end markers, -x for begin markers
-                // (both orient=auto relative to path direction).
-                let path = if begin {
-                    "M10,0 L0,5 L10,10 z"
+                // Paths point ALONG +x (end markers, tip at x=10/12);
+                // begin markers mirror around the viewBox center, which
+                // orients the tip at the path start (orient=auto).
+                // (path body, tip_x, box_w, stroke_only); the oval is
+                // a circle element, handled separately.
+                let spec: (&str, f64, f64, bool) = match kind {
+                    // 1 Arrow — the filled triangle.
+                    1 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 2 Open Arrow — the open V.
+                    2 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
+                    // 3 Concave — filled with a dipped base.
+                    3 => ("M0,0 L10,5 L0,10 Q3.5,5 0,0 z", 10.0, 10.0, false),
+                    // 4 Stealth — the dart.
+                    4 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
+                    // 5 Diamond (tip at both ends; anchor the right
+                    // tip on the line end).
+                    5 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
+                    // 6 Oval — the circle (symmetric, no mirror).
+                    6 => ("", 12.0, 12.0, false),
+                    // 13 Double Arrow — two chevrons.
+                    13 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
+                    // Unmapped gallery values: the filled triangle.
+                    _ => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                };
+                let (d, tip, box_w, stroke_only) = spec;
+                let mirror_x = |d: &str| -> String {
+                    // "M0,0 L10,5" → every x mirrored about box_w/2's
+                    // frame (x → box_w - x), keeping command letters.
+                    let mut m = String::new();
+                    for tok in d.split(' ') {
+                        let head: String = tok.chars().take_while(|c| c.is_alphabetic()).collect();
+                        let rest = &tok[head.len()..];
+                        if rest.is_empty() {
+                            m.push_str(tok);
+                        } else {
+                            let nums: Vec<String> = rest
+                                .split(',')
+                                .enumerate()
+                                .map(|(i, n)| {
+                                    // Only mirror the X of each x,y pair.
+                                    if i % 2 == 0 {
+                                        n.parse::<f64>()
+                                            .map(|v| format!("{}", box_w - v))
+                                            .unwrap_or_else(|_| n.to_string())
+                                    } else {
+                                        n.to_string()
+                                    }
+                                })
+                                .collect();
+                            m.push_str(&head);
+                            m.push_str(&nums.join(","));
+                        }
+                        m.push(' ');
+                    }
+                    m.trim_end().to_string()
+                };
+                // Begin markers mirror horizontally so the tip faces
+                // the path start (orient=auto supplies direction).
+                let d = if begin && kind != 6 {
+                    mirror_x(d)
                 } else {
-                    "M0,0 L10,5 L0,10 z"
+                    d.to_string()
+                };
+                let body = if kind == 6 {
+                    format!(
+                        r#"<circle cx="6" cy="5" r="5" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
+                        c = line_color,
+                    )
+                } else if stroke_only {
+                    format!(
+                        r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="1.2"/>"#,
+                        c = line_color,
+                    )
+                } else {
+                    format!(
+                        r#"<path d="{d}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
+                        c = line_color,
+                    )
                 };
                 let _ = writeln!(
                     out_all,
-                    r#"<defs><marker id="{id}" viewBox="0 0 10 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto"><path d="{path}" fill="{line_color}" stroke="{line_color}" stroke-width="0.5"/></marker></defs>"#,
-                    rx = if begin { 0.0 } else { 10.0 },
+                    r#"<defs><marker id="{id}" viewBox="0 0 {w} 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto">{body}</marker></defs>"#,
+                    w = box_w,
+                    rx = if begin { 0.0 } else { tip },
                 );
             }
             if begin {
@@ -3061,6 +3140,85 @@ mod tests {
             ..Section::default()
         }));
         s
+    }
+
+    /// #72: arrowheads render per value — each gallery entry emits
+    /// its own marker (distinct ids and shapes), the head scales with
+    /// LineWeight (markerUnits=strokeWidth), and 0 emits none.
+    #[test]
+    fn arrow_heads_render_per_value_and_scale() {
+        let doc = Document::default();
+        let line_with = |cells: &[(&str, &str)]| {
+            let mut s = Shape::default();
+            for (n, v) in cells {
+                s.sheet.set_cell(n, Cell::value(*v));
+            }
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: 0,
+                rows: vec![
+                    Row {
+                        ix: 1,
+                        t: Some("MoveTo".into()),
+                        cells: vec![
+                            ("X".into(), Cell::value("0")),
+                            ("Y".into(), Cell::value("0")),
+                        ],
+                        ..Row::default()
+                    },
+                    Row {
+                        ix: 2,
+                        t: Some("LineTo".into()),
+                        cells: vec![
+                            ("X".into(), Cell::value("1")),
+                            ("Y".into(), Cell::value("1")),
+                        ],
+                        ..Row::default()
+                    },
+                ],
+                ..Section::default()
+            }));
+            let chain = [&s];
+            let mut out = String::new();
+            render_shape(&doc, &s, 11.0, &chain, "", None, &mut out);
+            out
+        };
+        // 0 = no marker at all.
+        let none = line_with(&[("EndArrow", "0")]);
+        assert!(!none.contains("marker"), "value 0 emits no head: {none}");
+        // Each gallery value emits a marker with its own kind id and
+        // the expected body shape.
+        for (v, needle) in [
+            (1, "M0,0 L10,5 L0,10 z"),
+            (2, r#"fill="none""#),
+            (3, "Q3.5,5"),
+            (4, "L5,5 z"),
+            (5, "M0,5 L5,0 L10,5 L5,10 z"),
+            (13, "M6,0 L12,5 L6,10 z"),
+        ] {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            assert!(
+                out.contains("dc-ahek"),
+                "value {v} emits a kind-tagged marker: {out}"
+            );
+            assert!(out.contains(needle), "value {v} draws its shape: {out}");
+        }
+        // The oval is a circle.
+        let oval = line_with(&[("EndArrow", "6")]);
+        assert!(oval.contains("<circle"), "value 6 is a circle: {oval}");
+        // Weight scaling: the head rides stroke width.
+        let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
+        assert!(
+            heavy.contains("markerUnits=\"strokeWidth\""),
+            "the head rides stroke width: {heavy}"
+        );
+        // Begin markers mirror: the begin triangle faces -x.
+        let both = line_with(&[("BeginArrow", "1"), ("EndArrow", "1")]);
+        assert!(both.contains("dc-ahbk"), "the begin head carries its id");
+        assert!(
+            both.contains("M10,0 L0,5 L10,10 z"),
+            "the begin triangle mirrors: {both}"
+        );
     }
 
     /// #73: Char.Color accepts both spellings with fill/line-parity

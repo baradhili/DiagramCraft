@@ -3342,6 +3342,51 @@ fn format_pane_edits_cells_for_whole_selection() {
         None,
         "one undo removed the materialized Color cell"
     );
+
+    // #72: the Line section's Begin/End Arrow pickers write through,
+    // the canvas renders the head, and one Ctrl+Z restores.
+    // (The placed Rectangle is 2-D, but Arrow cells ride any line
+    // geometry; assert the write + the marker in the page SVG.)
+    let end_cur = h
+        .state()
+        .debug_cell_for_test(sid, "EndArrow")
+        .unwrap_or_else(|| "0".into());
+    assert_eq!(end_cur, "0", "no arrow yet");
+    // The End Arrow dropdown: the fmt_dropdown button shows the
+    // current name ("None") in the pane's Line section.
+    // Begin and End both show "None  ›" — the End row sits BELOW the
+    // Begin row, so take the lowest pane dropdown.
+    let btn = h
+        .get_all_by_label_contains("None")
+        .filter(|n| {
+            let r = n.rect();
+            r.min.x > 900.0 && r.width() < 120.0
+        })
+        .max_by_key(|n| n.rect().min.y as i64)
+        .expect("the End Arrow dropdown (shows None)");
+    btn.click();
+    h.run();
+    h.get_by_label("Arrow").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "EndArrow"),
+        Some("1".into()),
+        "the picker wrote the cell through the whole-selection macro"
+    );
+    assert!(
+        h.state()
+            .debug_page_svg()
+            .unwrap_or_default()
+            .contains("dc-ahek"),
+        "the canvas renders the arrowhead marker"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "EndArrow"),
+        Some("0".into()),
+        "one undo restored the arrow state (the master snapshot's 0)"
+    );
 }
 
 /// GitHub #29 rework: the badge indicates a comment; the popup edits,

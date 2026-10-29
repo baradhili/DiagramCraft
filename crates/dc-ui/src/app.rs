@@ -3909,6 +3909,30 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
+                // Begin/End Arrow (#72): the named gallery the renderer
+                // draws — value 0 none, 1-6 the classic set, 13 double.
+                const ARROWS: &[(&str, &str)] = &[
+                    ("0", "None"),
+                    ("1", "Arrow"),
+                    ("2", "Open Arrow"),
+                    ("3", "Concave"),
+                    ("4", "Stealth"),
+                    ("5", "Diamond"),
+                    ("6", "Oval"),
+                    ("13", "Double Arrow"),
+                ];
+                let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
+                if let Some(v) =
+                    Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS)
+                {
+                    set_cell = Some(("BeginArrow".into(), v));
+                }
+                let cur = self.eff_cell_str("EndArrow").unwrap_or_else(|| "0".into());
+                if let Some(v) =
+                    Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS)
+                {
+                    set_cell = Some(("EndArrow".into(), v));
+                }
                 ui.horizontal(|ui| {
                     ui.label("Rounding");
                     let cur = self.eff_cell_str("Rounding").unwrap_or_else(|| "0".into());
