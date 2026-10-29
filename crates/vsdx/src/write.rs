@@ -645,6 +645,7 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
         // Pure round-trips (no page-set change) leave all three untouched.
         reconcile_page_parts(&mut parts, doc, pkg);
         reconcile_master_parts(&mut parts, doc, pkg);
+        reconcile_media(&mut parts, doc, pkg);
         return parts;
     }
 
@@ -1062,6 +1063,91 @@ const CT_PAGE: &str = "application/vnd.ms-visio.pages+xml";
 /// Synchronize `parts` with the model's page set: new pages get their
 /// part, a pages-index relationship, and a content-types override;
 /// removed pages lose all three. No page-set change → nothing rewritten.
+/// Materialize runtime-added media (#113, picture insertion): the
+/// parts themselves, the owning page parts' relationship entries, and
+/// the `[Content_Types].xml` default for each used extension. No-op
+/// for documents without `extra_media`, so pure round-trips never
+/// touch these parts.
+fn reconcile_media(
+    parts: &mut BTreeMap<String, Vec<u8>>,
+    doc: &Document,
+    pkg: &crate::opc::Package,
+) {
+    if doc.extra_media.is_empty() {
+        return;
+    }
+    // Group by owning page part.
+    let mut by_page: std::collections::BTreeMap<String, Vec<&crate::model::MediaRef>> =
+        std::collections::BTreeMap::new();
+    for m in &doc.extra_media {
+        let Some(page) = doc.pages.iter().find(|p| p.id == m.page) else {
+            continue;
+        };
+        if page.part.is_empty() {
+            continue;
+        }
+        by_page.entry(page.part.clone()).or_default().push(m);
+    }
+    for (page_part, media) in &by_page {
+        // Insert the parts.
+        for m in media {
+            parts.insert(m.part.clone(), m.bytes.clone());
+        }
+        // Rebuild the page part's rels: retained entries + media.
+        let rels = rels_part_of(page_part);
+        let mut entries = match parts.get(&rels) {
+            Some(bytes) => parse_rels(bytes),
+            None => match pkg.part(&rels) {
+                Some(bytes) => parse_rels(bytes),
+                None => Vec::new(),
+            },
+        };
+        for m in media {
+            if entries.iter().any(|e| e.id == m.rid) {
+                continue;
+            }
+            entries.push(RelEntry {
+                id: m.rid.clone(),
+                type_: rel_type("image"),
+                target: relative_target(&dir_of(page_part), &m.part),
+            });
+        }
+        parts.insert(rels, build_rels(&entries));
+    }
+    // Content types: ensure a Default per used extension.
+    let ct = "[Content_Types].xml";
+    let ct_bytes: Vec<u8> = parts
+        .get(ct)
+        .cloned()
+        .or_else(|| pkg.part(ct).map(<[u8]>::to_vec))
+        .unwrap_or_default();
+    let mut xml = String::from_utf8_lossy(&ct_bytes).into_owned();
+    if !xml.is_empty() {
+        let mut changed = false;
+        for ext in doc.extra_media.iter().map(|m| m.ext.as_str()).collect::<std::collections::BTreeSet<_>>() {
+            let marker = format!("Extension=\"{ext}\"");
+            if !xml.contains(&marker) {
+                let default = format!(
+                    "<Default Extension=\"{ext}\" ContentType=\"{}\"/>",
+                    match ext {
+                        "png" => "image/png",
+                        "jpeg" | "jpg" => "image/jpeg",
+                        "gif" => "image/gif",
+                        _ => continue,
+                    }
+                );
+                if let Some(pos) = xml.rfind("</Types>") {
+                    xml.insert_str(pos, &default);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            parts.insert(ct.to_string(), xml.into_bytes());
+        }
+    }
+}
+
 fn reconcile_page_parts(
     parts: &mut BTreeMap<String, Vec<u8>>,
     doc: &Document,

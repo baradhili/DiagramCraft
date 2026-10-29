@@ -727,6 +727,33 @@ fn drag_naturally(h: &mut Harness<'_, App>, from: Pos2, by: egui::Vec2) {
     h.run();
 }
 
+/// Drag a guide out of a ruler (#113): press in a ruler band, move
+/// across frames, release over the page. `from` must sit inside the
+/// ruler band, `to` inside the page.
+fn ruler_drag(h: &mut Harness<'_, App>, from: egui::Pos2, to: egui::Pos2) {
+    let press = egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let release = egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(press);
+    h.run();
+    h.hover_at(from + (to - from) * 0.5);
+    h.run();
+    h.hover_at(to);
+    h.run();
+    h.event(release);
+    h.run();
+}
+
 /// Place a master through the stencil's click-to-arm, click-to-place
 /// path and return the (page, shape) of the placed instance.
 fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
@@ -942,6 +969,12 @@ fn line_body_drag_translates_endpoints() {
     // The Line master sits outside Quick Shapes' head set — reveal the
     // document stencil entry (#102) to place it.
     h.state_mut().show_doc_stencil_for_test();
+    // Pure translation semantics: turn the (default-on) snap engine
+    // off — #109's snap tests cover the snapped landings separately.
+    let mut snap_off = h.state().debug_snap_settings();
+    snap_off.snap_active = false;
+    snap_off.glue_active = false;
+    h.state_mut().debug_set_snap_for_test(snap_off);
     h.run();
     let (page, shape) = place_master(&mut h, LINE_MASTER);
 
@@ -4810,4 +4843,1235 @@ fn metric_toggle_opens_the_metric_variant() {
         "opened Basic Shapes (metric)",
         "the metric twin opened under the session preference"
     );
+}
+
+// ---- GitHub #109: the snap & glue engine ---------------------------------
+
+/// The snap engine lands a dragged shape on a neighbor's alignment
+/// box (URS-1100): after a real drag whose release point is a few px
+/// off perfect alignment, the shape lands exactly aligned — and the
+/// dynamic grid (URS-1088) reports alignment hints while the drag is
+/// live and none after release. (A drag that never leaves the snap
+/// threshold stays a no-op: no movement, no undo entry — Visio's
+/// feel, and why the shape is first dragged well clear.)
+#[test]
+fn drag_snaps_to_neighbors_alignment_box() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    // Alignment-box targets only — a deterministic landing that does
+    // not depend on the grid or ruler spacings.
+    let mut s = h.state().debug_snap_settings();
+    s.snap_active = true;
+    s.snap_grid = false;
+    s.snap_ruler_subdivisions = false;
+    s.snap_guides = false;
+    s.snap_shape_extensions = false;
+    s.snap_shape_intersections = false;
+    s.snap_connection_points = false;
+    s.snap_alignment_boxes = true;
+    s.dynamic_grid = true;
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    // Two instances of the Rectangle master (both land at the canvas
+    // center; the second is on top and is the one a press grabs).
+    let (page, a) = place_master(&mut h, 2);
+    let (page2, b) = place_master(&mut h, 2);
+    assert_eq!(page, page2);
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+
+    // Drag B well clear of A (beyond the snap threshold the whole
+    // way, so this is a real move), then read its live position for
+    // the gesture below.
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect");
+    drag_naturally(&mut h, bs.center(), egui::vec2(120.0, 90.0));
+    let bp = h.state().debug_shape_page_rect(b).expect("B rect after moving away");
+    assert!(
+        (bp.0 - ar.0).abs() > 0.3,
+        "B moved clear of A first: {bp:?} vs {ar:?}"
+    );
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect (moved)");
+
+    // page (y-up) → screen affine derived from B's two rects.
+    let k = bs.width() as f64 / bp.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            bs.left() + ((x - bp.0) * k) as f32,
+            bs.top() + (((bp.1 + bp.3) - y) * k) as f32,
+        )
+    };
+    // Drag B back to within 3 px (both axes) of A's center: a real
+    // travel, with the release point inside the snap strength, so the
+    // engine must land it exactly aligned.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let target = p2s(
+        ar.0 + ar.2 / 2.0 + 3.0 / ppi as f64,
+        ar.1 + ar.3 / 2.0 + 3.0 / ppi as f64,
+    );
+    let from = bs.center();
+
+    let press = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let release = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(press(from));
+    h.run();
+    for t in [0.25, 0.5, 0.75] {
+        h.hover_at(from + (target - from) * t);
+        h.run();
+    }
+    // Mid-drag: the dynamic grid reports alignment hints (x and y)
+    // against the neighbor.
+    assert!(
+        h.state().debug_snap_hint_count() >= 2,
+        "alignment hints live mid-drag"
+    );
+    h.hover_at(target);
+    h.run();
+    h.event(release(target));
+    h.run();
+
+    let br = h.state().debug_shape_page_rect(b).expect("B rect after");
+    assert!(
+        (br.0 - ar.0).abs() < 1e-6,
+        "B snapped back onto A's left edge: {} vs {}",
+        br.0,
+        ar.0
+    );
+    assert!(
+        (br.1 - ar.1).abs() < 1e-6,
+        "B snapped onto A's bottom edge: {} vs {} ({:?} vs {:?})",
+        br.1,
+        ar.1,
+        br,
+        ar
+    );
+    assert_eq!(h.state().debug_snap_hint_count(), 0, "hints clear on release");
+}
+
+/// Glue settings decide where a 1D endpoint sticks (URS-1112): with
+/// shape-handle glue enabled, dropping the endpoint 3 px off a
+/// rectangle's corner lands exactly on the handle. The sticky Connect
+/// itself is #108's connector work — #109 delivers the settings and
+/// the landing.
+#[test]
+fn endpoint_glues_to_a_shape_handle() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let mut s = h.state().debug_snap_settings();
+    s.snap_active = false; // the snap side must not interfere
+    s.glue_active = true;
+    s.glue_guides = false;
+    s.glue_shape_handles = true;
+    s.glue_shape_vertices = false;
+    s.glue_connection_points = false;
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let (page, rect) = place_master(&mut h, 2);
+    // The Line master sits outside Quick Shapes' head set — reveal the
+    // document stencil entry (#102) to place it.
+    h.state_mut().show_doc_stencil_for_test();
+    h.run();
+    let (page2, line) = place_master(&mut h, LINE_MASTER);
+    assert_eq!(page, page2);
+    let r = h.state().debug_shape_page_rect(rect).expect("rect");
+    let corner = (r.0 + r.2, r.1 + r.3); // top-right, page y-up
+
+    let bp = h.state().debug_shape_page_rect(line).expect("line rect");
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(line)
+        .expect("line screen rect");
+    let k = bs.width() as f64 / bp.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            bs.left() + ((x - bp.0) * k) as f32,
+            bs.top() + (((bp.1 + bp.3) - y) * k) as f32,
+        )
+    };
+    // The line rect's y extent is its stroke bbox; for p2s's y the
+    // rect height may be ~0 — fall back to B's screen rect height.
+    let k_y = (bs.height() as f64 / bp.3).max(k);
+
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("endpoint handle");
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let target = p2s(corner.0 - 3.0 / ppi as f64 * (k / k_y), corner.1);
+    drag_naturally(&mut h, end, target - end);
+
+    let (ex, ey) = (cell_of(&h, page, line, "EndX"), cell_of(&h, page, line, "EndY"));
+    assert!(
+        (ex - corner.0).abs() < 1e-5 && (ey - corner.1).abs() < 1e-5,
+        "endpoint glued to the handle: ({ex:.4}, {ey:.4}) vs ({:.4}, {:.4})",
+        corner.0,
+        corner.1
+    );
+    let status = h.state().debug_status();
+    assert!(
+        status.contains("glued"),
+        "the landing notes the glue target: {status}"
+    );
+}
+
+/// The Snap & Glue dialog writes every toggle straight into the
+/// document's DocumentSettings (GitHub #109) — a blank drawing grows
+/// the element on its first change, and the ribbon's Dynamic Grid
+/// toggle persists too.
+#[test]
+fn snap_glue_dialog_toggles_persist_to_the_document() {
+    let mut h = harness_with_blank();
+    h.run();
+    // The blank template carries no DocumentSettings — none reads as
+    // the shipped Visio 2016 defaults.
+    assert!(h.state().debug_doc_snap_glue().is_none());
+    assert_eq!(
+        h.state().debug_snap_settings().to_doc(),
+        vsdx::model::DocSnapGlue::CORPUS_DEFAULT
+    );
+
+    h.get_by_label_contains("View").click();
+    h.run();
+    h.get_by_label_contains("Snap & Glue").click();
+    h.run();
+    // "Alignment boxes" is off in the corpus default (295) — turn it
+    // on: 295 + 128 = 423 must land in the document.
+    h.get_by_label_contains("Alignment boxes").click();
+    h.run();
+    let d = h.state().debug_doc_snap_glue().expect("DocumentSettings written");
+    assert_eq!(d.snap, 423, "alignment-boxes bit persisted");
+    assert_eq!(d.glue, 9, "glue untouched");
+    assert!(h.state().debug_dirty(), "a settings change marks the doc dirty");
+
+    // The ribbon's Dynamic Grid toggle is the same write path.
+    h.get_by_label_contains("Dynamic Grid").click();
+    h.run();
+    let d = h.state().debug_doc_snap_glue().expect("DocumentSettings present");
+    assert!(!d.dynamic_grid, "dynamic grid toggled off in the doc");
+    assert!(!h.state().debug_snap_settings().dynamic_grid);
+}
+
+// ---- GitHub #113: the guides slice (URS-1076) -----------------------------
+
+/// A drag from each ruler becomes a guide (URS-1076): the left band a
+/// vertical guide, the top band a horizontal one, the corner square a
+/// guide point — each landing where released, each one undo step.
+#[test]
+fn ruler_drag_creates_guides() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    let canvas = h.state().debug_canvas_rect();
+    let (_page, a) = place_master(&mut h, 2);
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    assert!(h.state().debug_guides().is_empty(), "blank page has no guides");
+
+    // Left ruler → vertical guide at the release x.
+    let (tx, ty) = (ar.0 + 2.0, ar.1 + 1.0);
+    let drop = p2s(tx, ty);
+    let from = egui::pos2(canvas.left() + 10.0, drop.y);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 1, "vertical guide created: {guides:?}");
+    assert_eq!(guides[0].1, "vertical");
+    assert!(
+        (guides[0].2 - tx).abs() < 1e-3,
+        "guide landed at the release x: {} vs {tx}",
+        guides[0].2
+    );
+
+    // Top ruler → horizontal guide at the release y.
+    let hy = ar.1 + 2.5;
+    let drop = p2s(ar.0 + 1.0, hy);
+    let from = egui::pos2(drop.x, canvas.top() + 10.0);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 2, "{guides:?}");
+    assert_eq!(guides[1].1, "horizontal");
+    assert!(
+        (guides[1].3 - hy).abs() < 1e-3,
+        "guide landed at the release y: {} vs {hy}",
+        guides[1].3
+    );
+
+    // Ruler corner → guide point at the release position.
+    let (px, py) = (ar.0 + 3.0, ar.1 + 0.5);
+    let drop = p2s(px, py);
+    let from = egui::pos2(canvas.left() + 10.0, canvas.top() + 10.0);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 3, "{guides:?}");
+    assert_eq!(guides[2].1, "point");
+    assert!(
+        (guides[2].2 - px).abs() < 1e-3 && (guides[2].3 - py).abs() < 1e-3,
+        "point guide landed where released: {guides:?}"
+    );
+
+    // Each guide is one undo step.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_guides().len(), 2, "guide point undoes");
+}
+
+/// A dropped shape snaps onto a guide (URS-1076 / URS-1100's guides
+/// toggle): released a few px off, its alignment feature lands
+/// exactly on the guide's line.
+#[test]
+fn shape_snaps_to_a_guide() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let (_page, a) = place_master(&mut h, 2);
+    // Guides are the only snap target.
+    let s = dc_ui::snap::SnapSettings {
+        snap_active: true,
+        snap_grid: false,
+        snap_ruler_subdivisions: false,
+        snap_alignment_boxes: false,
+        snap_shape_extensions: false,
+        snap_connection_points: false,
+        snap_guides: true,
+        glue_active: false,
+        dynamic_grid: false,
+        ..dc_ui::snap::SnapSettings::default()
+    };
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    // A vertical guide 2 in right of the shape's left edge.
+    let gx = ar.0 + 2.0;
+    let drop = p2s(gx, ar.1 + 1.0);
+    let from = egui::pos2(canvas.left() + 10.0, drop.y);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!((guides.len(), guides[0].1), (1, "vertical"));
+
+    // Drag the shape so its LEFT edge lands 3 px off the guide.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let to = p2s(gx + ar.2 / 2.0 + 3.0 / ppi as f64, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, asr.center(), to - asr.center());
+    let br = h.state().debug_shape_page_rect(a).expect("rect after");
+    assert!(
+        (br.0 - gx).abs() < 1e-6,
+        "left edge snapped onto the guide: {} vs {gx}",
+        br.0
+    );
+}
+
+/// Dropping a shape with glue-to-guides on writes Visio's pin glue
+/// (`PinX = Sheet.N!PinX`), and dragging the guide carries the glued
+/// shape — one undo step for the whole move (URS-1076: "alignment
+/// persists across many shapes").
+#[test]
+fn glued_shape_follows_its_guide() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let (page, a) = place_master(&mut h, 2);
+    let s = dc_ui::snap::SnapSettings {
+        snap_active: true,
+        snap_grid: false,
+        snap_ruler_subdivisions: false,
+        snap_alignment_boxes: false,
+        snap_shape_extensions: false,
+        snap_connection_points: false,
+        snap_guides: true,
+        glue_active: true,
+        glue_guides: true,
+        glue_shape_handles: false,
+        glue_shape_vertices: false,
+        glue_connection_points: false,
+        dynamic_grid: false,
+        ..dc_ui::snap::SnapSettings::default()
+    };
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    // Vertical guide clear of the shape.
+    let gx = ar.0 + 2.0;
+    let gdrop = p2s(gx, ar.1 + 1.0);
+    let gfrom = egui::pos2(canvas.left() + 10.0, gdrop.y);
+    ruler_drag(&mut h, gfrom, gdrop);
+    let (gid, _, _, _) = h.state().debug_guides()[0];
+
+    // Drop the shape with its CENTER 3 px off the guide: the pin
+    // snaps on and glues.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let to = p2s(gx + 3.0 / ppi as f64, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, asr.center(), to - asr.center());
+    assert_eq!(
+        h.state().debug_cell_formula(page, a, "PinX").as_deref(),
+        Some(format!("Sheet.{gid}!PinX").as_str()),
+        "pin glue formula written"
+    );
+    let br = h.state().debug_shape_page_rect(a).unwrap();
+    assert!((br.0 + br.2 / 2.0 - gx).abs() < 1e-6, "pin sits on the guide");
+
+    // Dragging the guide moves the glued shape with it. Snapping off
+    // keeps the guide's own landing clean.
+    let mut off = h.state().debug_snap_settings();
+    off.snap_active = false;
+    h.state_mut().debug_set_snap_for_test(off);
+    h.run();
+    let new_x = gx + 1.0;
+    let at = p2s(gx, ar.1 + 2.0); // on the guide line, clear of the shape
+    let to = p2s(new_x, ar.1 + 2.0);
+    drag_naturally(&mut h, at, to - at);
+    let guides = h.state().debug_guides();
+    assert!(
+        (guides[0].2 - new_x).abs() < 1e-3,
+        "guide moved: {:?}",
+        guides
+    );
+    let br = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br.0 + br.2 / 2.0 - new_x).abs() < 1e-6,
+        "glued shape followed the guide: center {} vs {new_x}",
+        br.0 + br.2 / 2.0
+    );
+
+    // Deleting the guide releases the shape: formula stripped,
+    // position kept.
+    click_at(&mut h, p2s(new_x, ar.1 + 2.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_sel(), Some((page, gid)), "guide selected");
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert!(h.state().debug_guides().is_empty(), "guide deleted");
+    assert!(
+        h.state().debug_cell_formula(page, a, "PinX").is_none(),
+        "glue formula released"
+    );
+    let br2 = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br2.0 + br2.2 / 2.0 - new_x).abs() < 1e-6,
+        "shape keeps its position after the release"
+    );
+}
+
+// ---- GitHub #108: connector authoring -------------------------------------
+
+/// The Connector Tool draws between two shapes (URS-1067) and glues
+/// both ends dynamically (URS-1091): corpus formulas on the endpoint
+/// cells, Connect records with ToPart 3, one undo step.
+#[test]
+fn connector_tool_draws_and_glues_between_shapes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Two rectangles, A dragged clear right of B.
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (page2, b) = place_master(&mut h, 2);
+    assert_eq!(page, page2);
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    assert!(ar.0 > br.0 + br.2, "A sits right of B: {ar:?} vs {br:?}");
+
+    // Home ▸ Tools ▸ Connector.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Connector);
+
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let bsr = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect");
+    let press = asr.center();
+    let release = bsr.center();
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(press);
+    h.event(btn(press, true));
+    h.run();
+    h.hover_at(press + (release - press) * 0.5);
+    h.run();
+    h.hover_at(release);
+    h.run();
+    h.event(btn(release, false));
+    h.run();
+
+    assert_eq!(h.state().debug_shape_count(), 3, "the connector landed");
+    let connects = h.state().debug_connects();
+    assert_eq!(connects.len(), 2, "both ends glued: {connects:?}");
+    for c in &connects {
+        assert_eq!(c.5, 3, "dynamic glue (ToPart 3): {c:?}");
+        assert!(c.3 == a || c.3 == b, "glued to a rectangle: {c:?}");
+    }
+    // The connector (the remaining shape id) has corpus endpoint
+    // formulas and attaches on the facing edges.
+    let conn = connects[0].0;
+    let fx = h.state().debug_cell_formula(page, conn, "EndX").unwrap();
+    assert!(
+        fx.contains("_WALKGLUE"),
+        "end formula is the corpus walkglue: {fx}"
+    );
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // B is left of A: the end (dropped on B) attaches on B's RIGHT
+    // edge where the segment toward A's center crosses it (the two
+    // centers are not exactly level — sub-pixel placement).
+    let (bcx, bcy) = (br.0 + br.2 / 2.0, br.1 + br.3 / 2.0);
+    let (acx, acy) = (ar.0 + ar.2 / 2.0, ar.1 + ar.3 / 2.0);
+    let t = (br.2 / 2.0) / (acx - bcx);
+    assert!(
+        (ex - (br.0 + br.2)).abs() < 1e-5,
+        "end on B's right edge: {ex} vs {}",
+        br.0 + br.2
+    );
+    assert!(
+        (ey - (bcy + (acy - bcy) * t)).abs() < 1e-5,
+        "end on the toward-A crossing: {ey}"
+    );
+
+    // One undo removes connector AND connects.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "connector undoes");
+    assert!(h.state().debug_connects().is_empty(), "connects undo with it");
+}
+
+/// Moving a glued shape re-attaches and re-routes its connectors in
+/// the same undo step (URS-1006).
+#[test]
+fn moving_a_shape_reroutes_its_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release); // same press-move-release shape
+    assert_eq!(h.state().debug_connects().len(), 2);
+
+    // Back to the pointer, then move B left-down by a clear amount.
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+    let conn = h.state().debug_connects()[0].0;
+    let br0 = h.state().debug_shape_page_rect(b).unwrap();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-90.0, 60.0));
+    let br1 = h.state().debug_shape_page_rect(b).unwrap();
+    assert!((br1.0 - br0.0).abs() > 0.3, "B actually moved");
+
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // A sits right of B; after the move the attachment follows B's
+    // right edge, where the segment from B's new center toward the
+    // (unchanged) begin point crosses it — the reroute recomputed it.
+    let (bcx, bcy) = (br1.0 + br1.2 / 2.0, br1.1 + br1.3 / 2.0);
+    let (bx, by) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "BeginY"));
+    let t = (br1.2 / 2.0) / (bx - bcx).abs();
+    assert!(
+        (ex - (br1.0 + br1.2)).abs() < 1e-5,
+        "end followed B's new right edge: {ex} vs {}",
+        br1.0 + br1.2
+    );
+    assert!(
+        (ey - (bcy + (by - bcy) * t)).abs() < 1e-5,
+        "end on the toward-begin crossing: {ey} vs {}",
+        bcy + (by - bcy) * t
+    );
+    // The begin stayed on A (its left edge — the side facing B).
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let bx = cell_of(&h, page, conn, "BeginX");
+    assert!((bx - ar.0).abs() < 1e-5, "begin still on A's left edge: {bx} vs {}", ar.0);
+
+    // Undo restores the pre-move endpoint (one step covered both).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let ex = cell_of(&h, page, conn, "EndX");
+    assert!(
+        (ex - (br0.0 + br0.2)).abs() < 1e-5,
+        "undo restores the endpoint: {ex} vs {}",
+        br0.0 + br0.2
+    );
+}
+
+/// The connector's context menu sets the route style (URS-1114):
+/// Straight collapses the geometry rows onto the end.
+#[test]
+fn connector_context_menu_sets_route_style() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+
+    // Right-click on the connector's line (its midpoint).
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let k = asr2.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr2.left() + ((x - ar.0) * k) as f32,
+            asr2.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    let bx = cell_of(&h, page, conn, "BeginX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    let mid = p2s((bx + br.0) / 2.0, ey);
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let rb = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Secondary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(mid);
+    h.event(rb(mid));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: mid,
+        button: egui::PointerButton::Secondary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.get_by_label_contains("Straight Connector").click();
+    h.run();
+
+    let style = h.state().debug_cell(page, conn, "ShapeRouteStyle").unwrap().0;
+    assert_eq!(style, "2", "straight route style written");
+    // Straight route: geometry rows 2..4 all sit on the end point —
+    // the elbow rows collapsed.
+    let w = cell_of(&h, page, conn, "Width");
+    let hgt = cell_of(&h, page, conn, "Height");
+    for row in [2i64, 3, 4] {
+        let x = h
+            .state()
+            .debug_row_cell(page, conn, 0, row, "X")
+            .unwrap();
+        let y = h
+            .state()
+            .debug_row_cell(page, conn, 0, row, "Y")
+            .unwrap();
+        assert!(
+            (x - w).abs() < 1e-5 && (y - hgt).abs() < 1e-5,
+            "row {row} collapsed onto the end: ({x}, {y}) vs ({w}, {hgt})"
+        );
+    }
+}
+
+/// Dragging a connector endpoint re-glues and releases (URS-1090/1091
+/// interactive half): dropping on empty page strips the Connect and
+/// the formula; dropping back on a shape re-glues dynamically.
+#[test]
+fn endpoint_drag_releases_and_reglues() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+    assert_eq!(h.state().debug_connects().len(), 2);
+
+    // Drag the END handle off to empty page: the end releases.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let k = asr2.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr2.left() + ((x - ar.0) * k) as f32,
+            asr2.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    let empty = p2s(ar.0 - 1.2, ar.1 + 2.0);
+    drag_naturally(&mut h, end, empty - end);
+    assert_eq!(h.state().debug_connects().len(), 1, "end released");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "walkglue formula stripped on release"
+    );
+
+    // Drag it back onto A: dynamic glue again.
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    let onto = p2s(ar.0 + ar.2 / 2.0, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, end, onto - end);
+    let connects = h.state().debug_connects();
+    assert_eq!(connects.len(), 2, "re-glued: {connects:?}");
+    assert!(
+        connects.iter().any(|c| c.0 == conn && c.3 == a && c.5 == 3),
+        "the end glues dynamically to A: {connects:?}"
+    );
+    assert_eq!(
+        h.state().debug_cell_formula(page, conn, "EndX").as_deref(),
+        Some("GUARD(_WALKGLUE(EndTrigger,BegTrigger,WalkPreference))")
+    );
+}
+
+// ---- GitHub #110: align/distribute, select, painter, nudge -----------------
+
+/// Align Left lines every selected shape's left edge on the
+/// first-selected shape's (URS-1149), as one undoable command.
+#[test]
+fn align_left_lines_selection_on_first_selected() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-60.0, 60.0));
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    assert!((ar.0 - br.0).abs() > 0.3, "shapes start unaligned");
+
+    // Select both (marquee over both), primary = A (first click).
+    // Simpler and deterministic: click A, shift-click B.
+    let ars = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let brs = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, ars.center(), egui::PointerButton::Primary);
+    h.run();
+    // kittest click convention: press + release queued together; the
+    // shift state rides an explicit Modifiers event.
+    h.hover_at(brs.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both selected");
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Left").click();
+    h.run();
+    let br2 = h.state().debug_shape_page_rect(b).unwrap();
+    let ar2 = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br2.0 - ar2.0).abs() < 1e-5,
+        "left edges aligned: {} vs {}",
+        br2.0,
+        ar2.0
+    );
+    // Visio's anchor is the PRIMARY selection — the last-clicked
+    // shape (B here; shift-clicking B made it primary), so B stays.
+    assert!((br2.0 - br.0).abs() < 1e-5, "the primary anchors");
+    // One undo returns B.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let br3 = h.state().debug_shape_page_rect(b).unwrap();
+    assert!(
+        (br3.0 - br.0).abs() < 1e-5,
+        "undo restores B: {} vs {}",
+        br3.0,
+        br.0
+    );
+}
+
+/// Distribute evens the gaps between three shapes (URS-1161).
+#[test]
+fn distribute_evens_spacing() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Three rectangles at staggered x positions.
+    let mut ids = Vec::new();
+    let (_page, a) = place_master(&mut h, 2);
+    ids.push(a);
+    let sr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(-180.0, -40.0));
+    let (_, b) = place_master(&mut h, 2);
+    ids.push(b);
+    let sr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(-60.0, 80.0));
+    let (_, c) = place_master(&mut h, 2);
+    ids.push(c);
+    let sr = h.state().debug_shape_screen_rect_for_test(c).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(120.0, 160.0));
+
+    // Select all three via Ctrl+A (also covers URS-1160's select all).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::A);
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 3);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Dist H").click();
+    h.run();
+    let mut rs: Vec<(f64, f64)> = ids
+        .iter()
+        .map(|id| {
+            let r = h.state().debug_shape_page_rect(*id).unwrap();
+            (r.0, r.2)
+        })
+        .collect();
+    rs.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let g1 = rs[1].0 - (rs[0].0 + rs[0].1);
+    let g2 = rs[2].0 - (rs[1].0 + rs[1].1);
+    assert!(
+        (g1 - g2).abs() < 2e-3 && g1 > 0.0,
+        "even gaps: {g1} vs {g2} ({rs:?})"
+    );
+}
+
+/// Select by Type picks the class: both Rectangle instances via the
+/// Master criterion (URS-1160), plus an Ellipse staying out.
+#[test]
+fn select_by_type_master_criterion() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let (_, b) = place_master(&mut h, 2);
+    let (_, e) = place_master(&mut h, 3); // Ellipse
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Select by Type").click();
+    h.run();
+    h.get_by_label_contains("Master").click();
+    h.run();
+    h.get_by_label_contains(&format!("Rectangle ({} shapes)", 2)).click();
+    h.run();
+    h.get_by_label("Select").click();
+    h.run();
+    let sel = h.state().debug_sel_set();
+    assert_eq!(sel.len(), 2, "both rectangles: {sel:?}");
+    assert!(sel.contains(&(page, a)) && sel.contains(&(page, b)));
+    assert!(!sel.contains(&(page, e)), "the ellipse stays out");
+}
+
+/// The Format Painter copies the source's resolved formatting onto the
+/// clicked shape in one undo step (URS-1053).
+#[test]
+fn format_painter_copies_formatting() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 3); // Ellipse — different master
+
+    // The source is A: select it (the ellipse placement left B
+    // selected), then arm the painter on A.
+    let asr0 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr0.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Format Painter").click();
+    h.run();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, bsr.center(), egui::PointerButton::Primary);
+    h.run();
+    // The painter wrote A's resolved cells onto B as literals.
+    for cell in ["LineWeight", "FillForegnd", "FillPattern"] {
+        let bv = h.state().debug_cell(page, b, cell);
+        assert!(
+            bv.is_some(),
+            "cell {cell} written onto B"
+        );
+    }
+    assert!(
+        h.state().debug_status().contains("formatting cells copied"),
+        "status notes the copy: {}",
+        h.state().debug_status()
+    );
+    // The painter is single-shot: another click just selects.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_sel(), Some((page, a)));
+}
+
+/// Arrow keys nudge the selection (URS-1217 slice): one press = one
+/// undoable 0.25 in move; Shift widens to 1 in.
+#[test]
+fn arrow_keys_nudge_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let x0 = cell_of(&h, page, a, "PinX");
+    let y0 = cell_of(&h, page, a, "PinY");
+
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    let x1 = cell_of(&h, page, a, "PinX");
+    assert!((x1 - x0 - 0.25).abs() < 1e-5, "right arrow: {x0} → {x1}");
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    let y1 = cell_of(&h, page, a, "PinY");
+    assert!((y1 - y0 - 0.25).abs() < 1e-5, "up arrow (y-up): {y0} → {y1}");
+
+    // Shift widens the step.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowRight);
+    h.run();
+    let x2 = cell_of(&h, page, a, "PinX");
+    assert!((x2 - x1 - 1.0).abs() < 1e-5, "shift widens: {x1} → {x2}");
+
+    // Each press undoes individually.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let x3 = cell_of(&h, page, a, "PinX");
+    assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
+}
+
+// ---- GitHub #113: the remaining slices -------------------------------------
+
+/// A picture inserts as a Foreign shape carrying real media: a PNG in,
+/// a media part + rel recorded, and the render path sees it.
+#[test]
+fn picture_inserts_as_foreign_shape_with_media() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // A 16×16 red PNG.
+    let png = {
+        let img = image::RgbaImage::from_pixel(16, 16, image::Rgba([200, 30, 30, 255]));
+        let mut b = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
+        b
+    };
+    h.state_mut().debug_insert_picture_bytes(&png);
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the picture shape landed");
+    let media = h.state().debug_media_parts();
+    assert_eq!(media.len(), 1, "one media part: {media:?}");
+    assert!(media[0].starts_with("visio/media/image"), "{media:?}");
+    // Natural size: 16 px / 96 dpi = 1/6 in.
+    let (page, pic) = h.state().debug_sel().expect("picture selected");
+    let w = cell_of(&h, page, pic, "Width");
+    assert!((w - 16.0 / 96.0).abs() < 1e-5, "natural width: {w}");
+    // Undo removes it (the media ref rides the model — still present,
+    // but the shape is gone).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0);
+}
+
+/// Copy as Picture produces a real PNG of the selection (URS-1200).
+#[test]
+fn copy_as_picture_encodes_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    // Context menu → Copy as Picture… → Copy.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Copy as Picture").click();
+    h.run();
+    h.get_by_label("Copy Picture").click();
+    h.run();
+    let len = h.state().debug_last_picture_len().expect("a PNG encoded");
+    assert!(len > 100, "a real PNG, {len} bytes");
+    assert!(
+        h.state().debug_status().contains("picture copied"),
+        "status: {}",
+        h.state().debug_status()
+    );
+}
+
+/// Page size: a preset writes PageWidth/PageHeight undoably (URS-1122).
+#[test]
+fn page_size_preset_applies_and_undoes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (w0, h0) = h.state().debug_page_size();
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label("Size").click();
+    h.run();
+    h.get_by_label("A4").click();
+    h.run();
+    let (w1, h1) = h.state().debug_page_size();
+    assert!((w1 - 8.27).abs() < 0.01 && (h1 - 11.69).abs() < 0.01, "A4: {w1}×{h1}");
+    // Orientation swaps (the dialog is still open — its radio).
+    h.get_by_label("Landscape").click();
+    h.run();
+    let (w2, h2) = h.state().debug_page_size();
+    assert!(
+        (w2 - h1).abs() < 0.01 && (h2 - w1).abs() < 0.01,
+        "swapped: {w2}×{h2}"
+    );
+    // Two undoes return to the original.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let (w3, h3) = h.state().debug_page_size();
+    assert!((w3 - w0).abs() < 0.01 && (h3 - h0).abs() < 0.01);
+}
+
+/// Background pages: assign, and the flag persists on the page index
+/// attrs (URS-1158) — the underlay raster renders beneath.
+#[test]
+fn background_page_assignment_and_underlay() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, _a) = place_master(&mut h, 2);
+    assert_eq!(h.state().debug_back_page(), None);
+    // A second page becomes the background of page 1... actually the
+    // CURRENT page gets the background; add a page, put a shape on it,
+    // switch back, assign.
+    // A second page carries the background content; AddPage switches
+    // to it (the tab strip's insert semantics).
+    let _page2 = h.state_mut().debug_add_page();
+    h.run();
+    h.run();
+    // The tab: exact label "Page-2" (the dialog row is longer).
+    h.get_by_label("Page-2").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "fresh page is empty");
+    let (p2, b) = place_master(&mut h, 2);
+    let _ = (p2, b);
+    // Switch back to page 1 and assign page 2 as its background.
+    h.get_by_label_contains("Page-1").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "page 1 kept its shape");
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Backgrounds").click();
+    h.run();
+    // The dialog lists the other page; pick it (row text has the id).
+    h.get_by_label_contains("(page").click();
+    h.run();
+    let bp = h.state().debug_back_page();
+    assert!(bp.is_some(), "background assigned");
+    // The underlay chain renders beneath across repaints without
+    // panic, and the flag persists.
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_back_page(), bp);
+}
+
+/// CodeRabbit pass over the branch: a two-shape move where BOTH ends
+/// of one connector are glued to moved shapes reroutes the connector
+/// once, from both new endpoints (the per-Connect race read stale
+/// opposite ends).
+#[test]
+fn moving_both_glued_shapes_reroutes_once_consistently() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+
+    // Move BOTH shapes as one selection.
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let ars = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let brs = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, ars.center(), egui::PointerButton::Primary);
+    h.run();
+    h.hover_at(brs.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2);
+    // Drag B (a selection member) — both move together.
+    drag_naturally(&mut h, brs.center(), egui::vec2(-40.0, 30.0));
+
+    // Both attachments followed their shapes and the frame matches
+    // the endpoints: Pin is the midpoint, Width/Height the deltas.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    let bx = cell_of(&h, page, conn, "BeginX");
+    let by = cell_of(&h, page, conn, "BeginY");
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // Begin attaches on A's left edge; end on B's right edge.
+    assert!(
+        (bx - ar.0).abs() < 1e-5,
+        "begin followed A: {bx} vs {}",
+        ar.0
+    );
+    assert!(
+        (ex - (br.0 + br.2)).abs() < 1e-5,
+        "end followed B: {ex} vs {}",
+        br.0 + br.2
+    );
+    let px = cell_of(&h, page, conn, "PinX");
+    let py = cell_of(&h, page, conn, "PinY");
+    let w = cell_of(&h, page, conn, "Width");
+    let hgt = cell_of(&h, page, conn, "Height");
+    assert!((px - (bx + ex) / 2.0).abs() < 1e-5, "frame matches ends");
+    assert!((py - (by + ey) / 2.0).abs() < 1e-5);
+    assert!((w - (ex - bx)).abs() < 1e-5);
+    assert!((hgt - (ey - by)).abs() < 1e-5);
+}
+
+/// CodeRabbit pass: a second picture on the same page gets its own
+/// relationship id (both render, both persist distinct parts).
+#[test]
+fn second_picture_gets_a_unique_relationship() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let png = |r: u8| {
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([r, 40, 40, 255]));
+        let mut b = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
+        b
+    };
+    h.state_mut().debug_insert_picture_bytes(&png(30));
+    h.run();
+    // Deselect so the second insert is independent.
+    let deselect = h.state().debug_canvas_rect().left_top() + egui::vec2(40.0, 40.0);
+    click_at(&mut h, deselect, egui::PointerButton::Primary);
+    h.run();
+    h.state_mut().debug_insert_picture_bytes(&png(220));
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "both pictures landed");
+    let media = h.state().debug_media_parts();
+    assert_eq!(media.len(), 2, "two distinct parts: {media:?}");
+    assert_ne!(media[0], media[1]);
 }

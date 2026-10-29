@@ -8,6 +8,9 @@ pub mod canvas;
 pub mod cmd;
 #[doc(hidden)]
 pub mod group_fixture;
+pub mod align;
+pub mod connectors;
+pub mod guides;
 pub mod icontex;
 mod layers;
 pub mod os_theme;
@@ -17,6 +20,7 @@ mod rasterpool;
 pub mod quickshapes;
 pub mod recent;
 pub mod ribbon;
+pub mod snap;
 pub mod stencil;
 pub mod svgimg;
 pub mod textedit;

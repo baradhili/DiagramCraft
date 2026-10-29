@@ -26,6 +26,27 @@ pub enum Action {
     ToggleRulers,
     ToggleComments,
     ToggleUnits,
+    ToggleDynamicGrid,
+    SnapGlue,
+    PointerTool,
+    ConnectorTool,
+    AlignLeft,
+    AlignHCenter,
+    AlignRight,
+    AlignTop,
+    AlignVCenter,
+    AlignBottom,
+    AlignToPage,
+    DistributeH,
+    DistributeV,
+    SelectAll,
+    SelectByType,
+    FormatPainter,
+    PageOrientation,
+    PageSizeDialog,
+    CopyAsPicture,
+    InsertPicture,
+    PageBackgrounds,
     ShowShapeSheet,
     Macros,
     FillMenu,
@@ -129,6 +150,13 @@ pub enum Icon {
     Units,
     Delete,
     TellMe,
+    Magnet,
+    Connector,
+    AlignTop,
+    AlignMiddle,
+    AlignBottom,
+    DistH,
+    DistV,
 }
 
 impl Icon {
@@ -198,6 +226,13 @@ impl Icon {
             Icon::Units => "units",
             Icon::Delete => "delete",
             Icon::TellMe => "lightbulb",
+            Icon::Magnet => "magnet",
+            Icon::Connector => "connector",
+            Icon::AlignTop => "format-vertical-align-top",
+            Icon::AlignMiddle => "format-vertical-align-center",
+            Icon::AlignBottom => "format-vertical-align-bottom",
+            Icon::DistH => "arrow-expand-horizontal",
+            Icon::DistV => "arrow-expand-vertical",
         };
         Some(a)
     }
@@ -237,6 +272,11 @@ impl Icon {
                 Color32::from_rgb(0x2e, 0x8b, 0x57)
             }
             Icon::TellMe => Color32::from_rgb(0x82, 0x82, 0x82),
+            Icon::Magnet => Color32::from_rgb(0x2e, 0x75, 0xb6),
+            Icon::Connector => Color32::from_rgb(0x2e, 0x75, 0xb6),
+            Icon::AlignTop | Icon::AlignMiddle | Icon::AlignBottom | Icon::DistH | Icon::DistV => {
+                Color32::from_rgb(0x42, 0x42, 0x42)
+            }
             _ => Color32::from_rgb(0x42, 0x42, 0x42),
         }
     }
@@ -1070,6 +1110,84 @@ impl Icon {
                 p.line_segment(
                     [c + Vec2::new(-2.0, 5.0), c + Vec2::new(2.0, 5.0)],
                     Stroke::new(1.4, gray),
+                );
+            }
+            Icon::AlignTop | Icon::AlignMiddle | Icon::AlignBottom => {
+                let dy = match self {
+                    Icon::AlignTop => -6.0,
+                    Icon::AlignBottom => 6.0,
+                    _ => 0.0,
+                };
+                p.line_segment(
+                    [c + Vec2::new(-6.0, dy), c + Vec2::new(6.0, dy)],
+                    Stroke::new(1.6, gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, -6.0), c + Vec2::new(0.0, 6.0)],
+                    Stroke::new(1.2, gray),
+                );
+            }
+            Icon::DistH | Icon::DistV => {
+                let horiz = matches!(self, Icon::DistH);
+                let (a, b) = if horiz {
+                    (Vec2::new(-6.0, 0.0), Vec2::new(6.0, 0.0))
+                } else {
+                    (Vec2::new(0.0, -6.0), Vec2::new(0.0, 6.0))
+                };
+                p.line_segment([c + a, c + b], Stroke::new(1.6, gray));
+                for v in [a, b] {
+                    p.line_segment([c + v + Vec2::new(-2.0, 4.0), c + v], Stroke::new(1.2, gray));
+                    p.line_segment([c + v + Vec2::new(-2.0, -4.0), c + v], Stroke::new(1.2, gray));
+                }
+            }
+            Icon::Connector => {
+                // diagonal line + arrow tip (fallback; MDI ships)
+                p.line_segment(
+                    [c + Vec2::new(-6.0, 6.0), c + Vec2::new(5.0, -5.0)],
+                    Stroke::new(2.0, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.0, -5.0), c + Vec2::new(0.5, -5.5)],
+                    Stroke::new(2.0, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.0, -5.0), c + Vec2::new(5.5, -0.5)],
+                    Stroke::new(2.0, blue),
+                );
+            }
+            Icon::Magnet => {
+                // horseshoe magnet (fallback; the MDI glyph is shipped):
+                // two prongs over a bezier heel, blue pole tips.
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(-3.0, -1.0), Vec2::new(3.0, 10.0)),
+                    0.5,
+                    gray,
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(3.0, -1.0), Vec2::new(3.0, 10.0)),
+                    0.5,
+                    gray,
+                );
+                p.line_segment(
+                    [
+                        c + Vec2::new(-4.5, 4.0),
+                        c + Vec2::new(0.0, 8.5),
+                    ],
+                    Stroke::new(3.0, gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, 8.5), c + Vec2::new(4.5, 4.0)],
+                    Stroke::new(3.0, gray),
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(-3.0, -6.0), Vec2::new(4.0, 3.0)),
+                    0.5,
+                    blue,
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(3.0, -6.0), Vec2::new(4.0, 3.0)),
+                    0.5,
+                    blue,
                 );
             }
         }

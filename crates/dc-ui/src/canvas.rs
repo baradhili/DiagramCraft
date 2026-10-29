@@ -149,6 +149,27 @@ const RULER_SUBDIV: u32 = 4;
 /// never smear together when zooming out.
 const RULER_MIN_TICK_PX: f64 = 6.0;
 
+/// The displayed grid's line spacing (page inches) — one definition
+/// shared by the grid painting and the snap engine's grid target
+/// (#109).
+pub fn grid_step_in(view: &View) -> f64 {
+    view.unit.to_in(5.0)
+}
+
+/// The finest ruler subdivision interval currently drawn (page
+/// inches), shared by the rulers and the snap engine's
+/// ruler-subdivision target (#109): the tiered-tick logic of #62,
+/// which drops the finer halves/quarters as the zoom shrinks.
+pub fn ruler_interval_in(view: &View) -> f64 {
+    let ppi = view.px_per_in();
+    let dupx = view.unit.from_in(1.0) as f32 / ppi; // display units per px
+    let step = tick_step(dupx as f64, 45.0);
+    let px_per_major = step / dupx as f64;
+    let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
+    let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
+    view.unit.to_in(step / finest as f64)
+}
+
 /// Outcome of interacting with the canvas this frame.
 pub struct CanvasOut {
     pub page_rect: Rect,
@@ -179,6 +200,13 @@ pub struct CanvasOut {
     /// Marquee (empty-area drag) finished: rect in page inches, y-up,
     /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
+    /// A ruler drag released over the page (#113 guides slice): the
+    /// guide kind and its page position (inches, y-up).
+    pub guide_drop: Option<(GuideSource, (f64, f64))>,
+    /// The Connector Tool's gesture finished (#108): (press point,
+    /// release point), page inches y-up. Valid only when the release
+    /// landed on the page.
+    pub connector_drop: Option<((f64, f64), (f64, f64))>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,
     /// Shift held at click time (multi-select toggle).
@@ -196,6 +224,31 @@ pub enum Corner {
     BottomLeft,
     BottomRight,
 }
+
+/// Which ruler a guide is dragged out of (#113 guides slice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideSource {
+    /// The left (vertical) ruler → a vertical guide.
+    Vertical,
+    /// The top (horizontal) ruler → a horizontal guide.
+    Horizontal,
+    /// The ruler corner square → a guide point.
+    Point,
+}
+
+/// A guide to paint on the canvas overlay (page inches, y-up) —
+/// guides never raster as page ink (Visio: no print, no export).
+#[derive(Debug, Clone, Copy)]
+pub struct GuideFx {
+    pub id: i64,
+    pub vertical: Option<bool>, // None = guide point
+    pub x: f64,
+    pub y: f64,
+    pub selected: bool,
+}
+
+/// The guide color: Visio's teal guide lines.
+const GUIDE: Color32 = Color32::from_rgb(0x00, 0x8F, 0xA3);
 
 /// One grabbable selection handle (GitHub #59). 2D shapes expose the
 /// four resize corners; 1D shapes (lines/connectors, resolved
@@ -247,8 +300,9 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
 /// Live drag feedback (#96) — drawn above the layers, under nothing:
 /// ghost layer quads (moved/stretched textures; a move preview is a
 /// quad translation, never a re-raster), dashed screen-space outline
-/// fallbacks (also used for the moved selection frame), and live 1D
-/// line previews. Default/empty = no drag in progress.
+/// fallbacks (also used for the moved selection frame), live 1D line
+/// previews, and the dynamic-grid hints of #109. Default/empty = no
+/// drag in progress.
 #[derive(Default)]
 pub struct DragFx {
     /// Layer textures at their live positions (page bbox space).
@@ -258,6 +312,29 @@ pub struct DragFx {
     pub outlines: Vec<Rect>,
     /// Live 1D endpoint previews (screen px segment).
     pub lines: Vec<(Pos2, Pos2)>,
+    /// Dynamic-grid alignment/spacing hints (#109, URS-1088), in page
+    /// inches y-up — painted as dashed full-canvas alignment lines and
+    /// labeled gap segments while a drag is live.
+    pub hints: Vec<crate::snap::Hint>,
+}
+
+/// The dynamic-grid hint color: Visio's blue dashed alignment aid.
+const HINT: Color32 = Color32::from_rgb(0x2E, 0x75, 0xB6);
+
+/// A dashed segment (`on`/`off` in px), the dynamic-grid line style.
+fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
+    let len = (b - a).length();
+    if len < 1.0 {
+        return;
+    }
+    let dir = (b - a) / len;
+    let (on, off) = (6.0, 4.0);
+    let mut t = 0.0;
+    while t < len {
+        let t2 = (t + on).min(len);
+        p.line_segment([a + dir * t, a + dir * t2], Stroke::new(1.0, color));
+        t += on + off;
+    }
 }
 
 /// Draw the whole canvas area (fills `ui`).
@@ -271,6 +348,9 @@ pub fn show(
     extra_sel_rects: &[Rect], // other multi-selection members
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
+    guides: &[GuideFx],      // #113: guide overlay, above ink
+    underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
+    connector_tool: bool,    // #108: the Connector Tool is active
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
@@ -287,6 +367,8 @@ pub fn show(
         handle_drag_done: None,
         press_page_pos: None,
         marquee_done: None,
+        guide_drop: None,
+        connector_drop: None,
         marquee_live: None,
         shift_click: false,
         ctrl_click: false,
@@ -350,6 +432,8 @@ pub fn show(
     let mem_handle = egui::Id::unique("dc-handle-drag");
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
+    let mem_guide = egui::Id::unique("dc-guide-drag");
+    let mem_connector = egui::Id::unique("dc-connector-drag");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -368,6 +452,27 @@ pub fn show(
             // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else if connector_tool {
+                // The Connector Tool (#108) owns the gesture: press
+                // anywhere (on a shape = glue start), release on the
+                // page to draw the connector.
+                let page_pos = screen_to_page(p, view, page);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_connector, page_pos));
+            } else if view.show_rulers
+                && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
+            {
+                // A ruler drag pulls a guide out (#113): the corner
+                // square yields a guide point, the left band below it
+                // a vertical guide, the top band a horizontal one.
+                let src = if p.x < canvas_r.left() + RULER && p.y < canvas_r.top() + RULER {
+                    GuideSource::Point
+                } else if p.x < canvas_r.left() + RULER {
+                    GuideSource::Vertical
+                } else {
+                    GuideSource::Horizontal
+                };
+                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_guide, src));
             } else if !ui.input(|i| i.modifiers.command) {
                 let page_pos = screen_to_page(p, view, page);
                 if hit_shape(page_pos) {
@@ -403,6 +508,59 @@ pub fn show(
         }
     }
 
+    // Guide drag (#113): armed on a ruler press above; a dashed
+    // preview line/point follows the pointer while the button is
+    // held; releasing over the page drops the guide, releasing
+    // anywhere else cancels (Visio drops only onto the page).
+    let guide_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<GuideSource>(mem_guide));
+    let mut guide_live: Option<(GuideSource, (f64, f64))> = None;
+    if let Some(src) = guide_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx().memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
+            if primary_released {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let page_pos = screen_to_page(p, view, page);
+                    if page_pos.0 >= 0.0
+                        && page_pos.0 <= page.w_in
+                        && page_pos.1 >= 0.0
+                        && page_pos.1 <= page.h_in
+                    {
+                        out.guide_drop = Some((src, page_pos));
+                    }
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            guide_live = Some((src, screen_to_page(p, view, page)));
+        }
+    }
+
+    // Connector Tool gesture (#108): rubber line from the press point
+    // to the pointer; release on the page draws the connector (the
+    // app decides glue from both endpoints), release off the page
+    // cancels.
+    let connector_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<(f64, f64)>(mem_connector));
+    let mut connector_live: Option<((f64, f64), (f64, f64))> = None;
+    if let Some(from) = connector_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<(f64, f64)>(mem_connector));
+            if primary_released {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let to = screen_to_page(p, view, page);
+                    if to.0 >= 0.0 && to.0 <= page.w_in && to.1 >= 0.0 && to.1 <= page.h_in {
+                        out.connector_drop = Some((from, to));
+                    }
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            connector_live = Some((from, screen_to_page(p, view, page)));
+        }
+    }
+
     // Marquee: armed on an empty-page press above; live band while the
     // button is held, committed on release. A degenerate (zero-area)
     // band is just a click on empty page — the click path already
@@ -433,6 +591,10 @@ pub fn show(
         }
     }
 
+    // The Connector Tool draws with a crosshair (Visio).
+    if connector_tool {
+        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+    }
     // Handle cursors.
     if let Some(hp) = resp.hover_pos() {
         if let Some(c) = handle_at(hp) {
@@ -478,6 +640,23 @@ pub fn show(
         Stroke::new(1.0, t.page_edge),
         egui::StrokeKind::Middle,
     );
+    // Background pages (#113, URS-1158): stacked beneath everything
+    // drawn on this page — deepest background first.
+    for q in underlays {
+        let tl = page_to_screen(q.bbox.0, page.h_in - q.bbox.1, view, page);
+        let br = page_to_screen(
+            q.bbox.0 + q.bbox.2,
+            page.h_in - (q.bbox.1 + q.bbox.3),
+            view,
+            page,
+        );
+        p.image(
+            q.tex,
+            Rect::from_two_pos(tl, br),
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
     // Per-shape layers (#93), z-order = model order: each quad is the
     // layer texture at its bounds (y-down viewBox inches —
     // page_to_screen flips to its y-up convention).
@@ -499,8 +678,7 @@ pub fn show(
 
     // Grid (5 mm spacing in display units).
     if view.show_grid {
-        let step_in = view.unit.to_in(5.0);
-        let step_px = step_in as f32 * view.px_per_in();
+        let step_px = grid_step_in(view) as f32 * view.px_per_in();
         if step_px >= 5.0 {
             let mut x = out.page_rect.left() + step_px;
             while x < out.page_rect.right() {
@@ -525,6 +703,81 @@ pub fn show(
                 y += step_px;
             }
         }
+    }
+
+    // Guides (#113): dashed teal lines / point crosshairs above the
+    // ink, below the selection chrome. A selected guide draws solid;
+    // a live ruler-drag preview follows the pointer.
+    let draw_guide = |g: GuideFx, live: bool| {
+        let color = if g.selected { Color32::from_rgb(0x00, 0x6D, 0x7D) } else { GUIDE };
+        match g.vertical {
+            Some(true) => {
+                let x = page_to_screen(g.x, 0.0, view, page).x;
+                let (a, b) = (
+                    Pos2::new(x, out.page_rect.top()),
+                    Pos2::new(x, out.page_rect.bottom()),
+                );
+                if g.selected || live {
+                    p.line_segment([a, b], Stroke::new(1.2, color));
+                } else {
+                    dashed(&p, a, b, color);
+                }
+            }
+            Some(false) => {
+                let y = page_to_screen(0.0, g.y, view, page).y;
+                let (a, b) = (
+                    Pos2::new(out.page_rect.left(), y),
+                    Pos2::new(out.page_rect.right(), y),
+                );
+                if g.selected || live {
+                    p.line_segment([a, b], Stroke::new(1.2, color));
+                } else {
+                    dashed(&p, a, b, color);
+                }
+            }
+            None => {
+                // Guide point: a small crosshair.
+                let c = page_to_screen(g.x, g.y, view, page);
+                let r = if g.selected || live { 7.0 } else { 5.0 };
+                p.line_segment(
+                    [c + Vec2::new(-r, 0.0), c + Vec2::new(r, 0.0)],
+                    Stroke::new(1.2, color),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, -r), c + Vec2::new(0.0, r)],
+                    Stroke::new(1.2, color),
+                );
+            }
+        }
+    };
+    for g in guides {
+        draw_guide(*g, false);
+    }
+    if let Some((src, pos)) = guide_live {
+        let g = match src {
+            GuideSource::Vertical => GuideFx {
+                id: -1,
+                vertical: Some(true),
+                x: pos.0,
+                y: 0.0,
+                selected: false,
+            },
+            GuideSource::Horizontal => GuideFx {
+                id: -1,
+                vertical: Some(false),
+                x: 0.0,
+                y: pos.1,
+                selected: false,
+            },
+            GuideSource::Point => GuideFx {
+                id: -1,
+                vertical: None,
+                x: pos.0,
+                y: pos.1,
+                selected: false,
+            },
+        };
+        draw_guide(g, true);
     }
 
     // Selection frame (page-inch rect → screen).
@@ -781,6 +1034,48 @@ pub fn show(
         }
     }
 
+    // Connector Tool rubber line (#108): press point → pointer, with a
+    // hollow end marker where the connector's arrowhead will land.
+    if let Some((from, to)) = connector_live {
+        let a = page_to_screen(from.0, from.1, view, page);
+        let b = page_to_screen(to.0, to.1, view, page);
+        dashed(&p, a, b, HINT);
+        p.circle_stroke(b, 4.0, Stroke::new(1.2, HINT));
+    }
+
+    // Dynamic-grid hints (#109): dashed full-canvas alignment lines
+    // and labeled equal-spacing gaps, Visio's drag-time feedback.
+    for hint in &drag.hints {
+        match *hint {
+            crate::snap::Hint::Align { vertical, at } => {
+                let (a, b) = if vertical {
+                    let x = page_to_screen(at, 0.0, view, page).x;
+                    (Pos2::new(x, canvas_r.top()), Pos2::new(x, canvas_r.bottom()))
+                } else {
+                    let y = page_to_screen(0.0, at, view, page).y;
+                    (Pos2::new(canvas_r.left(), y), Pos2::new(canvas_r.right(), y))
+                };
+                dashed(&p, a, b, HINT);
+            }
+            crate::snap::Hint::Spacing { a, b, len_in } => {
+                let a0 = page_to_screen(a.0, a.1, view, page);
+                let a1 = page_to_screen(a.2, a.3, view, page);
+                let b0 = page_to_screen(b.0, b.1, view, page);
+                let b1 = page_to_screen(b.2, b.3, view, page);
+                dashed(&p, a0, a1, HINT);
+                dashed(&p, b0, b1, HINT);
+                let mid = Pos2::new((a0.x + a1.x) / 2.0, (a0.y + a1.y) / 2.0);
+                p.text(
+                    mid + Vec2::new(3.0, -3.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    view.unit.fmt(len_in),
+                    egui::FontId::proportional(10.0),
+                    HINT,
+                );
+            }
+        }
+    }
+
     // Marquee (live rubber band while selecting on empty page).
     if let Some(mr) = out.marquee_live {
         p.rect_stroke(
@@ -893,12 +1188,14 @@ fn draw_rulers(
     // half and quarter subdivisions, each minor tier dropped when its
     // pixel spacing would smear. Ticks are placed on the finest kept
     // interval and classified by integer index, so no float-multiple
-    // drift decides tiers.
+    // drift decides tiers. The interval computation lives in
+    // `ruler_interval_in` so the snap engine (#109) targets exactly
+    // the subdivisions the ruler shows.
     let step = tick_step(dupx as f64, 45.0);
     let px_per_major = step / dupx as f64;
     let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
     let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
-    let interval = step / finest as f64;
+    let interval = view.unit.from_in(ruler_interval_in(view));
     let tier_for = |k: i64| -> TickTier {
         *tiers
             .iter()

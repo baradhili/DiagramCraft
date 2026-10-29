@@ -18,6 +18,7 @@ use vsdx::model::{Document, Shape};
 use crate::canvas::{self, Handle, HandleId, PageGeom, View};
 use crate::cmd::MoveShape;
 use dc_core::AddMasterInstance;
+use dc_core::connects::ConnectsHost;
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
@@ -152,6 +153,54 @@ pub struct App {
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
+    /// Snap & glue settings (#109): the document's DocumentSettings,
+    /// mirrored in UI state; every toggle writes through to the doc.
+    snap: crate::snap::SnapSettings,
+    /// The Snap & Glue dialog is open (View ▸ Visual Aids, #109).
+    snap_dlg_open: bool,
+    /// Dynamic-grid hints for the frame in progress (#109, URS-1088),
+    /// recomputed by `update_drag` while a move drag is live and
+    /// painted by the canvas from `DragFx::hints`.
+    snap_live: Vec<crate::snap::Hint>,
+    /// The active mouse tool (#108).
+    tool: Tool,
+    /// #110: align against the page instead of the first-selected
+    /// shape (URS-1149's option).
+    align_to_page: bool,
+    /// The Select by Type dialog is open (#110, URS-1160).
+    selby_open: bool,
+    /// Select-by-Type criterion: 0 shape type, 1 master, 2 layer.
+    selby_criterion: u8,
+    /// Select-by-Type chosen value.
+    selby_value: String,
+    /// The Page Setup dialog is open (#113, URS-1122).
+    pagesetup_open: bool,
+    /// The Copy as Picture dialog is open (#113, URS-1200).
+    copypic_open: bool,
+    /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
+    copypic_factor: u32,
+    /// Text waiting for the OS clipboard (#113, URS-1113): copied on
+    /// the next frame's update (the copy path has no Context).
+    os_clipboard_text: Option<String>,
+    /// An in-flight OS clipboard image probe (#113): RGBA result.
+    os_image_rx: Option<Receiver<Option<OsImage>>>,
+    /// The Backgrounds dialog is open (#113, URS-1158).
+    backgrounds_open: bool,
+    /// Background-page underlay cache (#113): one raster per chain
+    /// level, keyed (bg page, content version, ppi bucket) — the
+    /// handle converts to a quad's TextureId per frame.
+    bg_underlays: Vec<(i64, u64, u32, egui::TextureHandle)>,
+    /// The last copy-as-picture PNG (test hook).
+    last_picture: Option<Vec<u8>>,
+    /// The Format Painter is armed for one target (#110, URS-1053):
+    /// the source shape whose resolved formatting the next shape
+    /// click receives.
+    painter_armed: Option<i64>,
+    /// Guide-glue pending on the live drag (#113): the guide the
+    /// snapped axis came from and which pin axes to glue. Written by
+    /// `apply_drag_snap` when glue-to-guides is on, consumed by the
+    /// move commit as Visio's `PinX = Sheet.N!PinX` formulas.
+    drag_glue: Option<(i64, bool, bool)>,
     shot_frames: u32,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
@@ -250,6 +299,8 @@ enum PendingDialog {
     SaveAs(Receiver<Option<PathBuf>>),
     /// "Open Existing Stencil…" (.vssx into the Shapes pane, #83).
     OpenStencil(Receiver<Option<PathBuf>>),
+    /// Insert ▸ Pictures (#113): a picked PNG/JPEG.
+    OpenPicture(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
@@ -258,6 +309,9 @@ enum PendingKind {
     SaveAs,
     /// "Open Existing Stencil…" from the Shapes pane (#83).
     OpenStencil,
+    /// Insert ▸ Pictures (#113, URS-1012): a PNG/JPEG file picked to
+    /// become a Foreign shape.
+    OpenPicture,
 }
 
 /// Backstage rail command.
@@ -302,6 +356,24 @@ impl BackPage {
             _ => return None,
         })
     }
+}
+
+/// Snap distance in screen px (Visio's default snap strength feels
+/// like this at 100 %): converted to page inches per frame by
+/// `snap_ctx_of` (#109).
+const SNAP_STRENGTH_PX: f32 = 8.0;
+
+/// An OS clipboard image probe's payload: (w, h, RGBA bytes).
+type OsImage = (u32, u32, Vec<u8>);
+
+/// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
+/// and drags; the Connector Tool (#108) draws connectors. Esc returns
+/// to the pointer, like Visio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    #[default]
+    Pointer,
+    Connector,
 }
 
 struct DragState {
@@ -382,6 +454,24 @@ impl App {
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
+            snap: crate::snap::SnapSettings::default(),
+            snap_dlg_open: false,
+            snap_live: Vec::new(),
+            drag_glue: None,
+            tool: Tool::Pointer,
+            align_to_page: false,
+            selby_open: false,
+            selby_criterion: 0,
+            selby_value: String::new(),
+            pagesetup_open: false,
+            copypic_open: false,
+            copypic_factor: 2,
+            os_clipboard_text: None,
+            os_image_rx: None,
+            backgrounds_open: false,
+            bg_underlays: Vec::new(),
+            last_picture: None,
+            painter_armed: None,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -526,6 +616,7 @@ impl App {
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
                 self.ed = Some(ed);
+                self.reload_snap_settings();
                 self.path = path;
                 self.dirty = false;
                 self.version += 1;
@@ -1004,6 +1095,7 @@ impl App {
         self.new_after_save = false;
         self.close_after_save = None;
         self.ed = Some(Editor::new_blank());
+        self.reload_snap_settings();
         self.path = PathBuf::new();
         self.dirty = false;
         self.version += 1;
@@ -1055,6 +1147,9 @@ impl App {
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
                         .save_file(),
+                    PendingKind::OpenPicture => rfd::FileDialog::new()
+                        .add_filter("Pictures", &["png", "jpg", "jpeg"])
+                        .pick_file(),
                 },
             };
             let _ = tx.send(picked);
@@ -1063,6 +1158,7 @@ impl App {
             PendingKind::Open => PendingDialog::Open(rx),
             PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
+            PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
         });
     }
 
@@ -1076,7 +1172,8 @@ impl App {
         let (path, again) = match &dialog {
             PendingDialog::Open(rx)
             | PendingDialog::SaveAs(rx)
-            | PendingDialog::OpenStencil(rx) => match rx.try_recv() {
+            | PendingDialog::OpenStencil(rx)
+            | PendingDialog::OpenPicture(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -1096,6 +1193,7 @@ impl App {
         match dialog {
             PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
+            PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -1155,6 +1253,9 @@ impl App {
     }
 
     /// Borrow-free bbox (page inches, y-up) for marquee gating.
+    /// Normalized: the corpus connector model carries SIGNED
+    /// Width/Height (`GUARD(EndX-BeginX)`), so the origin is min-corner
+    /// and the extents absolute (#108).
     fn shape_rect_static(doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
         let chain = shape_chain(doc, page_id, s.id).ok()?;
         let get = |n: &str| doc.resolve_cell(s, &chain, n).and_then(|c| c.numeric());
@@ -1163,12 +1264,51 @@ impl App {
         let h = get("Height").unwrap_or(1.0);
         let lx = get("LocPinX").unwrap_or(w / 2.0);
         let ly = get("LocPinY").unwrap_or(h / 2.0);
-        Some((pin_x - lx, pin_y - ly, w, h))
+        let (x, y) = (pin_x - lx, pin_y - ly);
+        Some((
+            x.min(x + w),
+            y.min(y + h),
+            w.abs(),
+            h.abs(),
+        ))
     }
 
     fn shape_hit(&self, page_pos: (f64, f64)) -> Option<i64> {
         let ed = self.ed()?;
+        // Guides sit above shapes in hit priority (#113): a press on
+        // the line (within the screen threshold) grabs the guide, per
+        // Visio. Not while group-editing — guides are page furniture.
+        if self.group_edit.is_empty() {
+            let threshold = 5.0 / self.view.px_per_in() as f64;
+            if let Some(g) = crate::guides::guide_hit(&self.page_guides(), page_pos, threshold) {
+                return Some(g.id);
+            }
+        }
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        // Connectors hit by their LINE, not a degenerate bbox (#108 —
+        // the corpus model's bbox can be a zero-height band).
+        if self.group_edit.is_empty() {
+            let threshold = 5.0 / self.view.px_per_in() as f64;
+            for shape in page.shapes.iter().rev() {
+                if !crate::connectors::is_connector(shape) {
+                    continue;
+                }
+                if let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(shape, &chain, n)
+                            .and_then(|c| c.numeric())
+                    };
+                    if let (Some(bx), Some(by), Some(ex), Some(ey)) =
+                        (g("BeginX"), g("BeginY"), g("EndX"), g("EndY"))
+                    {
+                        if segment_hit((bx, by), (ex, ey), page_pos, threshold) {
+                            return Some(shape.id);
+                        }
+                    }
+                }
+            }
+        }
         // Group-edit mode (#78): only the innermost open group's
         // members are on the canvas — clicks resolve against them
         // (nested-aware rects), never falling through to page shapes.
@@ -1224,6 +1364,11 @@ impl App {
         let (page_id, shape_id) = self.sel?;
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        // A selected guide draws as the guide overlay itself (#113):
+        // no selection frame, no handles.
+        if crate::guides::is_guide(shape) {
+            return None;
+        }
         let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
         let geom = self.page_geom();
         Some(Rect::from_min_size(
@@ -1258,6 +1403,11 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return Vec::new();
         };
+        // Guides drag by their body (#113) — no resize/endpoint
+        // handles (tilting a guide is not a thing).
+        if crate::guides::is_guide(sh) {
+            return Vec::new();
+        }
         let nested = chain.len() >= 2;
         let page_h = Self::page_height(ed, page_id);
         let to_page = |p: (f64, f64)| -> (f64, f64) {
@@ -1495,6 +1645,37 @@ impl App {
             if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
+            // Esc leaves the Connector Tool for the pointer (Visio),
+            // and disarms the Format Painter (#110).
+            if i.key_pressed(egui::Key::Escape) && !kb_owned {
+                if self.tool == Tool::Connector {
+                    self.tool = Tool::Pointer;
+                }
+                if self.painter_armed.is_some() {
+                    self.painter_armed = None;
+                    self.status = "format painter cancelled".into();
+                }
+            }
+            // Ctrl+A selects the page (#110, URS-1160).
+            if ctrl && i.key_pressed(egui::Key::A) && !kb_owned {
+                self.select_all();
+            }
+            // Arrow-key nudging (#110, URS-1217 keyboard slice):
+            // arrows move the selection, Shift widens the step.
+            if !kb_owned && self.sel.is_some() {
+                let step = if i.modifiers.shift { 1.0 } else { 0.25 };
+                let nudge = [
+                    (egui::Key::ArrowLeft, (-step, 0.0)),
+                    (egui::Key::ArrowRight, (step, 0.0)),
+                    (egui::Key::ArrowUp, (0.0, step)),
+                    (egui::Key::ArrowDown, (0.0, -step)),
+                ];
+                for (key, (dx, dy)) in nudge {
+                    if i.key_pressed(key) {
+                        self.nudge_selection(dx, dy);
+                    }
+                }
+            }
             // Shape clipboard / duplicate / text edit (Visio keys). Not
             // while a text field owns the keyboard.
             if !kb_owned && self.sel.is_some() {
@@ -1559,7 +1740,11 @@ impl App {
             // one undo restores everything.
             if let Some(ed) = self.ed() {
                 cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page_id, &ids));
+                for sid in &ids {
+                    cmds.extend(self.guide_glue_release_cmds(page_id, *sid));
+                }
             }
+            cmds.extend(self.connect_cleanup_cmds(page_id, &ids));
             let n = ids.len();
             self.apply(Macro::new(format!("delete {n} shapes"), cmds));
         } else {
@@ -1571,10 +1756,14 @@ impl App {
     }
 
     /// Delete a single shape, folding membership-row cleanup into the
-    /// same undo step when it is a container (#138).
+    /// same undo step when it is a container (#138) and glue-release
+    /// when it is a guide (#113: dependents keep their position, the
+    /// pin formulas referencing the gone guide are stripped).
     fn delete_one(&mut self, page_id: i64, shape_id: i64) {
         let mut cmds: Vec<Box<dyn dc_core::Command>> =
             vec![Box::new(RemoveShape::new(page_id, shape_id))];
+        cmds.extend(self.guide_glue_release_cmds(page_id, shape_id));
+        cmds.extend(self.connect_cleanup_cmds(page_id, &[shape_id]));
         if let Some(ed) = self.ed() {
             cmds.extend(dc_core::container_membership_cleanup(
                 &ed.doc,
@@ -1779,6 +1968,9 @@ impl App {
             nw / w,
             nh / h,
         ));
+        if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
+            cmds.push(r);
+        }
         self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
         if let Some(note) = guard_note {
             self.status = note;
@@ -2312,6 +2504,1716 @@ impl App {
         Box::new(Macro::new(format!("move line shape {sid}"), cmds))
     }
 
+    // -- snap & glue (GitHub #109) ----------------------------------------
+
+    /// Reload the snap & glue toggles from the document (open / new /
+    /// after any model-level settings change).
+    fn reload_snap_settings(&mut self) {
+        self.snap = self
+            .ed
+            .as_ref()
+            .and_then(|e| e.doc.doc_snap_glue())
+            .map(crate::snap::SnapSettings::from_doc)
+            .unwrap_or_default();
+    }
+
+    /// Write the current toggles into the document. Settings are
+    /// document state, not drawing edits, so they never enter the
+    /// undo history (Visio's behavior — Snap & Glue has no undo).
+    fn apply_snap_settings(&mut self) {
+        if let Some(ed) = self.ed.as_mut() {
+            ed.doc.set_doc_snap_glue(self.snap.to_doc());
+            self.dirty = true;
+        }
+    }
+
+    /// The snap-side description of every top-level shape except
+    /// `excluded` (the dragged shape, its co-selected group, and any
+    /// container members riding along): alignment box, own geometry
+    /// vertices, and connection points — the shape's own rows first,
+    /// the master's for instances (Visio stencils define them on the
+    /// master, like the #137 geometry inheritance note).
+    fn snap_targets(&self, page_id: i64, excluded: &[i64]) -> Vec<crate::snap::SnapTarget> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| !excluded.contains(&s.id))
+            .filter_map(|s| {
+                let rect = self.shape_rect(&ed.doc, page_id, s)?;
+                let mut t = crate::snap::SnapTarget {
+                    id: s.id,
+                    rect,
+                    ..Default::default()
+                };
+                // Own geometry vertices (#137's mapping: shape-local
+                // y-up onto the chain-mapped bbox origin).
+                for geo in s.sheet.sections_named("Geometry") {
+                    for row in &geo.rows {
+                        let point_row = matches!(
+                            row.t.as_deref().unwrap_or(""),
+                            "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo"
+                                | "SplineKnot"
+                        );
+                        if !point_row {
+                            continue;
+                        }
+                        if let (Some(x), Some(y)) = (
+                            row.cell("X").and_then(|c| c.numeric()),
+                            row.cell("Y").and_then(|c| c.numeric()),
+                        ) {
+                            t.vertices.push((rect.0 + x, rect.1 + y));
+                        }
+                    }
+                }
+                collect_connection_points(&mut t, &s.sheet);
+                if t.connection_points.is_empty() {
+                    if let Some(mid) = s.master {
+                        if let Some(root) =
+                            ed.doc.master(mid).and_then(|m| m.shapes.first())
+                        {
+                            collect_connection_points(&mut t, &root.sheet);
+                        }
+                    }
+                }
+                Some(t)
+            })
+            .collect()
+    }
+
+    /// A snap context over prebuilt targets and guides (#113 now
+    /// feeds them): the displayed grid and ruler-subdivision
+    /// spacings, and the Visio-style screen snap strength converted
+    /// through the zoom.
+    fn snap_ctx_of<'t>(
+        &self,
+        targets: &'t [crate::snap::SnapTarget],
+        guides: &'t [crate::snap::Guide],
+    ) -> crate::snap::SnapCtx<'t> {
+        crate::snap::SnapCtx {
+            targets,
+            guides,
+            grid_step_in: canvas::grid_step_in(&self.view),
+            ruler_step_in: canvas::ruler_interval_in(&self.view),
+            threshold_in: SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
+        }
+    }
+
+    /// Snap the live drag position (#109) and refresh the dynamic-grid
+    /// hints. The model rect is still the press-time rect during the
+    /// gesture, so the live box is the rect translated by the pin
+    /// delta; the returned pin carries the snap translation, and the
+    /// commit path (move_cmd_for) lands snapped by construction.
+    fn apply_drag_snap(&mut self, d: &DragState, pin: (f64, f64)) -> (f64, f64) {
+        self.snap_live.clear();
+        let Some(page_id) = self.page_id() else { return pin };
+        let Some(ed) = self.ed.as_ref() else { return pin };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return pin };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, d.shape) else { return pin };
+        let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page_id, sh) else { return pin };
+        let mut excluded: Vec<i64> = Vec::with_capacity(d.group.len() + 3);
+        excluded.push(d.shape);
+        excluded.extend(d.group.iter().copied());
+        excluded.extend(self.container_member_ids(page_id, d.shape));
+        let targets = self.snap_targets(page_id, &excluded);
+        let guide_list = self.snap_guides(&excluded);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
+        let live = (x + pin.0 - d.start_pin.0, y + pin.1 - d.start_pin.1, w, h);
+        let res = crate::snap::snap_translation(live, &ctx, &self.snap);
+        if self.snap.dynamic_grid {
+            let snapped = (live.0 + res.dx, live.1 + res.dy, w, h);
+            self.snap_live = crate::snap::dynamic_hints(snapped, &ctx);
+        }
+        // #113: remember which guide an axis snapped onto — the move
+        // commit turns it into Visio's pin glue formula when
+        // glue-to-guides is enabled.
+        self.drag_glue = None;
+        if self.snap.glue_active && self.snap.glue_guides {
+            use crate::snap::SnapHit;
+            let guide_of = |h: &Option<(f64, SnapHit)>| match h {
+                Some((_, SnapHit::Guide(id))) => Some(*id),
+                _ => None,
+            };
+            let (gx, gy) = (
+                guide_of(&res.x_hit).is_some(),
+                guide_of(&res.y_hit).is_some(),
+            );
+            if let Some(id) = guide_of(&res.x_hit).or(guide_of(&res.y_hit)) {
+                self.drag_glue = Some((id, gx, gy));
+            }
+        }
+        (pin.0 + res.dx, pin.1 + res.dy)
+    }
+
+    /// #108: commands removing every `<Connect>` that references a
+    /// deleted shape (either side). Indices are collected descending —
+    /// sequential `RemoveConnect`s inside one Macro shift the list.
+    fn connect_cleanup_cmds(
+        &self,
+        page_id: i64,
+        deleted: &[i64],
+    ) -> Vec<Box<dyn dc_core::Command>> {
+        let Some(ed) = self.ed() else { return Vec::new() };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        let connects = page.connects();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for idx in (0..connects.list.len()).rev() {
+            let c = &connects.list[idx];
+            if deleted.contains(&c.from_sheet) || deleted.contains(&c.to_sheet) {
+                cmds.push(Box::new(dc_core::RemoveConnect::new(
+                    dc_core::ConnectsOwner::Page(page_id),
+                    idx,
+                )));
+            }
+        }
+        cmds
+    }
+
+    /// #113: commands that release every shape glued to `shape_id`
+    /// (no-ops for non-guides): each dependent's pin formula
+    /// referencing the guide is replaced by its cached value, so the
+    /// shape keeps its position when the guide goes — Visio's
+    /// release-on-delete.
+    fn guide_glue_release_cmds(
+        &self,
+        page_id: i64,
+        shape_id: i64,
+    ) -> Vec<Box<dyn dc_core::Command>> {
+        let Some(ed) = self.ed() else { return Vec::new() };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        if !crate::guides::is_guide(sh) {
+            return Vec::new();
+        }
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (sid, axes) in crate::guides::glue_dependents(&page.shapes, shape_id) {
+            let Some(dep) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            for (cell, _) in axes {
+                let v = dep.sheet.cell(cell).and_then(|c| c.numeric());
+                if let Some(v) = v {
+                    cmds.push(Box::new(SetCell::new(
+                        Scope::Shape {
+                            page: page_id,
+                            shape: sid,
+                        },
+                        cell,
+                        vsdx::Cell::value(format!("{v:.6}")),
+                    )));
+                }
+            }
+        }
+        cmds
+    }
+
+    // -- connector authoring (GitHub #108) -------------------------------
+
+    /// #108: a connector endpoint drag's glue lifecycle. Build the
+    /// endpoint cells (the #59 derived-cell logic via
+    /// `apply_line_endpoint` semantics), then resolve glue at the drop:
+    /// static (connection point) or dynamic (shape) write the corpus
+    /// formula and Connect; empty page releases. One undo step.
+    fn commit_connector_endpoint(&mut self, end_id: HandleId, raw: (f64, f64)) {
+        use crate::connectors::{End, GlueKind};
+        let Some((page_id, sid)) = self.sel else { return };
+        let end = match end_id {
+            HandleId::LineBegin => End::Begin,
+            HandleId::LineEnd => End::End,
+            _ => return,
+        };
+        // Where the OTHER endpoint sits (page space) — the facing
+        // anchor for dynamic attachment.
+        let other = self.ed.as_ref().and_then(|ed| {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+            let (b, e) = match end {
+                End::Begin => ("EndX", "EndY"),
+                End::End => ("BeginX", "BeginY"),
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+            };
+            Some((g(b)?, g(e)?))
+        });
+        let Some(other) = other else { return };
+        let cands = self.glue_candidates(&[sid]);
+        let threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let target = crate::connectors::glue_decision(
+            &cands,
+            raw,
+            other,
+            threshold,
+            self.snap.glue_active,
+            self.snap.glue_connection_points,
+        );
+        let attach = target.map(|t| t.attach).unwrap_or(raw);
+        // The plain endpoint move first (derived cells + guards).
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![self.move_endpoint_cmd(page_id, sid, end, attach)];
+        // Resolve the glue state change against the existing Connect.
+        let page = self
+            .ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == page_id));
+        let existing = page.and_then(|p| {
+            p.connects()
+                .list
+                .iter()
+                .position(|c| c.from_sheet == sid && c.from_cell == end.cell())
+        });
+        let same_glue = |t: &crate::connectors::GlueTarget, idx: usize| -> bool {
+            let Some(p) = page else { return false };
+            let list = p.connects();
+            let Some(c) = list.list.get(idx) else { return false };
+            c.to_sheet == t.shape_id
+                && c.to_part == match t.kind {
+                    GlueKind::Static { row_ix } => 100 + row_ix,
+                    GlueKind::Dynamic => crate::connectors::PART_WALKGLUE,
+                }
+        };
+        if let Some(idx) = existing {
+            cmds.push(Box::new(dc_core::RemoveConnect::new(
+                dc_core::ConnectsOwner::Page(page_id),
+                idx,
+            )));
+        }
+        if let Some(t) = target {
+            // Formula cells overwrite the plain values from the move.
+            let (f, trig) = match t.kind {
+                GlueKind::Static { row_ix } => {
+                    (crate::connectors::static_glue_formula(t.shape_id, row_ix), None)
+                }
+                GlueKind::Dynamic => (
+                    crate::connectors::walkglue_formula(end),
+                    Some(t.shape_id),
+                ),
+            };
+            for cell in [end.cell(), end.y_cell()] {
+                cmds.push(Box::new(dc_core::SetGluedCell::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: sid,
+                    },
+                    cell,
+                    vsdx::Cell {
+                        v: Some(format!("{:.6}", if cell == end.cell() { attach.0 } else { attach.1 })),
+                        f: Some(f.clone()),
+                        ..vsdx::Cell::default()
+                    },
+                )));
+            }
+            if let Some(tid) = trig {
+                cmds.push(Box::new(SetCell::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: sid,
+                    },
+                    end.trigger_cell(),
+                    vsdx::Cell {
+                        v: Some("2".into()),
+                        f: Some(format!("GUARD(_XFTRIGGER(Sheet.{tid}!EventXFMod))")),
+                        ..vsdx::Cell::default()
+                    },
+                )));
+            }
+            cmds.push(Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: crate::connectors::glue_connect(sid, end, &t),
+            }));
+            let same = existing.is_some_and(|idx| same_glue(&t, idx));
+            self.status = if same {
+                format!("connector stays glued to shape {}", t.shape_id)
+            } else {
+                match t.kind {
+                    GlueKind::Static { .. } => {
+                        format!("connector glued to shape {}'s connection point", t.shape_id)
+                    }
+                    GlueKind::Dynamic => format!("connector glued to shape {}", t.shape_id),
+                }
+            };
+        } else if existing.is_some() {
+            self.status = "connector end released".into();
+        }
+        self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
+    }
+
+    /// #108/URS-1114: set a connector's route style and re-route its
+    /// geometry immediately — one undo step.
+    fn apply_connector_route_style(&mut self, page_id: i64, sid: i64, style: &str) {
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return;
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (Some(bx), Some(by), Some(ex), Some(ey)) =
+            (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+        else {
+            return;
+        };
+        let pts = crate::connectors::route(style, (bx, by), (ex, ey));
+        let rows = crate::connectors::route_rows((bx, by), &pts);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![Box::new(SetCell::new(
+            scope.clone(),
+            "ShapeRouteStyle",
+            vsdx::Cell::value(style),
+        ))];
+        for (i, (x, y)) in rows.iter().enumerate() {
+            let ix = (i + 2) as i64;
+            for (cell, v) in [("X", *x), ("Y", *y)] {
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    0,
+                    dc_core::commands::RowSel::Ix(ix),
+                    cell,
+                    vsdx::Cell::value(format!("{v:.6}")),
+                )));
+            }
+        }
+        self.apply(Macro::new("set connector route style", cmds));
+    }
+
+    /// The plain endpoint-move command (the #59 derived-cell set) for
+    /// `commit_connector_endpoint` — the same cells
+    /// `apply_line_endpoint` writes, as one boxed command.
+    fn move_endpoint_cmd(
+        &self,
+        page_id: i64,
+        sid: i64,
+        end: crate::connectors::End,
+        to: (f64, f64),
+    ) -> Box<dyn dc_core::Command> {
+        let Some(ed) = self.ed() else {
+            unreachable!("caller checked the document")
+        };
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+        let Some(sh) = page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sid)) else {
+            unreachable!("caller checked the shape")
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            unreachable!("caller checked the chain")
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (bx, by, ex, ey) =
+            (get("BeginX").unwrap_or(0.0), get("BeginY").unwrap_or(0.0), get("EndX").unwrap_or(0.0), get("EndY").unwrap_or(0.0));
+        let (a, b) = match end {
+            crate::connectors::End::Begin => (to, (ex, ey)),
+            crate::connectors::End::End => ((bx, by), to),
+        };
+        let w = (a.0 - b.0).hypot(a.1 - b.1).max(1e-4);
+        let angle = (b.1 - a.1).atan2(b.0 - a.0);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // NOTE: for the corpus-model connector (unrotated, signed
+        // Width/Height) the derived set differs from the 1D master
+        // model — Width/Height are the axis deltas and the pin the
+        // midpoint.
+        let cmds: Vec<Box<dyn dc_core::Command>> = [
+            ("BeginX", a.0),
+            ("BeginY", a.1),
+            ("EndX", b.0),
+            ("EndY", b.1),
+            ("PinX", (a.0 + b.0) / 2.0),
+            ("PinY", (a.1 + b.1) / 2.0),
+            ("Width", b.0 - a.0),
+            ("Height", b.1 - a.1),
+            ("LocPinX", (b.0 - a.0) / 2.0),
+            ("LocPinY", (b.1 - a.1) / 2.0),
+        ]
+        .into_iter()
+        // Visio-authored connectors GUARD their derived cells
+        // (GUARD(EndX-BeginX)…) — a literal write would refuse and
+        // abort the whole Macro (CodeRabbit); only formula-free
+        // derived cells write. The endpoint cells go through
+        // SetGluedCell (the glue engine owns their formulas).
+        .filter(|(n, _)| {
+            matches!(*n, "BeginX" | "BeginY" | "EndX" | "EndY")
+                || dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_none()
+        })
+        .map(|(n, v)| {
+            if matches!(n, "BeginX" | "BeginY" | "EndX" | "EndY") {
+                Box::new(dc_core::SetGluedCell::new(scope.clone(), n, cell(v)))
+                    as Box<dyn dc_core::Command>
+            } else {
+                Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
+            }
+        })
+        .collect();
+        let _ = (w, angle);
+        Box::new(Macro::new(format!("move {} endpoint", end.cell()), cmds))
+    }
+
+    /// The page's glue candidates (#108): every non-connector shape's
+    /// page rect with its connection-point rows (IX → page position —
+    /// own rows first, the master's for instances, like #109's
+    /// snap-target collection).
+    fn glue_candidates(&self, excluding: &[i64]) -> Vec<crate::connectors::GlueCandidate> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page_id) = self.page_id() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                !excluding.contains(&s.id)
+                    && !crate::connectors::is_connector(s)
+                    && !crate::guides::is_guide(s)
+            })
+            .filter_map(|s| {
+                let rect = self.shape_rect(&ed.doc, page_id, s)?;
+                let mut c = crate::connectors::GlueCandidate {
+                    id: s.id,
+                    rect,
+                    conn_rows: Vec::new(),
+                };
+                let collect = |sheet: &vsdx::model::Sheet, c: &mut crate::connectors::GlueCandidate| {
+                    for sec in sheet.sections_named("Connection") {
+                        for row in &sec.rows {
+                            if let (Some(x), Some(y)) = (
+                                row.cell("X").and_then(|v| v.numeric()),
+                                row.cell("Y").and_then(|v| v.numeric()),
+                            ) {
+                                c.conn_rows
+                                    .push((row.ix, (rect.0 + x, rect.1 + y)));
+                            }
+                        }
+                    }
+                };
+                collect(&s.sheet, &mut c);
+                if c.conn_rows.is_empty() {
+                    if let Some(root) = s
+                        .master
+                        .and_then(|mid| ed.doc.master(mid))
+                        .and_then(|m| m.shapes.first())
+                    {
+                        collect(&root.sheet, &mut c);
+                    }
+                }
+                Some(c)
+            })
+            .collect()
+    }
+
+    /// The Connector Tool's gesture finished (#108, URS-1067): create
+    /// the connector between the two points, gluing each end per the
+    /// #109 glue settings (connection point → static, shape →
+    /// dynamic) — corpus formulas baked into the shape cells, Connect
+    /// records in the same undo step.
+    fn create_connector(&mut self, from: (f64, f64), to: (f64, f64)) {
+        use crate::connectors::{End, GlueKind};
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let _geom = self.page_geom();
+        let cands = self.glue_candidates(&[]);
+        let threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let decide = |p, toward| {
+            crate::connectors::glue_decision(
+                &cands,
+                p,
+                toward,
+                threshold,
+                self.snap.glue_active,
+                self.snap.glue_connection_points,
+            )
+        };
+        let beg_t = decide(from, to);
+        let end_t = decide(to, from);
+        let beg = beg_t.map(|t| t.attach).unwrap_or(from);
+        let end = end_t.map(|t| t.attach).unwrap_or(to);
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut shape = crate::connectors::connector_shape(id, beg, end);
+        // Route the fresh connector per its style before it lands.
+        let style = shape
+            .sheet
+            .cell("ShapeRouteStyle")
+            .and_then(|c| c.v.clone())
+            .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+        let pts = crate::connectors::route(&style, beg, end);
+        let rows = crate::connectors::route_rows(beg, &pts);
+        let _ = rows;
+        // (the straight default rows the constructor wrote stand until
+        // the first reroute; a right-angle start routes now)
+        if style != crate::connectors::ROUTE_STRAIGHT {
+            crate::connectors::rewrite_route_rows(&mut shape, &rows);
+        }
+        // Bake the glue: endpoint formulas + triggers into the cells.
+        for (end, t) in [(End::Begin, beg_t), (End::End, end_t)] {
+            match t.map(|t| (t.shape_id, t.kind, t.attach)) {
+                Some((tid, GlueKind::Static { row_ix }, attach)) => {
+                    let f = crate::connectors::static_glue_formula(tid, row_ix);
+                    crate::connectors::bake_end(&mut shape, end, attach, &f);
+                }
+                Some((tid, GlueKind::Dynamic, attach)) => {
+                    let f = crate::connectors::walkglue_formula(end);
+                    crate::connectors::bake_end(&mut shape, end, attach, &f);
+                    crate::connectors::bake_trigger(&mut shape, end, tid);
+                }
+                None => {}
+            }
+        }
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![Box::new(dc_core::AddShape {
+                page: page_id,
+                parent: None,
+                shape,
+            })];
+        for (end, t) in [(End::Begin, beg_t), (End::End, end_t)] {
+            if let Some(t) = t {
+                cmds.push(Box::new(dc_core::AddConnect {
+                    owner: dc_core::ConnectsOwner::Page(page_id),
+                    connect: crate::connectors::glue_connect(id, end, &t),
+                }));
+            }
+        }
+        self.apply(Macro::new(format!("add connector {id}"), cmds));
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = match (beg_t, end_t) {
+            (Some(_), Some(_)) => "connector glued at both ends".into(),
+            (Some(_), None) | (None, Some(_)) => "connector glued at one end".into(),
+            (None, None) => "connector drawn (free ends)".into(),
+        };
+    }
+
+    /// #108 reroute: a deferred [`crate::cmd::RerouteConnectors`]
+    /// riding at the tail of the move/resize Macro — it evaluates
+    /// against the post-move document (an eager build would read
+    /// stale, pre-move geometry). `None` when nothing glues to the
+    /// moved shapes, so Macros stay clean of no-ops.
+    fn reroute_cmd(
+        &self,
+        page_id: i64,
+        moved: &[i64],
+    ) -> Option<Box<dyn dc_core::Command>> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let touches = page
+            .connects()
+            .list
+            .iter()
+            .any(|c| moved.contains(&c.to_sheet));
+        touches.then(|| Box::new(crate::cmd::RerouteConnectors::new(page_id, moved.to_vec())) as Box<dyn dc_core::Command>)
+    }
+
+    /// #113: a ruler drag released over the page becomes a guide
+    /// (URS-1076): one undoable AddShape carrying the synthetic
+    /// clean-room guide cells, then selected like any placement.
+    fn add_guide(&mut self, src: canvas::GuideSource, at: (f64, f64)) {
+        use crate::guides::GuideKind;
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let geom = self.page_geom();
+        let kind = match src {
+            canvas::GuideSource::Vertical => GuideKind::Vertical,
+            canvas::GuideSource::Horizontal => GuideKind::Horizontal,
+            canvas::GuideSource::Point => GuideKind::Point,
+        };
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let shape = crate::guides::guide_shape(id, kind, at, (geom.w_in, geom.h_in));
+        let label = match kind {
+            GuideKind::Vertical => "add vertical guide",
+            GuideKind::Horizontal => "add horizontal guide",
+            GuideKind::Point => "add guide point",
+        };
+        self.apply(dc_core::AddShape {
+            page: page_id,
+            parent: None,
+            shape,
+        });
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = match kind {
+            GuideKind::Vertical => format!("vertical guide at {} added", self.view.unit.fmt(at.0)),
+            GuideKind::Horizontal => {
+                format!("horizontal guide at {} added", self.view.unit.fmt(at.1))
+            }
+            GuideKind::Point => format!(
+                "guide point at {} added",
+                self.view.unit.fmt_pt(at.0, at.1)
+            ),
+        };
+        let _ = label;
+    }
+
+    /// #113: commit a guide drag — the guide moves through the normal
+    /// 1D/pin move path, and every shape glued to it (pin formulas
+    /// naming this guide) follows: cached values rewritten in the
+    /// same undo step, formulas kept for the file's sake (a real
+    /// Visio re-evaluates them live).
+    fn apply_guide_move(&mut self, page_id: i64, guide_id: i64, to_pin: (f64, f64)) {
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![self.move_cmd_for(page_id, guide_id, to_pin)];
+        if let Some(ed) = self.ed() {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+            if let Some(page) = page {
+                for (sid, axes) in crate::guides::glue_dependents(&page.shapes, guide_id) {
+                    for (cell, guide_axis) in axes {
+                        let v = if guide_axis == "PinX" {
+                            to_pin.0
+                        } else {
+                            to_pin.1
+                        };
+                        cmds.push(Box::new(SetCell::new(
+                            Scope::Shape {
+                                page: page_id,
+                                shape: sid,
+                            },
+                            cell,
+                            vsdx::Cell {
+                                v: Some(format!("{v:.6}")),
+                                f: Some(crate::guides::glue_formula(guide_id, guide_axis)),
+                                ..vsdx::Cell::default()
+                            },
+                        )));
+                    }
+                }
+            }
+        }
+        self.apply(Macro::new(format!("move guide {guide_id}"), cmds));
+    }
+
+    /// #109: snap a single dragged point — a 1D endpoint under the
+    /// glue settings, a geometry vertex under the snap settings —
+    /// against the page minus the dragged shape.
+    fn snap_point_for(
+        &self,
+        dragged: i64,
+        p: (f64, f64),
+        glue: bool,
+    ) -> Option<((f64, f64), crate::snap::SnapHit)> {
+        let page_id = self.page_id()?;
+        let targets = self.snap_targets(page_id, &[dragged]);
+        let guide_list = self.snap_guides(&[dragged]);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
+        crate::snap::point_snap(p, &ctx, &self.snap, glue)
+    }
+
+    /// #110 (URS-1149): align every selected shape's feature to the
+    /// first-selected shape (or the page while `align_to_page`): one
+    /// undo Macro of plain moves.
+    fn align_selection(&mut self, kind: crate::align::AlignKind) {
+        use crate::align::AlignTarget;
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        // Selection order: the primary leads (URS's first-selected).
+        let mut ids: Vec<i64> = Vec::new();
+        if let Some((p, first)) = self.sel {
+            if p == page_id && !ids.contains(&first) {
+                ids.push(first);
+            }
+        }
+        for (p, sid) in &self.sel_set {
+            if *p == page_id && !ids.contains(sid) {
+                ids.push(*sid);
+            }
+        }
+        let mut shapes: Vec<(i64, (f64, f64, f64, f64))> = Vec::new();
+        for sid in &ids {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            if let Some(r) = self.shape_rect(&ed.doc, page_id, sh) {
+                shapes.push((*sid, r));
+            }
+        }
+        if shapes.len() < 2 && !self.align_to_page {
+            self.status = "select two or more shapes to align".into();
+            return;
+        }
+        if shapes.is_empty() {
+            return;
+        }
+        let geom = self.page_geom();
+        let target = if self.align_to_page {
+            AlignTarget::Page
+        } else {
+            AlignTarget::FirstSelected
+        };
+        let moves = crate::align::align_moves(&shapes, kind, target, (geom.w_in, geom.h_in));
+        self.apply_moves(&format!("align {}", kind.label()), page_id, &moves);
+    }
+
+    /// #110 (URS-1161): distribute the selection with even gaps
+    /// (3+ shapes, Visio's "make spacing equal").
+    fn distribute_selection(&mut self, vertical: bool) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let mut shapes: Vec<(i64, (f64, f64, f64, f64))> = Vec::new();
+        for (p, sid) in &self.sel_set {
+            if *p != page_id {
+                continue;
+            }
+            if let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) {
+                if let Some(r) = self.shape_rect(&ed.doc, page_id, sh) {
+                    shapes.push((*sid, r));
+                }
+            }
+        }
+        match crate::align::distribute_moves(&shapes, vertical) {
+            Some(moves) => self.apply_moves(
+                if vertical {
+                    "distribute vertical spacing"
+                } else {
+                    "distribute horizontal spacing"
+                },
+                page_id,
+                &moves,
+            ),
+            None => self.status = "distribute needs three or more shapes".into(),
+        }
+    }
+
+    /// Apply (id, delta) moves as one undo Macro — the same move path
+    /// drags use, so 1D members translate their endpoints too.
+    fn apply_moves(&mut self, label: &str, page_id: i64, moves: &[(i64, (f64, f64))]) {
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (sid, (dx, dy)) in moves {
+            if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+                continue;
+            }
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let pin = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+            };
+            if let (Some(px), Some(py)) = (pin("PinX"), pin("PinY")) {
+                cmds.push(self.move_cmd_for(page_id, *sid, (px + dx, py + dy)));
+            }
+        }
+        if cmds.is_empty() {
+            self.status = "already aligned".into();
+            return;
+        }
+        self.apply(Macro::new(label.to_string(), cmds));
+    }
+
+    /// #110 (URS-1217 slice): keyboard nudge — one undo step per
+    /// press, the whole selection moves.
+    fn nudge_selection(&mut self, dx: f64, dy: f64) {
+        let Some(page_id) = self.page_id() else { return };
+        let ids: Vec<i64> = if self.sel_set.len() > 1 {
+            self.sel_set
+                .iter()
+                .filter(|(p, _)| *p == page_id)
+                .map(|(_, s)| *s)
+                .collect()
+        } else {
+            self.sel.map(|(_, s)| vec![s]).unwrap_or_default()
+        };
+        let moves: Vec<(i64, (f64, f64))> =
+            ids.iter().map(|id| (*id, (dx, dy))).collect();
+        self.apply_moves("nudge selection", page_id, &moves);
+    }
+
+    /// #113 (URS-1122): swap the page's width/height — portrait ↔
+    /// landscape, one undoable step, then refit the view.
+    fn toggle_page_orientation(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sheet) = page.sheet() else { return };
+        let get = |n: &str| sheet.cell(n).and_then(|c| c.numeric());
+        let Some((w, h)) = get("PageWidth").zip(get("PageHeight")) else {
+            return;
+        };
+        self.apply_page_size((h, w));
+    }
+
+    /// #113 (URS-1122): write the page's size (page inches, portrait
+    /// orientation of the pair as given) as one undo Macro, then
+    /// refit the view to the new page.
+    fn apply_page_size(&mut self, (w, h): (f64, f64)) {
+        let Some(page_id) = self.page_id() else { return };
+        let scope = Scope::PageSheet { page: page_id };
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(SetCell::new(
+                scope.clone(),
+                "PageWidth",
+                vsdx::Cell::value(format!("{w:.6}")),
+            )),
+            Box::new(SetCell::new(
+                scope,
+                "PageHeight",
+                vsdx::Cell::value(format!("{h:.6}")),
+            )),
+        ];
+        self.apply(Macro::new("set page size", cmds));
+        self.view.fit_pending = true;
+        self.layers.set_page(-1); // force re-key on the new geometry
+        self.status = format!(
+            "page size {} × {}",
+            self.view.unit.fmt(w),
+            self.view.unit.fmt(h)
+        );
+    }
+
+    /// #113 (URS-1113): probe the OS clipboard for an image on a
+    /// worker thread; the result lands via `os_image_rx` over the
+    /// next frames and inserts as a picture.
+    fn paste_os_image(&mut self) {
+        if self.os_image_rx.is_some() {
+            return; // one probe at a time
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let img: Option<OsImage> = std::panic::catch_unwind(arboard::Clipboard::new)
+                .ok()
+                .and_then(|cb| cb.ok())
+                .and_then(|mut cb| {
+                    cb.get_image().ok().map(|i| {
+                        // RGBA bytes, row-major, top-down.
+                        let w = i.width;
+                        let h = i.height;
+                        let mut bytes = Vec::with_capacity(w * h * 4);
+                        for row in 0..h {
+                            let line = &i.bytes[row * w * 4..(row + 1) * w * 4];
+                            bytes.extend_from_slice(line);
+                        }
+                        (w as u32, h as u32, bytes)
+                    })
+                });
+            let _ = tx.send(img);
+        });
+        self.os_image_rx = Some(rx);
+        self.status = "checking the clipboard for a picture…".into();
+    }
+
+    /// #113: poll the OS image probe; a hit inserts as a picture.
+    fn poll_os_image(&mut self) {
+        let Some(rx) = self.os_image_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(Some((w, h, rgba))) => {
+                // Encode PNG so the insert path's sniffer accepts it.
+                if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                    let mut png = Vec::new();
+                    if image::DynamicImage::ImageRgba8(img)
+                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                        .is_ok()
+                    {
+                        self.insert_picture_bytes(&png);
+                        return;
+                    }
+                }
+                self.status = "clipboard image could not be encoded".into();
+            }
+            Ok(None) => {
+                self.status = "no picture on the clipboard".into();
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                // still probing: keep the receiver and retry next frame
+                self.os_image_rx = Some(rx);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status = "clipboard probe failed".into();
+            }
+        }
+    }
+
+    /// #113 (URS-1158): the page's background assignment — the
+    /// `BackPage` pages-index attribute names a page ID; `Background`
+    /// marks the page itself as one. Corpus: `BackPage='4'` /
+    /// `Background='1'` on the `<Page>` entries.
+    fn back_page_of(&self, page_id: i64) -> Option<i64> {
+        let ed = self.ed.as_ref()?;
+        let p = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        p.attrs
+            .iter()
+            .find(|(k, _)| k == "BackPage")
+            .and_then(|(_, v)| v.parse::<i64>().ok())
+    }
+
+    fn is_background_page(&self, page_id: i64) -> bool {
+        let Some(ed) = self.ed.as_ref() else { return false };
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .is_some_and(|p| {
+                p.attrs
+                    .iter()
+                    .any(|(k, v)| k == "Background" && v == "1")
+            })
+    }
+
+    /// Assign/clear the current page's background (direct model
+    /// write — a page-index flag, like Visio's non-undoable page
+    /// setup properties).
+    fn set_back_page(&mut self, bg: Option<i64>) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page_id) else {
+            return;
+        };
+        page.attrs.retain(|(k, _)| k != "BackPage");
+        if let Some(bg) = bg {
+            page.attrs
+                .push(("BackPage".to_string(), bg.to_string()));
+        }
+        self.dirty = true;
+        self.version += 1;
+        self.status = match bg {
+            Some(id) => {
+                let name = ed
+                    .doc
+                    .pages
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| id.to_string());
+                format!("background page: {name}")
+            }
+            None => "background cleared".into(),
+        };
+    }
+
+    /// The Backgrounds dialog (#113, URS-1158): pick which page
+    /// renders behind the current one (chain: a background with its
+    /// own background stacks too), or none.
+    fn backgrounds_window(&mut self, ctx: &egui::Context) {
+        if !self.backgrounds_open {
+            return;
+        }
+        let mut open = true;
+        let mut pick: Option<Option<i64>> = None; // Some(None) = clear
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let entries: Vec<(i64, String)> = ed
+            .doc
+            .pages
+            .iter()
+            .filter(|p| p.id != page_id)
+            .map(|p| (p.id, p.name.clone()))
+            .collect();
+        let current = self.back_page_of(page_id);
+        let this_is_bg = self.is_background_page(page_id);
+        egui::Window::new("Backgrounds")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.label("This page renders behind:");
+                if this_is_bg {
+                    ui.weak("(this page is itself a background page)");
+                }
+                ui.separator();
+                if ui.radio(current.is_none(), "No background").clicked() {
+                    pick = Some(None);
+                }
+                for (id, name) in &entries {
+                    if ui
+                        .radio(current == Some(*id), format!("{name} (page {id})"))
+                        .clicked()
+                    {
+                        pick = Some(Some(*id));
+                    }
+                }
+            });
+        if let Some(bg) = pick {
+            self.set_back_page(bg);
+        }
+        if !open {
+            self.backgrounds_open = false;
+        }
+    }
+
+    /// #113 (URS-1158): the background chain's underlay quads —
+    /// deepest background first, each rasterized on demand at the
+    /// current zoom (cache keyed page/version/ppi-bucket).
+    fn build_bg_underlays(&mut self, ctx: &egui::Context) -> Vec<crate::layers::ShapeQuad> {
+        let Some(page_id) = self.page_id() else { return Vec::new() };
+        // Walk the chain (cycle-guarded, depth cap).
+        let mut chain: Vec<i64> = Vec::new();
+        let mut cur = self.back_page_of(page_id);
+        while let Some(id) = cur {
+            if chain.contains(&id) || chain.len() >= 8 {
+                break;
+            }
+            chain.push(id);
+            cur = self.ed.as_ref().and_then(|ed| {
+                let p = ed.doc.pages.iter().find(|p| p.id == id)?;
+                p.attrs
+                    .iter()
+                    .find(|(k, _)| k == "BackPage")
+                    .and_then(|(_, v)| v.parse::<i64>().ok())
+            });
+        }
+        let bucket = (self.view.px_per_in() * 4.0).round().max(4.0) as u32;
+        let version = self.layer_base_version();
+        // Drop stale entries — page switch, version bump, zoom bucket
+        // (CodeRabbit: keeping version-stale handles leaked a texture
+        // per edit while a background was assigned).
+        self.bg_underlays
+            .retain(|(p, v, b, _)| chain.contains(p) && *b == bucket && *v == version);
+        let mut out: Vec<crate::layers::ShapeQuad> = Vec::new();
+        for id in chain.iter().rev() {
+            let Some(ed) = self.ed.as_ref() else { break };
+            let Some(bg) = ed.doc.pages.iter().find(|p| p.id == *id) else {
+                continue;
+            };
+            let version = self.layer_base_version();
+            let (w, h) = (
+                bg.sheet()
+                    .and_then(|s| s.cell("PageWidth"))
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(8.5),
+                bg.sheet()
+                    .and_then(|s| s.cell("PageHeight"))
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(11.0),
+            );
+            if let Some(hh) = self
+                .bg_underlays
+                .iter()
+                .find(|(p, v, b, _)| *p == *id && *v == version && *b == bucket)
+                .map(|(_, _, _, hh)| hh)
+            {
+                out.push(crate::layers::ShapeQuad {
+                    id: -1000 - id,
+                    tex: hh.id(),
+                    bbox: (0.0, 0.0, w, h),
+                });
+                continue;
+            }
+            // Rasterize this background page's own content.
+            let Ok(svg) = dc::svg::render_page(&ed.doc, bg) else { continue };
+            let Ok(tree) = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Thumb) else {
+                continue;
+            };
+            let Ok(img) = crate::svgimg::render_tree(
+                &tree,
+                w as f32 * self.view.px_per_in(),
+                crate::perf::Kind::Thumb,
+            ) else {
+                continue;
+            };
+            let tex = ctx.load_texture(
+                format!("dc-bg-{id}"),
+                img,
+                egui::TextureOptions::default(),
+            );
+            out.push(crate::layers::ShapeQuad {
+                id: -1000 - id,
+                tex: tex.id(),
+                bbox: (0.0, 0.0, w, h),
+            });
+            self.bg_underlays.push((*id, version, bucket, tex));
+        }
+        out
+    }
+
+    /// The layer store's base version — the underlay invalidation key.
+    fn layer_base_version(&self) -> u64 {
+        self.version
+    }
+
+    /// #113 (URS-1012): open the picture picker (PNG/JPEG).
+    fn open_picture_dialog(&mut self) {
+        self.begin_dialog(PendingKind::OpenPicture);
+    }
+
+    /// #113 (URS-1012): a picked picture file becomes a Foreign shape
+    /// centered on the page at natural size (pixels/96 in, capped at
+    /// 8 in per side) — the media part, the page rels entry, and the
+    /// content-type default all ride `extra_media` to the writer.
+    fn insert_picture_file(&mut self, path: &Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.insert_picture_bytes(&bytes),
+            Err(e) => self.status = format!("could not read {}: {e}", path.display()),
+        }
+    }
+
+    /// The picture-insertion core (also the kittest path: bytes in,
+    /// no native dialog).
+    fn insert_picture_bytes(&mut self, bytes: &[u8]) {
+        let Some(page_id) = self.page_id() else { return };
+        let geom = self.page_geom();
+        let Some(ed) = self.ed.as_mut() else { return };
+        // Format sniff: PNG/JPEG magic.
+        let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            "png"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "jpeg"
+        } else {
+            self.status = "only PNG and JPEG pictures are supported".into();
+            return;
+        };
+        let compression = if ext == "png" { "PNG" } else { "JPG" };
+        let Ok(img) = image::load_from_memory(bytes) else {
+            self.status = "the picture could not be decoded".into();
+            return;
+        };
+        // Natural size, capped.
+        let (mw, mh) = (img.width() as f64, img.height() as f64);
+        let mut w = mw / 96.0;
+        let mut h = mh / 96.0;
+        let cap = 8.0_f64;
+        if w.max(h) > cap {
+            let k = cap / w.max(h);
+            w *= k;
+            h *= k;
+        }
+        let (w, h) = (w.max(0.1), h.max(0.1));
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut sh = vsdx::model::Shape {
+            id,
+            type_: Some("Foreign".into()),
+            name_u: Some(format!("Picture.{id}")),
+            ..vsdx::model::Shape::default()
+        };
+        let mut set = |n: &str, v: f64| {
+            sh.sheet
+                .set_cell(n, vsdx::model::Cell::value(format!("{v:.6}")));
+        };
+        set("PinX", geom.w_in / 2.0);
+        set("PinY", geom.h_in / 2.0);
+        set("Width", w);
+        set("Height", h);
+        set("LocPinX", w / 2.0);
+        set("LocPinY", h / 2.0);
+        set("Angle", 0.0);
+        set("FlipX", 0.0);
+        set("FlipY", 0.0);
+        set("ResizeMode", 0.0);
+        // The image fills the shape box.
+        let mut geo = vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..vsdx::model::Section::default()
+        };
+        for (n, v) in [("NoFill", "1"), ("NoLine", "0"), ("NoShow", "0")] {
+            geo.cells.push((n.to_string(), vsdx::model::Cell::value(v)));
+        }
+        for (ix, t, x, y) in [
+            (1i64, "MoveTo", 0.0, 0.0),
+            (2, "LineTo", w, 0.0),
+            (3, "LineTo", w, h),
+            (4, "LineTo", 0.0, h),
+            (5, "LineTo", 0.0, 0.0),
+        ] {
+            geo.rows.push(vsdx::model::Row {
+                t: Some(t.into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), vsdx::model::Cell::value(format!("{x:.6}"))),
+                    ("Y".to_string(), vsdx::model::Cell::value(format!("{y:.6}"))),
+                ],
+                ..vsdx::model::Row::default()
+            });
+        }
+        sh.sheet.children.push(vsdx::model::SheetChild::Section(geo));
+        // Media part + rel id: next free across the package and
+        // already-added media; the rid must not collide with the
+        // page part's existing rels.
+        let page = ed
+            .doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .expect("page");
+        let part = page.part.clone();
+        let n = ed
+            .doc
+            .extra_media
+            .iter()
+            .map(|m| m.part.clone())
+            .chain(
+                ed.doc
+                    .package
+                    .as_ref()
+                    .map(|p| p.part_names().iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .filter_map(|name| {
+                name.rsplit('/').next()
+                    .and_then(|f| f.strip_prefix("image"))
+                    .and_then(|rest| rest.split('.').next())
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let media_part = format!("visio/media/image{n}.{ext}");
+        let rid_n = ed
+            .doc
+            .package
+            .as_ref()
+            .map(|p| p.relationships(&part))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(id, _, _)| id.strip_prefix("rId").and_then(|v| v.parse::<u32>().ok()))
+            .chain(
+                // Pictures already inserted on this page own rids the
+                // package does not know (CodeRabbit: the second
+                // picture would collide and render the first's bytes).
+                ed.doc
+                    .extra_media
+                    .iter()
+                    .filter(|m| m.page == page_id)
+                    .filter_map(|m| m.rid.strip_prefix("rId").and_then(|v| v.parse::<u32>().ok())),
+            )
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let rid = format!("rId{rid_n}");
+        sh.raw_children.push(vsdx::model::RawEl {
+            name: "ForeignData".into(),
+            attrs: vec![
+                ("Type".to_string(), "Bitmap".into()),
+                ("ForeignType".to_string(), "Bitmap".into()),
+                ("CompressionType".to_string(), compression.into()),
+                ("r:id".to_string(), rid.clone()),
+            ],
+            inner: String::new(),
+        });
+        let _ = &mut ed.doc;
+        // Own the page borrow scope.
+        let doc = &mut ed.doc;
+        doc.extra_media.push(vsdx::model::MediaRef {
+            part: media_part,
+            bytes: bytes.to_vec(),
+            page: page_id,
+            rid,
+            ext: ext.to_string(),
+        });
+        let shape = sh;
+        self.apply(dc_core::AddShape {
+            page: page_id,
+            parent: None,
+            shape,
+        });
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = format!(
+            "picture inserted ({}×{} px at {:.2}×{:.2} in)",
+            mw as u32, mh as u32, w, h
+        );
+    }
+
+    /// #113 (URS-1200): render the selection as a PNG at `factor`
+    /// (1 screen, 2 high, 4 print): the full-page SVG with every
+    /// non-selected shape hidden, rasterized, then cropped to the
+    /// selection's bounds (the page-SVG viewBox is always the whole
+    /// page). The page raster is capped at 4096 px per side.
+    fn picture_png(&self, factor: u32) -> Option<Vec<u8>> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sel: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if sel.is_empty() {
+            return None;
+        }
+        // Selection bounds (page inches, y-up → y-down for the crop):
+        // union of the rects' corner pairs.
+        let geom = self.page_geom();
+        let mut b: Option<(f64, f64, f64, f64)> = None;
+        for sid in &sel {
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
+            let r = self.shape_rect(&ed.doc, page_id, sh)?;
+            let corners = (r.0, r.1, r.0 + r.2, r.1 + r.3);
+            b = Some(match b {
+                None => corners,
+                Some((x0, y0, x1, y1)) => (
+                    x0.min(corners.0),
+                    y0.min(corners.1),
+                    x1.max(corners.2),
+                    y1.max(corners.3),
+                ),
+            });
+        }
+        let (bx0, by0, bx1, by1) = b?;
+        // Hide every other shape.
+        let hidden: Vec<i64> = page
+            .shapes
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !sel.contains(id))
+            .collect();
+        let svg = dc::svg::render_page_with(&ed.doc, page, &hidden).ok()?;
+        let tree = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Thumb).ok()?;
+        // Raster the whole page, capped, then crop the selection.
+        let max_side = 4096.0;
+        let mut f = factor as f64;
+        if geom.w_in * 96.0 * f > max_side || geom.h_in * 96.0 * f > max_side {
+            f = (max_side / (96.0 * geom.w_in.max(geom.h_in))).min(f);
+        }
+        let f = f as f32;
+        let img = crate::svgimg::render_tree(&tree, geom.w_in as f32 * 96.0 * f, crate::perf::Kind::Thumb).ok()?;
+        let (iw, ih) = (img.width() as f64, img.height() as f64);
+        let sx = iw / geom.w_in;
+        let sy = ih / geom.h_in;
+        let px0 = ((bx0) * sx).floor().max(0.0) as u32;
+        let py0 = ((geom.h_in - by1) * sy).floor().max(0.0) as u32; // y-down
+        let px1 = ((bx1) * sx).ceil().min(iw) as u32;
+        let py1 = ((geom.h_in - by0) * sy).ceil().min(ih) as u32;
+        let (cw, ch) = (
+            px1.saturating_sub(px0).max(1),
+            py1.saturating_sub(py0).max(1),
+        );
+        let mut out = image::RgbaImage::new(cw, ch);
+        let (iw_us, ih_us) = (img.width(), img.height());
+        for row in 0..ch {
+            for col in 0..cw {
+                let sx = ((px0 + col) as usize).min(iw_us - 1);
+                let sy = ((py0 + row) as usize).min(ih_us - 1);
+                let px = img[(sx, sy)]; // egui::Color32 (sRGB, premult)
+                let [r, g, b, a] = px.to_srgba_unmultiplied();
+                out.put_pixel(col, row, image::Rgba([r, g, b, a]));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(out)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .ok()?;
+        Some(bytes)
+    }
+
+    /// The Copy as Picture dialog (#113, URS-1200).
+    fn copy_picture_window(&mut self, ctx: &egui::Context) {
+        if !self.copypic_open {
+            return;
+        }
+        let mut open = true;
+        let mut copy = false;
+        egui::Window::new("Copy as Picture")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.strong("Resolution");
+                for (f, label) in [(1u32, "Screen (96 dpi)"), (2, "High (192 dpi)"), (4, "Print (384 dpi)")] {
+                    if ui
+                        .radio(self.copypic_factor == f, label)
+                        .clicked()
+                    {
+                        self.copypic_factor = f;
+                    }
+                }
+                ui.add_space(6.0);
+                if ui.button("Copy Picture").clicked() {
+                    copy = true;
+                }
+                ui.weak("The picture lands on the clipboard as a PNG bitmap.");
+            });
+        if copy {
+            match self.picture_png(self.copypic_factor) {
+                Some(bytes) => {
+                    self.last_picture = Some(bytes.clone());
+                    match image::load_from_memory(&bytes) {
+                        Ok(dynimg) => {
+                            let rgba = dynimg.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                [w as usize, h as usize],
+                                &rgba.into_raw(),
+                            );
+                            {
+                                ctx.copy_image(ci);
+                                self.status =
+                                    format!("picture copied ({w}×{h} px at {}×)", self.copypic_factor);
+                            }
+                        }
+                        Err(e) => self.status = format!("copy as picture failed: {e}"),
+                    }
+                }
+                None => self.status = "nothing selected to copy".into(),
+            }
+        }
+        if !open {
+            self.copypic_open = false;
+        }
+    }
+
+    /// The Page Setup dialog (#113, URS-1122): ISO/ANSI presets plus
+    /// custom dimensions (display units) and orientation.
+    fn page_setup_window(&mut self, ctx: &egui::Context) {
+        if !self.pagesetup_open {
+            return;
+        }
+        /// (name, portrait w, h) in inches — Visio's Printer paper
+        /// preset table, metric and ANSI families.
+        const SIZES: &[(&str, f64, f64)] = &[
+            ("A5", 5.83, 8.27),
+            ("A4", 8.27, 11.69),
+            ("A3", 11.69, 16.54),
+            ("A2", 16.54, 23.39),
+            ("A1", 23.39, 33.11),
+            ("A0", 33.11, 46.81),
+            ("Letter (ANSI A)", 8.5, 11.0),
+            ("Legal", 8.5, 14.0),
+            ("Tabloid (ANSI B)", 11.0, 17.0),
+            ("ANSI C", 17.0, 22.0),
+            ("ANSI D", 22.0, 34.0),
+            ("ANSI E", 34.0, 44.0),
+        ];
+        let unit = self.view.unit;
+        let geom = self.page_geom();
+        // Current dims in display units.
+        let (cw, ch) = (
+            unit.from_in(geom.w_in),
+            unit.from_in(geom.h_in),
+        );
+        let mut open = true;
+        let mut apply: Option<(f64, f64)> = None; // portrait pair, inches
+        let mut custom: Option<(f64, f64)> = None;
+        egui::Window::new("Page Size")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.label("Current:");
+                ui.label(format!(
+                    "{:.1} × {:.1} {}",
+                    cw.max(ch),
+                    cw.min(ch),
+                    unit.suffix()
+                ));
+                ui.separator();
+                ui.strong("Preset sizes");
+                let mut picked: Option<(f64, f64)> = None;
+                egui::Grid::new("dc-sizes")
+                    .num_columns(3)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for chunk in SIZES.chunks(3) {
+                            for (name, w, h) in chunk {
+                                if ui.button(*name).clicked() {
+                                    picked = Some((*w, *h));
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if let Some(p) = picked {
+                    apply = Some(p);
+                }
+                ui.separator();
+                ui.strong("Custom");
+                let mut wd = cw;
+                let mut ht = ch;
+                // The range is ~10 mm .. 2 m, expressed in display
+                // units so inches never clamps at 10 in.
+                let (lo, hi) = (unit.from_in(10.0 / 25.4), unit.from_in(2000.0 / 25.4));
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(egui::DragValue::new(&mut wd).range(lo..=hi).suffix(unit.suffix()));
+                    ui.label("Height");
+                    ui.add(egui::DragValue::new(&mut ht).range(lo..=hi).suffix(unit.suffix()));
+                });
+                if ui.button("Apply custom size").clicked() && wd > 0.0 && ht > 0.0 {
+                    custom = Some((unit.to_in(wd), unit.to_in(ht)));
+                }
+                ui.separator();
+                ui.strong("Orientation");
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(geom.w_in <= geom.h_in, "Portrait")
+                        .clicked()
+                        && geom.w_in > geom.h_in
+                    {
+                        apply = Some((geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in)));
+                    }
+                    if ui
+                        .selectable_label(geom.w_in > geom.h_in, "Landscape")
+                        .clicked()
+                        && geom.w_in <= geom.h_in
+                    {
+                        apply = Some((geom.h_in.max(geom.w_in), geom.h_in.min(geom.w_in)));
+                    }
+                });
+            });
+        if let Some((w, h)) = apply.or(custom) {
+            self.apply_page_size((w, h));
+        }
+        if !open {
+            self.pagesetup_open = false;
+        }
+    }
+
+    /// #110 (URS-1160): select every shape on the page.
+    fn select_all(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let ids: Vec<(i64, i64)> = page
+            .shapes
+            .iter()
+            .map(|s| (page_id, s.id))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.sel = Some(ids[0]);
+        self.sel_set = ids;
+        self.status = "selected all shapes".into();
+    }
+
+    /// #110 (URS-1053): arm the Format Painter on the primary
+    /// selection — the next shape click receives its resolved
+    /// formatting (single-shot, Visio's click mode).
+    fn arm_format_painter(&mut self) {
+        let Some((_, sid)) = self.sel else {
+            self.status = "select a shape to copy formatting from first".into();
+            return;
+        };
+        self.painter_armed = Some(sid);
+        self.status = format!(
+            "format painter: click a shape to apply shape {sid}'s formatting"
+        );
+    }
+
+    /// The painter's application: copy the resolved FORMAT_CELLS from
+    /// the source onto the target as one undo Macro.
+    fn apply_format_painter(&mut self, from: i64, to: i64) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let (Some(src), Some(_dst)) = (
+            vsdx::model::find_shape_by_id(&page.shapes, from),
+            vsdx::model::find_shape_by_id(&page.shapes, to),
+        ) else {
+            return;
+        };
+        let Ok(src_chain) = shape_chain(&ed.doc, page_id, from) else {
+            return;
+        };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: to,
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for name in crate::align::FORMAT_CELLS {
+            if let Some(c) = ed.doc.resolve_cell(src, &src_chain, name) {
+                if let Some(v) = c.numeric() {
+                    cmds.push(Box::new(SetCell::new(
+                        scope.clone(),
+                        *name,
+                        vsdx::Cell::value(format!("{v:.9}")),
+                    )));
+                }
+            }
+        }
+        let n = cmds.len();
+        self.apply(Macro::new(format!("paint formatting onto shape {to}"), cmds));
+        self.status = format!("{n} formatting cells copied to shape {to}");
+        self.painter_armed = None;
+    }
+
+    /// The page's guides as UI info (#113), resolved through the
+    /// inheritance chain.
+    fn page_guides(&self) -> Vec<crate::guides::GuideInfo> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page_id) = self.page_id() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| crate::guides::is_guide(s))
+            .filter_map(|s| {
+                let Ok(chain) = shape_chain(&ed.doc, page_id, s.id) else {
+                    return None;
+                };
+                let get = |n: &str| {
+                    ed.doc
+                        .resolve_cell(s, &chain, n)
+                        .and_then(|c| c.numeric())
+                };
+                crate::guides::guide_info(s.id, s, get)
+            })
+            .collect()
+    }
+
+    /// The guide list as engine targets (#113 → #109's Guide seam),
+    /// minus `excluded` (the dragged shape's set — a guide being
+    /// dragged never targets itself).
+    fn snap_guides(&self, excluded: &[i64]) -> Vec<crate::snap::Guide> {
+        self.page_guides()
+            .iter()
+            .filter(|g| !excluded.contains(&g.id))
+            .map(|g| match g.kind {
+                crate::guides::GuideKind::Vertical => crate::snap::Guide::Line {
+                    id: g.id,
+                    horizontal: false,
+                    at: g.x,
+                },
+                crate::guides::GuideKind::Horizontal => crate::snap::Guide::Line {
+                    id: g.id,
+                    horizontal: true,
+                    at: g.y,
+                },
+                crate::guides::GuideKind::Point => crate::snap::Guide::Point {
+                    id: g.id,
+                    x: g.x,
+                    y: g.y,
+                },
+            })
+            .collect()
+    }
+
     /// Track an in-progress shape drag; commit on release.
     fn update_drag(&mut self, ctx: &egui::Context) {
         let (pressed, pos) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
@@ -2322,19 +4224,24 @@ impl App {
         let geom = self.page_geom();
 
         if pressed {
-            if let (Some(p), Some(d)) = (pointer, self.drag.as_mut()) {
+            // The drag is taken out for the frame so the snap pass can
+            // borrow the app (#109); it goes straight back.
+            if let (Some(p), Some(mut d)) = (pointer, self.drag.take()) {
                 let x_in = (p.x - self.view.pan.x) as f64 / self.view.px_per_in() as f64;
                 let y_up =
                     geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
                 let new_pin = (x_in + d.grab_off.0, y_up + d.grab_off.1);
+                let new_pin = self.apply_drag_snap(&d, new_pin);
                 if (new_pin.0 - d.last_pin.0).abs() * self.view.px_per_in() as f64 > 0.5
                     || (new_pin.1 - d.last_pin.1).abs() * self.view.px_per_in() as f64 > 0.5
                 {
                     d.moved = true;
                 }
                 d.last_pin = new_pin;
+                self.drag = Some(d);
             }
         } else if let Some(d) = self.drag.take() {
+            self.snap_live.clear();
             if d.moved {
                 if let Some(page_id) = self.page_id() {
                     // Moving a multi-selection moves every member by the
@@ -2343,17 +4250,124 @@ impl App {
                     // the press actually landed on). Each member moves
                     // through `move_cmd_for`: 1D members translate their
                     // endpoints too, not just the pin.
-                    if d.group.is_empty() {
+                    // A guide drag (#113) is its own commit: the
+                    // guide moves and its glued dependents follow.
+                    let dragging_guide = self.ed.as_ref().is_some_and(|ed| {
+                        let page = &ed.doc.pages
+                            [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                        vsdx::model::find_shape_by_id(&page.shapes, d.shape)
+                            .is_some_and(crate::guides::is_guide)
+                    });
+                    if dragging_guide {
+                        self.apply_guide_move(page_id, d.shape, d.last_pin);
+                    } else if d.group.is_empty() {
                         // A container drag carries its members (Visio,
                         // #27): one undo step.
                         let member_ids = self.container_member_ids(page_id, d.shape);
                         if member_ids.is_empty() {
                             let label = format!("move shape {}", d.shape);
                             let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
-                            self.apply_boxed(&label, cmd);
+                            // #108: glued connectors re-attach and
+                            // reroute in the same undo step.
+                            let reroute = self.reroute_cmd(page_id, &[d.shape]);
+                            // #113: a shape dropped onto a guide with
+                            // glue-to-guides on glues its pin(s) to it
+                            // — Visio's `PinX = Sheet.N!PinX` formula
+                            // with the snapped cached value. Only for
+                            // plain 2D shapes (1D endpoint glue to
+                            // guides rides with #108's connectors).
+                            let glue = self.drag_glue.take().filter(|_| {
+                                self.ed.as_ref().is_some_and(|ed| {
+                                    let page = &ed.doc.pages[self.page_idx];
+                                    vsdx::model::find_shape_by_id(&page.shapes, d.shape)
+                                        .and_then(|sh| {
+                                            let chain =
+                                                shape_chain(&ed.doc, page_id, d.shape).ok()?;
+                                            ed.doc
+                                                .resolve_cell(sh, &chain, "BeginX")
+                                                .and_then(|c| c.numeric())
+                                        })
+                                        .is_none()
+                                })
+                            });
+                            match glue {
+                                Some((guide_id, gx, gy)) => {
+                                    // Guide glue ties the PIN to the
+                                    // guide (Visio semantics: the pin
+                                    // rides the line). An edge-snap
+                                    // must not glue — the formula
+                                    // would jump the shape half its
+                                    // width at drop — so each axis
+                                    // glues only when the snapped pin
+                                    // coordinate already IS the
+                                    // guide's.
+                                    let g = self
+                                        .page_guides()
+                                        .iter()
+                                        .find(|g| g.id == guide_id)
+                                        .copied();
+                                    let axis_target = |axis: &str| -> Option<f64> {
+                                        let g = g?;
+                                        match (axis, g.kind) {
+                                            ("PinX", crate::guides::GuideKind::Vertical)
+                                            | ("PinX", crate::guides::GuideKind::Point) => {
+                                                Some(g.x)
+                                            }
+                                            ("PinY", crate::guides::GuideKind::Horizontal)
+                                            | ("PinY", crate::guides::GuideKind::Point) => {
+                                                Some(g.y)
+                                            }
+                                            _ => None,
+                                        }
+                                    };
+                                    let mut glue_cmds: Vec<Box<dyn dc_core::Command>> =
+                                        Vec::new();
+                                    for (axis, want) in [("PinX", gx), ("PinY", gy)] {
+                                        let Some(target) = axis_target(axis) else {
+                                            continue;
+                                        };
+                                        let pin = if axis == "PinX" {
+                                            d.last_pin.0
+                                        } else {
+                                            d.last_pin.1
+                                        };
+                                        if want && (pin - target).abs() < 1e-6 {
+                                            glue_cmds.push(Box::new(SetCell::new(
+                                                Scope::Shape {
+                                                    page: page_id,
+                                                    shape: d.shape,
+                                                },
+                                                axis,
+                                                vsdx::Cell {
+                                                    v: Some(format!("{target:.6}")),
+                                                    f: Some(crate::guides::glue_formula(
+                                                        guide_id, axis,
+                                                    )),
+                                                    ..vsdx::Cell::default()
+                                                },
+                                            )));
+                                        }
+                                    }
+                                    glue_cmds.insert(0, cmd);
+                                    if let Some(r) = reroute {
+                                        glue_cmds.push(r);
+                                    }
+                                    self.apply(Macro::new(label, glue_cmds));
+                                }
+                                None => match reroute {
+                                    Some(r) => {
+                                        let mut all = vec![cmd];
+                                        all.push(r);
+                                        self.apply(Macro::new(label, all));
+                                    }
+                                    None => self.apply_boxed(&label, cmd),
+                                },
+                            }
                         } else {
                             let (dx, dy) =
                                 (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                            let mut ids_for_reroute: Vec<i64> = vec![d.shape];
+                            ids_for_reroute.extend(member_ids.iter().copied());
                             let mut cmds: Vec<Box<dyn dc_core::Command>> =
                                 vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
                             if let Some(ed) = self.ed() {
@@ -2397,20 +4411,26 @@ impl App {
                                     }
                                 }
                             }
+                            if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
+                                cmds.push(r);
+                            }
                             self.apply(Macro::new("move container and members", cmds));
                         }
                     } else {
                         let Some(ed) = self.ed() else { return };
                         let dx = d.last_pin.0 - d.start_pin.0;
                         let dy = d.last_pin.1 - d.start_pin.1;
+                        let ids_for_reroute: Vec<i64> =
+                            std::iter::once(d.shape).chain(d.group.iter().copied()).collect();
                         let mut cmds: Vec<Box<dyn dc_core::Command>> =
                             vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
-                        for sid in d.group {
+                        for sid in &d.group {
                             let page = &ed.doc.pages[self.page_idx];
-                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid)
+                            else {
                                 continue;
                             };
-                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
                                 continue;
                             };
                             let get = |n: &str| {
@@ -2432,10 +4452,13 @@ impl App {
                                 };
                                 cmds.push(self.move_cmd_for(
                                     page_id,
-                                    sid,
+                                    *sid,
                                     (target.0 + dx, target.1 + dy),
                                 ));
                             }
+                        }
+                        if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
+                            cmds.push(r);
                         }
                         self.apply(Macro::new("move shapes", cmds));
                     }
@@ -2529,6 +4552,22 @@ impl App {
                     self.sel_set = vec![(page_id, nid)];
                 }
             }
+            return;
+        }
+        // The armed Format Painter consumes the click (#110): the hit
+        // shape receives the source's resolved formatting.
+        if let Some(src) = self.painter_armed {
+            self.painter_armed = None;
+            if let Some(hit) = self.shape_hit(page_pos) {
+                if hit != src {
+                    self.apply_format_painter(src, hit);
+                    if let Some(p) = self.page_id() {
+                        self.set_selection(Some((p, hit)));
+                    }
+                    return;
+                }
+            }
+            self.status = "format painter cancelled".into();
             return;
         }
         if shift {
@@ -2686,6 +4725,18 @@ impl App {
             return;
         };
         self.set_selection(Some((page_id, shape_id)));
+        // A guide has no text and no event to run (#113): selecting
+        // it is the whole double-click.
+        if let Some(ed) = self.ed() {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+            if let Some(sh) =
+                page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+            {
+                if crate::guides::is_guide(sh) {
+                    return;
+                }
+            }
+        }
         let formula = self.ed.as_ref().and_then(|ed| {
             let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
             let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
@@ -2751,6 +4802,46 @@ impl App {
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
             Action::ToggleComments => self.show_comments = !self.show_comments,
+            Action::ToggleDynamicGrid => {
+                self.snap.dynamic_grid = !self.snap.dynamic_grid;
+                self.apply_snap_settings();
+            }
+            Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
+            Action::PointerTool => self.tool = Tool::Pointer,
+            Action::AlignLeft => self.align_selection(crate::align::AlignKind::Left),
+            Action::AlignHCenter => self.align_selection(crate::align::AlignKind::HCenter),
+            Action::AlignRight => self.align_selection(crate::align::AlignKind::Right),
+            Action::AlignTop => self.align_selection(crate::align::AlignKind::Top),
+            Action::AlignVCenter => self.align_selection(crate::align::AlignKind::VCenter),
+            Action::AlignBottom => self.align_selection(crate::align::AlignKind::Bottom),
+            Action::AlignToPage => {
+                self.align_to_page = !self.align_to_page;
+                self.status = if self.align_to_page {
+                    "aligning to the page".into()
+                } else {
+                    "aligning to the first-selected shape".into()
+                };
+            }
+            Action::DistributeH => self.distribute_selection(false),
+            Action::DistributeV => self.distribute_selection(true),
+            Action::SelectAll => self.select_all(),
+            Action::SelectByType => {
+                self.selby_open = !self.selby_open;
+                if self.selby_open {
+                    self.status = "select by type: pick a criterion and value".into();
+                }
+            }
+            Action::FormatPainter => self.arm_format_painter(),
+            Action::PageOrientation => self.toggle_page_orientation(),
+            Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
+            Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
+            Action::InsertPicture => self.open_picture_dialog(),
+            Action::PageBackgrounds => self.backgrounds_open = !self.backgrounds_open,
+            Action::ConnectorTool => {
+                self.tool = Tool::Connector;
+                self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
+                    .into();
+            }
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -2945,7 +5036,26 @@ impl App {
         let groups: Vec<crate::ribbon::Group> = match self.tab {
             // File opens the backstage view instead of ribbon content.
             Tab::File => vec![],
-            Tab::Home => vec![
+            Tab::Home => {
+                let sel_count = self
+                    .sel_set
+                    .iter()
+                    .filter(|(p, _)| Some(*p) == self.page_id())
+                    .count();
+                let multi_sel = sel_count >= 2;
+                let tri_sel = sel_count >= 3;
+                vec![
+                crate::ribbon::Group::new(
+                    "Tools",
+                    vec![stack(vec![
+                        RibbonButton::new(Icon::Pointer, "Pointer Tool", Action::PointerTool)
+                            .selected(self.tool == Tool::Pointer)
+                            .tip("Select and drag (Esc from the Connector Tool)"),
+                        RibbonButton::new(Icon::Connector, "Connector", Action::ConnectorTool)
+                            .selected(self.tool == Tool::Connector)
+                            .tip("Draw a connector between shapes or points (Esc to finish)"),
+                    ])],
+                ),
                 crate::ribbon::Group::new(
                     "Clipboard",
                     vec![
@@ -2965,11 +5075,25 @@ impl App {
                             vec![RibbonButton::new(
                                 Icon::Painter,
                                 "Format Painter",
-                                Action::Macros,
+                                Action::FormatPainter,
                             )
-                            .enabled(false)
-                            .tip("Format Painter — planned")],
+                            .enabled(has_sel)
+                            .selected(self.painter_armed.is_some())
+                            .tip("Copy the selection's formatting to the next shape you click")],
                         ]),
+                        // Visio's Editing group rides beside Clipboard:
+                        // Select All + Select by Type (#110, URS-1160).
+                        grid(vec![vec![
+                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
+                                .tip("Select every shape on the page (Ctrl+A)"),
+                            RibbonButton::new(
+                                Icon::Shapes,
+                                "Select by Type…",
+                                Action::SelectByType,
+                            )
+                            .selected(self.selby_open)
+                            .tip("Select shapes by type, master, or layer"),
+                        ]]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -3080,44 +5204,53 @@ impl App {
                 crate::ribbon::Group::new(
                     "Arrange",
                     vec![
-                        big(
+                        stack(vec![
                             RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
                                 .enabled(false)
                                 .tip("Z-order — planned"),
-                        ),
-                        big(
                             RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
                                 .enabled(false)
                                 .tip("Z-order — planned"),
-                        ),
+                            RibbonButton::new(Icon::Check, "To Page", Action::AlignToPage)
+                                .selected(self.align_to_page)
+                                .tip("Align against the page instead of the primary selection"),
+                        ]),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Align, "Align", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Alignment — planned"),
-                                RibbonButton::new(
-                                    Icon::Rotate,
-                                    "Rotate Right",
-                                    Action::RotateRight,
-                                )
-                                .enabled(has_sel)
-                                .tip("Rotate selection 90° clockwise"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft)
-                                    .enabled(has_sel)
-                                    .tip("Rotate selection 90° counter-clockwise"),
+                                RibbonButton::new(Icon::Align, "Left", Action::AlignLeft)
+                                    .enabled(multi_sel)
+                                    .tip("Align left edges (first-selected or page)"),
+                                RibbonButton::new(Icon::AlignCenter, "Center", Action::AlignHCenter)
+                                .enabled(multi_sel)
+                                .tip("Align vertical centers"),
+                                RibbonButton::new(Icon::AlignRight, "Right", Action::AlignRight)
+                                    .enabled(multi_sel)
+                                    .tip("Align right edges"),
                             ],
                             vec![
-                                RibbonButton::new(Icon::Group, "Group", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Grouping — planned"),
-                                RibbonButton::new(Icon::Delete, "Delete", Action::Delete)
-                                    .enabled(sel_active)
-                                    .tip("Delete the selected shape (Del)"),
+                                RibbonButton::new(Icon::AlignTop, "Top", Action::AlignTop)
+                                    .enabled(multi_sel)
+                                    .tip("Align top edges"),
+                                RibbonButton::new(Icon::AlignMiddle, "Middle", Action::AlignVCenter)
+                                .enabled(multi_sel)
+                                .tip("Align horizontal middles"),
+                                RibbonButton::new(Icon::AlignBottom, "Bottom", Action::AlignBottom)
+                                .enabled(multi_sel)
+                                .tip("Align bottom edges"),
+                            ],
+                            vec![
+                                RibbonButton::new(Icon::DistH, "Dist H", Action::DistributeH)
+                                .enabled(tri_sel)
+                                .tip("Even horizontal spacing (3+ shapes)"),
+                                RibbonButton::new(Icon::DistV, "Dist V", Action::DistributeV)
+                                .enabled(tri_sel)
+                                .tip("Even vertical spacing (3+ shapes)"),
                             ],
                         ]),
                     ],
                 ),
-            ],
+                ]
+            }
             Tab::Insert => vec![
                 crate::ribbon::Group::new(
                     "Blocks",
@@ -3135,9 +5268,8 @@ impl App {
                 crate::ribbon::Group::new(
                     "Illustrations",
                     vec![
-                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros)
-                            .enabled(false)
-                            .tip("Picture shapes — planned")),
+                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::InsertPicture)
+                            .tip("Insert a PNG or JPEG picture from a file")),
                         stack(vec![RibbonButton::new(
                             Icon::OnlinePic,
                             "Online Pictures",
@@ -3202,12 +5334,11 @@ impl App {
                     "Page Setup",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros)
-                                .enabled(false)
-                                .tip("Page orientation — planned"),
-                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros)
-                                .enabled(false)
-                                .tip("Page size — planned"),
+                            RibbonButton::new(Icon::Orientation, "Orientation", Action::PageOrientation)
+                                .tip("Swap portrait/landscape (swaps width and height)"),
+                            RibbonButton::new(Icon::NewPage, "Size", Action::PageSizeDialog)
+                                .selected(self.pagesetup_open)
+                                .tip("Page size — ISO/ANSI presets or custom"),
                         ],
                         vec![RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros)
                             .enabled(false)
@@ -3218,9 +5349,9 @@ impl App {
                     "Backgrounds",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::Macros)
-                                .enabled(false)
-                                .tip("Page backgrounds — planned"),
+                            RibbonButton::new(Icon::Picture, "Backgrounds", Action::PageBackgrounds)
+                                .selected(self.backgrounds_open)
+                                .tip("Assign a background page behind this one"),
                         ],
                         vec![
                             RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros)
@@ -3384,13 +5515,22 @@ impl App {
                 ),
                 crate::ribbon::Group::new(
                     "Visual Aids",
-                    vec![big(RibbonButton::new(
-                        Icon::Check,
-                        "Visual Aids",
-                        Action::Macros,
-                    )
-                    .enabled(false)
-                    .tip("Snap & glue settings — planned"))],
+                    vec![
+                        stack(vec![RibbonButton::new(
+                            Icon::Grid,
+                            "Dynamic Grid",
+                            Action::ToggleDynamicGrid,
+                        )
+                        .selected(self.snap.dynamic_grid)
+                        .tip("Alignment and spacing hints while dragging")]),
+                        big(RibbonButton::new(
+                            Icon::Magnet,
+                            "Snap & Glue",
+                            Action::SnapGlue,
+                        )
+                        .selected(self.snap_dlg_open)
+                        .tip("Configure snap and glue targets")),
+                    ],
                 ),
                 crate::ribbon::Group::new(
                     "Macros",
@@ -4308,6 +6448,25 @@ impl App {
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
+        // The page's guides (#113): collected before the borrows below
+        // (the marquee-gating hit closure and the overlay both use
+        // them).
+        let page_guides = self.page_guides();
+        let guide_fx: Vec<canvas::GuideFx> = page_guides
+            .iter()
+            .map(|g| canvas::GuideFx {
+                id: g.id,
+                vertical: match g.kind {
+                    crate::guides::GuideKind::Vertical => Some(true),
+                    crate::guides::GuideKind::Horizontal => Some(false),
+                    crate::guides::GuideKind::Point => None,
+                },
+                x: g.x,
+                y: g.y,
+                selected: self.sel.is_some_and(|(_, sid)| sid == g.id),
+            })
+            .collect();
+        let guide_hit_threshold = 5.0 / self.view.px_per_in() as f64;
         // Live move feedback (#96): during a moved drag the dragged
         // shapes' static layers are suppressed and ghosted at the live
         // position — Visio moves the shape under the cursor for the
@@ -4319,6 +6478,9 @@ impl App {
         if let Some(d) = self.drag.as_ref().filter(|d| d.moved) {
             if self.sel.is_some_and(|(p, _)| Some(p) == self.page_id()) {
                 live_drag = true;
+                // #109: the dynamic-grid hints computed by this frame's
+                // `apply_drag_snap` (update_drag runs before the paint).
+                drag_fx.hints = self.snap_live.clone();
                 // y-up pin delta → y-down bbox delta flips y.
                 let (dx, dy) = (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
                 let mut ids: Vec<i64> = vec![d.shape];
@@ -4443,6 +6605,9 @@ impl App {
             self.status = msg;
         }
         quads.retain(|q| !hide_layers.contains(&q.id));
+        // Background pages render beneath this page's ink (#113) —
+        // built before the field borrows below.
+        let underlays = self.build_bg_underlays(ui.ctx());
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -4452,6 +6617,11 @@ impl App {
         let hit = |pos: (f64, f64)| -> bool {
             let Some(ed) = ed else { return false };
             let Some(page) = page else { return false };
+            // Guides count as occupied page (#113): a press on one
+            // arms its move-drag, never a marquee.
+            if crate::guides::guide_hit(&page_guides, pos, guide_hit_threshold).is_some() {
+                return true;
+            }
             for shape in page.shapes.iter().rev() {
                 if let Some((x, y, w, h)) = Self::shape_rect_static(&ed.doc, page.id, shape) {
                     if hit_in_rect(pos, x, y, w, h) {
@@ -4470,6 +6640,9 @@ impl App {
             &extra_rects,
             &handles,
             &drag_fx,
+            &guide_fx,
+            &underlays,
+            self.tool == Tool::Connector,
             armed,
             &hit,
             &mut mouse,
@@ -4501,6 +6674,15 @@ impl App {
             }
             if let Some((x0, y0, x1, y1)) = out.marquee_done {
                 self.apply_marquee(x0, y0, x1, y1);
+            }
+            // A ruler drag released over the page drops a guide
+            // (#113, URS-1076).
+            if let Some((src, pos)) = out.guide_drop {
+                self.add_guide(src, pos);
+            }
+            // The Connector Tool's gesture (#108, URS-1067).
+            if let Some((from, to)) = out.connector_drop {
+                self.create_connector(from, to);
             }
         }
         // Comment badges (#29 rework): a small bubble at the top-left
@@ -4609,27 +6791,77 @@ impl App {
                         // handle's own position — the grab may start up
                         // to HANDLE_GRAB px away from the handle center,
                         // and snapping to the raw pointer would jump it.
+                        // #108: connectors get the full glue lifecycle —
+                        // a drop on a connection point (static) or a
+                        // shape (dynamic) writes the corpus formula +
+                        // `<Connect>`; a drop on empty page releases
+                        // the glue. Plain 1D shapes keep the #109 glue
+                        // snap with a note (their glue rides with
+                        // connectors-as-masters later).
                         if let Some(origin) = handles.iter().find(|h| h.id == id).map(|h| h.pos) {
-                            self.apply_line_endpoint(
-                                id,
-                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
-                            );
+                            let raw = (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1);
+                            let dragged = self.sel.map(|(_, s)| s);
+                            let is_conn = dragged.is_some_and(|sid| {
+                                self.ed.as_ref().is_some_and(|ed| {
+                                    let page =
+                                        &ed.doc.pages[self.page_idx];
+                                    vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                        .is_some_and(crate::connectors::is_connector)
+                                })
+                            });
+                            if is_conn {
+                                self.commit_connector_endpoint(id, raw);
+                            } else {
+                                let glue = dragged
+                                    .and_then(|sid| self.snap_point_for(sid, raw, true));
+                                let (target, note) = match glue {
+                                    Some((p, hit)) => {
+                                        (p, Some(format!("endpoint glued to {}", snap_hit_text(hit))))
+                                    }
+                                    None => (raw, None),
+                                };
+                                self.apply_line_endpoint(id, target);
+                                if let Some(note) = note {
+                                    self.status = note;
+                                }
+                            }
                         }
                     }
                     HandleId::LineMid => {
-                        self.apply_line_move(start, end);
+                        // #108: dragging a glued connector's body
+                        // would rewrite its formula-driven endpoints
+                        // as plain values (dropping the glue); body
+                        // drag arrives with the connector routing UX.
+                        let is_conn = self.sel.is_some_and(|(_, sid)| {
+                            self.ed.as_ref().is_some_and(|ed| {
+                                let page = &ed.doc.pages[self.page_idx];
+                                vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                    .is_some_and(crate::connectors::is_connector)
+                            })
+                        });
+                        if is_conn {
+                            self.status =
+                                "drag the connector's endpoints — body drag arrives with routing UX"
+                                    .into();
+                        } else {
+                            self.apply_line_move(start, end);
+                        }
                     }
                     HandleId::GeoPoint { section_ix, row_ix } => {
                         // The DELTA from the handle's own position (the
                         // grab may start inside the grab radius).
+                        // #109: a vertex drag runs through the snap
+                        // engine's point snap (grid, ruler, alignment
+                        // targets — no glue; glue is for connectors).
                         if let Some(origin) =
                             handles.iter().find(|h| h.id == id).map(|h| h.pos)
                         {
-                            self.apply_geo_vertex(
-                                section_ix,
-                                row_ix,
-                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
-                            );
+                            let raw = (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1);
+                            let target = self
+                                .sel
+                                .and_then(|(_, sid)| self.snap_point_for(sid, raw, false))
+                                .map_or(raw, |(p, _)| p);
+                            self.apply_geo_vertex(section_ix, row_ix, target);
                         }
                     }
                 }
@@ -4638,7 +6870,18 @@ impl App {
         if let Some(pos) = out.right_click_page_pos {
             // Visio: right-click selects the shape under the cursor and
             // opens its context menu (empty page = no shape menu yet).
-            match self.shape_hit(pos) {
+            // Guides carry no shape context menu (#113): they are
+            // page furniture — right-click on one opens nothing.
+            let hit = self.shape_hit(pos).and_then(|id| {
+                let ed = self.ed()?;
+                let page_id = self.page_id()?;
+                let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+                match vsdx::model::find_shape_by_id(&page.shapes, id) {
+                    Some(sh) if crate::guides::is_guide(sh) => None,
+                    _ => Some(id),
+                }
+            });
+            match hit {
                 Some(shape_id) => {
                     if let Some(p) = self.page_id() {
                         // Right-clicking a member of the current
@@ -5634,6 +7877,238 @@ impl App {
         }
     }
 
+    /// The Select by Type dialog (#110, URS-1160, Visio's Home ▸
+    /// Editing ▸ Select ▸ Select by Type): pick a criterion — shape
+    /// type, master, or layer — and a value from the page, and the
+    /// matching shapes become the selection.
+    fn select_by_type_window(&mut self, ctx: &egui::Context) {
+        if !self.selby_open {
+            return;
+        }
+        // The value list per criterion, straight off the page.
+        let mut pairs: Vec<(String, String, Vec<i64>)> = Vec::new();
+        if let Some(ed) = self.ed.as_ref() {
+            if let Some(page) = ed.doc.pages.get(self.page_idx) {
+                // (key shown to the user, dedup key, matching ids)
+                let mut push = |label: String, ids: Vec<i64>| {
+                    if let Some(slot) = pairs.iter_mut().find(|(l, _, _)| *l == label) {
+                        slot.2.extend(ids);
+                    } else {
+                        pairs.push((label.clone(), label, ids));
+                    }
+                };
+                match self.selby_criterion {
+                    0 => {
+                        for sh in &page.shapes {
+                            let t = sh.type_.clone().unwrap_or_else(|| "Shape".into());
+                            push(t, vec![sh.id]);
+                        }
+                    }
+                    1 => {
+                        for sh in &page.shapes {
+                            if let Some(mid) = sh.master {
+                                let name = ed
+                                    .doc
+                                    .master(mid)
+                                    .and_then(|m| m.name_u.clone())
+                                    .unwrap_or_else(|| format!("master {mid}"));
+                                push(name, vec![sh.id]);
+                            }
+                        }
+                    }
+                    _ => {
+                        let layer_names: Vec<(i64, String)> = page
+                            .sheet()
+                            .map(|sheet| {
+                                sheet
+                                    .sections_named("Layer")
+                                    .into_iter()
+                                    .flat_map(|sec| sec.rows.iter().map(|row| {
+                                        (
+                                            row.ix,
+                                            row.cell("Name")
+                                                .and_then(|c| c.v.clone())
+                                                .unwrap_or_else(|| format!("layer {}", row.ix)),
+                                        )
+                                    }))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (ix, name) in &layer_names {
+                            let ids: Vec<i64> = page
+                                .shapes
+                                .iter()
+                                .filter(|sh| {
+                                    sh.sheet
+                                        .cell("LayerMember")
+                                        .and_then(|c| c.numeric())
+                                        .is_some_and(|m| m as i64 == *ix)
+                                })
+                                .map(|sh| sh.id)
+                                .collect();
+                            if !ids.is_empty() {
+                                push(name.clone(), ids);
+                            }
+                        }
+                    }
+                }
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        if !pairs.iter().any(|(l, _, _)| *l == self.selby_value) {
+            self.selby_value = pairs.first().map(|(l, _, _)| l.clone()).unwrap_or_default();
+        }
+        let mut open = true;
+        let mut apply = false;
+        egui::Window::new("Select by Type")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Select by");
+                    for (i, label) in ["Shape type", "Master", "Layer"].into_iter().enumerate() {
+                        if ui
+                            .selectable_label(self.selby_criterion == i as u8, label)
+                            .clicked()
+                        {
+                            self.selby_criterion = i as u8;
+                            self.selby_value.clear();
+                        }
+                    }
+                });
+                ui.separator();
+                if pairs.is_empty() {
+                    ui.weak("(nothing on this page matches the criterion)");
+                } else {
+                    ui.label("Value:");
+                    for (label, _, ids) in &pairs {
+                        if ui
+                            .selectable_label(self.selby_value == *label, format!("{label} ({} shapes)", ids.len()))
+                            .clicked()
+                        {
+                            self.selby_value = label.clone();
+                        }
+                    }
+                }
+                ui.add_space(6.0);
+                let can = !self.selby_value.is_empty();
+                let btn = egui::Button::new("Select");
+                let r = ui.add_enabled(can, btn);
+                if r.clicked() {
+                    apply = true;
+                }
+            });
+        if apply {
+            if let Some((_, _, ids)) =
+                pairs.iter().find(|(l, _, _)| *l == self.selby_value)
+            {
+                let ids = ids.clone();
+                if let Some(page_id) = self.page_id() {
+                    let mut all: Vec<(i64, i64)> =
+                        ids.iter().map(|sid| (page_id, *sid)).collect();
+                    all.sort();
+                    all.dedup();
+                    if let Some(first) = all.first().copied() {
+                        self.sel = Some(first);
+                    }
+                    let n = all.len();
+                    self.sel_set = all;
+                    self.status = format!("selected {n} shapes by {}", match self.selby_criterion {
+                        0 => "shape type",
+                        1 => "master",
+                        _ => "layer",
+                    });
+                }
+            }
+        }
+        if !open {
+            self.selby_open = false;
+        }
+    }
+
+    /// The Snap & Glue dialog (#109, Visio 2016's View ▸ Visual Aids):
+    /// per-target toggles for snap (URS-1100) and glue (URS-1112)
+    /// plus the dynamic-grid aid (URS-1088). Every change writes
+    /// through to the document's DocumentSettings — settings are
+    /// document state, not undoable drawing edits.
+    fn snap_glue_window(&mut self, ctx: &egui::Context) {
+        if !self.snap_dlg_open {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Snap & Glue")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                let s = &mut self.snap;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.strong("Snap");
+                        if ui.checkbox(&mut s.snap_active, "Active").changed() {
+                            changed = true;
+                        }
+                        ui.add_enabled_ui(s.snap_active, |ui| {
+                            ui.label("Snap to:");
+                            for (v, label) in [
+                                (&mut s.snap_ruler_subdivisions, "Ruler subdivisions"),
+                                (&mut s.snap_grid, "Grid"),
+                                (&mut s.snap_guides, "Guides"),
+                                (&mut s.snap_alignment_boxes, "Alignment boxes"),
+                                (&mut s.snap_shape_extensions, "Shape extensions"),
+                                (&mut s.snap_shape_intersections, "Shape intersections"),
+                                (&mut s.snap_connection_points, "Connection points"),
+                            ] {
+                                if ui.checkbox(v, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.strong("Glue");
+                        if ui.checkbox(&mut s.glue_active, "Active").changed() {
+                            changed = true;
+                        }
+                        ui.add_enabled_ui(s.glue_active, |ui| {
+                            ui.label("Glue to:");
+                            for (v, label) in [
+                                (&mut s.glue_guides, "Guides"),
+                                (&mut s.glue_shape_handles, "Shape handles"),
+                                (&mut s.glue_shape_vertices, "Shape vertices"),
+                                (&mut s.glue_connection_points, "Connection points"),
+                            ] {
+                                if ui.checkbox(v, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                });
+                ui.separator();
+                ui.strong("Drawing aids");
+                if ui.checkbox(&mut s.dynamic_grid, "Dynamic grid").changed() {
+                    changed = true;
+                }
+                ui.add_space(3.0);
+                ui.weak(
+                    "Settings are stored in the drawing. Guides as targets arrive with \
+                     #113; connector glue with #108.",
+                );
+            });
+        if !open {
+            self.snap_dlg_open = false;
+        }
+        if changed {
+            self.apply_snap_settings();
+        }
+    }
+
     fn hyperlink_window(&mut self, ctx: &egui::Context) {
         let Some(shape_id) = self.hyperlink_open else {
             return;
@@ -6313,6 +8788,11 @@ impl App {
             FlipH,
             EditText,
             ShapeSheet,
+            /// #108: per-connector route style (URS-1114).
+            RouteStraight,
+            RouteRightAngle,
+            /// #113/URS-1200: render the selection to a picture.
+            CopyAsPicture,
         }
         let mut act: Option<Act> = None;
         // Min menu width incl. frame, until the popup reports its own
@@ -6612,6 +9092,29 @@ impl App {
             if underlying_action {
                 act = Some(Act::AddToUnderlying);
             }
+            // #108: connector route styles (Visio 2016 puts
+            // Straight/Right-Angle Connector on the connector's menu).
+            {
+                let is_conn = self.page_id().is_some_and(|pid| {
+                    self.ed.as_ref().is_some_and(|ed| {
+                        let page = ed.doc.pages.iter().find(|p| p.id == pid);
+                        page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+                            .is_some_and(crate::connectors::is_connector)
+                    })
+                });
+                if is_conn {
+                    if ctx_item(ui, None, "Straight Connector", "", true) {
+                        act = Some(Act::RouteStraight);
+                    }
+                    if ctx_item(ui, None, "Right-Angle Connector", "", true) {
+                        act = Some(Act::RouteRightAngle);
+                    }
+                    ui.separator();
+                }
+            }
+            if ctx_item(ui, None, "Copy as Picture…", "", self.sel.is_some()) {
+                act = Some(Act::CopyAsPicture);
+            }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
             }
@@ -6792,6 +9295,17 @@ impl App {
                 self.status = format!("editing text of shape {shape_id}");
             }
             Act::ShapeSheet => self.show_shapesheet = true,
+            Act::RouteStraight => {
+                self.apply_connector_route_style(page_id, shape_id, crate::connectors::ROUTE_STRAIGHT)
+            }
+            Act::RouteRightAngle => self.apply_connector_route_style(
+                page_id,
+                shape_id,
+                crate::connectors::ROUTE_RIGHT_ANGLE,
+            ),
+            Act::CopyAsPicture => {
+                self.copypic_open = true;
+            }
         }
     }
 
@@ -6806,6 +9320,12 @@ impl App {
         };
         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) {
             self.clipboard = Some(s.clone());
+            // #113 (URS-1113): the system clipboard receives the
+            // shape's text so other apps get meaningful content (the
+            // internal shape clipboard handles in-app paste).
+            if let Some(txt) = s.sheet.text.as_deref().filter(|t| !t.is_empty()) {
+                self.os_clipboard_text = Some(txt.to_string());
+            }
         }
     }
 
@@ -6813,6 +9333,12 @@ impl App {
     /// top of the z-order, and select it.
     fn paste_clipboard(&mut self, page_id: i64) {
         let Some(clip) = self.clipboard.clone() else {
+            // #113 (URS-1113): nothing internal — an OS clipboard
+            // IMAGE pastes as a picture (another app's graphic, or
+            // this app's own Copy as Picture). Probed off-thread:
+            // arboard opens its own connection and the paste path
+            // runs on the UI thread.
+            self.paste_os_image();
             return;
         };
         let Some(ed) = self.ed.as_ref() else { return };
@@ -6989,6 +9515,183 @@ impl App {
     #[doc(hidden)]
     pub fn debug_sel_set_len(&self) -> usize {
         self.sel_set.len()
+    }
+
+    /// #109 tests: the live snap & glue toggles.
+    pub fn debug_snap_settings(&self) -> crate::snap::SnapSettings {
+        self.snap
+    }
+
+    /// #109 tests: the document's persisted DocumentSettings values.
+    pub fn debug_doc_snap_glue(&self) -> Option<vsdx::model::DocSnapGlue> {
+        self.ed.as_ref().and_then(|e| e.doc.doc_snap_glue())
+    }
+
+    /// #109 tests: a shape's page rect (inches, y-up, bottom-left
+    /// origin) — the snap engine's own frame.
+    pub fn debug_shape_page_rect(&self, shape_id: i64) -> Option<(f64, f64, f64, f64)> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        self.shape_rect(&ed.doc, page_id, sh)
+    }
+
+    /// #109 tests: how many dynamic-grid hints the current frame
+    /// holds (nonzero only mid-drag).
+    pub fn debug_snap_hint_count(&self) -> usize {
+        self.snap_live.len()
+    }
+
+    /// #109 tests: replace the live snap settings in memory (drag
+    /// tests that verify pure translation semantics turn snapping
+    /// off; the document copy is untouched).
+    pub fn debug_set_snap_for_test(&mut self, s: crate::snap::SnapSettings) {
+        self.snap = s;
+    }
+
+    /// #113 tests: the page's guides — (id, kind name, x, y), page
+    /// inches y-up (x = the line for vertical, y for horizontal,
+    /// both for points).
+    pub fn debug_guides(&self) -> Vec<(i64, &'static str, f64, f64)> {
+        self.page_guides()
+            .iter()
+            .map(|g| {
+                let kind = match g.kind {
+                    crate::guides::GuideKind::Vertical => "vertical",
+                    crate::guides::GuideKind::Horizontal => "horizontal",
+                    crate::guides::GuideKind::Point => "point",
+                };
+                (g.id, kind, g.x, g.y)
+            })
+            .collect()
+    }
+
+    /// #108 tests: the page's Connect records as (from, from_cell,
+    /// from_part, to, to_cell, to_part).
+    pub fn debug_connects(&self) -> Vec<(i64, String, i64, i64, String, i64)> {
+        let Some(page_id) = self.page_id() else { return Vec::new() };
+        let Some(ed) = self.ed.as_ref() else { return Vec::new() };
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .map(|p| {
+                p.connects()
+                    .list
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.from_sheet,
+                            c.from_cell.clone(),
+                            c.from_part,
+                            c.to_sheet,
+                            c.to_cell.clone(),
+                            c.to_part,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// #108 tests: one geometry row cell of a shape.
+    pub fn debug_row_cell(
+        &self,
+        page: i64,
+        shape: i64,
+        sec_ix: i64,
+        row_ix: i64,
+        cell: &str,
+    ) -> Option<f64> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet
+            .sections_named("Geometry")
+            .into_iter()
+            .find(|s| s.ix == sec_ix)?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?
+            .cell(cell)
+            .and_then(|c| c.numeric())
+    }
+
+    /// #108 tests: the active mouse tool.
+    pub fn debug_tool(&self) -> Tool {
+        self.tool
+    }
+
+    /// #113 tests: the last copy-as-picture PNG's byte length.
+    pub fn debug_last_picture_len(&self) -> Option<usize> {
+        self.last_picture.as_ref().map(|v| v.len())
+    }
+
+    /// #113 tests: insert a picture from bytes (the kittest path —
+    /// no native dialog).
+    pub fn debug_insert_picture_bytes(&mut self, bytes: &[u8]) {
+        self.insert_picture_bytes(bytes);
+    }
+
+    /// #113 tests: the current page's background assignment.
+    pub fn debug_back_page(&self) -> Option<i64> {
+        self.page_id().and_then(|p| self.back_page_of(p))
+    }
+
+    /// #113 tests: assign the current page's background (kittest
+    /// path — no dialog).
+    pub fn debug_set_back_page(&mut self, bg: Option<i64>) {
+        self.set_back_page(bg);
+    }
+
+    /// #113 tests: add a fresh page and return its id.
+    pub fn debug_add_page(&mut self) -> i64 {
+        let page_id = self.page_id().unwrap_or(0);
+        let _ = page_id;
+        // The AddPage command through the normal path.
+        let ed = self.ed.as_ref().expect("doc");
+        let id = ed
+            .doc
+            .pages
+            .iter()
+            .map(|p| p.id)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        self.apply(dc_core::commands::AddPage::new(format!(
+            "Page-{}",
+            id
+        )));
+        id
+    }
+
+    /// #113 tests: the document's runtime media parts.
+    pub fn debug_media_parts(&self) -> Vec<String> {
+        self.ed
+            .as_ref()
+            .map(|e| {
+                e.doc
+                    .extra_media
+                    .iter()
+                    .map(|m| m.part.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// #113 tests: the page's current size in inches.
+    pub fn debug_page_size(&self) -> (f64, f64) {
+        let g = self.page_geom();
+        (g.w_in, g.h_in)
+    }
+
+    /// #113 tests: a cell's formula (the `F` attribute) on a shape.
+    pub fn debug_cell_formula(&self, page: i64, shape: i64, cell: &str) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet.cell(cell).and_then(|c| c.f.clone())
     }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
@@ -7908,10 +10611,21 @@ impl App {
             ctx.request_repaint_after(Duration::from_secs(2));
         }
         self.handle_shortcuts(&ctx);
+        // #113: a copy queued OS-clipboard text (the copy path runs
+        // inside input handling without a Context).
+        if let Some(txt) = self.os_clipboard_text.take() {
+            ctx.copy_text(txt);
+        }
+        self.poll_os_image();
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
+        self.page_setup_window(&ctx);
+        self.copy_picture_window(&ctx);
+        self.backgrounds_window(&ctx);
+        self.select_by_type_window(&ctx);
+        self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
         self.shape_data_window(&ctx);
@@ -8892,6 +11606,53 @@ fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
 
 /// Every shape of a subtree, document (z) order, recursive (#78):
 /// the group-edit mode's hit-test and marquee candidate set.
+/// Distance from `p` to the segment a→b within `threshold` (#108
+/// connector hit-testing).
+fn segment_hit(a: (f64, f64), b: (f64, f64), p: (f64, f64), threshold: f64) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-12 {
+        0.0
+    } else {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    (p.0 - cx).hypot(p.1 - cy) <= threshold
+}
+
+/// Connection rows of one sheet → page-space connection points on
+/// `t` (#109): rows carry shape-local X/Y (often cached formula
+/// values, e.g. `Width*0.5`), mapped through the same unrotated
+/// bbox frame as the #137 vertex handles.
+fn collect_connection_points(t: &mut crate::snap::SnapTarget, sheet: &vsdx::model::Sheet) {
+    for sec in sheet.sections_named("Connection") {
+        for row in &sec.rows {
+            if let (Some(x), Some(y)) = (
+                row.cell("X").and_then(|c| c.numeric()),
+                row.cell("Y").and_then(|c| c.numeric()),
+            ) {
+                t.connection_points.push((t.rect.0 + x, t.rect.1 + y));
+            }
+        }
+    }
+}
+
+/// One-line description of a snap landing, for status notes (#109).
+fn snap_hit_text(h: crate::snap::SnapHit) -> String {
+    use crate::snap::SnapHit::*;
+    match h {
+        Grid => "the grid".into(),
+        Ruler => "a ruler subdivision".into(),
+        Guide(id) => format!("guide {id}"),
+        AlignmentBox(id) => format!("shape {id}'s alignment box"),
+        ShapeExtension(id) => format!("shape {id}'s extension"),
+        ShapeIntersection => "a shape intersection".into(),
+        ConnectionPoint(id) => format!("shape {id}'s connection point"),
+        ShapeHandle(id) => format!("shape {id}'s handle"),
+        ShapeVertex(id) => format!("shape {id}'s vertex"),
+    }
+}
+
 fn collect_members<'a>(shapes: &'a [Shape], out: &mut Vec<&'a Shape>) {
     for s in shapes {
         out.push(s);
