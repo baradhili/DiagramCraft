@@ -1237,12 +1237,12 @@ impl App {
     /// handle at each endpoint plus the midpoint; everything else gets
     /// the four resize corners of its bounding box.
     fn selection_handles(&self) -> Vec<Handle> {
-        // Group-edit mode v1 (#78): resize/endpoint handles for nested
-        // members are deferred — the drag-move and edit paths work,
-        // but handle math through group transforms arrives separately.
-        if !self.group_edit.is_empty() {
-            return Vec::new();
-        }
+        // Group-edit mode (#95): member resize/endpoint handles work —
+        // 2D corners come from `sel_page_rect`, which already maps a
+        // member's parent-local rect through the renderer's XForm chain
+        // to page space; 1D endpoints map their parent-local cells to
+        // page below. The commit-side deltas convert through the same
+        // chain (apply_resize / apply_line_endpoint).
         let Some(ed) = self.ed() else {
             return Vec::new();
         };
@@ -1258,6 +1258,15 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return Vec::new();
         };
+        let nested = chain.len() >= 2;
+        let page_h = Self::page_height(ed, page_id);
+        let to_page = |p: (f64, f64)| -> (f64, f64) {
+            if nested {
+                dc::svg::parent_local_point_to_page(&ed.doc, &chain, page_h, p)
+            } else {
+                p
+            }
+        };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         if let (Some(bx), Some(by), Some(ex), Some(ey)) =
             (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
@@ -1265,15 +1274,15 @@ impl App {
             return vec![
                 Handle {
                     id: HandleId::LineBegin,
-                    pos: (bx, by),
+                    pos: to_page((bx, by)),
                 },
                 Handle {
                     id: HandleId::LineEnd,
-                    pos: (ex, ey),
+                    pos: to_page((ex, ey)),
                 },
                 Handle {
                     id: HandleId::LineMid,
-                    pos: ((bx + ex) / 2.0, (by + ey) / 2.0),
+                    pos: to_page(((bx + ex) / 2.0, (by + ey) / 2.0)),
                 },
             ];
         }
@@ -1282,7 +1291,7 @@ impl App {
         };
         let page_h = self.page_geom().h_in;
         // The rect is y-down page inches; handles are y-up.
-        [
+        let mut out: Vec<Handle> = [
             (canvas::Corner::TopLeft, r.left(), r.top()),
             (canvas::Corner::TopRight, r.right(), r.top()),
             (canvas::Corner::BottomLeft, r.left(), r.bottom()),
@@ -1293,7 +1302,132 @@ impl App {
             id: HandleId::Corner(c),
             pos: (x as f64, page_h - y as f64),
         })
-        .collect()
+        .collect();
+        // Geometry vertex handles (#137): one per point row of the
+        // shape's OWN Geometry sections (master-inherited geometry has
+        // no local rows to drag — its handles arrive with master
+        // editing). Appended after the corners, so corner handles win
+        // overlaps.
+        for geo in sh.sheet.sections_named("Geometry") {
+            for row in &geo.rows {
+                let t = row.t.as_deref().unwrap_or("");
+                if !matches!(t, "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo" | "SplineKnot") {
+                    continue;
+                }
+                let (Some(x), Some(y)) = (
+                    row.cell("X").and_then(|c| c.numeric()),
+                    row.cell("Y").and_then(|c| c.numeric()),
+                ) else {
+                    continue;
+                };
+                // Shape-local (0..w, 0..h, y-up) → page y-up through
+                // the chain-mapped bbox (v1 unrotated: the local frame
+                // maps linearly onto the bbox).
+                if let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) {
+                    out.push(Handle {
+                        id: HandleId::GeoPoint {
+                            section_ix: geo.ix,
+                            row_ix: row.ix,
+                        },
+                        pos: (bx + x, by + y),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// #137: commit a geometry-vertex drag — rewrite the row's X/Y
+    /// (shape-local, y-up) through one `SetRowCell` Macro. The #59
+    /// guard policy: a row cell that resolves to a formula refuses
+    /// with a status note and is never written; relative rows
+    /// (`RelMoveTo`/`RelLineTo`) resolve against their PRECEDING row —
+    /// not modeled here, so they refuse with a note rather than
+    /// writing a wrong absolute value.
+    fn apply_geo_vertex(&mut self, section_ix: i64, row_ix: i64, to_page: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        // Page → shape-local: the inverse of the handle mapping (the
+        // chain-mapped bbox's origin; unrotated v1).
+        let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) else {
+            return;
+        };
+        let Some(row) = sh
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == section_ix)
+            .and_then(|s| s.rows.iter().find(|r| r.ix == row_ix))
+        else {
+            return;
+        };
+        let t = row.t.as_deref().unwrap_or("");
+        if matches!(t, "RelMoveTo" | "RelLineTo") {
+            self.status = format!(
+                "vertex drag refused: row {row_ix} is relative ({t}) — \
+                 relative geometry editing arrives separately"
+            );
+            return;
+        }
+        for name in ["X", "Y"] {
+            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
+                .is_some()
+            {
+                self.status = format!(
+                    "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven \
+                     — edit the formula to change it"
+                );
+                return;
+            }
+            // Row-cell formulas live on the row cell itself too.
+            if row
+                .cell(name)
+                .and_then(|c| c.f.as_deref())
+                .is_some_and(|f| f != "Inh" && f != "No Formula")
+            {
+                self.status = format!(
+                    "vertex drag refused: row {row_ix}'s {name} is formula-driven \
+                     — edit the formula to change it"
+                );
+                return;
+            }
+        }
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let (lx, ly) = (to_page.0 - bx, to_page.1 - by);
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Geometry",
+                section_ix,
+                dc_core::commands::RowSel::Ix(row_ix),
+                "X",
+                cell(lx),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope,
+                "Geometry",
+                section_ix,
+                dc_core::commands::RowSel::Ix(row_ix),
+                "Y",
+                cell(ly),
+            )),
+        ];
+        self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
     }
 
     /// kittest: one shape's bbox in SCREEN coords (y-down) — follows
@@ -1367,7 +1501,7 @@ impl App {
                 if ctrl && i.key_pressed(egui::Key::X) {
                     self.copy_selection();
                     let (p, s) = self.sel.unwrap();
-                    self.apply(RemoveShape::new(p, s));
+                    self.delete_one(p, s);
                     self.set_selection(None);
                 }
                 if ctrl && i.key_pressed(egui::Key::C) {
@@ -1410,20 +1544,45 @@ impl App {
         let Some((page_id, _)) = self.sel else { return };
         if self.sel_set.len() > 1 {
             // One undo step for a multi-delete.
-            let cmds: Vec<Box<dyn dc_core::Command>> = self
+            let ids: Vec<i64> = self
                 .sel_set
                 .iter()
                 .filter(|(p, _)| *p == page_id)
-                .map(|(_, s)| Box::new(RemoveShape::new(page_id, *s)) as Box<dyn dc_core::Command>)
+                .map(|(_, s)| *s)
                 .collect();
-            let n = cmds.len();
+            let mut cmds: Vec<Box<dyn dc_core::Command>> = ids
+                .iter()
+                .map(|&s| Box::new(RemoveShape::new(page_id, s)) as Box<dyn dc_core::Command>)
+                .collect();
+            // #138: deleting a container strips its members' membership
+            // rows in the same Macro — no dangling rows in the file,
+            // one undo restores everything.
+            if let Some(ed) = self.ed() {
+                cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page_id, &ids));
+            }
+            let n = ids.len();
             self.apply(Macro::new(format!("delete {n} shapes"), cmds));
         } else {
             let shape_id = self.sel.unwrap().1;
-            self.apply(RemoveShape::new(page_id, shape_id));
+            self.delete_one(page_id, shape_id);
         }
         self.set_selection(None);
         self.sel_set.clear();
+    }
+
+    /// Delete a single shape, folding membership-row cleanup into the
+    /// same undo step when it is a container (#138).
+    fn delete_one(&mut self, page_id: i64, shape_id: i64) {
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![Box::new(RemoveShape::new(page_id, shape_id))];
+        if let Some(ed) = self.ed() {
+            cmds.extend(dc_core::container_membership_cleanup(
+                &ed.doc,
+                page_id,
+                &[shape_id],
+            ));
+        }
+        self.apply(Macro::new(format!("delete shape {shape_id}"), cmds));
     }
 
     /// Marquee selection: page-inch rect (y-down) → every top-level
@@ -1513,6 +1672,18 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return;
         };
+        // #95: a member's cells are parent-local — convert the
+        // page-space drag delta through the renderer's affine (any
+        // base point works; the translation cancels in the
+        // difference).
+        let (dx, dy) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            let l0 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (0.0, 0.0));
+            let l1 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (dx, dy));
+            (l1.0 - l0.0, l1.1 - l0.1)
+        } else {
+            (dx, dy)
+        };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(px), Some(py), Some(w), Some(h), Some(lx), Some(ly)) = (
             get("PinX"),
@@ -1584,6 +1755,19 @@ impl App {
         }
         cmds.push(Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))));
         cmds.push(Box::new(SetCell::new(scope, "PinY", cell(npy))));
+        // A group resize scales its members (#69): literal Xform cells
+        // (the common case — GroupShapes writes literals when grouping)
+        // scale here; formula-driven cells stay with the cache refresh
+        // below (#15's per-shape rules).
+        if sh.type_.as_deref() == Some("Group") {
+            cmds.extend(dc_core::scale_group_members(
+                &ed.doc,
+                page_id,
+                shape_id,
+                nw / w,
+                nh / h,
+            ));
+        }
         // Refresh the flattened group's inherited caches (sub-shape
         // XForms, Txt block, row coordinates) to the new size — Visio's
         // save-time refresh; without it a real-file group renders stale
@@ -1655,6 +1839,15 @@ impl App {
         };
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return;
+        };
+        // #95: endpoint cells are parent-local for a member — the
+        // page-space target converts through the affine; the other
+        // endpoint already reads parent-local.
+        let to = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, to)
+        } else {
+            to
         };
         let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
         let (Some(bx), Some(by), Some(ex), Some(ey)) =
@@ -1765,7 +1958,17 @@ impl App {
         let Some((px, py)) = get("PinX").zip(get("PinY")) else {
             return;
         };
-        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        // #95: member cells are parent-local — convert the page-space
+        // drag through the affine (translation cancels).
+        let (dx, dy) = if chain.len() >= 2 {
+            let page_h = Self::page_height(ed, page_id);
+            let f0 = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (0.0, 0.0));
+            let f1 =
+                dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (to.0 - from.0, to.1 - from.1));
+            (f1.0 - f0.0, f1.1 - f0.1)
+        } else {
+            (to.0 - from.0, to.1 - from.1)
+        };
         let scope = Scope::Shape {
             page: page_id,
             shape: shape_id,
@@ -1828,6 +2031,136 @@ impl App {
             })
             .map(|s| s.id)
             .collect()
+    }
+
+    /// #75: the topmost container under the selection's centroid —
+    /// a candidate is a top-level shape that is the target of at
+    /// least one member-side `User.msvSDContainerShape` reference or
+    /// was created by the Add-to-New flow (its `Container.` name);
+    /// the selection's own shapes never qualify. Z-order decides
+    /// between overlapping containers (topmost wins).
+    fn underlying_container(&self, members: &[i64]) -> Option<i64> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let page_id = page.id;
+        // The selection's centroid (page inches, y-up).
+        let mut cx = 0.0;
+        let mut cy = 0.0;
+        let mut n = 0.0;
+        for &sid in members {
+            let sh = page.shapes.iter().find(|s| s.id == sid)?;
+            let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, sh)?;
+            cx += x + w / 2.0;
+            cy += y + h / 2.0;
+            n += 1.0;
+        }
+        if n == 0.0 {
+            return None;
+        }
+        let centroid = (cx / n, cy / n);
+        let is_container = |s: &Shape, referenced: bool| {
+            referenced || s.name_u.as_deref().is_some_and(|n| n.starts_with("Container."))
+        };
+        // Which ids some member references (container identity by
+        // membership convention).
+        let referenced: std::collections::HashSet<i64> = page
+            .shapes
+            .iter()
+            .flat_map(|s| s.sheet.sections_named("User"))
+            .filter_map(|sec| {
+                sec.named_row("msvSDContainerShape")
+                    .and_then(|r| r.cell("Value"))
+                    .and_then(|c| c.numeric())
+                    .map(|v| v as i64)
+            })
+            .collect();
+        let mut found: Option<i64> = None;
+        for s in &page.shapes {
+            if members.contains(&s.id) {
+                continue;
+            }
+            if !is_container(s, referenced.contains(&s.id)) {
+                continue;
+            }
+            let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page_id, s) else {
+                continue;
+            };
+            if centroid.0 >= x && centroid.0 <= x + w && centroid.1 >= y && centroid.1 <= y + h {
+                found = Some(s.id); // later z-order wins (topmost)
+            }
+        }
+        found
+    }
+
+    /// #75: Add to Underlying Container — write the membership row on
+    /// each selected shape (the #27 convention, materialized on first
+    /// edit), one Macro, one undo.
+    fn add_selection_to_underlying_container(&mut self) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        let Some(container) = self.underlying_container(&members) else {
+            return;
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = members
+            .iter()
+            .map(|&m| {
+                Box::new(dc_core::SetRowCell::new(
+                    Scope::Shape { page: page_id, shape: m },
+                    "User",
+                    0,
+                    dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
+                    "Value",
+                    vsdx::Cell::value(container.to_string()),
+                )) as Box<dyn dc_core::Command>
+            })
+            .collect();
+        // #138 §2: the heading band's member count re-derives from live
+        // membership — "{base title} ({count})" through SetText.
+        if let Some(ed) = self.ed() {
+            let title = ed
+                .doc
+                .pages
+                .iter()
+                .find(|p| p.id == page_id)
+                .and_then(|p| p.shapes.iter().find(|s| s.id == container))
+                .and_then(|cont| {
+                    cont.sheet.sections_named("User").iter().find_map(|sec| {
+                        sec.named_row("msvSDContainerTitle")
+                            .and_then(|r| r.cell("Value"))
+                            .and_then(|c| c.v.clone())
+                    })
+                })
+                .unwrap_or_else(|| "Container".into());
+            // The UNION — already-members selected again must not
+            // double-count (#75 branch review).
+            let mut all = self.container_member_ids(page_id, container);
+            for m in &members {
+                if !all.contains(m) {
+                    all.push(*m);
+                }
+            }
+            let count = all.len();
+            cmds.push(Box::new(dc_core::SetText::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: container,
+                },
+                format!("{title} ({count})"),
+            )));
+        }
+        if !cmds.is_empty() {
+            self.apply(Macro::new(
+                format!("add {0} shape(s) to container {container}", members.len()),
+                cmds,
+            ));
+        }
     }
 
     /// Context-menu Container (#27): wrap the current selection's
@@ -2110,6 +2443,55 @@ impl App {
                 }
             }
         }
+    }
+
+    /// #95's UI guard: when `members` contains exactly one top-level
+    /// Group (plus at least one other shape), grouping nests into that
+    /// group — returns the parent id and the members' page-space bbox
+    /// origin converted into the parent's local frame.
+    fn nest_group_target(&self, members: &[i64]) -> Option<(i64, (f64, f64))> {
+        if members.len() < 2 {
+            return None;
+        }
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let page_id = page.id;
+        let mut groups = Vec::new();
+        for &id in members {
+            let s = page.shapes.iter().find(|s| s.id == id)?;
+            if s.type_.as_deref() == Some("Group") {
+                groups.push(id);
+            }
+        }
+        if groups.len() != 1 {
+            return None;
+        }
+        let parent = groups[0];
+        // The members' page-space bbox origin (the group-to-be's pin
+        // before conversion): union of the non-parent members' rects.
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        for &id in members {
+            if id == parent {
+                continue;
+            }
+            let s = page.shapes.iter().find(|s| s.id == id)?;
+            let chain = shape_chain(&ed.doc, page_id, id).ok()?;
+            let get = |n: &str| ed.doc.resolve_cell(s, &chain, n).and_then(|c| c.numeric());
+            let (px, py) = (get("PinX")?, get("PinY")?);
+            let lx = get("LocPinX").unwrap_or(0.0);
+            let ly = get("LocPinY").unwrap_or(0.0);
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+        }
+        let page_h = Self::page_height(ed, page_id);
+        // The conversion needs the PARENT as an ancestor — the affine
+        // maps the chain's last entry's parent-local frame, so append
+        // the new group's own slot (the parent twice).
+        let mut chain = shape_chain(&ed.doc, page_id, parent).ok()?;
+        chain.push(chain[0]);
+        let local = dc::svg::page_point_to_parent_local(&ed.doc, &chain, page_h, (x0, y0));
+        Some((parent, local))
     }
 
     /// Route every single-selection write through here so `sel` and
@@ -3538,6 +3920,30 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
+                // Begin/End Arrow (#72): the named gallery the renderer
+                // draws — value 0 none, 1-6 the classic set, 13 double.
+                const ARROWS: &[(&str, &str)] = &[
+                    ("0", "None"),
+                    ("1", "Arrow"),
+                    ("2", "Open Arrow"),
+                    ("3", "Concave"),
+                    ("4", "Stealth"),
+                    ("5", "Diamond"),
+                    ("6", "Oval"),
+                    ("13", "Double Arrow"),
+                ];
+                let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
+                if let Some(v) =
+                    Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS)
+                {
+                    set_cell = Some(("BeginArrow".into(), v));
+                }
+                let cur = self.eff_cell_str("EndArrow").unwrap_or_else(|| "0".into());
+                if let Some(v) =
+                    Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS)
+                {
+                    set_cell = Some(("EndArrow".into(), v));
+                }
                 ui.horizontal(|ui| {
                     ui.label("Rounding");
                     let cur = self.eff_cell_str("Rounding").unwrap_or_else(|| "0".into());
@@ -4212,6 +4618,19 @@ impl App {
                     }
                     HandleId::LineMid => {
                         self.apply_line_move(start, end);
+                    }
+                    HandleId::GeoPoint { section_ix, row_ix } => {
+                        // The DELTA from the handle's own position (the
+                        // grab may start inside the grab radius).
+                        if let Some(origin) =
+                            handles.iter().find(|h| h.id == id).map(|h| h.pos)
+                        {
+                            self.apply_geo_vertex(
+                                section_ix,
+                                row_ix,
+                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
+                            );
+                        }
                     }
                 }
             }
@@ -5842,6 +6261,26 @@ impl App {
             return;
         };
         let has_clip = self.clipboard.is_some();
+        // #75: the underlying-container membership item enables when a
+        // container sits under the selection AND the selection is not
+        // already entirely its member set (a pure no-op stays gray).
+        let sel_members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| Some(p) == self.page_id().as_ref())
+            .map(|(_, s)| *s)
+            .collect();
+        let underlying = self.underlying_container(&sel_members);
+        let can_underlying = match underlying {
+            Some(c) => {
+                let current = self.container_member_ids(self.page_id().unwrap_or(-1), c);
+                // Enables only when a selected shape is not yet a
+                // member — a pure re-add is a no-op and stays gray
+                // (#75 branch review).
+                sel_members.iter().any(|m| !current.contains(m))
+            }
+            None => false,
+        };
         // Master-defined actions (the ShapeSheet Actions section) head the
         // menu in Visio — e.g. the Capability master's "Shape Layout"
         // flyout. Entries render with their flyout children indented;
@@ -5856,6 +6295,8 @@ impl App {
             /// Enter the selected group's edit mode (#78).
             OpenGroup(i64),
             Container,
+            /// #75: membership into the container under the selection.
+            AddToUnderlying,
             Hyperlink,
             AddComment,
             ShapeData,
@@ -6146,6 +6587,7 @@ impl App {
                 egui::Button::new(job).min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
             );
             let mut sub_action = false;
+            let mut underlying_action = false;
             egui::Popup::menu(&cont)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                 .show(|ui| {
@@ -6153,16 +6595,22 @@ impl App {
                     if ctx_item(ui, None, "Add to New Container", "", true) {
                         sub_action = true;
                     }
-                    ctx_item(
+                    if ctx_item(
                         ui,
                         None,
                         "Add to Underlying Container",
-                        "(later milestone)",
-                        false,
-                    );
+                        "",
+                        can_underlying,
+                    ) && can_underlying
+                    {
+                        underlying_action = true;
+                    }
                 });
             if sub_action {
                 act = Some(Act::Container);
+            }
+            if underlying_action {
+                act = Some(Act::AddToUnderlying);
             }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
@@ -6214,12 +6662,36 @@ impl App {
                 let new_id = self
                     .ed()
                     .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
-                self.apply(dc_core::commands::GroupShapes::new(page_id, members));
+                // #95: exactly one GROUP in the selection plus other
+                // top-level shapes → nest a new group INSIDE it (the
+                // members' bbox origin converted into the parent's
+                // local frame through the renderer's affine), Visio's
+                // group-into-group. Anything else groups at top level
+                // as before.
+                let nest = self.nest_group_target(&members);
+                let cmd = match nest {
+                    Some((parent, local_pin)) => {
+                        // The parent itself is the CONTAINER, never a
+                        // member (grouping it into itself would
+                        // self-nest).
+                        let nested: Vec<i64> = members
+                            .iter()
+                            .copied()
+                            .filter(|id| *id != parent)
+                            .collect();
+                        dc_core::commands::GroupShapes::into_group(
+                            page_id, nested, parent, local_pin,
+                        )
+                    }
+                    None => dc_core::commands::GroupShapes::new(page_id, members),
+                };
+                self.apply(cmd);
                 if let Some(nid) = new_id {
                     self.set_selection(Some((page_id, nid)));
                 }
             }
             Act::Container => self.wrap_selection_in_container(),
+            Act::AddToUnderlying => self.add_selection_to_underlying_container(),
             Act::Hyperlink => {
                 self.hyperlink_open = Some(shape_id);
                 self.hyperlink_draft = None;
@@ -6271,7 +6743,7 @@ impl App {
             Act::Cut | Act::Copy => {
                 self.copy_selection();
                 if a == Act::Cut {
-                    self.apply(RemoveShape::new(page_id, shape_id));
+                    self.delete_one(page_id, shape_id);
                     self.set_selection(None);
                 }
             }
@@ -6772,6 +7244,66 @@ impl App {
     #[doc(hidden)]
     pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#137): one cell of a shape's OWN Geometry section-0
+    /// row, as (value, formula) — the vertex-drag probe.
+    #[doc(hidden)]
+    pub fn debug_geo_row_cell_for_test(
+        &self,
+        shape: i64,
+        row_ix: i64,
+        cell: &str,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        let row = sh
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == 0)?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?;
+        let c = row.cell(cell)?;
+        Some((c.v.clone(), c.f.clone()))
+    }
+
+    /// kittest (#138): how many `User.msvSDContainerShape` rows the
+    /// page carries (any container) — the dangling-row detector.
+    #[doc(hidden)]
+    pub fn debug_membership_rows_for_test(&self) -> usize {
+        self.ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .map(|p| {
+                p.shapes
+                    .iter()
+                    .flat_map(|s| s.sheet.sections_named("User"))
+                    .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// kittest (#75): the shapes whose membership row names
+    /// `container` (Visio's `User.msvSDContainerShape` convention).
+    #[doc(hidden)]
+    pub fn debug_container_members_for_test(&self, container: i64) -> Vec<i64> {
+        self.page_id()
+            .map(|p| self.container_member_ids(p, container))
+            .unwrap_or_default()
+    }
+
+    /// kittest (#69): a group's direct member ids.
+    #[doc(hidden)]
+    pub fn debug_group_members_for_test(&self, group: i64) -> Vec<i64> {
+        self.ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, group))
+            .map(|g| g.sub_shapes.iter().map(|m| m.id).collect())
+            .unwrap_or_default()
     }
 
     /// kittest (#67): the window title last pushed to the OS (name +

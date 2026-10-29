@@ -206,6 +206,10 @@ pub enum HandleId {
     LineBegin,
     LineEnd,
     LineMid,
+    /// A geometry row's defining point (#137): the row's X/Y pair,
+    /// addressed by Geometry section index and row index on the
+    /// SELECTED shape's own sheet.
+    GeoPoint { section_ix: i64, row_ix: i64 },
 }
 
 /// A finished handle drag (GitHub #59): (handle, press position,
@@ -442,6 +446,7 @@ pub fn show(
                     }
                     HandleId::LineBegin | HandleId::LineEnd => egui::CursorIcon::Crosshair,
                     HandleId::LineMid => egui::CursorIcon::AllScroll,
+                    HandleId::GeoPoint { .. } => egui::CursorIcon::Crosshair,
                 }
             });
         }
@@ -568,6 +573,15 @@ pub fn show(
     // larger filled squares and the midpoint an open circle.
     for (id, pos) in &handles_screen {
         match id {
+            // Geometry vertex handles (#137): Visio's small filled
+            // vertex squares.
+            HandleId::GeoPoint { .. } => {
+                p.rect_filled(
+                    Rect::from_center_size(*pos, Vec2::splat(5.0)),
+                    1.0,
+                    t.selection,
+                );
+            }
             HandleId::Corner(_) => {
                 p.rect_filled(
                     Rect::from_center_size(*pos, Vec2::splat(7.0)),
@@ -713,6 +727,16 @@ pub fn show(
                     HandleId::LineBegin
                 };
                 if let Some((_, o)) = handles_screen.iter().find(|(id, _)| *id == other) {
+                    lines.push((*o, ptr));
+                }
+            }
+            HandleId::GeoPoint { .. } => {
+                // Live vertex feedback (#137): a guide line from the
+                // handle's rest position to the pointer.
+                if let Some((_, o)) = handles_screen
+                    .iter()
+                    .find(|(id, _)| matches!(id, HandleId::GeoPoint { .. } if *id == hid))
+                {
                     lines.push((*o, ptr));
                 }
             }

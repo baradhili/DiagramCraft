@@ -280,6 +280,125 @@ pub fn effective_formula(
     f
 }
 
+
+/// Group-member scaling for a group resize (#69, #26's v1 boundary):
+/// under the no-scale rendering convention a group's size lives in
+/// its members' local cells, so resizing the group must scale each
+/// descendant's LITERAL Xform cells — positions and loc-pins always,
+/// sizes unless protected. The #15 per-shape rules, expressed against
+/// this codebase's machinery:
+///
+/// - a cell with a real formula anywhere in its resolution chain
+///   (`GUARD(…)`, a proportional master formula) is NOT written —
+///   guarded sizes keep their dimensions, and formula-driven cells
+///   belong to the #97 cache-refresh walk that runs alongside the
+///   resize macro;
+/// - a Protection lock (`LockWidth`/`LockHeight`) keeps the size;
+///   the position still scales;
+/// - nested groups recurse with the SAME factors: each level's
+///   members scale exactly once (the child group's own Xform scales
+///   as a member, and the no-scale convention means its members need
+///   the same factor applied directly).
+pub fn scale_group_members(
+    doc: &Document,
+    page: i64,
+    group: i64,
+    kx: f64,
+    ky: f64,
+) -> Vec<Box<dyn crate::Command>> {
+    if ((kx - 1.0).abs() < 1e-9) && ((ky - 1.0).abs() < 1e-9) {
+        return Vec::new();
+    }
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let Some(root) = vsdx::model::find_shape_by_id(&p.shapes, group) else {
+        return Vec::new();
+    };
+    let mut cmds = Vec::new();
+    scale_members_of(doc, page, root, kx, ky, &mut cmds);
+    cmds
+}
+
+/// One group's direct members; nested groups recurse after their own
+/// Xform scales.
+fn scale_members_of(
+    doc: &Document,
+    page: i64,
+    group: &vsdx::model::Shape,
+    kx: f64,
+    ky: f64,
+    cmds: &mut Vec<Box<dyn crate::Command>>,
+) {
+    for m in &group.sub_shapes {
+        let chain = crate::scope::shape_chain(doc, page, m.id).unwrap_or_default();
+        for (name, k) in [
+            ("PinX", kx),
+            ("PinY", ky),
+            ("LocPinX", kx),
+            ("LocPinY", ky),
+            ("Width", kx),
+            ("Height", ky),
+        ] {
+            if (k - 1.0).abs() < 1e-9 {
+                continue; // a guarded group axis: nothing to scale
+            }
+            let is_size = matches!(name, "Width" | "Height");
+            if is_size && sheet_locked(&m.sheet, lock_for(name).unwrap_or("")) {
+                continue;
+            }
+            // A real formula anywhere in the resolution chain marks the
+            // cell as guarded or refresh-driven — never ours to write.
+            if effective_formula(doc, m, &chain, name).is_some() {
+                continue;
+            }
+            let Some(cell) = m.sheet.cell(name) else {
+                // No local cell: a resolved LITERAL behind it scales as
+                // an instance snapshot (Visio materializes on edit —
+                // master instances inside groups carry no local
+                // Width/Height, exactly this case).
+                let Some(v) = doc
+                    .resolve_cell(m, &chain, name)
+                    .and_then(|c| c.numeric())
+                    .filter(|v| v.is_finite())
+                else {
+                    continue;
+                };
+                cmds.push(Box::new(crate::SetCell::new(
+                    crate::Scope::Shape {
+                        page,
+                        shape: m.id,
+                    },
+                    name,
+                    Cell::value(format!("{:.6}", v * k)),
+                )));
+                continue;
+            };
+            // Only LITERAL local cells are ours (an `F='Inh'` snapshot
+            // with a formula behind it was filtered above).
+            if cell
+                .f
+                .as_deref()
+                .is_some_and(|f| f != "Inh" && f != "No Formula")
+            {
+                continue;
+            }
+            let Some(v) = cell.numeric() else { continue };
+            cmds.push(Box::new(crate::SetCell::new(
+                crate::Scope::Shape {
+                    page,
+                    shape: m.id,
+                },
+                name,
+                Cell::value(format!("{:.6}", v * k)),
+            )));
+        }
+        if m.type_.as_deref() == Some("Group") {
+            scale_members_of(doc, page, m, kx, ky, cmds);
+        }
+    }
+}
+
 /// Visio protection semantics shared by every surface (#97 §6 item 6):
 /// a **plain value** write to a shape cell is refused when the cell —
 /// resolved instance → master — carries a `GUARD(...)` formula, or the
@@ -1320,28 +1439,47 @@ pub fn add_container(
     set(&mut sheet, "LocPinY", "0");
     // Heading text: the standard text block, pinned into the top-left
     // corner strip (Visio's Plain container look).
+    // #138 §2 — the styled heading band: the heading sits in a filled
+    // strip across the container's top (the highlight blue, white
+    // text), the body below is outline-only. Geometry rows are
+    // FORMULA-authored (Width/Height references) so the band and body
+    // track container resizes; the band's height is the member pad.
     set(&mut sheet, "TxtPinX", "0.2");
     set(&mut sheet, "TxtLocPinX", "0");
+    // The text block is the BAND (0.25 in tall), its pin at the band
+    // center: TxtHeight defaults to the shape's full Height otherwise,
+    // and the block would tower a whole container-height above the
+    // band — the white heading rendered off the container, invisible
+    // (#138 branch review).
+    set(&mut sheet, "TxtHeight", "0.25");
     sheet.set_cell(
         "TxtPinY",
         vsdx::model::Cell {
             v: None,
-            f: Some("Height-TxtHeight".into()),
+            // Band center: the top 0.25 in strip (PAD below).
+            f: Some("Height-0.125".into()),
             ..vsdx::model::Cell::default()
         },
     );
-    set(&mut sheet, "TxtLocPinY", "0");
-    set(&mut sheet, "FillForegnd", "#FFFFFF");
-    let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
-        ix,
-        t: Some(t.into()),
-        cells: vec![
-            ("X".into(), vsdx::model::Cell::value(x.to_string())),
-            ("Y".into(), vsdx::model::Cell::value(y.to_string())),
-        ],
-        ..vsdx::model::Row::default()
-    };
-    let (w, h) = (fmt_num(rect.2), fmt_num(rect.3));
+    set(&mut sheet, "TxtLocPinY", "0.125");
+    set(&mut sheet, "FillForegnd", "#2e74b5");
+    // (Geometry rows are formula-authored below — the literal w/h the
+    // old plain-frame rows used are gone.)
+    // Heading text in the band is white.
+    sheet.children.push(vsdx::model::SheetChild::Section(
+        vsdx::model::Section {
+            name: "Character".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                cells: vec![(
+                    "Color".into(),
+                    vsdx::model::Cell::value("#FFFFFF".to_string()),
+                )],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        },
+    ));
     let container = Shape {
         id,
         name_u: Some(format!("Container.{id}")),
@@ -1350,15 +1488,34 @@ pub fn add_container(
         ..Shape::default()
     };
     let mut container = container;
-    container.sheet.text = Some(heading.to_string());
+    let heading_with_count = format!("{heading} ({})", members.len());
+    container.sheet.text = Some(heading_with_count.clone());
     // The writer emits <Text> from text_raw (verbatim), so seed the
     // escaped form too — the SetText convention.
     container.sheet.text_raw = Some(
-        heading
+        heading_with_count
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;"),
     );
+    // Section 0 — the heading band (filled). Formula rows keep it
+    // glued to the container's live Width/Height.
+    let fcell = |f: &str| {
+        vsdx::model::Cell {
+            v: None,
+            f: Some(f.to_string()),
+            ..vsdx::model::Cell::default()
+        }
+    };
+    let frow = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+        ix,
+        t: Some(t.into()),
+        cells: vec![
+            ("X".into(), fcell(x)),
+            ("Y".into(), fcell(y)),
+        ],
+        ..vsdx::model::Row::default()
+    };
     container
         .sheet
         .children
@@ -1366,14 +1523,48 @@ pub fn add_container(
             name: "Geometry".into(),
             ix: 0,
             rows: vec![
-                row(1, "MoveTo", "0", "0"),
-                row(2, "LineTo", &w, "0"),
-                row(3, "LineTo", &w, &h),
-                row(4, "LineTo", "0", &h),
-                row(5, "LineTo", "0", "0"),
+                frow(1, "MoveTo", "0", "Height-0.25"),
+                frow(2, "LineTo", "Width*1", "Height-0.25"),
+                frow(3, "LineTo", "Width*1", "Height*1"),
+                frow(4, "LineTo", "0", "Height*1"),
+                frow(5, "LineTo", "0", "Height-0.25"),
             ],
             ..vsdx::model::Section::default()
         }));
+    // Section 1 — the body: outline only (NoFill), same live frame.
+    container
+        .sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 1,
+            cells: vec![("NoFill".into(), vsdx::model::Cell::value("1"))],
+            rows: vec![
+                frow(1, "MoveTo", "0", "0"),
+                frow(2, "LineTo", "Width*1", "0"),
+                frow(3, "LineTo", "Width*1", "Height*1"),
+                frow(4, "LineTo", "0", "Height*1"),
+                frow(5, "LineTo", "0", "0"),
+            ],
+            ..vsdx::model::Section::default()
+        }));
+    // The base title rides on the sheet (#138: the heading text is
+    // re-derived as "{title} ({member count})" by membership flows.
+    container.sheet.children.push(vsdx::model::SheetChild::Section(
+        vsdx::model::Section {
+            name: "User".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                n: Some("msvSDContainerTitle".into()),
+                cells: vec![(
+                    "Value".into(),
+                    vsdx::model::Cell::value(heading.to_string()),
+                )],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        },
+    ));
     let mut cmds: Vec<Box<dyn crate::Command>> = vec![
         Box::new(AddShape {
             page,
@@ -1396,6 +1587,48 @@ pub fn add_container(
         format!("add container around {} shape(s)", members.len()),
         cmds,
     )
+}
+
+/// #138: membership-row cleanup for shapes being removed — every
+/// shape whose `User.msvSDContainerShape` names one of `removed` loses
+/// that row, so a deleted container leaves no dangling rows in the
+/// saved file. Pure command list; the caller folds it into the same
+/// delete Macro (one undo restores container and rows together).
+pub fn container_membership_cleanup(
+    doc: &Document,
+    page: i64,
+    removed: &[i64],
+) -> Vec<Box<dyn crate::Command>> {
+    let gone: std::collections::HashSet<i64> = removed.iter().copied().collect();
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let mut cmds = Vec::new();
+    for s in &p.shapes {
+        // A shape the same delete removes carries its rows away with
+        // it (undo restores them verbatim) — emitting a row removal
+        // for it would error the whole Macro after the removal
+        // already ran (#138 branch review).
+        if gone.contains(&s.id) {
+            continue;
+        }
+        let hits = s.sheet.sections_named("User").iter().any(|sec| {
+            sec.named_row("msvSDContainerShape")
+                .and_then(|r| r.cell("Value"))
+                .and_then(|c| c.numeric())
+                .map(|v| gone.contains(&(v as i64)))
+                .unwrap_or(false)
+        });
+        if hits {
+            cmds.push(Box::new(RemoveSectionRow::new(
+                Scope::Shape { page, shape: s.id },
+                "User",
+                0,
+                RowSel::Named("msvSDContainerShape".into()),
+            )) as Box<dyn crate::Command>);
+        }
+    }
+    cmds
 }
 
 /// Undo payload for [`GroupShapes`]: member id, original z-position, and
@@ -1422,6 +1655,13 @@ pub struct GroupShapes {
     pub page: i64,
     /// Member ids, any order; the group preserves ascending z-order.
     pub members: Vec<i64>,
+    /// Nesting target (#95): the new group is inserted into this
+    /// top-level group's `sub_shapes` instead of the page, pinned at
+    /// `parent_local_pin` (the bbox origin converted into the parent's
+    /// local frame — computed by the UI through the renderer's affine,
+    /// which dc-core cannot reach).
+    pub parent: Option<i64>,
+    parent_local_pin: (f64, f64),
     id: Option<i64>,
     /// (member id, original z-position, rewritten cells with their
     /// originals) for undo.
@@ -1433,6 +1673,30 @@ impl GroupShapes {
         GroupShapes {
             page,
             members,
+            parent: None,
+            parent_local_pin: (0.0, 0.0),
+            id: None,
+            undo: None,
+        }
+    }
+
+    /// Nest the new group inside `parent` (a top-level Group), pinned
+    /// at `parent_local_pin` — the members' page-space bbox origin
+    /// mapped into the parent's local frame (#95). The members stay
+    /// top-level-resolved and are re-pinned into the NEW group's
+    /// frame exactly as the top-level variant; only where the new
+    /// group lands differs.
+    pub fn into_group(
+        page: i64,
+        members: Vec<i64>,
+        parent: i64,
+        parent_local_pin: (f64, f64),
+    ) -> GroupShapes {
+        GroupShapes {
+            page,
+            members,
+            parent: Some(parent),
+            parent_local_pin,
             id: None,
             undo: None,
         }
@@ -1461,10 +1725,29 @@ impl crate::Command for GroupShapes {
                     .map(|p| (p, *id))
             })
             .collect();
-        if found.len() < 2 {
+        // Top-level grouping needs two members (a lone group is a
+        // no-op); NESTING accepts one — dropping a single shape into
+        // an existing group as its own sub-group is the #95 flow.
+        if found.len() < 2 && self.parent.is_none() {
             bail!("grouping needs at least two member shapes");
         }
+        if found.is_empty() {
+            bail!("grouping needs at least one member shape");
+        }
         found.sort();
+        // #95 branch review: validate the nest target before ANY
+        // mutation — the members detach below, so a late bail would
+        // strand them in a dropped value.
+        if let Some(pid) = self.parent {
+            if self.members.contains(&pid) {
+                bail!("nest target {pid} cannot be its own member");
+            }
+            match doc.pages[pi].shapes.iter().find(|s| s.id == pid) {
+                Some(p) if p.type_.as_deref() == Some("Group") => {}
+                Some(_) => bail!("nest target {pid} is not a group"),
+                None => bail!("parent group {pid} not found"),
+            }
+        }
         // Union bbox from each member's absolute rect.
         let num = |s: &Shape, n: &str| -> f64 {
             doc.resolve_cell(s, &[], n)
@@ -1535,14 +1818,22 @@ impl crate::Command for GroupShapes {
         for (pos, _) in found.iter().rev() {
             doc.pages[pi].shapes.remove(*pos);
         }
+        // #95: nested groups are pinned in the PARENT's local frame
+        // (the converted bbox origin); the group stays axis-aligned in
+        // page space at creation, so a rotated parent skews the frame
+        // v1 accepts.
+        let (gpx, gpy) = match self.parent {
+            Some(_) => self.parent_local_pin,
+            None => (x0, y0),
+        };
         let group = Shape {
             id: gid,
             name_u: Some(format!("Group.{gid}")),
             type_: Some("Group".into()),
             sheet: {
                 let mut sh = vsdx::model::Sheet::default();
-                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(x0)));
-                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(y0)));
+                sh.set_cell("PinX", vsdx::model::Cell::value(fmt_num(gpx)));
+                sh.set_cell("PinY", vsdx::model::Cell::value(fmt_num(gpy)));
                 sh.set_cell("Width", vsdx::model::Cell::value(fmt_num(x1 - x0)));
                 sh.set_cell("Height", vsdx::model::Cell::value(fmt_num(y1 - y0)));
                 sh.set_cell("LocPinX", vsdx::model::Cell::value("0"));
@@ -1553,8 +1844,23 @@ impl crate::Command for GroupShapes {
             flow: vec![vsdx::model::ShapeFlow::Shapes],
             ..Shape::default()
         };
-        let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
-        doc.pages[pi].shapes.insert(at, group);
+        match self.parent {
+            Some(pid) => {
+                let parent = doc.pages[pi]
+                    .shapes
+                    .iter_mut()
+                    .find(|s| s.id == pid)
+                    .ok_or_else(|| anyhow::anyhow!("parent group {pid} vanished"))?;
+                if parent.type_.as_deref() != Some("Group") {
+                    bail!("nest target {pid} is not a group");
+                }
+                parent.sub_shapes.push(group);
+            }
+            None => {
+                let at = found.first().unwrap().0.min(doc.pages[pi].shapes.len());
+                doc.pages[pi].shapes.insert(at, group);
+            }
+        }
         Ok(())
     }
     fn undo(&mut self, doc: &mut Document) -> Result<()> {
@@ -1568,12 +1874,29 @@ impl crate::Command for GroupShapes {
             .iter()
             .position(|p| p.id == self.page)
             .ok_or_else(|| anyhow::anyhow!("page {} not found", self.page))?;
-        let gpos = doc.pages[pi]
-            .shapes
-            .iter()
-            .position(|s| s.id == gid)
-            .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
-        let mut extracted = doc.pages[pi].shapes.remove(gpos).sub_shapes;
+        let mut extracted = match self.parent {
+            Some(pid) => {
+                let parent = doc.pages[pi]
+                    .shapes
+                    .iter_mut()
+                    .find(|s| s.id == pid)
+                    .ok_or_else(|| anyhow::anyhow!("parent group {pid} vanished"))?;
+                let gpos = parent
+                    .sub_shapes
+                    .iter()
+                    .position(|s| s.id == gid)
+                    .ok_or_else(|| anyhow::anyhow!("group {gid} vanished from parent"))?;
+                parent.sub_shapes.remove(gpos).sub_shapes
+            }
+            None => {
+                let gpos = doc.pages[pi]
+                    .shapes
+                    .iter()
+                    .position(|s| s.id == gid)
+                    .ok_or_else(|| anyhow::anyhow!("group {gid} vanished"))?;
+                doc.pages[pi].shapes.remove(gpos).sub_shapes
+            }
+        };
         // Restore original absolute Xform cells and z-positions.
         for (id, pos, cells) in &undo {
             let m = extracted

@@ -2021,6 +2021,564 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
 
+/// #138: deleting a container strips its members' membership rows in
+/// the same undo step — members stay put, no dangling rows, one
+/// Ctrl+Z restores everything — and the styled heading band renders
+/// (band fill + count heading).
+#[test]
+fn container_delete_strips_membership_rows() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes wrapped in a container (#27 flow).
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to New Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to New Container row")
+        .click();
+    h.run();
+    let (_, cont) = h.state().debug_sel().expect("container selected");
+
+    // Styled band (#138 §2): the heading carries the member count,
+    // the page SVG renders the band fill, and the heading GLYPHS sit
+    // INSIDE the band (branch review: the text block defaulted to the
+    // full container height and towered invisibly above it).
+    assert_eq!(
+        h.state().debug_shape_text(cont).as_deref(),
+        Some("Container (2)"),
+        "the heading band shows the count"
+    );
+    let svg = h.state().debug_page_svg().unwrap_or_default();
+    assert!(
+        svg.contains("#2e74b5"),
+        "the band fill (the highlight blue) renders"
+    );
+    {
+        // The heading tspan's local y-down y ≈ -(H - 0.125) — the band
+        // center of a 0.25-in band at the container's top.
+        let hgt = h
+            .state()
+            .debug_cell_for_test(cont, "Height")
+            .and_then(|v| v.parse::<f64>().ok())
+            .expect("container Height");
+        let band_center = -(hgt - 0.125);
+        let tspan = svg
+            .split("<tspan")
+            .find(|t| t.contains("Container (2)"))
+            .expect("the heading tspan");
+        let y: f64 = tspan
+            .split("y=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("tspan y");
+        assert!(
+            (y - band_center).abs() < 0.06,
+            "the heading renders in the band: y={y} vs band center {band_center}"
+        );
+    }
+
+    // Delete the container: members stay put, rows stripped.
+    assert_eq!(h.state().debug_membership_rows_for_test(), 2);
+    let m1_before = h.state().debug_shape_screen_rect(1).unwrap();
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "members orphaned in place");
+    assert_eq!(
+        h.state().debug_membership_rows_for_test(),
+        0,
+        "no dangling membership rows"
+    );
+    let m1_after = h.state().debug_shape_screen_rect(1).unwrap();
+    assert!(
+        (m1_after.min.x - m1_before.min.x).abs() < 0.5,
+        "the member stayed put"
+    );
+
+    // One Ctrl+Z restores the container AND both rows.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 3, "the container is back");
+    assert_eq!(
+        h.state().debug_membership_rows_for_test(),
+        2,
+        "one undo restored the membership rows"
+    );
+}
+
+/// #75: Add to Underlying Container — a shape placed over an existing
+/// container joins it through the flyout item, moves with it, and one
+/// Ctrl+Z removes only the membership write.
+#[test]
+fn add_to_underlying_container_members_and_carries() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes, wrapped in a container (#27 flow).
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to New Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to New Container row")
+        .click();
+    h.run();
+    let (_, cont) = h.state().debug_sel().expect("container selected");
+    assert_eq!(h.state().debug_shape_count(), 3, "two members + container");
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2],
+        "#27 membership"
+    );
+
+    // A third shape placed over the container, selected by placement.
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, c, egui::PointerButton::Primary);
+    h.run();
+    let (_, third) = h.state().debug_sel().expect("third placed + selected");
+    assert!(
+        !h.state()
+            .debug_container_members_for_test(cont)
+            .contains(&third),
+        "no membership yet"
+    );
+
+    // Right-click → Container ▸ → Add to Underlying Container (enabled
+    // now — a container sits under the selection and the shape is not
+    // its member).
+    click_at(&mut h, c, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to Underlying Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to Underlying row")
+        .click();
+    h.run();
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2, third],
+        "the third joined the underlying container"
+    );
+
+    // The third now moves with the container (#27 carry semantics).
+    // Press the CONTAINER, not its center — the third sits on top
+    // there and a center press would drag the shape directly. The
+    // left-edge margin is container-only; members 1 and 2 moving too
+    // proves the container itself was dragged.
+    let cont_grab = {
+        let r = h.state().debug_shape_screen_rect(cont).unwrap();
+        egui::pos2(r.left() + 8.0, r.center().y)
+    };
+    let third_before = h.state().debug_shape_screen_rect(third).unwrap();
+    let m1_before = h.state().debug_shape_screen_rect(1).unwrap();
+    drag_naturally(&mut h, cont_grab, egui::vec2(60.0, 0.0));
+    let third_after = h.state().debug_shape_screen_rect(third).unwrap();
+    let m1_after = h.state().debug_shape_screen_rect(1).unwrap();
+    assert!(
+        (third_after.min.x - third_before.min.x - 60.0).abs() < 1.5,
+        "the third carried with the container: {:?} -> {:?}",
+        third_before,
+        third_after
+    );
+    assert!(
+        (m1_after.min.x - m1_before.min.x - 60.0).abs() < 1.5,
+        "the container itself moved (member 1 carried)"
+    );
+
+    // Undo the container move, then undo ONLY the membership write:
+    // the third stays put on the next container drag.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_container_members_for_test(cont),
+        vec![1, 2],
+        "one undo removed only the membership write"
+    );
+    let third_parked = h.state().debug_shape_screen_rect(third).unwrap();
+    let cont_grab = {
+        let r = h.state().debug_shape_screen_rect(cont).unwrap();
+        egui::pos2(r.left() + 8.0, r.center().y)
+    };
+    drag_naturally(&mut h, cont_grab, egui::vec2(40.0, 0.0));
+    let third_now = h.state().debug_shape_screen_rect(third).unwrap();
+    assert!(
+        (third_now.min.x - third_parked.min.x).abs() < 1.0,
+        "the third no longer carries after the membership undo"
+    );
+}
+
+/// #95 §1: grouping a selection of {one group + other shapes} nests a
+/// new group INSIDE the existing one — members keep their page-space
+/// positions through the local-frame conversion, and one undo
+/// restores the top-level layout.
+#[test]
+fn group_into_existing_group_nests() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Three shapes: a pair to group first, plus a loner.
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32, 0.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 3);
+    // Marquee all three, right-click, Group — with THREE plain shapes
+    // this makes a top-level group (the pre-#95 behavior): G1 holds
+    // members 1, 2, 3 (placement ids are sequential).
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item");
+    group_item.click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "one top-level group");
+    let (_, g1) = h.state().debug_sel().expect("group selected");
+
+    // Place a fourth shape, then select {G1, shape4} and Group: with
+    // exactly one GROUP in the selection this NESTS (#95) — shape4
+    // lands inside a new sub-group of G1, page-space stable.
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, canvas.center() + egui::vec2(150.0, 0.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "group plus the new shape");
+    let s4 = h.state().debug_sel().expect("placed").1;
+    let s4_before = h.state().debug_shape_screen_rect(s4).expect("shape4 rect");
+
+    // Multi-select G1 + shape4: click G1, shift-click shape4.
+    let g1c = h.state().debug_shape_screen_rect(g1).unwrap().center();
+    let s4c = s4_before.center();
+    click_at(&mut h, g1c, egui::PointerButton::Primary);
+    let shift = egui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    h.event(egui::Event::ModifiersChanged(shift));
+    h.hover_at(s4c);
+    h.event(egui::Event::PointerButton {
+        pos: s4c,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: shift,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: s4c,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: shift,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "group + shape selected");
+
+    // Right-click the selection, Group.
+    click_at(&mut h, g1c, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item");
+    group_item.click();
+    h.run();
+
+    // Nested: still ONE top-level shape; the new group (selected) is a
+    // MEMBER of G1, holding shape4.
+    assert_eq!(
+        h.state().debug_shape_count(),
+        1,
+        "nesting kept one top-level group"
+    );
+    let (_, g2) = h.state().debug_sel().expect("the new sub-group is selected");
+    assert_ne!(g2, g1, "a new group was created");
+    assert_eq!(
+        h.state().debug_group_members_for_test(g1),
+        vec![1, 2, 3, g2],
+        "the new group joined G1's members"
+    );
+    assert_eq!(
+        h.state().debug_group_members_for_test(g2),
+        vec![s4],
+        "the sub-group holds shape4"
+    );
+    // Page-space stability through the local-frame conversion.
+    let s4_after = h.state().debug_shape_screen_rect(s4).expect("shape4 rect");
+    assert!(
+        (s4_after.min.x - s4_before.min.x).abs() < 1.0
+            && (s4_after.min.y - s4_before.min.y).abs() < 1.0
+            && (s4_after.width() - s4_before.width()).abs() < 1.0,
+        "shape4 renders where it was: {:?} -> {:?}",
+        s4_before,
+        s4_after
+    );
+
+    // One undo restores the top-level layout: G1 (with 1,2) + shape4.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "undo restored the layout");
+    assert_eq!(
+        h.state().debug_group_members_for_test(g1),
+        vec![1, 2, 3],
+        "G1 back to its original members"
+    );
+}
+
+/// #69: resizing a group SCALES its members — both member screen
+/// rects grow with the group's frame, and one Ctrl+Z restores the
+/// members and the group in a single step.
+#[test]
+fn group_resize_scales_its_members() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    // Marquee both, right-click, Group (the flyout row — full-width,
+    // the icon bar's 22 px Group icon dispatches instead).
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item in the flyout submenu");
+    group_item.click();
+    h.run();
+    let (_, gid) = h.state().debug_sel().expect("group selected");
+    let members = h.state().debug_group_members_for_test(gid);
+    assert_eq!(members.len(), 2, "the group holds both shapes");
+    let rect_of = |h: &egui_kittest::Harness<'_, App>, m: i64| {
+        h.state().debug_shape_screen_rect_for_test(m).expect("member rect")
+    };
+    let before: Vec<_> = members.iter().map(|&m| rect_of(&h, m)).collect();
+    let (gw0, gh0) = {
+        let r = h.state().debug_shape_screen_rect(gid).unwrap();
+        (r.width(), r.height())
+    };
+
+    // Drag the group's bottom-right corner out: the frame grows and
+    // BOTH members scale with it (#69).
+    let br = h.state().debug_sel_br_corner().expect("group handles");
+    drag_naturally(&mut h, br, egui::vec2(40.0, 30.0));
+    let (gw1, gh1) = {
+        let r = h.state().debug_shape_screen_rect(gid).unwrap();
+        (r.width(), r.height())
+    };
+    assert!(gw1 > gw0 * 1.2 && gh1 > gh0 * 1.2, "the group grew");
+    let (fx, fy) = (gw1 / gw0, gh1 / gh0);
+    for (i, &m) in members.iter().enumerate() {
+        let after = rect_of(&h, m);
+        let want_w = before[i].width() * fx;
+        let want_h = before[i].height() * fy;
+        assert!(
+            (after.width() - want_w).abs() < 1.5 && (after.height() - want_h).abs() < 1.5,
+            "member {m} scaled with the group: {:?} → {:?} (fx {fx:.2}, fy {fy:.2})",
+            before[i],
+            after
+        );
+    }
+
+    // One Ctrl+Z restores the members and the group together.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    for (i, &m) in members.iter().enumerate() {
+        let back = rect_of(&h, m);
+        assert!(
+            (back.width() - before[i].width()).abs() < 0.5
+                && (back.height() - before[i].height()).abs() < 0.5,
+            "member {m} restored: {:?} vs {:?}",
+            back,
+            before[i]
+        );
+    }
+}
+
 /// GitHub #27: Container from the context menu wraps the selection;
 /// dragging the container carries its members; delete orphans them in
 /// place.
@@ -2810,6 +3368,51 @@ fn format_pane_edits_cells_for_whole_selection() {
         None,
         "one undo removed the materialized Color cell"
     );
+
+    // #72: the Line section's Begin/End Arrow pickers write through,
+    // the canvas renders the head, and one Ctrl+Z restores.
+    // (The placed Rectangle is 2-D, but Arrow cells ride any line
+    // geometry; assert the write + the marker in the page SVG.)
+    let end_cur = h
+        .state()
+        .debug_cell_for_test(sid, "EndArrow")
+        .unwrap_or_else(|| "0".into());
+    assert_eq!(end_cur, "0", "no arrow yet");
+    // The End Arrow dropdown: the fmt_dropdown button shows the
+    // current name ("None") in the pane's Line section.
+    // Begin and End both show "None  ›" — the End row sits BELOW the
+    // Begin row, so take the lowest pane dropdown.
+    let btn = h
+        .get_all_by_label_contains("None")
+        .filter(|n| {
+            let r = n.rect();
+            r.min.x > 900.0 && r.width() < 120.0
+        })
+        .max_by_key(|n| n.rect().min.y as i64)
+        .expect("the End Arrow dropdown (shows None)");
+    btn.click();
+    h.run();
+    h.get_by_label("Arrow").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "EndArrow"),
+        Some("1".into()),
+        "the picker wrote the cell through the whole-selection macro"
+    );
+    assert!(
+        h.state()
+            .debug_page_svg()
+            .unwrap_or_default()
+            .contains("dc-ahek"),
+        "the canvas renders the arrowhead marker"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "EndArrow"),
+        Some("0".into()),
+        "one undo restored the arrow state (the master snapshot's 0)"
+    );
 }
 
 /// GitHub #29 rework: the badge indicates a comment; the popup edits,
@@ -3068,6 +3671,23 @@ fn drag_moves_the_shape_live_under_the_cursor() {
 /// A synthetic standalone stencil (.vssx) written from an in-code
 /// model — DiagramCraft's own fixture, no Microsoft content. Master
 /// ids are caller-chosen so tests can make two stencils collide.
+/// Pump the harness until the dialog worker's answer lands in the
+/// stencil pane (a FIXED frame count races the worker thread on slow
+/// CI runners — the Windows job of PR #159 saw 8 frames not suffice);
+/// bounded, and yields a wall-clock slice periodically so the worker
+/// can actually finish.
+fn wait_for_stencil_entry(h: &mut egui_kittest::Harness<'_, App>) {
+    let mut waited = 0;
+    while h.state().debug_stencil_entries().is_empty() {
+        waited += 1;
+        assert!(waited < 20_000, "dialog worker never answered");
+        h.run();
+        if waited % 500 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
 fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> std::path::PathBuf {
     synth_stencil_opts(dir, stem, masters, &[])
 }
@@ -3303,9 +3923,7 @@ fn more_shapes_menu_opens_a_stencil_into_the_pane() {
     h.run();
     h.get_by_label("Open Existing Stencil...").click();
     h.run();
-    for _ in 0..8 {
-        h.run(); // the worker thread's answer lands via poll_dialog
-    }
+    wait_for_stencil_entry(&mut h);
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries, vec![("gamma".to_string(), true)], "stencil opened expanded");
     assert!(
@@ -3333,9 +3951,7 @@ fn file_open_of_a_stencil_lands_in_the_pane_not_the_editor() {
     // File→Open through the real dialog-worker seam, preset-answered.
     h.state_mut().open_file_for_test(s);
     h.run();
-    for _ in 0..8 {
-        h.run();
-    }
+    wait_for_stencil_entry(&mut h);
     assert_eq!(
         h.state().debug_stencil_entries().len(),
         1,

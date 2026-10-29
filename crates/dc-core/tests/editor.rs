@@ -580,6 +580,361 @@ fn remove_page_undo_restores_it() {
     assert_eq!(ed.doc.pages[0].part, "visio/pages/page1.xml");
 }
 
+
+/// #137: a geometry vertex edit is one reversible row-cell pair —
+/// SetRowCell on a synthetic polyline's row, single undo restores.
+#[test]
+fn geometry_row_cell_edit_single_undo() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    let polyline = vsdx::model::Shape {
+        id: 60,
+        type_: Some("Shape".into()),
+        sheet: {
+            let mut s = vsdx::model::Sheet::default();
+            s.set_cell("PinX", Cell::value("3"));
+            s.set_cell("PinY", Cell::value("5"));
+            s.set_cell("Width", Cell::value("2"));
+            s.set_cell("Height", Cell::value("2"));
+            s.children.push(vsdx::model::SheetChild::Section(
+                vsdx::model::Section {
+                    name: "Geometry".into(),
+                    ix: 0,
+                    rows: vec![
+                        vsdx::model::Row {
+                            ix: 1,
+                            t: Some("MoveTo".into()),
+                            cells: vec![
+                                ("X".into(), Cell::value("0")),
+                                ("Y".into(), Cell::value("0")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                        vsdx::model::Row {
+                            ix: 2,
+                            t: Some("LineTo".into()),
+                            cells: vec![
+                                ("X".into(), Cell::value("2")),
+                                ("Y".into(), Cell::value("2")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                    ],
+                    ..vsdx::model::Section::default()
+                },
+            ));
+            s
+        },
+        ..vsdx::model::Shape::default()
+    };
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: polyline,
+    })
+    .unwrap();
+    let row_y = |ed: &dc_core::Editor| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 60)
+            .unwrap()
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == 0)
+            .unwrap()
+            .rows
+            .iter()
+            .find(|r| r.ix == 2)
+            .unwrap()
+            .cell("Y")
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    assert_eq!(row_y(&ed), 2.0);
+    let scope = dc_core::Scope::Shape {
+        page: page0,
+        shape: 60,
+    };
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
+        Box::new(dc_core::SetRowCell::new(
+            scope.clone(),
+            "Geometry",
+            0,
+            dc_core::commands::RowSel::Ix(2),
+            "X",
+            Cell::value("1.5"),
+        )),
+        Box::new(dc_core::SetRowCell::new(
+            scope,
+            "Geometry",
+            0,
+            dc_core::commands::RowSel::Ix(2),
+            "Y",
+            Cell::value("0.5"),
+        )),
+    ];
+    ed.apply(dc_core::Macro::new("move vertex", std::mem::take(&mut cmds)))
+        .unwrap();
+    assert_eq!(row_y(&ed), 0.5, "the vertex moved");
+    ed.undo().unwrap();
+    assert_eq!(row_y(&ed), 2.0, "one undo restored the vertex");
+}
+
+/// #138: a container delete strips its members' membership rows in
+/// the same Macro (one undo restores container and rows), and the
+/// container carries the styled heading band (band + NoFill body
+/// geometry, base-title row, count heading).
+#[test]
+fn container_delete_cleans_membership_rows() {
+    use dc_core::commands::add_container;
+
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Two plain members to wrap.
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: vsdx::model::Shape {
+            id: 50,
+            type_: Some("Shape".into()),
+            sheet: {
+                let mut s = vsdx::model::Sheet::default();
+                s.set_cell("PinX", Cell::value("2"));
+                s.set_cell("PinY", Cell::value("5"));
+                s.set_cell("Width", Cell::value("1"));
+                s.set_cell("Height", Cell::value("1"));
+                s
+            },
+            ..vsdx::model::Shape::default()
+        },
+    })
+    .unwrap();
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: vsdx::model::Shape {
+            id: 51,
+            type_: Some("Shape".into()),
+            sheet: {
+                let mut s = vsdx::model::Sheet::default();
+                s.set_cell("PinX", Cell::value("4"));
+                s.set_cell("PinY", Cell::value("5"));
+                s.set_cell("Width", Cell::value("1"));
+                s.set_cell("Height", Cell::value("1"));
+                s
+            },
+            ..vsdx::model::Shape::default()
+        },
+    })
+    .unwrap();
+    let cid = dc_core::commands::next_shape_id(&ed.doc, page0);
+    ed.apply(add_container(page0, cid, &[50, 51], (1.0, 4.0, 4.0, 3.0), "Panel"))
+    .unwrap();
+
+    // Styled band (#138 §2): two geometry sections — the band filled,
+    // the body NoFill — the base-title row, and the count heading.
+    {
+        let cont = ed.doc.pages[0].shapes.iter().find(|s| s.id == cid).unwrap();
+        let geos = cont.sheet.sections_named("Geometry");
+        assert_eq!(geos.len(), 2, "band + body sections");
+        assert!(geos[0].cells.is_empty(), "the band carries fill");
+        assert!(
+            geos[1]
+                .cells
+                .iter()
+                .any(|(n, c)| n == "NoFill" && c.numeric() == Some(1.0)),
+            "the body is outline-only"
+        );
+        let title = cont
+            .sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| {
+                sec.named_row("msvSDContainerTitle")
+                    .and_then(|r| r.cell("Value"))
+                    .and_then(|c| c.v.clone())
+            })
+            .unwrap();
+        assert_eq!(title, "Panel");
+        assert_eq!(cont.sheet.text.as_deref(), Some("Panel (2)"));
+    }
+
+    // Delete with cleanup folded in (the GUI's delete_one shape):
+    let mut cmds: Vec<Box<dyn dc_core::Command>> =
+        vec![Box::new(RemoveShape::new(page0, cid))];
+    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid]));
+    ed.apply(dc_core::Macro::new("delete container", cmds)).unwrap();
+    let rows = |ed: &dc_core::Editor| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .flat_map(|s| s.sheet.sections_named("User"))
+            .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+            .count()
+    };
+    assert_eq!(rows(&ed), 0, "no dangling membership rows after delete");
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| s.id != cid),
+        "the container is gone"
+    );
+
+    // Save → reparse keeps the cleanup (no rows in the file).
+    let out = tmp.path().join("cleaned.vsdx");
+    ed.save_as(&out).unwrap();
+    let back = dc_core::Editor::open(&out).unwrap();
+    let rows_back = back.doc.pages[0]
+        .shapes
+        .iter()
+        .flat_map(|s| s.sheet.sections_named("User"))
+        .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+        .count();
+    assert_eq!(rows_back, 0, "the written file carries no dangling rows");
+
+    // ONE undo restores the container and both rows together.
+    ed.undo().unwrap();
+    assert_eq!(rows(&ed), 2, "one undo restored the membership rows");
+    assert!(ed.doc.pages[0].shapes.iter().any(|s| s.id == cid));
+
+    // #138 branch review: deleting the container AND its members in
+    // one Macro (the marquee+Delete case) must succeed — the cleanup
+    // skips shapes the same delete removes, instead of erroring on
+    // rows of already-removed shapes.
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![];
+    for id in [cid, 50, 51] {
+        cmds.push(Box::new(RemoveShape::new(page0, id)));
+    }
+    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid, 50, 51]));
+    ed.apply(dc_core::Macro::new("delete container + members", cmds)).unwrap();
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| ![cid, 50, 51].contains(&s.id)),
+        "the container and both members are gone, no error"
+    );
+    ed.undo().unwrap();
+    assert_eq!(rows(&ed), 2, "undo brings back container, members, and rows");
+
+    // #95 branch review: into_group with the parent among the members
+    // refuses BEFORE any mutation — nothing detaches.
+    let g1 = dc_core::commands::next_shape_id(&ed.doc, page0);
+    ed.apply(dc_core::commands::GroupShapes::new(page0, vec![50, 51])).unwrap();
+    let bad = dc_core::commands::GroupShapes::into_group(
+        page0,
+        vec![50, g1],
+        g1,
+        (0.0, 0.0),
+    );
+    let err = ed.apply(bad).unwrap_err();
+    assert!(err.to_string().contains("own member"), "{err}");
+    // 50 and 51 stay nested inside g1 (top-level holds only g1).
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| ![50, 51].contains(&s.id)),
+        "50 and 51 stayed grouped inside {g1} — nothing mutated"
+    );
+    assert!(
+        ed.doc.pages[0].shapes.iter().any(|s| s.id == g1),
+        "the group itself is untouched"
+    );
+}
+
+/// #69: a group resize scales its members — literal Xform cells
+/// (positions, loc-pins, sizes) scale by the group's factors; a
+/// GUARDed member keeps its size while its position still scales;
+/// nested groups recurse with the same factors.
+#[test]
+fn scale_group_members_scales_literals_guards_and_nesting() {
+    use dc_core::scale_group_members;
+
+    // Literal member cell helper.
+    let lit = |v: &str| Cell::value(v);
+    let member = |id: i64, guard_width: bool| {
+        let mut m = Shape {
+            id,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        m.sheet.set_cell("PinX", lit("1"));
+        m.sheet.set_cell("PinY", lit("0.5"));
+        m.sheet.set_cell("Width", lit("2"));
+        m.sheet.set_cell("Height", lit("1"));
+        if guard_width {
+            let mut c = Cell::value("2");
+            c.f = Some("GUARD(2)".into());
+            m.sheet.set_cell("Width", c);
+        }
+        m
+    };
+    // Nested group N holding member 3.
+    let mut nested = Shape {
+        id: 2,
+        type_: Some("Group".into()),
+        ..Shape::default()
+    };
+    nested.sheet.set_cell("Width", lit("2"));
+    nested.sheet.set_cell("Height", lit("1"));
+    nested.sub_shapes.push(member(3, false));
+    // Outer group G holding member 1 (guarded width) and N.
+    let mut outer = Shape {
+        id: 10,
+        type_: Some("Group".into()),
+        ..Shape::default()
+    };
+    outer.sub_shapes.push(member(1, true));
+    outer.sub_shapes.push(nested);
+
+    let doc = Document {
+        pages: vec![vsdx::model::Page {
+            id: 0,
+            name: "P1".into(),
+            shapes: vec![outer],
+            ..vsdx::model::Page::default()
+        }],
+        ..bare_doc()
+    };
+    // Double the width, halve the height.
+    let cmds = scale_group_members(&doc, 0, 10, 2.0, 0.5);
+    let mut ed = dc_core::Editor::new(doc);
+    ed.apply(dc_core::Macro::new("scale members", cmds)).unwrap();
+
+    let page = &ed.doc.pages[0];
+    let cell = |sid: i64, n: &str| {
+        vsdx::model::find_shape_by_id(&page.shapes, sid)
+            .unwrap()
+            .sheet
+            .cell(n)
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    // Member 1: GUARDed Width keeps 2; everything else scales.
+    assert_eq!(cell(1, "Width"), 2.0, "the GUARDed size keeps its dimension");
+    assert_eq!(cell(1, "Height"), 0.5, "the free size axis scales");
+    assert_eq!(cell(1, "PinX"), 2.0, "position scales under the guard");
+    assert_eq!(cell(1, "PinY"), 0.25);
+    // Nested group's own Xform scales, and its member follows with the
+    // SAME factors (once — the no-scale convention means the child
+    // group's Width scaling does not propagate on its own).
+    assert_eq!(cell(2, "Width"), 4.0, "the nested group's frame scales");
+    assert_eq!(cell(3, "Width"), 4.0, "the nested member scales exactly once");
+    assert_eq!(cell(3, "PinY"), 0.25);
+
+    // One undo reverts every member edit.
+    ed.undo().unwrap();
+    let page = &ed.doc.pages[0];
+    let cell = |sid: i64, n: &str| {
+        vsdx::model::find_shape_by_id(&page.shapes, sid)
+            .unwrap()
+            .sheet
+            .cell(n)
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    assert_eq!(cell(1, "PinX"), 1.0, "one undo restored the members");
+    assert_eq!(cell(3, "Width"), 2.0);
+}
+
+
 /// #68: a new page's PageSheet is seeded from its source — size
 /// always, the scale cells only when the source carries them — with
 /// the document's last page as the default source, an explicit page
@@ -1803,7 +2158,8 @@ fn add_container_records_membership_and_survives_reload() {
     let re = vsdx::parse::parse(&out).unwrap();
     let c = &re.pages[0].shapes[0];
     assert_eq!(c.id, id);
-    assert_eq!(c.sheet.text.as_deref(), Some("Legend"));
+    // #138 §2: the heading band carries the member count.
+    assert_eq!(c.sheet.text.as_deref(), Some("Legend (2)"));
     let m = re.pages[0]
         .shapes
         .iter()

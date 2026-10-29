@@ -155,6 +155,37 @@ fn group_fixture(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+/// The groups fixture plus a top-level zigzag shape 30 for #137: a
+/// 4-segment polyline with two OFF-CORNER apexes (a rectangle's every
+/// vertex coincides with a corner handle) — apex A (row 2) free, apex
+/// B (row 3) with a GUARDed Y.
+fn guarded_vertex_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = group_fixture(dir);
+    let pkg = vsdx::Package::open(&path).unwrap();
+    let out = dir.join("groups-guarded.vsdx");
+    let file = std::fs::File::create(&out).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    let zigzag = "<Shape ID='30' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'><Cell N='PinX' V='6.5'/><Cell N='PinY' V='4.5'/><Cell N='Width' V='1.2'/><Cell N='Height' V='1.0'/><Cell N='LocPinX' V='0'/><Cell N='LocPinY' V='0'/><Section N='Geometry' IX='0'><Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='LineTo' IX='2'><Cell N='X' V='0.3'/><Cell N='Y' V='1'/></Row><Row T='LineTo' IX='3'><Cell N='X' V='0.9'/><Cell N='Y' V='1' F='GUARD(1)'/></Row><Row T='LineTo' IX='4'><Cell N='X' V='1.2'/><Cell N='Y' V='0'/></Row><Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row></Section></Shape>";
+    for name in pkg.part_names() {
+        let data = pkg.part(name).unwrap().to_vec();
+        let data = if name == "visio/pages/page1.xml" {
+            let mut xml = String::from_utf8(data).unwrap();
+            // The GROUP's inner <Shapes> closes before the page's —
+            // inject at the LAST close (the page's own).
+            let at = xml.rfind("</Shapes>").expect("page shapes close");
+            xml.insert_str(at, zigzag);
+            xml.into_bytes()
+        } else {
+            data
+        };
+        w.start_file(name, opts).unwrap();
+        std::io::Write::write_all(&mut w, &data).unwrap();
+    }
+    w.finish().unwrap();
+    out
+}
+
 fn harness_with(dir: &std::path::Path, dark: bool) -> Harness<'static, App> {
     dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
@@ -262,6 +293,26 @@ fn open_group_via_flyout(h: &mut Harness<'_, App>, open_label: &str) {
     h.run();
 }
 
+/// A natural press-drag-release across frames (the #59 gesture shape;
+/// see interactions.rs).
+fn drag_naturally(h: &mut Harness<'_, App>, from: egui::Pos2, by: egui::Vec2) {
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(b(from, true));
+    h.run();
+    for t in [0.25, 0.5, 0.75, 1.0] {
+        h.hover_at(from + by * t);
+        h.run();
+    }
+    h.event(b(from + by, false));
+    h.run();
+}
+
 fn shape_center(h: &Harness<'_, App>, sid: i64) -> egui::Pos2 {
     h.state()
         .debug_shape_screen_rect_for_test(sid)
@@ -310,6 +361,148 @@ fn flyout_groups_and_ungroups() {
     assert!(
         h.state().debug_sel().is_none(),
         "the re-nested member {member} is not left selected"
+    );
+}
+
+/// #95: resize handles work for members inside group-edit mode — the
+/// member's own frame resizes (the group is untouched), and one undo
+/// restores it. Handle positions and drag deltas route through the
+/// renderer's XForm chain (`sel_page_rect` / the parent-local
+/// conversion in `apply_resize`).
+#[test]
+fn member_resize_handles_work_in_group_edit_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut h = harness_with(tmp.path(), false);
+    h.run();
+    h.run();
+    // Open the group, select member 10.
+    let g = shape_center(&h, 9);
+    click_at(&mut h, g, egui::PointerButton::Secondary);
+    h.run();
+    open_group_via_flyout(&mut h, "Open Panel.9");
+    let m = shape_center(&h, 10);
+    click_at(&mut h, m, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_sel().map(|s| s.1), Some(10));
+    h.run();
+
+    let (w0, h0) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!((w0 - 1.0).abs() < 1e-6, "member 10 starts 1 in wide");
+    let group_rect_before = h.state().debug_shape_screen_rect(9).expect("group rect");
+
+    // The corner handle exists in the mode (v1 suppressed all
+    // handles) and dragging it grows ONLY the member.
+    let br = h.state().debug_sel_br_corner().expect("member handles in the mode");
+    drag_naturally(&mut h, br, egui::vec2(30.0, 20.0));
+    let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!(
+        w1 > w0 * 1.2 && h1 > h0 * 1.2,
+        "the member resized: {w0:.3}x{h0:.3} -> {w1:.3}x{h1:.3}"
+    );
+    let group_rect_after = h.state().debug_shape_screen_rect(9).expect("group rect");
+    let grew = group_rect_after.width() > group_rect_before.width() + 1.0
+        || group_rect_after.height() > group_rect_before.height() + 1.0;
+    // The group's own Xform is untouched (its bbox may include the
+    // member's growth through shape_ink_bounds-style unions? No —
+    // the group's W/H are cells we never wrote).
+    assert!(
+        !grew,
+        "the group's own Xform is untouched: {:?} -> {:?}",
+        group_rect_before,
+        group_rect_after
+    );
+
+    // One undo restores the member.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let (w2, h2) = (h.state().debug_sel_width(), h.state().debug_sel_height());
+    assert!(
+        (w2 - w0).abs() < 1e-3 && (h2 - h0).abs() < 1e-3,
+        "one undo restored the member: {w2:.3}x{h2:.3}"
+    );
+}
+
+/// #137: geometry vertex handles — a shape with own Geometry rows
+/// gets per-row handles; dragging a free apex rewrites the row's X/Y
+/// in one undo step; a GUARDed apex refuses with a status note and
+/// its cells stay untouched.
+#[test]
+fn geometry_vertex_handles_edit_and_respect_guards() {
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = guarded_vertex_fixture(tmp.path());
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_doc(&doc),
+        );
+    h.run();
+    h.run();
+    // Select the zigzag (30).
+    let z = shape_center(&h, 30);
+    click_at(&mut h, z, egui::PointerButton::Primary);
+    assert_eq!(h.state().debug_sel().map(|s| s.1), Some(30));
+    h.run();
+
+    let cell = |h: &Harness<'_, App>, row: i64, c: &str| {
+        h.state().debug_geo_row_cell_for_test(30, row, c).unwrap()
+    };
+    assert_eq!(
+        cell(&h, 2, "Y"),
+        (Some("1".into()), None),
+        "apex A's Y is a free literal"
+    );
+    assert_eq!(
+        cell(&h, 3, "Y"),
+        (Some("1".into()), Some("GUARD(1)".into())),
+        "apex B's Y is GUARDed"
+    );
+
+    // Screen positions of the apexes: local (0.3,1) and (0.9,1) of a
+    // 1.2x1.0 shape — the top edge at 25%/75% across, clear of the
+    // corner handles at the ends.
+    let apex = |h: &Harness<'_, App>, fx: f32| -> egui::Pos2 {
+        let r = h
+            .state()
+            .debug_shape_screen_rect_for_test(30)
+            .expect("zigzag rect");
+        egui::pos2(r.left() + fx * r.width(), r.top())
+    };
+
+    // Apex A (free): drag it further up; the row cells move.
+    let va = apex(&h, 0.3 / 1.2);
+    drag_naturally(&mut h, va, egui::vec2(0.0, -14.0));
+    let (xa, ya) = (cell(&h, 2, "X"), cell(&h, 2, "Y"));
+    assert!(
+        ya.0.as_deref().unwrap().parse::<f64>().unwrap() > 1.1,
+        "the free apex moved: {xa:?} {ya:?}"
+    );
+
+    // One undo restores the vertex.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        cell(&h, 2, "Y"),
+        (Some("1".into()), None),
+        "one undo restored the vertex"
+    );
+
+    // Apex B (GUARDed): the drag refuses, cells byte-identical, the
+    // status explains.
+    let vb = apex(&h, 0.9 / 1.2);
+    drag_naturally(&mut h, vb, egui::vec2(0.0, -14.0));
+    assert_eq!(
+        cell(&h, 3, "Y"),
+        (Some("1".into()), Some("GUARD(1)".into())),
+        "the GUARDed vertex is untouched"
+    );
+    assert!(
+        h.state().debug_status().contains("formula-driven"),
+        "the refusal explains itself: {}",
+        h.state().debug_status()
     );
 }
 
