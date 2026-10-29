@@ -1376,7 +1376,7 @@ impl App {
                 if ctrl && i.key_pressed(egui::Key::X) {
                     self.copy_selection();
                     let (p, s) = self.sel.unwrap();
-                    self.apply(RemoveShape::new(p, s));
+                    self.delete_one(p, s);
                     self.set_selection(None);
                 }
                 if ctrl && i.key_pressed(egui::Key::C) {
@@ -1419,20 +1419,45 @@ impl App {
         let Some((page_id, _)) = self.sel else { return };
         if self.sel_set.len() > 1 {
             // One undo step for a multi-delete.
-            let cmds: Vec<Box<dyn dc_core::Command>> = self
+            let ids: Vec<i64> = self
                 .sel_set
                 .iter()
                 .filter(|(p, _)| *p == page_id)
-                .map(|(_, s)| Box::new(RemoveShape::new(page_id, *s)) as Box<dyn dc_core::Command>)
+                .map(|(_, s)| *s)
                 .collect();
-            let n = cmds.len();
+            let mut cmds: Vec<Box<dyn dc_core::Command>> = ids
+                .iter()
+                .map(|&s| Box::new(RemoveShape::new(page_id, s)) as Box<dyn dc_core::Command>)
+                .collect();
+            // #138: deleting a container strips its members' membership
+            // rows in the same Macro — no dangling rows in the file,
+            // one undo restores everything.
+            if let Some(ed) = self.ed() {
+                cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page_id, &ids));
+            }
+            let n = ids.len();
             self.apply(Macro::new(format!("delete {n} shapes"), cmds));
         } else {
             let shape_id = self.sel.unwrap().1;
-            self.apply(RemoveShape::new(page_id, shape_id));
+            self.delete_one(page_id, shape_id);
         }
         self.set_selection(None);
         self.sel_set.clear();
+    }
+
+    /// Delete a single shape, folding membership-row cleanup into the
+    /// same undo step when it is a container (#138).
+    fn delete_one(&mut self, page_id: i64, shape_id: i64) {
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![Box::new(RemoveShape::new(page_id, shape_id))];
+        if let Some(ed) = self.ed() {
+            cmds.extend(dc_core::container_membership_cleanup(
+                &ed.doc,
+                page_id,
+                &[shape_id],
+            ));
+        }
+        self.apply(Macro::new(format!("delete shape {shape_id}"), cmds));
     }
 
     /// Marquee selection: page-inch rect (y-down) → every top-level
@@ -1958,7 +1983,7 @@ impl App {
         let Some(container) = self.underlying_container(&members) else {
             return;
         };
-        let cmds: Vec<Box<dyn dc_core::Command>> = members
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = members
             .iter()
             .map(|&m| {
                 Box::new(dc_core::SetRowCell::new(
@@ -1971,6 +1996,32 @@ impl App {
                 )) as Box<dyn dc_core::Command>
             })
             .collect();
+        // #138 §2: the heading band's member count re-derives from live
+        // membership — "{base title} ({count})" through SetText.
+        if let Some(ed) = self.ed() {
+            let title = ed
+                .doc
+                .pages
+                .iter()
+                .find(|p| p.id == page_id)
+                .and_then(|p| p.shapes.iter().find(|s| s.id == container))
+                .and_then(|cont| {
+                    cont.sheet.sections_named("User").iter().find_map(|sec| {
+                        sec.named_row("msvSDContainerTitle")
+                            .and_then(|r| r.cell("Value"))
+                            .and_then(|c| c.v.clone())
+                    })
+                })
+                .unwrap_or_else(|| "Container".into());
+            let count = self.container_member_ids(page_id, container).len() + members.len();
+            cmds.push(Box::new(dc_core::SetText::new(
+                Scope::Shape {
+                    page: page_id,
+                    shape: container,
+                },
+                format!("{title} ({count})"),
+            )));
+        }
         if !cmds.is_empty() {
             self.apply(Macro::new(
                 format!("add {0} shape(s) to container {container}", members.len()),
@@ -6520,7 +6571,7 @@ impl App {
             Act::Cut | Act::Copy => {
                 self.copy_selection();
                 if a == Act::Cut {
-                    self.apply(RemoveShape::new(page_id, shape_id));
+                    self.delete_one(page_id, shape_id);
                     self.set_selection(None);
                 }
             }
@@ -7021,6 +7072,22 @@ impl App {
     #[doc(hidden)]
     pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#138): how many `User.msvSDContainerShape` rows the
+    /// page carries (any container) — the dangling-row detector.
+    #[doc(hidden)]
+    pub fn debug_membership_rows_for_test(&self) -> usize {
+        self.ed()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .map(|p| {
+                p.shapes
+                    .iter()
+                    .flat_map(|s| s.sheet.sections_named("User"))
+                    .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+                    .count()
+            })
+            .unwrap_or(0)
     }
 
     /// kittest (#75): the shapes whose membership row names

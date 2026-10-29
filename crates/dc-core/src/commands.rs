@@ -1439,28 +1439,41 @@ pub fn add_container(
     set(&mut sheet, "LocPinY", "0");
     // Heading text: the standard text block, pinned into the top-left
     // corner strip (Visio's Plain container look).
+    // #138 §2 — the styled heading band: the heading sits in a filled
+    // strip across the container's top (the highlight blue, white
+    // text), the body below is outline-only. Geometry rows are
+    // FORMULA-authored (Width/Height references) so the band and body
+    // track container resizes; the band's height is the member pad.
     set(&mut sheet, "TxtPinX", "0.2");
     set(&mut sheet, "TxtLocPinX", "0");
     sheet.set_cell(
         "TxtPinY",
         vsdx::model::Cell {
             v: None,
-            f: Some("Height-TxtHeight".into()),
+            // Band center: the top 0.25 in strip (PAD below).
+            f: Some("Height-0.125".into()),
             ..vsdx::model::Cell::default()
         },
     );
     set(&mut sheet, "TxtLocPinY", "0");
-    set(&mut sheet, "FillForegnd", "#FFFFFF");
-    let row = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
-        ix,
-        t: Some(t.into()),
-        cells: vec![
-            ("X".into(), vsdx::model::Cell::value(x.to_string())),
-            ("Y".into(), vsdx::model::Cell::value(y.to_string())),
-        ],
-        ..vsdx::model::Row::default()
-    };
-    let (w, h) = (fmt_num(rect.2), fmt_num(rect.3));
+    set(&mut sheet, "FillForegnd", "#2e74b5");
+    // (Geometry rows are formula-authored below — the literal w/h the
+    // old plain-frame rows used are gone.)
+    // Heading text in the band is white.
+    sheet.children.push(vsdx::model::SheetChild::Section(
+        vsdx::model::Section {
+            name: "Character".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                cells: vec![(
+                    "Color".into(),
+                    vsdx::model::Cell::value("#FFFFFF".to_string()),
+                )],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        },
+    ));
     let container = Shape {
         id,
         name_u: Some(format!("Container.{id}")),
@@ -1469,15 +1482,34 @@ pub fn add_container(
         ..Shape::default()
     };
     let mut container = container;
-    container.sheet.text = Some(heading.to_string());
+    let heading_with_count = format!("{heading} ({})", members.len());
+    container.sheet.text = Some(heading_with_count.clone());
     // The writer emits <Text> from text_raw (verbatim), so seed the
     // escaped form too — the SetText convention.
     container.sheet.text_raw = Some(
-        heading
+        heading_with_count
             .replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;"),
     );
+    // Section 0 — the heading band (filled). Formula rows keep it
+    // glued to the container's live Width/Height.
+    let fcell = |f: &str| {
+        vsdx::model::Cell {
+            v: None,
+            f: Some(f.to_string()),
+            ..vsdx::model::Cell::default()
+        }
+    };
+    let frow = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
+        ix,
+        t: Some(t.into()),
+        cells: vec![
+            ("X".into(), fcell(x)),
+            ("Y".into(), fcell(y)),
+        ],
+        ..vsdx::model::Row::default()
+    };
     container
         .sheet
         .children
@@ -1485,14 +1517,48 @@ pub fn add_container(
             name: "Geometry".into(),
             ix: 0,
             rows: vec![
-                row(1, "MoveTo", "0", "0"),
-                row(2, "LineTo", &w, "0"),
-                row(3, "LineTo", &w, &h),
-                row(4, "LineTo", "0", &h),
-                row(5, "LineTo", "0", "0"),
+                frow(1, "MoveTo", "0", "Height-0.25"),
+                frow(2, "LineTo", "Width*1", "Height-0.25"),
+                frow(3, "LineTo", "Width*1", "Height*1"),
+                frow(4, "LineTo", "0", "Height*1"),
+                frow(5, "LineTo", "0", "Height-0.25"),
             ],
             ..vsdx::model::Section::default()
         }));
+    // Section 1 — the body: outline only (NoFill), same live frame.
+    container
+        .sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 1,
+            cells: vec![("NoFill".into(), vsdx::model::Cell::value("1"))],
+            rows: vec![
+                frow(1, "MoveTo", "0", "0"),
+                frow(2, "LineTo", "Width*1", "0"),
+                frow(3, "LineTo", "Width*1", "Height*1"),
+                frow(4, "LineTo", "0", "Height*1"),
+                frow(5, "LineTo", "0", "0"),
+            ],
+            ..vsdx::model::Section::default()
+        }));
+    // The base title rides on the sheet (#138: the heading text is
+    // re-derived as "{title} ({member count})" by membership flows.
+    container.sheet.children.push(vsdx::model::SheetChild::Section(
+        vsdx::model::Section {
+            name: "User".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                n: Some("msvSDContainerTitle".into()),
+                cells: vec![(
+                    "Value".into(),
+                    vsdx::model::Cell::value(heading.to_string()),
+                )],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        },
+    ));
     let mut cmds: Vec<Box<dyn crate::Command>> = vec![
         Box::new(AddShape {
             page,
@@ -1515,6 +1581,41 @@ pub fn add_container(
         format!("add container around {} shape(s)", members.len()),
         cmds,
     )
+}
+
+/// #138: membership-row cleanup for shapes being removed — every
+/// shape whose `User.msvSDContainerShape` names one of `removed` loses
+/// that row, so a deleted container leaves no dangling rows in the
+/// saved file. Pure command list; the caller folds it into the same
+/// delete Macro (one undo restores container and rows together).
+pub fn container_membership_cleanup(
+    doc: &Document,
+    page: i64,
+    removed: &[i64],
+) -> Vec<Box<dyn crate::Command>> {
+    let gone: std::collections::HashSet<i64> = removed.iter().copied().collect();
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let mut cmds = Vec::new();
+    for s in &p.shapes {
+        let hits = s.sheet.sections_named("User").iter().any(|sec| {
+            sec.named_row("msvSDContainerShape")
+                .and_then(|r| r.cell("Value"))
+                .and_then(|c| c.numeric())
+                .map(|v| gone.contains(&(v as i64)))
+                .unwrap_or(false)
+        });
+        if hits {
+            cmds.push(Box::new(RemoveSectionRow::new(
+                Scope::Shape { page, shape: s.id },
+                "User",
+                0,
+                RowSel::Named("msvSDContainerShape".into()),
+            )) as Box<dyn crate::Command>);
+        }
+    }
+    cmds
 }
 
 /// Undo payload for [`GroupShapes`]: member id, original z-position, and

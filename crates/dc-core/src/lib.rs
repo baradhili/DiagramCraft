@@ -23,7 +23,7 @@ pub use commands::{
     AddConnect, AddLayer, AddMasterInstance, AddPage, AddShape, DuplicateShape, ImportMaster,
     Macro, MovePage, RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage,
     ReorderShape, SetCell, SetRowCell, SetText, find_imported, next_master_id,
-    place_master_from_stencil, scale_group_members,
+    place_master_from_stencil, scale_group_members, container_membership_cleanup,
 };
 pub use connects::{Connect, Connects, ConnectsOwner};
 pub use scope::{find_shape_mut, Scope};

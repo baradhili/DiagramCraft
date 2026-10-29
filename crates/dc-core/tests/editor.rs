@@ -581,6 +581,123 @@ fn remove_page_undo_restores_it() {
 }
 
 
+/// #138: a container delete strips its members' membership rows in
+/// the same Macro (one undo restores container and rows), and the
+/// container carries the styled heading band (band + NoFill body
+/// geometry, base-title row, count heading).
+#[test]
+fn container_delete_cleans_membership_rows() {
+    use dc_core::commands::add_container;
+
+    let (ed, tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    // Two plain members to wrap.
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: vsdx::model::Shape {
+            id: 50,
+            type_: Some("Shape".into()),
+            sheet: {
+                let mut s = vsdx::model::Sheet::default();
+                s.set_cell("PinX", Cell::value("2"));
+                s.set_cell("PinY", Cell::value("5"));
+                s.set_cell("Width", Cell::value("1"));
+                s.set_cell("Height", Cell::value("1"));
+                s
+            },
+            ..vsdx::model::Shape::default()
+        },
+    })
+    .unwrap();
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: vsdx::model::Shape {
+            id: 51,
+            type_: Some("Shape".into()),
+            sheet: {
+                let mut s = vsdx::model::Sheet::default();
+                s.set_cell("PinX", Cell::value("4"));
+                s.set_cell("PinY", Cell::value("5"));
+                s.set_cell("Width", Cell::value("1"));
+                s.set_cell("Height", Cell::value("1"));
+                s
+            },
+            ..vsdx::model::Shape::default()
+        },
+    })
+    .unwrap();
+    let cid = dc_core::commands::next_shape_id(&ed.doc, page0);
+    ed.apply(add_container(page0, cid, &[50, 51], (1.0, 4.0, 4.0, 3.0), "Panel"))
+    .unwrap();
+
+    // Styled band (#138 §2): two geometry sections — the band filled,
+    // the body NoFill — the base-title row, and the count heading.
+    {
+        let cont = ed.doc.pages[0].shapes.iter().find(|s| s.id == cid).unwrap();
+        let geos = cont.sheet.sections_named("Geometry");
+        assert_eq!(geos.len(), 2, "band + body sections");
+        assert!(geos[0].cells.is_empty(), "the band carries fill");
+        assert!(
+            geos[1]
+                .cells
+                .iter()
+                .any(|(n, c)| n == "NoFill" && c.numeric() == Some(1.0)),
+            "the body is outline-only"
+        );
+        let title = cont
+            .sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| {
+                sec.named_row("msvSDContainerTitle")
+                    .and_then(|r| r.cell("Value"))
+                    .and_then(|c| c.v.clone())
+            })
+            .unwrap();
+        assert_eq!(title, "Panel");
+        assert_eq!(cont.sheet.text.as_deref(), Some("Panel (2)"));
+    }
+
+    // Delete with cleanup folded in (the GUI's delete_one shape):
+    let mut cmds: Vec<Box<dyn dc_core::Command>> =
+        vec![Box::new(RemoveShape::new(page0, cid))];
+    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid]));
+    ed.apply(dc_core::Macro::new("delete container", cmds)).unwrap();
+    let rows = |ed: &dc_core::Editor| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .flat_map(|s| s.sheet.sections_named("User"))
+            .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+            .count()
+    };
+    assert_eq!(rows(&ed), 0, "no dangling membership rows after delete");
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| s.id != cid),
+        "the container is gone"
+    );
+
+    // Save → reparse keeps the cleanup (no rows in the file).
+    let out = tmp.path().join("cleaned.vsdx");
+    ed.save_as(&out).unwrap();
+    let back = dc_core::Editor::open(&out).unwrap();
+    let rows_back = back.doc.pages[0]
+        .shapes
+        .iter()
+        .flat_map(|s| s.sheet.sections_named("User"))
+        .filter(|sec| sec.named_row("msvSDContainerShape").is_some())
+        .count();
+    assert_eq!(rows_back, 0, "the written file carries no dangling rows");
+
+    // ONE undo restores the container and both rows together.
+    ed.undo().unwrap();
+    assert_eq!(rows(&ed), 2, "one undo restored the membership rows");
+    assert!(ed.doc.pages[0].shapes.iter().any(|s| s.id == cid));
+}
+
 /// #69: a group resize scales its members — literal Xform cells
 /// (positions, loc-pins, sizes) scale by the group's factors; a
 /// GUARDed member keeps its size while its position still scales;
@@ -1900,7 +2017,8 @@ fn add_container_records_membership_and_survives_reload() {
     let re = vsdx::parse::parse(&out).unwrap();
     let c = &re.pages[0].shapes[0];
     assert_eq!(c.id, id);
-    assert_eq!(c.sheet.text.as_deref(), Some("Legend"));
+    // #138 §2: the heading band carries the member count.
+    assert_eq!(c.sheet.text.as_deref(), Some("Legend (2)"));
     let m = re.pages[0]
         .shapes
         .iter()

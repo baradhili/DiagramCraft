@@ -2021,6 +2021,107 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
 
+/// #138: deleting a container strips its members' membership rows in
+/// the same undo step — members stay put, no dangling rows, one
+/// Ctrl+Z restores everything — and the styled heading band renders
+/// (band fill + count heading).
+#[test]
+fn container_delete_strips_membership_rows() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two shapes wrapped in a container (#27 flow).
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Container")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Container flyout parent")
+        .click();
+    h.run();
+    h.run();
+    h.get_all_by_label_contains("Add to New Container")
+        .into_iter()
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Add to New Container row")
+        .click();
+    h.run();
+    let (_, cont) = h.state().debug_sel().expect("container selected");
+
+    // Styled band (#138 §2): the heading carries the member count and
+    // the page SVG renders the band fill.
+    assert_eq!(
+        h.state().debug_shape_text(cont).as_deref(),
+        Some("Container (2)"),
+        "the heading band shows the count"
+    );
+    let svg = h.state().debug_page_svg().unwrap_or_default();
+    assert!(
+        svg.contains("#2e74b5"),
+        "the band fill (the highlight blue) renders"
+    );
+
+    // Delete the container: members stay put, rows stripped.
+    assert_eq!(h.state().debug_membership_rows_for_test(), 2);
+    let m1_before = h.state().debug_shape_screen_rect(1).unwrap();
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "members orphaned in place");
+    assert_eq!(
+        h.state().debug_membership_rows_for_test(),
+        0,
+        "no dangling membership rows"
+    );
+    let m1_after = h.state().debug_shape_screen_rect(1).unwrap();
+    assert!(
+        (m1_after.min.x - m1_before.min.x).abs() < 0.5,
+        "the member stayed put"
+    );
+
+    // One Ctrl+Z restores the container AND both rows.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 3, "the container is back");
+    assert_eq!(
+        h.state().debug_membership_rows_for_test(),
+        2,
+        "one undo restored the membership rows"
+    );
+}
+
 /// #75: Add to Underlying Container — a shape placed over an existing
 /// container joins it through the flyout item, moves with it, and one
 /// Ctrl+Z removes only the membership write.
