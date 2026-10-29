@@ -175,6 +175,12 @@ pub struct App {
     selby_value: String,
     /// The Page Setup dialog is open (#113, URS-1122).
     pagesetup_open: bool,
+    /// The Copy as Picture dialog is open (#113, URS-1200).
+    copypic_open: bool,
+    /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
+    copypic_factor: u32,
+    /// The last copy-as-picture PNG (test hook).
+    last_picture: Option<Vec<u8>>,
     /// The Format Painter is armed for one target (#110, URS-1053):
     /// the source shape whose resolved formatting the next shape
     /// click receives.
@@ -439,6 +445,9 @@ impl App {
             selby_criterion: 0,
             selby_value: String::new(),
             pagesetup_open: false,
+            copypic_open: false,
+            copypic_factor: 2,
+            last_picture: None,
             painter_armed: None,
             shot_frames: 0,
             dialog: None,
@@ -3355,6 +3364,144 @@ impl App {
         );
     }
 
+    /// #113 (URS-1200): render the selection as a PNG at `factor`
+    /// (1 screen, 2 high, 4 print): the full-page SVG with every
+    /// non-selected shape hidden, rasterized, then cropped to the
+    /// selection's bounds (the page-SVG viewBox is always the whole
+    /// page). The page raster is capped at 4096 px per side.
+    fn picture_png(&self, factor: u32) -> Option<Vec<u8>> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sel: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if sel.is_empty() {
+            return None;
+        }
+        // Selection bounds (page inches, y-up → y-down for the crop).
+        let geom = self.page_geom();
+        let mut b: Option<(f64, f64, f64, f64)> = None;
+        for sid in &sel {
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
+            let r = self.shape_rect(&ed.doc, page_id, sh)?;
+            b = Some(match b {
+                None => r,
+                Some((x0, y0, x1, y1)) => (
+                    x0.min(r.0),
+                    y0.min(r.1),
+                    (x1 + r.2).max(r.0 + r.2),
+                    (y1 + r.3).max(r.1 + r.3),
+                ),
+            });
+        }
+        let (bx0, by0, bx1, by1) = b?;
+        // Hide every other shape.
+        let hidden: Vec<i64> = page
+            .shapes
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !sel.contains(id))
+            .collect();
+        let svg = dc::svg::render_page_with(&ed.doc, page, &hidden).ok()?;
+        let tree = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Thumb).ok()?;
+        // Raster the whole page, capped, then crop the selection.
+        let max_side = 4096.0;
+        let mut f = factor as f64;
+        if geom.w_in * 96.0 * f > max_side || geom.h_in * 96.0 * f > max_side {
+            f = (max_side / (96.0 * geom.w_in.max(geom.h_in))).min(f);
+        }
+        let f = f as f32;
+        let img = crate::svgimg::render_tree(&tree, geom.w_in as f32 * 96.0 * f, crate::perf::Kind::Thumb).ok()?;
+        let (iw, ih) = (img.width() as f64, img.height() as f64);
+        let sx = iw / geom.w_in;
+        let sy = ih / geom.h_in;
+        let px0 = ((bx0) * sx).floor().max(0.0) as u32;
+        let py0 = ((geom.h_in - by1) * sy).floor().max(0.0) as u32; // y-down
+        let px1 = ((bx1) * sx).ceil().min(iw) as u32;
+        let py1 = ((geom.h_in - by0) * sy).ceil().min(ih) as u32;
+        let (cw, ch) = (
+            px1.saturating_sub(px0).max(1),
+            py1.saturating_sub(py0).max(1),
+        );
+        let mut out = image::RgbaImage::new(cw, ch);
+        let (iw_us, ih_us) = (img.width(), img.height());
+        for row in 0..ch {
+            for col in 0..cw {
+                let sx = ((px0 + col) as usize).min(iw_us - 1);
+                let sy = ((py0 + row) as usize).min(ih_us - 1);
+                let px = img[(sx, sy)]; // egui::Color32 (sRGB, premult)
+                let [r, g, b, a] = px.to_srgba_unmultiplied();
+                out.put_pixel(col, row, image::Rgba([r, g, b, a]));
+            }
+        }
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(out)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .ok()?;
+        Some(bytes)
+    }
+
+    /// The Copy as Picture dialog (#113, URS-1200).
+    fn copy_picture_window(&mut self, ctx: &egui::Context) {
+        if !self.copypic_open {
+            return;
+        }
+        let mut open = true;
+        let mut copy = false;
+        egui::Window::new("Copy as Picture")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(280.0)
+            .show(ctx, |ui| {
+                ui.strong("Resolution");
+                for (f, label) in [(1u32, "Screen (96 dpi)"), (2, "High (192 dpi)"), (4, "Print (384 dpi)")] {
+                    if ui
+                        .radio(self.copypic_factor == f, label)
+                        .clicked()
+                    {
+                        self.copypic_factor = f;
+                    }
+                }
+                ui.add_space(6.0);
+                if ui.button("Copy").clicked() {
+                    copy = true;
+                }
+                ui.weak("The picture lands on the clipboard as a PNG bitmap.");
+            });
+        if copy {
+            match self.picture_png(self.copypic_factor) {
+                Some(bytes) => {
+                    self.last_picture = Some(bytes.clone());
+                    match image::load_from_memory(&bytes) {
+                        Ok(dynimg) => {
+                            let rgba = dynimg.to_rgba8();
+                            let (w, h) = (rgba.width(), rgba.height());
+                            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                [w as usize, h as usize],
+                                &rgba.into_raw(),
+                            );
+                            {
+                                ctx.copy_image(ci);
+                                self.status =
+                                    format!("picture copied ({w}×{h} px at {}×)", self.copypic_factor);
+                            }
+                        }
+                        Err(e) => self.status = format!("copy as picture failed: {e}"),
+                    }
+                }
+                None => self.status = "nothing selected to copy".into(),
+            }
+        }
+        if !open {
+            self.copypic_open = false;
+        }
+    }
+
     /// The Page Setup dialog (#113, URS-1122): ISO/ANSI presets plus
     /// custom dimensions (display units) and orientation.
     fn page_setup_window(&mut self, ctx: &egui::Context) {
@@ -4204,6 +4351,7 @@ impl App {
             Action::FormatPainter => self.arm_format_painter(),
             Action::PageOrientation => self.toggle_page_orientation(),
             Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
+            Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
@@ -8155,6 +8303,8 @@ impl App {
             /// #108: per-connector route style (URS-1114).
             RouteStraight,
             RouteRightAngle,
+            /// #113/URS-1200: render the selection to a picture.
+            CopyAsPicture,
         }
         let mut act: Option<Act> = None;
         // Min menu width incl. frame, until the popup reports its own
@@ -8474,6 +8624,9 @@ impl App {
                     ui.separator();
                 }
             }
+            if ctx_item(ui, None, "Copy as Picture…", "", self.sel.is_some()) {
+                act = Some(Act::CopyAsPicture);
+            }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
             }
@@ -8662,6 +8815,9 @@ impl App {
                 shape_id,
                 crate::connectors::ROUTE_RIGHT_ANGLE,
             ),
+            Act::CopyAsPicture => {
+                self.copypic_open = true;
+            }
         }
     }
 
@@ -8965,6 +9121,17 @@ impl App {
     /// #108 tests: the active mouse tool.
     pub fn debug_tool(&self) -> Tool {
         self.tool
+    }
+
+    /// #113 tests: the last copy-as-picture PNG's byte length.
+    pub fn debug_last_picture_len(&self) -> Option<usize> {
+        self.last_picture.as_ref().map(|v| v.len())
+    }
+
+    /// #113 tests: the page's current size in inches.
+    pub fn debug_page_size(&self) -> (f64, f64) {
+        let g = self.page_geom();
+        (g.w_in, g.h_in)
     }
 
     /// #113 tests: a cell's formula (the `F` attribute) on a shape.
@@ -9897,6 +10064,7 @@ impl App {
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
+        self.copy_picture_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);

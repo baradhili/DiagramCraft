@@ -39,6 +39,7 @@ assets = [
 ]
 
 [dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 craft-ui = { path = "../../third_party/craft-ui" }
 anyhow.workspace = true
 dc = { version = "0.1.0", path = "../dc" }
@@ -51,7 +52,6 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 vsdx = { version = "0.1.0", path = "../vsdx" }
 
 [dev-dependencies]
-image = "0.25"
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
 tempfile = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }

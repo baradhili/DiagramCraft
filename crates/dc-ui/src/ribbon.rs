@@ -44,6 +44,7 @@ pub enum Action {
     FormatPainter,
     PageOrientation,
     PageSizeDialog,
+    CopyAsPicture,
     ShowShapeSheet,
     Macros,
     FillMenu,
