@@ -1291,7 +1291,7 @@ impl App {
         };
         let page_h = self.page_geom().h_in;
         // The rect is y-down page inches; handles are y-up.
-        [
+        let mut out: Vec<Handle> = [
             (canvas::Corner::TopLeft, r.left(), r.top()),
             (canvas::Corner::TopRight, r.right(), r.top()),
             (canvas::Corner::BottomLeft, r.left(), r.bottom()),
@@ -1302,7 +1302,129 @@ impl App {
             id: HandleId::Corner(c),
             pos: (x as f64, page_h - y as f64),
         })
-        .collect()
+        .collect();
+        // Geometry vertex handles (#137): one per point row of the
+        // shape's OWN Geometry sections (master-inherited geometry has
+        // no local rows to drag — its handles arrive with master
+        // editing). Appended after the corners, so corner handles win
+        // overlaps.
+        for geo in sh.sheet.sections_named("Geometry") {
+            for row in &geo.rows {
+                let t = row.t.as_deref().unwrap_or("");
+                if !matches!(t, "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo" | "SplineKnot") {
+                    continue;
+                }
+                let (Some(x), Some(y)) = (
+                    row.cell("X").and_then(|c| c.numeric()),
+                    row.cell("Y").and_then(|c| c.numeric()),
+                ) else {
+                    continue;
+                };
+                // Shape-local (0..w, 0..h, y-up) → page y-up through
+                // the chain-mapped bbox (v1 unrotated: the local frame
+                // maps linearly onto the bbox).
+                if let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) {
+                    out.push(Handle {
+                        id: HandleId::GeoPoint {
+                            section_ix: geo.ix,
+                            row_ix: row.ix,
+                        },
+                        pos: (bx + x, by + y),
+                    });
+                }
+            }
+        }
+        out
+    }
+
+    /// #137: commit a geometry-vertex drag — rewrite the row's X/Y
+    /// (shape-local, y-up) through one `SetRowCell` Macro. The #59
+    /// guard policy: a row cell that resolves to a formula refuses
+    /// with a status note and is never written; relative rows
+    /// (`RelMoveTo`/`RelLineTo`) resolve against their PRECEDING row —
+    /// not modeled here, so they refuse with a note rather than
+    /// writing a wrong absolute value.
+    fn apply_geo_vertex(&mut self, section_ix: i64, row_ix: i64, to_page: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        // Page → shape-local: the inverse of the handle mapping (the
+        // chain-mapped bbox's origin; unrotated v1).
+        let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) else {
+            return;
+        };
+        let Some(row) = sh
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == section_ix)
+            .and_then(|s| s.rows.iter().find(|r| r.ix == row_ix))
+        else {
+            return;
+        };
+        let t = row.t.as_deref().unwrap_or("");
+        if matches!(t, "RelMoveTo" | "RelLineTo") {
+            self.status = format!(
+                "vertex drag refused: row {row_ix} is relative ({t}) —                  relative geometry editing arrives separately"
+            );
+            return;
+        }
+        for name in ["X", "Y"] {
+            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
+                .is_some()
+            {
+                self.status = format!(
+                    "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven                      — edit the formula to change it"
+                );
+                return;
+            }
+            // Row-cell formulas live on the row cell itself too.
+            if row
+                .cell(name)
+                .and_then(|c| c.f.as_deref())
+                .is_some_and(|f| f != "Inh" && f != "No Formula")
+            {
+                self.status = format!(
+                    "vertex drag refused: row {row_ix}'s {name} is formula-driven                      — edit the formula to change it"
+                );
+                return;
+            }
+        }
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let (lx, ly) = (to_page.0 - bx, to_page.1 - by);
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Geometry",
+                section_ix,
+                dc_core::commands::RowSel::Ix(row_ix),
+                "X",
+                cell(lx),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope,
+                "Geometry",
+                section_ix,
+                dc_core::commands::RowSel::Ix(row_ix),
+                "Y",
+                cell(ly),
+            )),
+        ];
+        self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
     }
 
     /// kittest: one shape's bbox in SCREEN coords (y-down) — follows
@@ -4462,6 +4584,19 @@ impl App {
                     HandleId::LineMid => {
                         self.apply_line_move(start, end);
                     }
+                    HandleId::GeoPoint { section_ix, row_ix } => {
+                        // The DELTA from the handle's own position (the
+                        // grab may start inside the grab radius).
+                        if let Some(origin) =
+                            handles.iter().find(|h| h.id == id).map(|h| h.pos)
+                        {
+                            self.apply_geo_vertex(
+                                section_ix,
+                                row_ix,
+                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -7072,6 +7207,30 @@ impl App {
     #[doc(hidden)]
     pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#137): one cell of a shape's OWN Geometry section-0
+    /// row, as (value, formula) — the vertex-drag probe.
+    #[doc(hidden)]
+    pub fn debug_geo_row_cell_for_test(
+        &self,
+        shape: i64,
+        row_ix: i64,
+        cell: &str,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        let row = sh
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == 0)?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?;
+        let c = row.cell(cell)?;
+        Some((c.v.clone(), c.f.clone()))
     }
 
     /// kittest (#138): how many `User.msvSDContainerShape` rows the

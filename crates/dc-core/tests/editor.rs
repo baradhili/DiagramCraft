@@ -581,6 +581,108 @@ fn remove_page_undo_restores_it() {
 }
 
 
+/// #137: a geometry vertex edit is one reversible row-cell pair —
+/// SetRowCell on a synthetic polyline's row, single undo restores.
+#[test]
+fn geometry_row_cell_edit_single_undo() {
+    let (ed, _tmp) = open_fixture();
+    let mut ed = ed;
+    let page0 = ed.doc.pages[0].id;
+    let polyline = vsdx::model::Shape {
+        id: 60,
+        type_: Some("Shape".into()),
+        sheet: {
+            let mut s = vsdx::model::Sheet::default();
+            s.set_cell("PinX", Cell::value("3"));
+            s.set_cell("PinY", Cell::value("5"));
+            s.set_cell("Width", Cell::value("2"));
+            s.set_cell("Height", Cell::value("2"));
+            s.children.push(vsdx::model::SheetChild::Section(
+                vsdx::model::Section {
+                    name: "Geometry".into(),
+                    ix: 0,
+                    rows: vec![
+                        vsdx::model::Row {
+                            ix: 1,
+                            t: Some("MoveTo".into()),
+                            cells: vec![
+                                ("X".into(), Cell::value("0")),
+                                ("Y".into(), Cell::value("0")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                        vsdx::model::Row {
+                            ix: 2,
+                            t: Some("LineTo".into()),
+                            cells: vec![
+                                ("X".into(), Cell::value("2")),
+                                ("Y".into(), Cell::value("2")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                    ],
+                    ..vsdx::model::Section::default()
+                },
+            ));
+            s
+        },
+        ..vsdx::model::Shape::default()
+    };
+    ed.apply(AddShape {
+        page: page0,
+        parent: None,
+        shape: polyline,
+    })
+    .unwrap();
+    let row_y = |ed: &dc_core::Editor| {
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 60)
+            .unwrap()
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .find(|s| s.ix == 0)
+            .unwrap()
+            .rows
+            .iter()
+            .find(|r| r.ix == 2)
+            .unwrap()
+            .cell("Y")
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    assert_eq!(row_y(&ed), 2.0);
+    let scope = dc_core::Scope::Shape {
+        page: page0,
+        shape: 60,
+    };
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
+        Box::new(dc_core::SetRowCell::new(
+            scope.clone(),
+            "Geometry",
+            0,
+            dc_core::commands::RowSel::Ix(2),
+            "X",
+            Cell::value("1.5"),
+        )),
+        Box::new(dc_core::SetRowCell::new(
+            scope,
+            "Geometry",
+            0,
+            dc_core::commands::RowSel::Ix(2),
+            "Y",
+            Cell::value("0.5"),
+        )),
+    ];
+    ed.apply(dc_core::Macro::new("move vertex", std::mem::take(&mut cmds)))
+        .unwrap();
+    assert_eq!(row_y(&ed), 0.5, "the vertex moved");
+    ed.undo().unwrap();
+    assert_eq!(row_y(&ed), 2.0, "one undo restored the vertex");
+}
+
 /// #138: a container delete strips its members' membership rows in
 /// the same Macro (one undo restores container and rows), and the
 /// container carries the styled heading band (band + NoFill body
