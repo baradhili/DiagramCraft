@@ -179,6 +179,11 @@ pub struct App {
     copypic_open: bool,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
+    /// Text waiting for the OS clipboard (#113, URS-1113): copied on
+    /// the next frame's update (the copy path has no Context).
+    os_clipboard_text: Option<String>,
+    /// An in-flight OS clipboard image probe (#113): RGBA result.
+    os_image_rx: Option<Receiver<Option<(u32, u32, Vec<u8>)>>>,
     /// The last copy-as-picture PNG (test hook).
     last_picture: Option<Vec<u8>>,
     /// The Format Painter is armed for one target (#110, URS-1053):
@@ -452,6 +457,8 @@ impl App {
             pagesetup_open: false,
             copypic_open: false,
             copypic_factor: 2,
+            os_clipboard_text: None,
+            os_image_rx: None,
             last_picture: None,
             painter_armed: None,
             shot_frames: 0,
@@ -3373,6 +3380,68 @@ impl App {
             self.view.unit.fmt(w),
             self.view.unit.fmt(h)
         );
+    }
+
+    /// #113 (URS-1113): probe the OS clipboard for an image on a
+    /// worker thread; the result lands via `os_image_rx` over the
+    /// next frames and inserts as a picture.
+    fn paste_os_image(&mut self) {
+        if self.os_image_rx.is_some() {
+            return; // one probe at a time
+        }
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let img = std::panic::catch_unwind(arboard::Clipboard::new)
+                .ok()
+                .and_then(|cb| cb.ok())
+                .and_then(|mut cb| {
+                    cb.get_image().ok().map(|i| {
+                        // RGBA bytes, row-major, top-down.
+                        let w = i.width as usize;
+                        let h = i.height as usize;
+                        let mut bytes = Vec::with_capacity(w * h * 4);
+                        for row in 0..h {
+                            let line = &i.bytes[row * w * 4..(row + 1) * w * 4];
+                            bytes.extend_from_slice(line);
+                        }
+                        (w as u32, h as u32, bytes)
+                    })
+                });
+            let _ = tx.send(img);
+        });
+        self.os_image_rx = Some(rx);
+        self.status = "checking the clipboard for a picture…".into();
+    }
+
+    /// #113: poll the OS image probe; a hit inserts as a picture.
+    fn poll_os_image(&mut self) {
+        let Some(rx) = self.os_image_rx.take() else { return };
+        match rx.try_recv() {
+            Ok(Some((w, h, rgba))) => {
+                // Encode PNG so the insert path's sniffer accepts it.
+                if let Some(img) = image::RgbaImage::from_raw(w, h, rgba) {
+                    let mut png = Vec::new();
+                    if image::DynamicImage::ImageRgba8(img)
+                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                        .is_ok()
+                    {
+                        self.insert_picture_bytes(&png);
+                        return;
+                    }
+                }
+                self.status = "clipboard image could not be encoded".into();
+            }
+            Ok(None) => {
+                self.status = "no picture on the clipboard".into();
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                // still probing: keep the receiver and retry next frame
+                self.os_image_rx = Some(rx);
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.status = "clipboard probe failed".into();
+            }
+        }
     }
 
     /// #113 (URS-1012): open the picture picker (PNG/JPEG).
@@ -9016,6 +9085,12 @@ impl App {
         };
         if let Some(s) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) {
             self.clipboard = Some(s.clone());
+            // #113 (URS-1113): the system clipboard receives the
+            // shape's text so other apps get meaningful content (the
+            // internal shape clipboard handles in-app paste).
+            if let Some(txt) = s.sheet.text.as_deref().filter(|t| !t.is_empty()) {
+                self.os_clipboard_text = Some(txt.to_string());
+            }
         }
     }
 
@@ -9023,6 +9098,12 @@ impl App {
     /// top of the z-order, and select it.
     fn paste_clipboard(&mut self, page_id: i64) {
         let Some(clip) = self.clipboard.clone() else {
+            // #113 (URS-1113): nothing internal — an OS clipboard
+            // IMAGE pastes as a picture (another app's graphic, or
+            // this app's own Copy as Picture). Probed off-thread:
+            // arboard opens its own connection and the paste path
+            // runs on the UI thread.
+            self.paste_os_image();
             return;
         };
         let Some(ed) = self.ed.as_ref() else { return };
@@ -10263,6 +10344,12 @@ impl App {
             ctx.request_repaint_after(Duration::from_secs(2));
         }
         self.handle_shortcuts(&ctx);
+        // #113: a copy queued OS-clipboard text (the copy path runs
+        // inside input handling without a Context).
+        if let Some(txt) = self.os_clipboard_text.take() {
+            ctx.copy_text(txt);
+        }
+        self.poll_os_image();
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
