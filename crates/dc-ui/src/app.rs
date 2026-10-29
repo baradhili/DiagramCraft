@@ -1584,6 +1584,19 @@ impl App {
         }
         cmds.push(Box::new(SetCell::new(scope.clone(), "PinX", cell(npx))));
         cmds.push(Box::new(SetCell::new(scope, "PinY", cell(npy))));
+        // A group resize scales its members (#69): literal Xform cells
+        // (the common case — GroupShapes writes literals when grouping)
+        // scale here; formula-driven cells stay with the cache refresh
+        // below (#15's per-shape rules).
+        if sh.type_.as_deref() == Some("Group") {
+            cmds.extend(dc_core::scale_group_members(
+                &ed.doc,
+                page_id,
+                shape_id,
+                nw / w,
+                nh / h,
+            ));
+        }
         // Refresh the flattened group's inherited caches (sub-shape
         // XForms, Txt block, row coordinates) to the new size — Visio's
         // save-time refresh; without it a real-file group renders stale
@@ -6772,6 +6785,17 @@ impl App {
     #[doc(hidden)]
     pub fn set_quick_shapes_store_for_test(&mut self, path: &std::path::Path) {
         self.quick_shapes = crate::quickshapes::QuickShapes::at(path.to_path_buf());
+    }
+
+    /// kittest (#69): a group's direct member ids.
+    #[doc(hidden)]
+    pub fn debug_group_members_for_test(&self, group: i64) -> Vec<i64> {
+        self.ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.get(self.page_idx))
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, group))
+            .map(|g| g.sub_shapes.iter().map(|m| m.id).collect())
+            .unwrap_or_default()
     }
 
     /// kittest (#67): the window title last pushed to the OS (name +

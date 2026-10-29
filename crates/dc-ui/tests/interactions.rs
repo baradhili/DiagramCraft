@@ -2021,6 +2021,115 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     assert_eq!(h.state().debug_shape_count(), 2, "ungroup via undo");
 }
 
+/// #69: resizing a group SCALES its members — both member screen
+/// rects grow with the group's frame, and one Ctrl+Z restores the
+/// members and the group in a single step.
+#[test]
+fn group_resize_scales_its_members() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let from = cells[0].1.center();
+    let canvas = h.state().debug_canvas_rect();
+    for off in [-40.0f32, 40.0f32] {
+        let to = canvas.center() + egui::vec2(off, -off);
+        click_at(&mut h, from, egui::PointerButton::Primary);
+        click_at(&mut h, to, egui::PointerButton::Primary);
+    }
+    h.run();
+    // Marquee both, right-click, Group (the flyout row — full-width,
+    // the icon bar's 22 px Group icon dispatches instead).
+    let c = canvas.center();
+    let s0 = c + egui::vec2(-120.0, -120.0);
+    let s1 = c + egui::vec2(120.0, 120.0);
+    h.hover_at(s0);
+    h.event(egui::Event::PointerButton {
+        pos: s0,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.hover_at(s0 + (s1 - s0) * 0.5);
+    h.run();
+    h.hover_at(s1);
+    h.event(egui::Event::PointerButton {
+        pos: s1,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    click_at(&mut h, c + egui::vec2(-40.0, 40.0), egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+    let group_row = h
+        .get_all_by_label_contains("Group")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()) && n.rect().width() > 100.0)
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Group ▸ flyout row");
+    group_row.click();
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("menu still open");
+    let group_item = h
+        .get_all_by_label_contains("Group")
+        .find(|n| {
+            let r = n.rect();
+            !menu.expand(2.0).contains_rect(r) && r.min.y > menu.min.y - 5.0
+        })
+        .expect("Group item in the flyout submenu");
+    group_item.click();
+    h.run();
+    let (_, gid) = h.state().debug_sel().expect("group selected");
+    let members = h.state().debug_group_members_for_test(gid);
+    assert_eq!(members.len(), 2, "the group holds both shapes");
+    let rect_of = |h: &egui_kittest::Harness<'_, App>, m: i64| {
+        h.state().debug_shape_screen_rect_for_test(m).expect("member rect")
+    };
+    let before: Vec<_> = members.iter().map(|&m| rect_of(&h, m)).collect();
+    let (gw0, gh0) = {
+        let r = h.state().debug_shape_screen_rect(gid).unwrap();
+        (r.width(), r.height())
+    };
+
+    // Drag the group's bottom-right corner out: the frame grows and
+    // BOTH members scale with it (#69).
+    let br = h.state().debug_sel_br_corner().expect("group handles");
+    drag_naturally(&mut h, br, egui::vec2(40.0, 30.0));
+    let (gw1, gh1) = {
+        let r = h.state().debug_shape_screen_rect(gid).unwrap();
+        (r.width(), r.height())
+    };
+    assert!(gw1 > gw0 * 1.2 && gh1 > gh0 * 1.2, "the group grew");
+    let (fx, fy) = (gw1 / gw0, gh1 / gh0);
+    for (i, &m) in members.iter().enumerate() {
+        let after = rect_of(&h, m);
+        let want_w = before[i].width() * fx;
+        let want_h = before[i].height() * fy;
+        assert!(
+            (after.width() - want_w).abs() < 1.5 && (after.height() - want_h).abs() < 1.5,
+            "member {m} scaled with the group: {:?} → {:?} (fx {fx:.2}, fy {fy:.2})",
+            before[i],
+            after
+        );
+    }
+
+    // One Ctrl+Z restores the members and the group together.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    for (i, &m) in members.iter().enumerate() {
+        let back = rect_of(&h, m);
+        assert!(
+            (back.width() - before[i].width()).abs() < 0.5
+                && (back.height() - before[i].height()).abs() < 0.5,
+            "member {m} restored: {:?} vs {:?}",
+            back,
+            before[i]
+        );
+    }
+}
+
 /// GitHub #27: Container from the context menu wraps the selection;
 /// dragging the container carries its members; delete orphans them in
 /// place.

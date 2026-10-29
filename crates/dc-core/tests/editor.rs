@@ -580,6 +580,103 @@ fn remove_page_undo_restores_it() {
     assert_eq!(ed.doc.pages[0].part, "visio/pages/page1.xml");
 }
 
+
+/// #69: a group resize scales its members — literal Xform cells
+/// (positions, loc-pins, sizes) scale by the group's factors; a
+/// GUARDed member keeps its size while its position still scales;
+/// nested groups recurse with the same factors.
+#[test]
+fn scale_group_members_scales_literals_guards_and_nesting() {
+    use dc_core::scale_group_members;
+
+    // Literal member cell helper.
+    let lit = |v: &str| Cell::value(v);
+    let member = |id: i64, guard_width: bool| {
+        let mut m = Shape {
+            id,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        m.sheet.set_cell("PinX", lit("1"));
+        m.sheet.set_cell("PinY", lit("0.5"));
+        m.sheet.set_cell("Width", lit("2"));
+        m.sheet.set_cell("Height", lit("1"));
+        if guard_width {
+            let mut c = Cell::value("2");
+            c.f = Some("GUARD(2)".into());
+            m.sheet.set_cell("Width", c);
+        }
+        m
+    };
+    // Nested group N holding member 3.
+    let mut nested = Shape {
+        id: 2,
+        type_: Some("Group".into()),
+        ..Shape::default()
+    };
+    nested.sheet.set_cell("Width", lit("2"));
+    nested.sheet.set_cell("Height", lit("1"));
+    nested.sub_shapes.push(member(3, false));
+    // Outer group G holding member 1 (guarded width) and N.
+    let mut outer = Shape {
+        id: 10,
+        type_: Some("Group".into()),
+        ..Shape::default()
+    };
+    outer.sub_shapes.push(member(1, true));
+    outer.sub_shapes.push(nested);
+
+    let doc = Document {
+        pages: vec![vsdx::model::Page {
+            id: 0,
+            name: "P1".into(),
+            shapes: vec![outer],
+            ..vsdx::model::Page::default()
+        }],
+        ..bare_doc()
+    };
+    // Double the width, halve the height.
+    let cmds = scale_group_members(&doc, 0, 10, 2.0, 0.5);
+    let mut ed = dc_core::Editor::new(doc);
+    ed.apply(dc_core::Macro::new("scale members", cmds)).unwrap();
+
+    let page = &ed.doc.pages[0];
+    let cell = |sid: i64, n: &str| {
+        vsdx::model::find_shape_by_id(&page.shapes, sid)
+            .unwrap()
+            .sheet
+            .cell(n)
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    // Member 1: GUARDed Width keeps 2; everything else scales.
+    assert_eq!(cell(1, "Width"), 2.0, "the GUARDed size keeps its dimension");
+    assert_eq!(cell(1, "Height"), 0.5, "the free size axis scales");
+    assert_eq!(cell(1, "PinX"), 2.0, "position scales under the guard");
+    assert_eq!(cell(1, "PinY"), 0.25);
+    // Nested group's own Xform scales, and its member follows with the
+    // SAME factors (once — the no-scale convention means the child
+    // group's Width scaling does not propagate on its own).
+    assert_eq!(cell(2, "Width"), 4.0, "the nested group's frame scales");
+    assert_eq!(cell(3, "Width"), 4.0, "the nested member scales exactly once");
+    assert_eq!(cell(3, "PinY"), 0.25);
+
+    // One undo reverts every member edit.
+    ed.undo().unwrap();
+    let page = &ed.doc.pages[0];
+    let cell = |sid: i64, n: &str| {
+        vsdx::model::find_shape_by_id(&page.shapes, sid)
+            .unwrap()
+            .sheet
+            .cell(n)
+            .and_then(|c| c.numeric())
+            .unwrap()
+    };
+    assert_eq!(cell(1, "PinX"), 1.0, "one undo restored the members");
+    assert_eq!(cell(3, "Width"), 2.0);
+}
+
+
 /// #68: a new page's PageSheet is seeded from its source — size
 /// always, the scale cells only when the source carries them — with
 /// the document's last page as the default source, an explicit page

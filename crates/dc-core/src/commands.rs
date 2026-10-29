@@ -280,6 +280,125 @@ pub fn effective_formula(
     f
 }
 
+
+/// Group-member scaling for a group resize (#69, #26's v1 boundary):
+/// under the no-scale rendering convention a group's size lives in
+/// its members' local cells, so resizing the group must scale each
+/// descendant's LITERAL Xform cells — positions and loc-pins always,
+/// sizes unless protected. The #15 per-shape rules, expressed against
+/// this codebase's machinery:
+///
+/// - a cell with a real formula anywhere in its resolution chain
+///   (`GUARD(…)`, a proportional master formula) is NOT written —
+///   guarded sizes keep their dimensions, and formula-driven cells
+///   belong to the #97 cache-refresh walk that runs alongside the
+///   resize macro;
+/// - a Protection lock (`LockWidth`/`LockHeight`) keeps the size;
+///   the position still scales;
+/// - nested groups recurse with the SAME factors: each level's
+///   members scale exactly once (the child group's own Xform scales
+///   as a member, and the no-scale convention means its members need
+///   the same factor applied directly).
+pub fn scale_group_members(
+    doc: &Document,
+    page: i64,
+    group: i64,
+    kx: f64,
+    ky: f64,
+) -> Vec<Box<dyn crate::Command>> {
+    if ((kx - 1.0).abs() < 1e-9) && ((ky - 1.0).abs() < 1e-9) {
+        return Vec::new();
+    }
+    let Some(p) = doc.pages.iter().find(|p| p.id == page) else {
+        return Vec::new();
+    };
+    let Some(root) = vsdx::model::find_shape_by_id(&p.shapes, group) else {
+        return Vec::new();
+    };
+    let mut cmds = Vec::new();
+    scale_members_of(doc, page, root, kx, ky, &mut cmds);
+    cmds
+}
+
+/// One group's direct members; nested groups recurse after their own
+/// Xform scales.
+fn scale_members_of(
+    doc: &Document,
+    page: i64,
+    group: &vsdx::model::Shape,
+    kx: f64,
+    ky: f64,
+    cmds: &mut Vec<Box<dyn crate::Command>>,
+) {
+    for m in &group.sub_shapes {
+        let chain = crate::scope::shape_chain(doc, page, m.id).unwrap_or_default();
+        for (name, k) in [
+            ("PinX", kx),
+            ("PinY", ky),
+            ("LocPinX", kx),
+            ("LocPinY", ky),
+            ("Width", kx),
+            ("Height", ky),
+        ] {
+            if (k - 1.0).abs() < 1e-9 {
+                continue; // a guarded group axis: nothing to scale
+            }
+            let is_size = matches!(name, "Width" | "Height");
+            if is_size && sheet_locked(&m.sheet, lock_for(name).unwrap_or("")) {
+                continue;
+            }
+            // A real formula anywhere in the resolution chain marks the
+            // cell as guarded or refresh-driven — never ours to write.
+            if effective_formula(doc, m, &chain, name).is_some() {
+                continue;
+            }
+            let Some(cell) = m.sheet.cell(name) else {
+                // No local cell: a resolved LITERAL behind it scales as
+                // an instance snapshot (Visio materializes on edit —
+                // master instances inside groups carry no local
+                // Width/Height, exactly this case).
+                let Some(v) = doc
+                    .resolve_cell(m, &chain, name)
+                    .and_then(|c| c.numeric())
+                    .filter(|v| v.is_finite())
+                else {
+                    continue;
+                };
+                cmds.push(Box::new(crate::SetCell::new(
+                    crate::Scope::Shape {
+                        page,
+                        shape: m.id,
+                    },
+                    name,
+                    Cell::value(format!("{:.6}", v * k)),
+                )));
+                continue;
+            };
+            // Only LITERAL local cells are ours (an `F='Inh'` snapshot
+            // with a formula behind it was filtered above).
+            if cell
+                .f
+                .as_deref()
+                .is_some_and(|f| f != "Inh" && f != "No Formula")
+            {
+                continue;
+            }
+            let Some(v) = cell.numeric() else { continue };
+            cmds.push(Box::new(crate::SetCell::new(
+                crate::Scope::Shape {
+                    page,
+                    shape: m.id,
+                },
+                name,
+                Cell::value(format!("{:.6}", v * k)),
+            )));
+        }
+        if m.type_.as_deref() == Some("Group") {
+            scale_members_of(doc, page, m, kx, ky, cmds);
+        }
+    }
+}
+
 /// Visio protection semantics shared by every surface (#97 §6 item 6):
 /// a **plain value** write to a shape cell is refused when the cell —
 /// resolved instance → master — carries a `GUARD(...)` formula, or the
