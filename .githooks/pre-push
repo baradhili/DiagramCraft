@@ -1,0 +1,27 @@
+#!/bin/sh
+# pre-push hook — the clippy zero-warning regression gate (#140, owner
+# decision 2026-10-28: pre-push hook, not CI). The workspace baseline
+# is zero clippy warnings (#61); this keeps it enforced at the last
+# moment before code leaves the machine.
+#
+# The invocation must be `--workspace --all-targets` exactly: plain
+# workspace runs silently skip the vendored third_party/craft-ui fork
+# (an automatic workspace member via path dependency), and it was
+# precisely the fork's test targets that carried the old 111 deny
+# errors (#61's constraint).
+#
+# Shares the one-time setup with the commit-msg hook:
+#   git config core.hooksPath .githooks
+#
+# Emergency bypass for a single push (keep it rare — the zero
+# baseline is the point): CLIPPY_SKIP=1 git push ...
+
+[ -n "$CLIPPY_SKIP" ] && exit 0
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "warning: cargo not found; push not clippy-gated." >&2
+    exit 0
+fi
+
+# Hooks run from the repo top; cargo finds the workspace from here.
+exec cargo clippy --workspace --all-targets --quiet -- -D warnings
