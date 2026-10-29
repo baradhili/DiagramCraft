@@ -203,6 +203,10 @@ pub struct CanvasOut {
     /// A ruler drag released over the page (#113 guides slice): the
     /// guide kind and its page position (inches, y-up).
     pub guide_drop: Option<(GuideSource, (f64, f64))>,
+    /// The Connector Tool's gesture finished (#108): (press point,
+    /// release point), page inches y-up. Valid only when the release
+    /// landed on the page.
+    pub connector_drop: Option<((f64, f64), (f64, f64))>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,
     /// Shift held at click time (multi-select toggle).
@@ -345,6 +349,7 @@ pub fn show(
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
     guides: &[GuideFx],      // #113: guide overlay, above ink
+    connector_tool: bool,    // #108: the Connector Tool is active
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
@@ -362,6 +367,7 @@ pub fn show(
         press_page_pos: None,
         marquee_done: None,
         guide_drop: None,
+        connector_drop: None,
         marquee_live: None,
         shift_click: false,
         ctrl_click: false,
@@ -426,6 +432,7 @@ pub fn show(
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
     let mem_guide = egui::Id::unique("dc-guide-drag");
+    let mem_connector = egui::Id::unique("dc-connector-drag");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -444,6 +451,13 @@ pub fn show(
             // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else if connector_tool {
+                // The Connector Tool (#108) owns the gesture: press
+                // anywhere (on a shape = glue start), release on the
+                // page to draw the connector.
+                let page_pos = screen_to_page(p, view, page);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_connector, page_pos));
             } else if view.show_rulers
                 && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
             {
@@ -521,6 +535,31 @@ pub fn show(
         }
     }
 
+    // Connector Tool gesture (#108): rubber line from the press point
+    // to the pointer; release on the page draws the connector (the
+    // app decides glue from both endpoints), release off the page
+    // cancels.
+    let connector_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<(f64, f64)>(mem_connector));
+    let mut connector_live: Option<((f64, f64), (f64, f64))> = None;
+    if let Some(from) = connector_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<(f64, f64)>(mem_connector));
+            if primary_released {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let to = screen_to_page(p, view, page);
+                    if to.0 >= 0.0 && to.0 <= page.w_in && to.1 >= 0.0 && to.1 <= page.h_in {
+                        out.connector_drop = Some((from, to));
+                    }
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            connector_live = Some((from, screen_to_page(p, view, page)));
+        }
+    }
+
     // Marquee: armed on an empty-page press above; live band while the
     // button is held, committed on release. A degenerate (zero-area)
     // band is just a click on empty page — the click path already
@@ -551,6 +590,10 @@ pub fn show(
         }
     }
 
+    // The Connector Tool draws with a crosshair (Visio).
+    if connector_tool {
+        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+    }
     // Handle cursors.
     if let Some(hp) = resp.hover_pos() {
         if let Some(c) = handle_at(hp) {
@@ -971,6 +1014,15 @@ pub fn show(
         for (a, b) in &lines {
             p.line_segment([*a, *b], Stroke::new(1.4, t.selection));
         }
+    }
+
+    // Connector Tool rubber line (#108): press point → pointer, with a
+    // hollow end marker where the connector's arrowhead will land.
+    if let Some((from, to)) = connector_live {
+        let a = page_to_screen(from.0, from.1, view, page);
+        let b = page_to_screen(to.0, to.1, view, page);
+        dashed(&p, a, b, HINT);
+        p.circle_stroke(b, 4.0, Stroke::new(1.2, HINT));
     }
 
     // Dynamic-grid hints (#109): dashed full-canvas alignment lines

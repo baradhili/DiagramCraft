@@ -18,6 +18,7 @@ use vsdx::model::{Document, Shape};
 use crate::canvas::{self, Handle, HandleId, PageGeom, View};
 use crate::cmd::MoveShape;
 use dc_core::AddMasterInstance;
+use dc_core::connects::ConnectsHost;
 use crate::recent::RecentFiles;
 use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
 use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
@@ -161,6 +162,8 @@ pub struct App {
     /// recomputed by `update_drag` while a move drag is live and
     /// painted by the canvas from `DragFx::hints`.
     snap_live: Vec<crate::snap::Hint>,
+    /// The active mouse tool (#108).
+    tool: Tool,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
@@ -323,6 +326,16 @@ impl BackPage {
 /// `snap_ctx_of` (#109).
 const SNAP_STRENGTH_PX: f32 = 8.0;
 
+/// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
+/// and drags; the Connector Tool (#108) draws connectors. Esc returns
+/// to the pointer, like Visio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    #[default]
+    Pointer,
+    Connector,
+}
+
 struct DragState {
     shape: i64,
     grab_off: (f64, f64), // pin − pointer, inches (y-up)
@@ -405,6 +418,7 @@ impl App {
             snap_dlg_open: false,
             snap_live: Vec::new(),
             drag_glue: None,
+            tool: Tool::Pointer,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1180,6 +1194,9 @@ impl App {
     }
 
     /// Borrow-free bbox (page inches, y-up) for marquee gating.
+    /// Normalized: the corpus connector model carries SIGNED
+    /// Width/Height (`GUARD(EndX-BeginX)`), so the origin is min-corner
+    /// and the extents absolute (#108).
     fn shape_rect_static(doc: &Document, page_id: i64, s: &Shape) -> Option<(f64, f64, f64, f64)> {
         let chain = shape_chain(doc, page_id, s.id).ok()?;
         let get = |n: &str| doc.resolve_cell(s, &chain, n).and_then(|c| c.numeric());
@@ -1188,7 +1205,13 @@ impl App {
         let h = get("Height").unwrap_or(1.0);
         let lx = get("LocPinX").unwrap_or(w / 2.0);
         let ly = get("LocPinY").unwrap_or(h / 2.0);
-        Some((pin_x - lx, pin_y - ly, w, h))
+        let (x, y) = (pin_x - lx, pin_y - ly);
+        Some((
+            x.min(x + w),
+            y.min(y + h),
+            w.abs(),
+            h.abs(),
+        ))
     }
 
     fn shape_hit(&self, page_pos: (f64, f64)) -> Option<i64> {
@@ -1203,6 +1226,30 @@ impl App {
             }
         }
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        // Connectors hit by their LINE, not a degenerate bbox (#108 —
+        // the corpus model's bbox can be a zero-height band).
+        if self.group_edit.is_empty() {
+            let threshold = 5.0 / self.view.px_per_in() as f64;
+            for shape in page.shapes.iter().rev() {
+                if !crate::connectors::is_connector(shape) {
+                    continue;
+                }
+                if let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(shape, &chain, n)
+                            .and_then(|c| c.numeric())
+                    };
+                    if let (Some(bx), Some(by), Some(ex), Some(ey)) =
+                        (g("BeginX"), g("BeginY"), g("EndX"), g("EndY"))
+                    {
+                        if segment_hit((bx, by), (ex, ey), page_pos, threshold) {
+                            return Some(shape.id);
+                        }
+                    }
+                }
+            }
+        }
         // Group-edit mode (#78): only the innermost open group's
         // members are on the canvas — clicks resolve against them
         // (nested-aware rects), never falling through to page shapes.
@@ -1539,6 +1586,10 @@ impl App {
             if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
+            // Esc leaves the Connector Tool for the pointer (Visio).
+            if i.key_pressed(egui::Key::Escape) && self.tool == Tool::Connector && !kb_owned {
+                self.tool = Tool::Pointer;
+            }
             // Shape clipboard / duplicate / text edit (Visio keys). Not
             // while a text field owns the keyboard.
             if !kb_owned && self.sel.is_some() {
@@ -1607,6 +1658,7 @@ impl App {
                     cmds.extend(self.guide_glue_release_cmds(page_id, *sid));
                 }
             }
+            cmds.extend(self.connect_cleanup_cmds(page_id, &ids));
             let n = ids.len();
             self.apply(Macro::new(format!("delete {n} shapes"), cmds));
         } else {
@@ -1625,6 +1677,7 @@ impl App {
         let mut cmds: Vec<Box<dyn dc_core::Command>> =
             vec![Box::new(RemoveShape::new(page_id, shape_id))];
         cmds.extend(self.guide_glue_release_cmds(page_id, shape_id));
+        cmds.extend(self.connect_cleanup_cmds(page_id, &[shape_id]));
         if let Some(ed) = self.ed() {
             cmds.extend(dc_core::container_membership_cleanup(
                 &ed.doc,
@@ -1829,6 +1882,9 @@ impl App {
             nw / w,
             nh / h,
         ));
+        if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
+            cmds.push(r);
+        }
         self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
         if let Some(note) = guard_note {
             self.status = note;
@@ -2507,6 +2563,32 @@ impl App {
         (pin.0 + res.dx, pin.1 + res.dy)
     }
 
+    /// #108: commands removing every `<Connect>` that references a
+    /// deleted shape (either side). Indices are collected descending —
+    /// sequential `RemoveConnect`s inside one Macro shift the list.
+    fn connect_cleanup_cmds(
+        &self,
+        page_id: i64,
+        deleted: &[i64],
+    ) -> Vec<Box<dyn dc_core::Command>> {
+        let Some(ed) = self.ed() else { return Vec::new() };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        let connects = page.connects();
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for idx in (0..connects.list.len()).rev() {
+            let c = &connects.list[idx];
+            if deleted.contains(&c.from_sheet) || deleted.contains(&c.to_sheet) {
+                cmds.push(Box::new(dc_core::RemoveConnect::new(
+                    dc_core::ConnectsOwner::Page(page_id),
+                    idx,
+                )));
+            }
+        }
+        cmds
+    }
+
     /// #113: commands that release every shape glued to `shape_id`
     /// (no-ops for non-guides): each dependent's pin formula
     /// referencing the guide is replaced by its cached value, so the
@@ -2547,6 +2629,418 @@ impl App {
             }
         }
         cmds
+    }
+
+    // -- connector authoring (GitHub #108) -------------------------------
+
+    /// #108: a connector endpoint drag's glue lifecycle. Build the
+    /// endpoint cells (the #59 derived-cell logic via
+    /// `apply_line_endpoint` semantics), then resolve glue at the drop:
+    /// static (connection point) or dynamic (shape) write the corpus
+    /// formula and Connect; empty page releases. One undo step.
+    fn commit_connector_endpoint(&mut self, end_id: HandleId, raw: (f64, f64)) {
+        use crate::connectors::{End, GlueKind};
+        let Some((page_id, sid)) = self.sel else { return };
+        let end = match end_id {
+            HandleId::LineBegin => End::Begin,
+            HandleId::LineEnd => End::End,
+            _ => return,
+        };
+        // Where the OTHER endpoint sits (page space) — the facing
+        // anchor for dynamic attachment.
+        let other = self.ed.as_ref().and_then(|ed| {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+            let (b, e) = match end {
+                End::Begin => ("EndX", "EndY"),
+                End::End => ("BeginX", "BeginY"),
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+            };
+            Some((g(b)?, g(e)?))
+        });
+        let Some(other) = other else { return };
+        let cands = self.glue_candidates(&[sid]);
+        let threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let target = crate::connectors::glue_decision(
+            &cands,
+            raw,
+            other,
+            threshold,
+            self.snap.glue_active,
+            self.snap.glue_connection_points,
+        );
+        let attach = target.map(|t| t.attach).unwrap_or(raw);
+        // The plain endpoint move first (derived cells + guards).
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![self.move_endpoint_cmd(page_id, sid, end, attach)];
+        // Resolve the glue state change against the existing Connect.
+        let page = self
+            .ed
+            .as_ref()
+            .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == page_id));
+        let existing = page.and_then(|p| {
+            p.connects()
+                .list
+                .iter()
+                .position(|c| c.from_sheet == sid && c.from_cell == end.cell())
+        });
+        let same_glue = |t: &crate::connectors::GlueTarget, idx: usize| -> bool {
+            let Some(p) = page else { return false };
+            let list = p.connects();
+            let Some(c) = list.list.get(idx) else { return false };
+            c.to_sheet == t.shape_id
+                && c.to_part == match t.kind {
+                    GlueKind::Static { row_ix } => 100 + row_ix,
+                    GlueKind::Dynamic => crate::connectors::PART_WALKGLUE,
+                }
+        };
+        if let Some(idx) = existing {
+            cmds.push(Box::new(dc_core::RemoveConnect::new(
+                dc_core::ConnectsOwner::Page(page_id),
+                idx,
+            )));
+        }
+        if let Some(t) = target {
+            // Formula cells overwrite the plain values from the move.
+            let (f, trig) = match t.kind {
+                GlueKind::Static { row_ix } => {
+                    (crate::connectors::static_glue_formula(t.shape_id, row_ix), None)
+                }
+                GlueKind::Dynamic => (
+                    crate::connectors::walkglue_formula(end),
+                    Some(t.shape_id),
+                ),
+            };
+            for cell in [end.cell(), end.y_cell()] {
+                cmds.push(Box::new(dc_core::SetGluedCell::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: sid,
+                    },
+                    cell,
+                    vsdx::Cell {
+                        v: Some(format!("{:.6}", if cell == end.cell() { attach.0 } else { attach.1 })),
+                        f: Some(f.clone()),
+                        ..vsdx::Cell::default()
+                    },
+                )));
+            }
+            if let Some(tid) = trig {
+                cmds.push(Box::new(SetCell::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: sid,
+                    },
+                    end.trigger_cell(),
+                    vsdx::Cell {
+                        v: Some("2".into()),
+                        f: Some(format!("GUARD(_XFTRIGGER(Sheet.{tid}!EventXFMod))")),
+                        ..vsdx::Cell::default()
+                    },
+                )));
+            }
+            cmds.push(Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: crate::connectors::glue_connect(sid, end, &t),
+            }));
+            let same = existing.is_some_and(|idx| same_glue(&t, idx));
+            self.status = if same {
+                format!("connector stays glued to shape {}", t.shape_id)
+            } else {
+                match t.kind {
+                    GlueKind::Static { .. } => {
+                        format!("connector glued to shape {}'s connection point", t.shape_id)
+                    }
+                    GlueKind::Dynamic => format!("connector glued to shape {}", t.shape_id),
+                }
+            };
+        } else if existing.is_some() {
+            self.status = "connector end released".into();
+        }
+        self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
+    }
+
+    /// #108/URS-1114: set a connector's route style and re-route its
+    /// geometry immediately — one undo step.
+    fn apply_connector_route_style(&mut self, page_id: i64, sid: i64, style: &str) {
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return;
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (Some(bx), Some(by), Some(ex), Some(ey)) =
+            (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+        else {
+            return;
+        };
+        let pts = crate::connectors::route(style, (bx, by), (ex, ey));
+        let rows = crate::connectors::route_rows((bx, by), &pts);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![Box::new(SetCell::new(
+            scope.clone(),
+            "ShapeRouteStyle",
+            vsdx::Cell::value(style),
+        ))];
+        for (i, (x, y)) in rows.iter().enumerate() {
+            let ix = (i + 2) as i64;
+            for (cell, v) in [("X", *x), ("Y", *y)] {
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    0,
+                    dc_core::commands::RowSel::Ix(ix),
+                    cell,
+                    vsdx::Cell::value(format!("{v:.6}")),
+                )));
+            }
+        }
+        self.apply(Macro::new("set connector route style", cmds));
+    }
+
+    /// The plain endpoint-move command (the #59 derived-cell set) for
+    /// `commit_connector_endpoint` — the same cells
+    /// `apply_line_endpoint` writes, as one boxed command.
+    fn move_endpoint_cmd(
+        &self,
+        page_id: i64,
+        sid: i64,
+        end: crate::connectors::End,
+        to: (f64, f64),
+    ) -> Box<dyn dc_core::Command> {
+        let Some(ed) = self.ed() else {
+            unreachable!("caller checked the document")
+        };
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+        let Some(sh) = page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sid)) else {
+            unreachable!("caller checked the shape")
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            unreachable!("caller checked the chain")
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (bx, by, ex, ey) =
+            (get("BeginX").unwrap_or(0.0), get("BeginY").unwrap_or(0.0), get("EndX").unwrap_or(0.0), get("EndY").unwrap_or(0.0));
+        let (a, b) = match end {
+            crate::connectors::End::Begin => (to, (ex, ey)),
+            crate::connectors::End::End => ((bx, by), to),
+        };
+        let w = (a.0 - b.0).hypot(a.1 - b.1).max(1e-4);
+        let angle = (b.1 - a.1).atan2(b.0 - a.0);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: sid,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        // NOTE: for the corpus-model connector (unrotated, signed
+        // Width/Height) the derived set differs from the 1D master
+        // model — Width/Height are the axis deltas and the pin the
+        // midpoint.
+        let cmds: Vec<Box<dyn dc_core::Command>> = [
+            ("BeginX", a.0),
+            ("BeginY", a.1),
+            ("EndX", b.0),
+            ("EndY", b.1),
+            ("PinX", (a.0 + b.0) / 2.0),
+            ("PinY", (a.1 + b.1) / 2.0),
+            ("Width", b.0 - a.0),
+            ("Height", b.1 - a.1),
+            ("LocPinX", (b.0 - a.0) / 2.0),
+            ("LocPinY", (b.1 - a.1) / 2.0),
+        ]
+        .into_iter()
+        .map(|(n, v)| {
+            // The endpoint cells may carry the glue engine's GUARDed
+            // formulas — a drag legitimately rewrites them
+            // (re-glue/release), so they go through SetGluedCell.
+            if matches!(n, "BeginX" | "BeginY" | "EndX" | "EndY") {
+                Box::new(dc_core::SetGluedCell::new(scope.clone(), n, cell(v)))
+                    as Box<dyn dc_core::Command>
+            } else {
+                Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
+            }
+        })
+        .collect();
+        let _ = (w, angle);
+        Box::new(Macro::new(format!("move {} endpoint", end.cell()), cmds))
+    }
+
+    /// The page's glue candidates (#108): every non-connector shape's
+    /// page rect with its connection-point rows (IX → page position —
+    /// own rows first, the master's for instances, like #109's
+    /// snap-target collection).
+    fn glue_candidates(&self, excluding: &[i64]) -> Vec<crate::connectors::GlueCandidate> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page_id) = self.page_id() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| {
+                !excluding.contains(&s.id)
+                    && !crate::connectors::is_connector(s)
+                    && !crate::guides::is_guide(s)
+            })
+            .filter_map(|s| {
+                let rect = self.shape_rect(&ed.doc, page_id, s)?;
+                let mut c = crate::connectors::GlueCandidate {
+                    id: s.id,
+                    rect,
+                    conn_rows: Vec::new(),
+                };
+                let collect = |sheet: &vsdx::model::Sheet, c: &mut crate::connectors::GlueCandidate| {
+                    for sec in sheet.sections_named("Connection") {
+                        for row in &sec.rows {
+                            if let (Some(x), Some(y)) = (
+                                row.cell("X").and_then(|v| v.numeric()),
+                                row.cell("Y").and_then(|v| v.numeric()),
+                            ) {
+                                c.conn_rows
+                                    .push((row.ix, (rect.0 + x, rect.1 + y)));
+                            }
+                        }
+                    }
+                };
+                collect(&s.sheet, &mut c);
+                if c.conn_rows.is_empty() {
+                    if let Some(root) = s
+                        .master
+                        .and_then(|mid| ed.doc.master(mid))
+                        .and_then(|m| m.shapes.first())
+                    {
+                        collect(&root.sheet, &mut c);
+                    }
+                }
+                Some(c)
+            })
+            .collect()
+    }
+
+    /// The Connector Tool's gesture finished (#108, URS-1067): create
+    /// the connector between the two points, gluing each end per the
+    /// #109 glue settings (connection point → static, shape →
+    /// dynamic) — corpus formulas baked into the shape cells, Connect
+    /// records in the same undo step.
+    fn create_connector(&mut self, from: (f64, f64), to: (f64, f64)) {
+        use crate::connectors::{End, GlueKind};
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let _geom = self.page_geom();
+        let cands = self.glue_candidates(&[]);
+        let threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let decide = |p, toward| {
+            crate::connectors::glue_decision(
+                &cands,
+                p,
+                toward,
+                threshold,
+                self.snap.glue_active,
+                self.snap.glue_connection_points,
+            )
+        };
+        let beg_t = decide(from, to);
+        let end_t = decide(to, from);
+        let beg = beg_t.map(|t| t.attach).unwrap_or(from);
+        let end = end_t.map(|t| t.attach).unwrap_or(to);
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut shape = crate::connectors::connector_shape(id, beg, end);
+        // Route the fresh connector per its style before it lands.
+        let style = shape
+            .sheet
+            .cell("ShapeRouteStyle")
+            .and_then(|c| c.v.clone())
+            .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+        let pts = crate::connectors::route(&style, beg, end);
+        let rows = crate::connectors::route_rows(beg, &pts);
+        let _ = rows;
+        // (the straight default rows the constructor wrote stand until
+        // the first reroute; a right-angle start routes now)
+        if style != crate::connectors::ROUTE_STRAIGHT {
+            crate::connectors::rewrite_route_rows(&mut shape, &rows);
+        }
+        // Bake the glue: endpoint formulas + triggers into the cells.
+        for (end, t) in [(End::Begin, beg_t), (End::End, end_t)] {
+            match t.map(|t| (t.shape_id, t.kind, t.attach)) {
+                Some((tid, GlueKind::Static { row_ix }, attach)) => {
+                    let f = crate::connectors::static_glue_formula(tid, row_ix);
+                    crate::connectors::bake_end(&mut shape, end, attach, &f);
+                }
+                Some((tid, GlueKind::Dynamic, attach)) => {
+                    let f = crate::connectors::walkglue_formula(end);
+                    crate::connectors::bake_end(&mut shape, end, attach, &f);
+                    crate::connectors::bake_trigger(&mut shape, end, tid);
+                }
+                None => {}
+            }
+        }
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![Box::new(dc_core::AddShape {
+                page: page_id,
+                parent: None,
+                shape,
+            })];
+        for (end, t) in [(End::Begin, beg_t), (End::End, end_t)] {
+            if let Some(t) = t {
+                cmds.push(Box::new(dc_core::AddConnect {
+                    owner: dc_core::ConnectsOwner::Page(page_id),
+                    connect: crate::connectors::glue_connect(id, end, &t),
+                }));
+            }
+        }
+        self.apply(Macro::new(format!("add connector {id}"), cmds));
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = match (beg_t, end_t) {
+            (Some(_), Some(_)) => "connector glued at both ends".into(),
+            (Some(_), None) | (None, Some(_)) => "connector glued at one end".into(),
+            (None, None) => "connector drawn (free ends)".into(),
+        };
+    }
+
+    /// #108 reroute: a deferred [`crate::cmd::RerouteConnectors`]
+    /// riding at the tail of the move/resize Macro — it evaluates
+    /// against the post-move document (an eager build would read
+    /// stale, pre-move geometry). `None` when nothing glues to the
+    /// moved shapes, so Macros stay clean of no-ops.
+    fn reroute_cmd(
+        &self,
+        page_id: i64,
+        moved: &[i64],
+    ) -> Option<Box<dyn dc_core::Command>> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let touches = page
+            .connects()
+            .list
+            .iter()
+            .any(|c| moved.contains(&c.to_sheet));
+        touches.then(|| Box::new(crate::cmd::RerouteConnectors::new(page_id, moved.to_vec())) as Box<dyn dc_core::Command>)
     }
 
     /// #113: a ruler drag released over the page becomes a guide
@@ -2751,6 +3245,9 @@ impl App {
                         if member_ids.is_empty() {
                             let label = format!("move shape {}", d.shape);
                             let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
+                            // #108: glued connectors re-attach and
+                            // reroute in the same undo step.
+                            let reroute = self.reroute_cmd(page_id, &[d.shape]);
                             // #113: a shape dropped onto a guide with
                             // glue-to-guides on glues its pin(s) to it
                             // — Visio's `PinX = Sheet.N!PinX` formula
@@ -2829,18 +3326,26 @@ impl App {
                                             )));
                                         }
                                     }
-                                    if glue_cmds.is_empty() {
-                                        self.apply_boxed(&label, cmd);
-                                    } else {
-                                        glue_cmds.insert(0, cmd);
-                                        self.apply(Macro::new(label, glue_cmds));
+                                    glue_cmds.insert(0, cmd);
+                                    if let Some(r) = reroute {
+                                        glue_cmds.push(r);
                                     }
+                                    self.apply(Macro::new(label, glue_cmds));
                                 }
-                                None => self.apply_boxed(&label, cmd),
+                                None => match reroute {
+                                    Some(r) => {
+                                        let mut all = vec![cmd];
+                                        all.push(r);
+                                        self.apply(Macro::new(label, all));
+                                    }
+                                    None => self.apply_boxed(&label, cmd),
+                                },
                             }
                         } else {
                             let (dx, dy) =
                                 (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
+                            let mut ids_for_reroute: Vec<i64> = vec![d.shape];
+                            ids_for_reroute.extend(member_ids.iter().copied());
                             let mut cmds: Vec<Box<dyn dc_core::Command>> =
                                 vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
                             if let Some(ed) = self.ed() {
@@ -2884,20 +3389,26 @@ impl App {
                                     }
                                 }
                             }
+                            if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
+                                cmds.push(r);
+                            }
                             self.apply(Macro::new("move container and members", cmds));
                         }
                     } else {
                         let Some(ed) = self.ed() else { return };
                         let dx = d.last_pin.0 - d.start_pin.0;
                         let dy = d.last_pin.1 - d.start_pin.1;
+                        let ids_for_reroute: Vec<i64> =
+                            std::iter::once(d.shape).chain(d.group.iter().copied()).collect();
                         let mut cmds: Vec<Box<dyn dc_core::Command>> =
                             vec![self.move_cmd_for(page_id, d.shape, d.last_pin)];
-                        for sid in d.group {
+                        for sid in &d.group {
                             let page = &ed.doc.pages[self.page_idx];
-                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid)
+                            else {
                                 continue;
                             };
-                            let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+                            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
                                 continue;
                             };
                             let get = |n: &str| {
@@ -2919,10 +3430,13 @@ impl App {
                                 };
                                 cmds.push(self.move_cmd_for(
                                     page_id,
-                                    sid,
+                                    *sid,
                                     (target.0 + dx, target.1 + dy),
                                 ));
                             }
+                        }
+                        if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
+                            cmds.push(r);
                         }
                         self.apply(Macro::new("move shapes", cmds));
                     }
@@ -3255,6 +3769,12 @@ impl App {
                 self.apply_snap_settings();
             }
             Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
+            Action::PointerTool => self.tool = Tool::Pointer,
+            Action::ConnectorTool => {
+                self.tool = Tool::Connector;
+                self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
+                    .into();
+            }
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -3450,6 +3970,25 @@ impl App {
             // File opens the backstage view instead of ribbon content.
             Tab::File => vec![],
             Tab::Home => vec![
+                crate::ribbon::Group::new(
+                    "Tools",
+                    vec![
+                        big(RibbonButton::new(
+                            Icon::Pointer,
+                            "Pointer Tool",
+                            Action::PointerTool,
+                        )
+                        .selected(self.tool == Tool::Pointer)
+                        .tip("Select and drag (Esc from the Connector Tool)")),
+                        big(RibbonButton::new(
+                            Icon::Connector,
+                            "Connector",
+                            Action::ConnectorTool,
+                        )
+                        .selected(self.tool == Tool::Connector)
+                        .tip("Draw a connector between shapes or points")),
+                    ],
+                ),
                 crate::ribbon::Group::new(
                     "Clipboard",
                     vec![
@@ -5011,6 +5550,7 @@ impl App {
             &handles,
             &drag_fx,
             &guide_fx,
+            self.tool == Tool::Connector,
             armed,
             &hit,
             &mut mouse,
@@ -5047,6 +5587,10 @@ impl App {
             // (#113, URS-1076).
             if let Some((src, pos)) = out.guide_drop {
                 self.add_guide(src, pos);
+            }
+            // The Connector Tool's gesture (#108, URS-1067).
+            if let Some((from, to)) = out.connector_drop {
+                self.create_connector(from, to);
             }
         }
         // Comment badges (#29 rework): a small bubble at the top-left
@@ -5155,29 +5699,61 @@ impl App {
                         // handle's own position — the grab may start up
                         // to HANDLE_GRAB px away from the handle center,
                         // and snapping to the raw pointer would jump it.
-                        // #109: the glue settings decide where an
-                        // endpoint sticks (connection points, vertices,
-                        // handles; guides arrive with #113). The sticky
-                        // Connect itself is #108's connector work.
+                        // #108: connectors get the full glue lifecycle —
+                        // a drop on a connection point (static) or a
+                        // shape (dynamic) writes the corpus formula +
+                        // `<Connect>`; a drop on empty page releases
+                        // the glue. Plain 1D shapes keep the #109 glue
+                        // snap with a note (their glue rides with
+                        // connectors-as-masters later).
                         if let Some(origin) = handles.iter().find(|h| h.id == id).map(|h| h.pos) {
                             let raw = (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1);
                             let dragged = self.sel.map(|(_, s)| s);
-                            let glue = dragged
-                                .and_then(|sid| self.snap_point_for(sid, raw, true));
-                            let (target, note) = match glue {
-                                Some((p, hit)) => {
-                                    (p, Some(format!("endpoint glued to {} — Connect persists with #108", snap_hit_text(hit))))
+                            let is_conn = dragged.is_some_and(|sid| {
+                                self.ed.as_ref().is_some_and(|ed| {
+                                    let page =
+                                        &ed.doc.pages[self.page_idx];
+                                    vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                        .is_some_and(crate::connectors::is_connector)
+                                })
+                            });
+                            if is_conn {
+                                self.commit_connector_endpoint(id, raw);
+                            } else {
+                                let glue = dragged
+                                    .and_then(|sid| self.snap_point_for(sid, raw, true));
+                                let (target, note) = match glue {
+                                    Some((p, hit)) => {
+                                        (p, Some(format!("endpoint glued to {}", snap_hit_text(hit))))
+                                    }
+                                    None => (raw, None),
+                                };
+                                self.apply_line_endpoint(id, target);
+                                if let Some(note) = note {
+                                    self.status = note;
                                 }
-                                None => (raw, None),
-                            };
-                            self.apply_line_endpoint(id, target);
-                            if let Some(note) = note {
-                                self.status = note;
                             }
                         }
                     }
                     HandleId::LineMid => {
-                        self.apply_line_move(start, end);
+                        // #108: dragging a glued connector's body
+                        // would rewrite its formula-driven endpoints
+                        // as plain values (dropping the glue); body
+                        // drag arrives with the connector routing UX.
+                        let is_conn = self.sel.is_some_and(|(_, sid)| {
+                            self.ed.as_ref().is_some_and(|ed| {
+                                let page = &ed.doc.pages[self.page_idx];
+                                vsdx::model::find_shape_by_id(&page.shapes, sid)
+                                    .is_some_and(crate::connectors::is_connector)
+                            })
+                        });
+                        if is_conn {
+                            self.status =
+                                "drag the connector's endpoints — body drag arrives with routing UX"
+                                    .into();
+                        } else {
+                            self.apply_line_move(start, end);
+                        }
                     }
                     HandleId::GeoPoint { section_ix, row_ix } => {
                         // The DELTA from the handle's own position (the
@@ -6969,6 +7545,9 @@ impl App {
             FlipH,
             EditText,
             ShapeSheet,
+            /// #108: per-connector route style (URS-1114).
+            RouteStraight,
+            RouteRightAngle,
         }
         let mut act: Option<Act> = None;
         // Min menu width incl. frame, until the popup reports its own
@@ -7268,6 +7847,26 @@ impl App {
             if underlying_action {
                 act = Some(Act::AddToUnderlying);
             }
+            // #108: connector route styles (Visio 2016 puts
+            // Straight/Right-Angle Connector on the connector's menu).
+            {
+                let is_conn = self.page_id().is_some_and(|pid| {
+                    self.ed.as_ref().is_some_and(|ed| {
+                        let page = ed.doc.pages.iter().find(|p| p.id == pid);
+                        page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+                            .is_some_and(crate::connectors::is_connector)
+                    })
+                });
+                if is_conn {
+                    if ctx_item(ui, None, "Straight Connector", "", true) {
+                        act = Some(Act::RouteStraight);
+                    }
+                    if ctx_item(ui, None, "Right-Angle Connector", "", true) {
+                        act = Some(Act::RouteRightAngle);
+                    }
+                    ui.separator();
+                }
+            }
             if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
             }
@@ -7448,6 +8047,14 @@ impl App {
                 self.status = format!("editing text of shape {shape_id}");
             }
             Act::ShapeSheet => self.show_shapesheet = true,
+            Act::RouteStraight => {
+                self.apply_connector_route_style(page_id, shape_id, crate::connectors::ROUTE_STRAIGHT)
+            }
+            Act::RouteRightAngle => self.apply_connector_route_style(
+                page_id,
+                shape_id,
+                crate::connectors::ROUTE_RIGHT_ANGLE,
+            ),
         }
     }
 
@@ -7695,6 +8302,62 @@ impl App {
                 (g.id, kind, g.x, g.y)
             })
             .collect()
+    }
+
+    /// #108 tests: the page's Connect records as (from, from_cell,
+    /// from_part, to, to_cell, to_part).
+    pub fn debug_connects(&self) -> Vec<(i64, String, i64, i64, String, i64)> {
+        let Some(page_id) = self.page_id() else { return Vec::new() };
+        let Some(ed) = self.ed.as_ref() else { return Vec::new() };
+        ed.doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .map(|p| {
+                p.connects()
+                    .list
+                    .iter()
+                    .map(|c| {
+                        (
+                            c.from_sheet,
+                            c.from_cell.clone(),
+                            c.from_part,
+                            c.to_sheet,
+                            c.to_cell.clone(),
+                            c.to_part,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// #108 tests: one geometry row cell of a shape.
+    pub fn debug_row_cell(
+        &self,
+        page: i64,
+        shape: i64,
+        sec_ix: i64,
+        row_ix: i64,
+        cell: &str,
+    ) -> Option<f64> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet
+            .sections_named("Geometry")
+            .into_iter()
+            .find(|s| s.ix == sec_ix)?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?
+            .cell(cell)
+            .and_then(|c| c.numeric())
+    }
+
+    /// #108 tests: the active mouse tool.
+    pub fn debug_tool(&self) -> Tool {
+        self.tool
     }
 
     /// #113 tests: a cell's formula (the `F` attribute) on a shape.
@@ -9607,6 +10270,20 @@ fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
 
 /// Every shape of a subtree, document (z) order, recursive (#78):
 /// the group-edit mode's hit-test and marquee candidate set.
+/// Distance from `p` to the segment a→b within `threshold` (#108
+/// connector hit-testing).
+fn segment_hit(a: (f64, f64), b: (f64, f64), p: (f64, f64), threshold: f64) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-12 {
+        0.0
+    } else {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    (p.0 - cx).hypot(p.1 - cy) <= threshold
+}
+
 /// Connection rows of one sheet → page-space connection points on
 /// `t` (#109): rows carry shape-local X/Y (often cached formula
 /// values, e.g. `Width*0.5`), mapped through the same unrotated

@@ -28,6 +28,8 @@ pub enum Action {
     ToggleUnits,
     ToggleDynamicGrid,
     SnapGlue,
+    PointerTool,
+    ConnectorTool,
     ShowShapeSheet,
     Macros,
     FillMenu,
@@ -132,6 +134,7 @@ pub enum Icon {
     Delete,
     TellMe,
     Magnet,
+    Connector,
 }
 
 impl Icon {
@@ -202,6 +205,7 @@ impl Icon {
             Icon::Delete => "delete",
             Icon::TellMe => "lightbulb",
             Icon::Magnet => "magnet",
+            Icon::Connector => "connector",
         };
         Some(a)
     }
@@ -242,6 +246,7 @@ impl Icon {
             }
             Icon::TellMe => Color32::from_rgb(0x82, 0x82, 0x82),
             Icon::Magnet => Color32::from_rgb(0x2e, 0x75, 0xb6),
+            Icon::Connector => Color32::from_rgb(0x2e, 0x75, 0xb6),
             _ => Color32::from_rgb(0x42, 0x42, 0x42),
         }
     }
@@ -1075,6 +1080,21 @@ impl Icon {
                 p.line_segment(
                     [c + Vec2::new(-2.0, 5.0), c + Vec2::new(2.0, 5.0)],
                     Stroke::new(1.4, gray),
+                );
+            }
+            Icon::Connector => {
+                // diagonal line + arrow tip (fallback; MDI ships)
+                p.line_segment(
+                    [c + Vec2::new(-6.0, 6.0), c + Vec2::new(5.0, -5.0)],
+                    Stroke::new(2.0, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.0, -5.0), c + Vec2::new(0.5, -5.5)],
+                    Stroke::new(2.0, blue),
+                );
+                p.line_segment(
+                    [c + Vec2::new(5.0, -5.0), c + Vec2::new(5.5, -0.5)],
+                    Stroke::new(2.0, blue),
                 );
             }
             Icon::Magnet => {

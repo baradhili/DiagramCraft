@@ -161,6 +161,73 @@ pub struct SetCell {
     old: Option<Cell>,
 }
 
+/// The glue engine's cell write (GitHub #108): like [`SetCell`], but
+/// `SetCell`'s GUARD refusal is waived — that refusal protects user
+/// edits from clobbering formulas, while the glue machinery IS the
+/// formula's owner (the corpus shows Visio rewriting
+/// `GUARD(_WALKGLUE(...))` endpoint caches on every reroute, and
+/// breaking glue replaces the formula with a plain value). Locks
+/// still refuse; undo and touches are identical.
+#[derive(Debug, Clone)]
+pub struct SetGluedCell {
+    scope: Scope,
+    name: String,
+    new: Cell,
+    old: Option<Cell>,
+}
+
+impl SetGluedCell {
+    pub fn new(scope: Scope, name: impl Into<String>, new: Cell) -> SetGluedCell {
+        SetGluedCell {
+            scope,
+            name: name.into(),
+            new,
+            old: None,
+        }
+    }
+}
+
+impl crate::Command for SetGluedCell {
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        SetCell {
+            scope: self.scope.clone(),
+            name: self.name.clone(),
+            new: self.new.clone(),
+            old: None,
+        }
+        .touched(doc)
+    }
+
+    fn label(&self) -> String {
+        format!("set glue {}:{} = {:?}", self.scope, self.name, self.new.v)
+    }
+
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        // Only the GUARD waiver differs from SetCell (locks included).
+        if let Some(reason) =
+            protection_refusal(doc, &self.scope, &self.name, &self.new, true)
+        {
+            bail!("{reason}");
+        }
+        let (name, new) = (self.name.clone(), self.new.clone());
+        let s = sheet_mut(doc, &self.scope)?;
+        self.old = s.cell(&name).cloned();
+        s.set_cell(&name, new);
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let s = sheet_mut(doc, &self.scope)?;
+        match self.old.clone() {
+            Some(old) => restore_cell(s, &self.name, old),
+            None => {
+                remove_cell(s, &self.name);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl SetCell {
     pub fn new(scope: Scope, name: impl Into<String>, new: Cell) -> SetCell {
         SetCell {
@@ -206,7 +273,7 @@ impl crate::Command for SetCell {
         format!("set {}:{} = {:?}", self.scope, self.name, self.new.v)
     }
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
-        if let Some(reason) = protection_refusal(doc, &self.scope, &self.name, &self.new) {
+        if let Some(reason) = protection_refusal(doc, &self.scope, &self.name, &self.new, false) {
             bail!("{reason}");
         }
         let (name, new) = (self.name.clone(), self.new.clone());
@@ -410,7 +477,13 @@ fn scale_members_of(
 /// master formulas. Before this lived only in the GUI's gestures,
 /// `dc edit --cell` silently clobbered every protection the GUI
 /// honored.
-pub fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell) -> Option<String> {
+pub fn protection_refusal(
+    doc: &Document,
+    scope: &Scope,
+    name: &str,
+    new: &Cell,
+    waive_guard: bool,
+) -> Option<String> {
     if new.f.is_some() {
         return None;
     }
@@ -420,10 +493,12 @@ pub fn protection_refusal(doc: &Document, scope: &Scope, name: &str, new: &Cell)
     let p = doc.pages.iter().find(|p| p.id == *page)?;
     let sh = vsdx::model::find_shape_by_id(&p.shapes, *shape)?;
     let chain = crate::scope::shape_chain(doc, *page, *shape).ok()?;
-    if let Some(f) = effective_formula(doc, sh, &chain, name) {
-        let guard = f.trim().trim_start_matches('=').trim();
-        if guard.to_ascii_uppercase().starts_with("GUARD(") {
-            return Some(format!("{name} is GUARDed ({f}) — edit the formula to change it"));
+    if !waive_guard {
+        if let Some(f) = effective_formula(doc, sh, &chain, name) {
+            let guard = f.trim().trim_start_matches('=').trim();
+            if guard.to_ascii_uppercase().starts_with("GUARD(") {
+                return Some(format!("{name} is GUARDed ({f}) — edit the formula to change it"));
+            }
         }
     }
     if let Some(lock) = lock_for(name) {

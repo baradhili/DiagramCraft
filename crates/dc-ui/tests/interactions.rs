@@ -5304,3 +5304,307 @@ fn glued_shape_follows_its_guide() {
         "shape keeps its position after the release"
     );
 }
+
+// ---- GitHub #108: connector authoring -------------------------------------
+
+/// The Connector Tool draws between two shapes (URS-1067) and glues
+/// both ends dynamically (URS-1091): corpus formulas on the endpoint
+/// cells, Connect records with ToPart 3, one undo step.
+#[test]
+fn connector_tool_draws_and_glues_between_shapes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Two rectangles, A dragged clear right of B.
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (page2, b) = place_master(&mut h, 2);
+    assert_eq!(page, page2);
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    assert!(ar.0 > br.0 + br.2, "A sits right of B: {ar:?} vs {br:?}");
+
+    // Home ▸ Tools ▸ Connector.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Connector);
+
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let bsr = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect");
+    let press = asr.center();
+    let release = bsr.center();
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(press);
+    h.event(btn(press, true));
+    h.run();
+    h.hover_at(press + (release - press) * 0.5);
+    h.run();
+    h.hover_at(release);
+    h.run();
+    h.event(btn(release, false));
+    h.run();
+
+    assert_eq!(h.state().debug_shape_count(), 3, "the connector landed");
+    let connects = h.state().debug_connects();
+    assert_eq!(connects.len(), 2, "both ends glued: {connects:?}");
+    for c in &connects {
+        assert_eq!(c.5, 3, "dynamic glue (ToPart 3): {c:?}");
+        assert!(c.3 == a || c.3 == b, "glued to a rectangle: {c:?}");
+    }
+    // The connector (the remaining shape id) has corpus endpoint
+    // formulas and attaches on the facing edges.
+    let conn = connects[0].0;
+    let fx = h.state().debug_cell_formula(page, conn, "EndX").unwrap();
+    assert!(
+        fx.contains("_WALKGLUE"),
+        "end formula is the corpus walkglue: {fx}"
+    );
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // B is left of A: the end (dropped on B) attaches on B's RIGHT
+    // edge where the segment toward A's center crosses it (the two
+    // centers are not exactly level — sub-pixel placement).
+    let (bcx, bcy) = (br.0 + br.2 / 2.0, br.1 + br.3 / 2.0);
+    let (acx, acy) = (ar.0 + ar.2 / 2.0, ar.1 + ar.3 / 2.0);
+    let t = (br.2 / 2.0) / (acx - bcx);
+    assert!(
+        (ex - (br.0 + br.2)).abs() < 1e-5,
+        "end on B's right edge: {ex} vs {}",
+        br.0 + br.2
+    );
+    assert!(
+        (ey - (bcy + (acy - bcy) * t)).abs() < 1e-5,
+        "end on the toward-A crossing: {ey}"
+    );
+
+    // One undo removes connector AND connects.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "connector undoes");
+    assert!(h.state().debug_connects().is_empty(), "connects undo with it");
+}
+
+/// Moving a glued shape re-attaches and re-routes its connectors in
+/// the same undo step (URS-1006).
+#[test]
+fn moving_a_shape_reroutes_its_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release); // same press-move-release shape
+    assert_eq!(h.state().debug_connects().len(), 2);
+
+    // Back to the pointer, then move B left-down by a clear amount.
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+    let conn = h.state().debug_connects()[0].0;
+    let br0 = h.state().debug_shape_page_rect(b).unwrap();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-90.0, 60.0));
+    let br1 = h.state().debug_shape_page_rect(b).unwrap();
+    assert!((br1.0 - br0.0).abs() > 0.3, "B actually moved");
+
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // A sits right of B; after the move the attachment follows B's
+    // right edge, where the segment from B's new center toward the
+    // (unchanged) begin point crosses it — the reroute recomputed it.
+    let (bcx, bcy) = (br1.0 + br1.2 / 2.0, br1.1 + br1.3 / 2.0);
+    let (bx, by) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "BeginY"));
+    let t = (br1.2 / 2.0) / (bx - bcx).abs();
+    assert!(
+        (ex - (br1.0 + br1.2)).abs() < 1e-5,
+        "end followed B's new right edge: {ex} vs {}",
+        br1.0 + br1.2
+    );
+    assert!(
+        (ey - (bcy + (by - bcy) * t)).abs() < 1e-5,
+        "end on the toward-begin crossing: {ey} vs {}",
+        bcy + (by - bcy) * t
+    );
+    // The begin stayed on A (its left edge — the side facing B).
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let bx = cell_of(&h, page, conn, "BeginX");
+    assert!((bx - ar.0).abs() < 1e-5, "begin still on A's left edge: {bx} vs {}", ar.0);
+
+    // Undo restores the pre-move endpoint (one step covered both).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let ex = cell_of(&h, page, conn, "EndX");
+    assert!(
+        (ex - (br0.0 + br0.2)).abs() < 1e-5,
+        "undo restores the endpoint: {ex} vs {}",
+        br0.0 + br0.2
+    );
+}
+
+/// The connector's context menu sets the route style (URS-1114):
+/// Straight collapses the geometry rows onto the end.
+#[test]
+fn connector_context_menu_sets_route_style() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+
+    // Right-click on the connector's line (its midpoint).
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let k = asr2.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr2.left() + ((x - ar.0) * k) as f32,
+            asr2.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    let bx = cell_of(&h, page, conn, "BeginX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    let mid = p2s((bx + br.0) / 2.0, ey);
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let rb = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Secondary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(mid);
+    h.event(rb(mid));
+    h.run();
+    h.event(egui::Event::PointerButton {
+        pos: mid,
+        button: egui::PointerButton::Secondary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.get_by_label_contains("Straight Connector").click();
+    h.run();
+
+    let style = h.state().debug_cell(page, conn, "ShapeRouteStyle").unwrap().0;
+    assert_eq!(style, "2", "straight route style written");
+    // Straight route: geometry rows 2..4 all sit on the end point —
+    // the elbow rows collapsed.
+    let w = cell_of(&h, page, conn, "Width");
+    let hgt = cell_of(&h, page, conn, "Height");
+    for row in [2i64, 3, 4] {
+        let x = h
+            .state()
+            .debug_row_cell(page, conn, 0, row, "X")
+            .unwrap();
+        let y = h
+            .state()
+            .debug_row_cell(page, conn, 0, row, "Y")
+            .unwrap();
+        assert!(
+            (x - w).abs() < 1e-5 && (y - hgt).abs() < 1e-5,
+            "row {row} collapsed onto the end: ({x}, {y}) vs ({w}, {hgt})"
+        );
+    }
+}
+
+/// Dragging a connector endpoint re-glues and releases (URS-1090/1091
+/// interactive half): dropping on empty page strips the Connect and
+/// the formula; dropping back on a shape re-glues dynamically.
+#[test]
+fn endpoint_drag_releases_and_reglues() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+    assert_eq!(h.state().debug_connects().len(), 2);
+
+    // Drag the END handle off to empty page: the end releases.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let k = asr2.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr2.left() + ((x - ar.0) * k) as f32,
+            asr2.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    let empty = p2s(ar.0 - 1.2, ar.1 + 2.0);
+    drag_naturally(&mut h, end, empty - end);
+    assert_eq!(h.state().debug_connects().len(), 1, "end released");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "walkglue formula stripped on release"
+    );
+
+    // Drag it back onto A: dynamic glue again.
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    let onto = p2s(ar.0 + ar.2 / 2.0, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, end, onto - end);
+    let connects = h.state().debug_connects();
+    assert_eq!(connects.len(), 2, "re-glued: {connects:?}");
+    assert!(
+        connects.iter().any(|c| c.0 == conn && c.3 == a && c.5 == 3),
+        "the end glues dynamically to A: {connects:?}"
+    );
+    assert_eq!(
+        h.state().debug_cell_formula(page, conn, "EndX").as_deref(),
+        Some("GUARD(_WALKGLUE(EndTrigger,BegTrigger,WalkPreference))")
+    );
+}

@@ -8,6 +8,7 @@ pub mod canvas;
 pub mod cmd;
 #[doc(hidden)]
 pub mod group_fixture;
+pub mod connectors;
 pub mod guides;
 pub mod icontex;
 mod layers;

@@ -421,6 +421,258 @@ pub(crate) fn pin_of(doc: &Document, page: i64, shape: i64) -> Option<(f64, f64)
     Some((x, y))
 }
 
+// ---------------------------------------------------------------------------
+// Connector rerouting (GitHub #108)
+// ---------------------------------------------------------------------------
+
+/// Deferred connector reroute: re-attach and re-route every connector
+/// glued to the moved/resized shapes, evaluated against the document
+/// state AT APPLY TIME (it rides at the tail of a move/resize Macro,
+/// so the moved shapes' cells are already updated — building the
+/// reroute eagerly would read stale, pre-move geometry).
+///
+/// Static glue follows the connection row; dynamic glue re-attaches on
+/// the facing side; the geometry rows carry the new route
+/// (`FixedRoute=1` connectors stay put). Cached values are rewritten,
+/// the corpus formulas kept. Undo restores every touched cell.
+pub struct RerouteConnectors {
+    page: i64,
+    moved: Vec<i64>,
+    inner: Vec<Box<dyn dc_core::Command>>,
+}
+
+impl RerouteConnectors {
+    pub fn new(page: i64, moved: Vec<i64>) -> RerouteConnectors {
+        RerouteConnectors {
+            page,
+            moved,
+            inner: Vec::new(),
+        }
+    }
+}
+
+impl Command for RerouteConnectors {
+    fn touched(&self, _doc: &Document) -> dc_core::TouchList {
+        let mut all = dc_core::TouchList::default();
+        for c in &self.inner {
+            all.merge(c.touched(_doc));
+        }
+        all
+    }
+
+    fn label(&self) -> String {
+        format!("reroute connectors for {} moved shape(s)", self.moved.len())
+    }
+
+    fn apply(&mut self, doc: &mut Document) -> anyhow::Result<()> {
+        // Pass 1 (immutable): plan every reroute against the current
+        // (post-move) document.
+        struct Plan {
+            conn_id: i64,
+            cells: Vec<(String, f64, Option<String>)>,
+            rows: Vec<(i64, f64, f64)>,
+        }
+        let mut plans: Vec<Plan> = Vec::new();
+        {
+            use dc_core::connects::ConnectsHost;
+            let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
+                return Ok(());
+            };
+            let connects = page.connects();
+            for c in &connects.list {
+                if !self.moved.contains(&c.to_sheet) {
+                    continue;
+                }
+                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, c.from_sheet)
+                else {
+                    continue;
+                };
+                if !crate::connectors::is_connector(conn) {
+                    continue;
+                }
+                if conn
+                    .sheet
+                    .cell("FixedRoute")
+                    .and_then(|v| v.numeric())
+                    .is_some_and(|v| v == 1.0)
+                {
+                    continue;
+                }
+                let Some(target) = vsdx::model::find_shape_by_id(&page.shapes, c.to_sheet)
+                else {
+                    continue;
+                };
+                let end = if c.from_cell == "BeginX" {
+                    crate::connectors::End::Begin
+                } else {
+                    crate::connectors::End::End
+                };
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id) else {
+                    continue;
+                };
+                let get = |n: &str| {
+                    doc.resolve_cell(conn, &chain, n)
+                        .and_then(|v| v.numeric())
+                };
+                let (Some(bx), Some(by), Some(ex), Some(ey)) =
+                    (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+                else {
+                    continue;
+                };
+                let other = match end {
+                    crate::connectors::End::Begin => (ex, ey),
+                    crate::connectors::End::End => (bx, by),
+                };
+                let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
+                    let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
+                    let g = |n: &str| {
+                        doc.resolve_cell(t, &ch, n)
+                            .and_then(|v| v.numeric())
+                    };
+                    let (px, py) = (g("PinX")?, g("PinY")?);
+                    let (w, h) = (g("Width").unwrap_or(1.0), g("Height").unwrap_or(1.0));
+                    let (lx, ly) = (
+                        g("LocPinX").unwrap_or(w / 2.0),
+                        g("LocPinY").unwrap_or(h / 2.0),
+                    );
+                    let (x, y) = (px - lx, py - ly);
+                    Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
+                };
+                let attach = if c.to_part >= 100 {
+                    let row_ix = c.to_part - 100;
+                    trect(target).and_then(|(rx, ry, _, _)| {
+                        let find = |sheet: &vsdx::model::Sheet| -> Option<(f64, f64)> {
+                            for sec in sheet.sections_named("Connection") {
+                                if let Some(row) = sec.rows.iter().find(|r| r.ix == row_ix) {
+                                    if let (Some(x), Some(y)) = (
+                                        row.cell("X").and_then(|v| v.numeric()),
+                                        row.cell("Y").and_then(|v| v.numeric()),
+                                    ) {
+                                        return Some((rx + x, ry + y));
+                                    }
+                                }
+                            }
+                            None
+                        };
+                        find(&target.sheet).or_else(|| {
+                            target
+                                .master
+                                .and_then(|mid| doc.master(mid))
+                                .and_then(|m| m.shapes.first())
+                                .and_then(|root| find(&root.sheet))
+                        })
+                    })
+                } else {
+                    trect(target)
+                        .map(|r| crate::connectors::attach_point(r, other))
+                };
+                let Some(attach) = attach else { continue };
+                let (beg, endp) = match end {
+                    crate::connectors::End::Begin => (attach, (ex, ey)),
+                    crate::connectors::End::End => ((bx, by), attach),
+                };
+                let style = get("ShapeRouteStyle")
+                    .map(|v| format!("{}", v as i64))
+                    .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+                let pts = crate::connectors::route(&style, beg, endp);
+                let rows = crate::connectors::route_rows(beg, &pts);
+                let endf = conn
+                    .sheet
+                    .cell(end.cell())
+                    .and_then(|v| v.f.clone());
+                let mut cells: Vec<(String, f64, Option<String>)> = vec![
+                    (end.cell().to_string(), attach.0, endf.clone()),
+                    (end.y_cell().to_string(), attach.1, endf),
+                    ("PinX".to_string(), (beg.0 + endp.0) / 2.0, None),
+                    ("PinY".to_string(), (beg.1 + endp.1) / 2.0, None),
+                    ("Width".to_string(), endp.0 - beg.0, None),
+                    ("Height".to_string(), endp.1 - beg.1, None),
+                    ("LocPinX".to_string(), (endp.0 - beg.0) / 2.0, None),
+                    ("LocPinY".to_string(), (endp.1 - beg.1) / 2.0, None),
+                ];
+                cells.retain(|(n, _, _)| {
+                    // A formula-driven derived cell never literal-writes
+                    // (the endpoint carries the glue formula instead).
+                    !matches!(n.as_str(), "PinX" | "PinY" | "Width" | "Height" | "LocPinX" | "LocPinY")
+                        || conn
+                            .sheet
+                            .cell(n)
+                            .and_then(|v| v.f.as_deref())
+                            .is_none_or(|f| f == "Inh")
+                });
+                plans.push(Plan {
+                    conn_id: conn.id,
+                    cells,
+                    rows: rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
+                        .collect(),
+                });
+            }
+        }
+        // Pass 2 (mutable): apply the planned commands, capturing each
+        // for undo.
+        for plan in plans {
+            let scope = dc_core::Scope::Shape {
+                page: self.page,
+                shape: plan.conn_id,
+            };
+            for (n, v, f) in plan.cells {
+                // Formula-carrying writes are the glue engine
+                // updating its own GUARDed endpoint caches —
+                // SetGluedCell (plain derived cells stay SetCell).
+                let mut c = if f.is_some() {
+                    Box::new(dc_core::SetGluedCell::new(
+                        scope.clone(),
+                        n,
+                        Cell {
+                            v: Some(format!("{v:.6}")),
+                            f,
+                            ..Cell::default()
+                        },
+                    )) as Box<dyn Command>
+                } else {
+                    Box::new(SetCell::new(
+                        scope.clone(),
+                        n,
+                        Cell {
+                            v: Some(format!("{v:.6}")),
+                            f,
+                            ..Cell::default()
+                        },
+                    )) as Box<dyn Command>
+                };
+                c.apply(doc)?;
+                self.inner.push(c);
+            }
+            for (ix, x, y) in plan.rows {
+                for (cell, v) in [("X", x), ("Y", y)] {
+                    let mut c = dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        0,
+                        dc_core::commands::RowSel::Ix(ix),
+                        cell,
+                        Cell::value(format!("{v:.6}")),
+                    );
+                    c.apply(doc)?;
+                    self.inner.push(Box::new(c));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> anyhow::Result<()> {
+        for c in self.inner.iter_mut().rev() {
+            c.undo(doc)?;
+        }
+        self.inner.clear();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

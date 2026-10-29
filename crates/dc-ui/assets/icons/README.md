@@ -57,6 +57,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | delete | trash-can-outline |
 | lightbulb | lightbulb (Tell Me search box, 2026-10-22) |
 | magnet | magnet (Snap & Glue, 2026-10-29) |
+| connector | vector-line (Connector Tool, 2026-10-29) |
 
 Posters note: MDI is an open-source set, not Microsoft artwork; the
 cleanroom rule (no Microsoft assets) still holds. Fluent UI icons were
