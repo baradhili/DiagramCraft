@@ -164,6 +164,19 @@ pub struct App {
     snap_live: Vec<crate::snap::Hint>,
     /// The active mouse tool (#108).
     tool: Tool,
+    /// #110: align against the page instead of the first-selected
+    /// shape (URS-1149's option).
+    align_to_page: bool,
+    /// The Select by Type dialog is open (#110, URS-1160).
+    selby_open: bool,
+    /// Select-by-Type criterion: 0 shape type, 1 master, 2 layer.
+    selby_criterion: u8,
+    /// Select-by-Type chosen value.
+    selby_value: String,
+    /// The Format Painter is armed for one target (#110, URS-1053):
+    /// the source shape whose resolved formatting the next shape
+    /// click receives.
+    painter_armed: Option<i64>,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
@@ -419,6 +432,11 @@ impl App {
             snap_live: Vec::new(),
             drag_glue: None,
             tool: Tool::Pointer,
+            align_to_page: false,
+            selby_open: false,
+            selby_criterion: 0,
+            selby_value: String::new(),
+            painter_armed: None,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1586,9 +1604,36 @@ impl App {
             if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
-            // Esc leaves the Connector Tool for the pointer (Visio).
-            if i.key_pressed(egui::Key::Escape) && self.tool == Tool::Connector && !kb_owned {
-                self.tool = Tool::Pointer;
+            // Esc leaves the Connector Tool for the pointer (Visio),
+            // and disarms the Format Painter (#110).
+            if i.key_pressed(egui::Key::Escape) && !kb_owned {
+                if self.tool == Tool::Connector {
+                    self.tool = Tool::Pointer;
+                }
+                if self.painter_armed.is_some() {
+                    self.painter_armed = None;
+                    self.status = "format painter cancelled".into();
+                }
+            }
+            // Ctrl+A selects the page (#110, URS-1160).
+            if ctrl && i.key_pressed(egui::Key::A) && !kb_owned {
+                self.select_all();
+            }
+            // Arrow-key nudging (#110, URS-1217 keyboard slice):
+            // arrows move the selection, Shift widens the step.
+            if !kb_owned && self.sel.is_some() {
+                let step = if i.modifiers.shift { 1.0 } else { 0.25 };
+                let nudge = [
+                    (egui::Key::ArrowLeft, (-step, 0.0)),
+                    (egui::Key::ArrowRight, (step, 0.0)),
+                    (egui::Key::ArrowUp, (0.0, step)),
+                    (egui::Key::ArrowDown, (0.0, -step)),
+                ];
+                for (key, (dx, dy)) in nudge {
+                    if i.key_pressed(key) {
+                        self.nudge_selection(dx, dy);
+                    }
+                }
             }
             // Shape clipboard / duplicate / text edit (Visio keys). Not
             // while a text field owns the keyboard.
@@ -3136,6 +3181,202 @@ impl App {
         crate::snap::point_snap(p, &ctx, &self.snap, glue)
     }
 
+    /// #110 (URS-1149): align every selected shape's feature to the
+    /// first-selected shape (or the page while `align_to_page`): one
+    /// undo Macro of plain moves.
+    fn align_selection(&mut self, kind: crate::align::AlignKind) {
+        use crate::align::AlignTarget;
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        // Selection order: the primary leads (URS's first-selected).
+        let mut ids: Vec<i64> = Vec::new();
+        if let Some((p, first)) = self.sel {
+            if p == page_id && !ids.contains(&first) {
+                ids.push(first);
+            }
+        }
+        for (p, sid) in &self.sel_set {
+            if *p == page_id && !ids.contains(sid) {
+                ids.push(*sid);
+            }
+        }
+        let mut shapes: Vec<(i64, (f64, f64, f64, f64))> = Vec::new();
+        for sid in &ids {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            if let Some(r) = self.shape_rect(&ed.doc, page_id, sh) {
+                shapes.push((*sid, r));
+            }
+        }
+        if shapes.len() < 2 && !self.align_to_page {
+            self.status = "select two or more shapes to align".into();
+            return;
+        }
+        if shapes.is_empty() {
+            return;
+        }
+        let geom = self.page_geom();
+        let target = if self.align_to_page {
+            AlignTarget::Page
+        } else {
+            AlignTarget::FirstSelected
+        };
+        let moves = crate::align::align_moves(&shapes, kind, target, (geom.w_in, geom.h_in));
+        self.apply_moves(&format!("align {}", kind.label()), page_id, &moves);
+    }
+
+    /// #110 (URS-1161): distribute the selection with even gaps
+    /// (3+ shapes, Visio's "make spacing equal").
+    fn distribute_selection(&mut self, vertical: bool) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let mut shapes: Vec<(i64, (f64, f64, f64, f64))> = Vec::new();
+        for (p, sid) in &self.sel_set {
+            if *p != page_id {
+                continue;
+            }
+            if let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) {
+                if let Some(r) = self.shape_rect(&ed.doc, page_id, sh) {
+                    shapes.push((*sid, r));
+                }
+            }
+        }
+        match crate::align::distribute_moves(&shapes, vertical) {
+            Some(moves) => self.apply_moves(
+                if vertical {
+                    "distribute vertical spacing"
+                } else {
+                    "distribute horizontal spacing"
+                },
+                page_id,
+                &moves,
+            ),
+            None => self.status = "distribute needs three or more shapes".into(),
+        }
+    }
+
+    /// Apply (id, delta) moves as one undo Macro — the same move path
+    /// drags use, so 1D members translate their endpoints too.
+    fn apply_moves(&mut self, label: &str, page_id: i64, moves: &[(i64, (f64, f64))]) {
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (sid, (dx, dy)) in moves {
+            if dx.abs() < 1e-9 && dy.abs() < 1e-9 {
+                continue;
+            }
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let pin = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+            };
+            if let (Some(px), Some(py)) = (pin("PinX"), pin("PinY")) {
+                cmds.push(self.move_cmd_for(page_id, *sid, (px + dx, py + dy)));
+            }
+        }
+        if cmds.is_empty() {
+            self.status = "already aligned".into();
+            return;
+        }
+        self.apply(Macro::new(label.to_string(), cmds));
+    }
+
+    /// #110 (URS-1217 slice): keyboard nudge — one undo step per
+    /// press, the whole selection moves.
+    fn nudge_selection(&mut self, dx: f64, dy: f64) {
+        let Some(page_id) = self.page_id() else { return };
+        let ids: Vec<i64> = if self.sel_set.len() > 1 {
+            self.sel_set
+                .iter()
+                .filter(|(p, _)| *p == page_id)
+                .map(|(_, s)| *s)
+                .collect()
+        } else {
+            self.sel.map(|(_, s)| vec![s]).unwrap_or_default()
+        };
+        let moves: Vec<(i64, (f64, f64))> =
+            ids.iter().map(|id| (*id, (dx, dy))).collect();
+        self.apply_moves("nudge selection", page_id, &moves);
+    }
+
+    /// #110 (URS-1160): select every shape on the page.
+    fn select_all(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let ids: Vec<(i64, i64)> = page
+            .shapes
+            .iter()
+            .map(|s| (page_id, s.id))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.sel = Some(ids[0]);
+        self.sel_set = ids;
+        self.status = "selected all shapes".into();
+    }
+
+    /// #110 (URS-1053): arm the Format Painter on the primary
+    /// selection — the next shape click receives its resolved
+    /// formatting (single-shot, Visio's click mode).
+    fn arm_format_painter(&mut self) {
+        let Some((_, sid)) = self.sel else {
+            self.status = "select a shape to copy formatting from first".into();
+            return;
+        };
+        self.painter_armed = Some(sid);
+        self.status = format!(
+            "format painter: click a shape to apply shape {sid}'s formatting"
+        );
+    }
+
+    /// The painter's application: copy the resolved FORMAT_CELLS from
+    /// the source onto the target as one undo Macro.
+    fn apply_format_painter(&mut self, from: i64, to: i64) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let page = &ed.doc.pages[self.page_idx];
+        let (Some(src), Some(_dst)) = (
+            vsdx::model::find_shape_by_id(&page.shapes, from),
+            vsdx::model::find_shape_by_id(&page.shapes, to),
+        ) else {
+            return;
+        };
+        let Ok(src_chain) = shape_chain(&ed.doc, page_id, from) else {
+            return;
+        };
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: to,
+        };
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for name in crate::align::FORMAT_CELLS {
+            if let Some(c) = ed.doc.resolve_cell(src, &src_chain, name) {
+                if let Some(v) = c.numeric() {
+                    cmds.push(Box::new(SetCell::new(
+                        scope.clone(),
+                        *name,
+                        vsdx::Cell::value(format!("{v:.9}")),
+                    )));
+                }
+            }
+        }
+        let n = cmds.len();
+        self.apply(Macro::new(format!("paint formatting onto shape {to}"), cmds));
+        self.status = format!("{n} formatting cells copied to shape {to}");
+        self.painter_armed = None;
+    }
+
     /// The page's guides as UI info (#113), resolved through the
     /// inheritance chain.
     fn page_guides(&self) -> Vec<crate::guides::GuideInfo> {
@@ -3532,6 +3773,22 @@ impl App {
             }
             return;
         }
+        // The armed Format Painter consumes the click (#110): the hit
+        // shape receives the source's resolved formatting.
+        if let Some(src) = self.painter_armed {
+            self.painter_armed = None;
+            if let Some(hit) = self.shape_hit(page_pos) {
+                if hit != src {
+                    self.apply_format_painter(src, hit);
+                    if let Some(p) = self.page_id() {
+                        self.set_selection(Some((p, hit)));
+                    }
+                    return;
+                }
+            }
+            self.status = "format painter cancelled".into();
+            return;
+        }
         if shift {
             // Toggle membership in the multi-selection.
             if let Some(hit) = self.shape_hit(page_pos) {
@@ -3770,6 +4027,25 @@ impl App {
             }
             Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
             Action::PointerTool => self.tool = Tool::Pointer,
+            Action::AlignLeft => self.align_selection(crate::align::AlignKind::Left),
+            Action::AlignHCenter => self.align_selection(crate::align::AlignKind::HCenter),
+            Action::AlignRight => self.align_selection(crate::align::AlignKind::Right),
+            Action::AlignTop => self.align_selection(crate::align::AlignKind::Top),
+            Action::AlignVCenter => self.align_selection(crate::align::AlignKind::VCenter),
+            Action::AlignBottom => self.align_selection(crate::align::AlignKind::Bottom),
+            Action::AlignToPage => {
+                self.align_to_page = !self.align_to_page;
+                self.status = if self.align_to_page {
+                    "aligning to the page".into()
+                } else {
+                    "aligning to the first-selected shape".into()
+                };
+            }
+            Action::DistributeH => self.distribute_selection(false),
+            Action::DistributeV => self.distribute_selection(true),
+            Action::SelectAll => self.select_all(),
+            Action::SelectByType => self.selby_open = !self.selby_open,
+            Action::FormatPainter => self.arm_format_painter(),
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
@@ -3969,7 +4245,15 @@ impl App {
         let groups: Vec<crate::ribbon::Group> = match self.tab {
             // File opens the backstage view instead of ribbon content.
             Tab::File => vec![],
-            Tab::Home => vec![
+            Tab::Home => {
+                let sel_count = self
+                    .sel_set
+                    .iter()
+                    .filter(|(p, _)| Some(*p) == self.page_id())
+                    .count();
+                let multi_sel = sel_count >= 2;
+                let tri_sel = sel_count >= 3;
+                vec![
                 crate::ribbon::Group::new(
                     "Tools",
                     vec![
@@ -4008,10 +4292,11 @@ impl App {
                             vec![RibbonButton::new(
                                 Icon::Painter,
                                 "Format Painter",
-                                Action::Macros,
+                                Action::FormatPainter,
                             )
-                            .enabled(false)
-                            .tip("Format Painter — planned")],
+                            .enabled(has_sel)
+                            .selected(self.painter_armed.is_some())
+                            .tip("Copy the selection's formatting to the next shape you click")],
                         ]),
                     ],
                 ),
@@ -4135,32 +4420,79 @@ impl App {
                         ),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Align, "Align", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Alignment — planned"),
+                                RibbonButton::new(Icon::Align, "Align Left", Action::AlignLeft)
+                                    .enabled(multi_sel)
+                                    .tip("Align left edges (first-selected or page)"),
                                 RibbonButton::new(
-                                    Icon::Rotate,
-                                    "Rotate Right",
-                                    Action::RotateRight,
+                                    Icon::AlignCenter,
+                                    "Align Center",
+                                    Action::AlignHCenter,
                                 )
-                                .enabled(has_sel)
-                                .tip("Rotate selection 90° clockwise"),
-                                RibbonButton::new(Icon::Rotate, "Rotate Left", Action::RotateLeft)
-                                    .enabled(has_sel)
-                                    .tip("Rotate selection 90° counter-clockwise"),
+                                .enabled(multi_sel)
+                                .tip("Align vertical centers"),
+                                RibbonButton::new(Icon::AlignRight, "Align Right", Action::AlignRight)
+                                    .enabled(multi_sel)
+                                    .tip("Align right edges"),
                             ],
                             vec![
-                                RibbonButton::new(Icon::Group, "Group", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Grouping — planned"),
-                                RibbonButton::new(Icon::Delete, "Delete", Action::Delete)
-                                    .enabled(sel_active)
-                                    .tip("Delete the selected shape (Del)"),
+                                RibbonButton::new(Icon::AlignTop, "Align Top", Action::AlignTop)
+                                    .enabled(multi_sel)
+                                    .tip("Align top edges"),
+                                RibbonButton::new(
+                                    Icon::AlignMiddle,
+                                    "Align Middle",
+                                    Action::AlignVCenter,
+                                )
+                                .enabled(multi_sel)
+                                .tip("Align horizontal middles"),
+                                RibbonButton::new(
+                                    Icon::AlignBottom,
+                                    "Align Bottom",
+                                    Action::AlignBottom,
+                                )
+                                .enabled(multi_sel)
+                                .tip("Align bottom edges"),
+                            ],
+                            vec![
+                                RibbonButton::new(
+                                    Icon::DistH,
+                                    "Distribute H",
+                                    Action::DistributeH,
+                                )
+                                .enabled(tri_sel)
+                                .tip("Even horizontal spacing (3+ shapes)"),
+                                RibbonButton::new(
+                                    Icon::DistV,
+                                    "Distribute V",
+                                    Action::DistributeV,
+                                )
+                                .enabled(tri_sel)
+                                .tip("Even vertical spacing (3+ shapes)"),
+                                RibbonButton::new(Icon::Check, "To Page", Action::AlignToPage)
+                                    .selected(self.align_to_page)
+                                    .tip("Align against the page instead of the first-selected shape"),
                             ],
                         ]),
                     ],
                 ),
-            ],
+                crate::ribbon::Group::new(
+                    "Editing",
+                    vec![grid(vec![
+                        vec![
+                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
+                                .tip("Select every shape on the page (Ctrl+A)"),
+                            RibbonButton::new(
+                                Icon::Shapes,
+                                "Select by Type…",
+                                Action::SelectByType,
+                            )
+                            .selected(self.selby_open)
+                            .tip("Select shapes by type, master, or layer"),
+                        ],
+                    ])],
+                ),
+                ]
+            }
             Tab::Insert => vec![
                 crate::ribbon::Group::new(
                     "Blocks",
@@ -6785,6 +7117,157 @@ impl App {
         }
     }
 
+    /// The Select by Type dialog (#110, URS-1160, Visio's Home ▸
+    /// Editing ▸ Select ▸ Select by Type): pick a criterion — shape
+    /// type, master, or layer — and a value from the page, and the
+    /// matching shapes become the selection.
+    fn select_by_type_window(&mut self, ctx: &egui::Context) {
+        if !self.selby_open {
+            return;
+        }
+        // The value list per criterion, straight off the page.
+        let mut pairs: Vec<(String, String, Vec<i64>)> = Vec::new();
+        if let Some(ed) = self.ed.as_ref() {
+            if let Some(page) = ed.doc.pages.get(self.page_idx) {
+                // (key shown to the user, dedup key, matching ids)
+                let mut push = |label: String, ids: Vec<i64>| {
+                    if let Some(slot) = pairs.iter_mut().find(|(l, _, _)| *l == label) {
+                        slot.2.extend(ids);
+                    } else {
+                        pairs.push((label.clone(), label, ids));
+                    }
+                };
+                match self.selby_criterion {
+                    0 => {
+                        for sh in &page.shapes {
+                            let t = sh.type_.clone().unwrap_or_else(|| "Shape".into());
+                            push(t, vec![sh.id]);
+                        }
+                    }
+                    1 => {
+                        for sh in &page.shapes {
+                            if let Some(mid) = sh.master {
+                                let name = ed
+                                    .doc
+                                    .master(mid)
+                                    .and_then(|m| m.name_u.clone())
+                                    .unwrap_or_else(|| format!("master {mid}"));
+                                push(name, vec![sh.id]);
+                            }
+                        }
+                    }
+                    _ => {
+                        let layer_names: Vec<(i64, String)> = page
+                            .sheet()
+                            .map(|sheet| {
+                                sheet
+                                    .sections_named("Layer")
+                                    .into_iter()
+                                    .flat_map(|sec| sec.rows.iter().map(|row| {
+                                        (
+                                            row.ix,
+                                            row.cell("Name")
+                                                .and_then(|c| c.v.clone())
+                                                .unwrap_or_else(|| format!("layer {}", row.ix)),
+                                        )
+                                    }))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        for (ix, name) in &layer_names {
+                            let ids: Vec<i64> = page
+                                .shapes
+                                .iter()
+                                .filter(|sh| {
+                                    sh.sheet
+                                        .cell("LayerMember")
+                                        .and_then(|c| c.numeric())
+                                        .is_some_and(|m| m as i64 == *ix)
+                                })
+                                .map(|sh| sh.id)
+                                .collect();
+                            if !ids.is_empty() {
+                                push(name.clone(), ids);
+                            }
+                        }
+                    }
+                }
+                pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+        }
+        if !pairs.iter().any(|(l, _, _)| *l == self.selby_value) {
+            self.selby_value = pairs.first().map(|(l, _, _)| l.clone()).unwrap_or_default();
+        }
+        let mut open = true;
+        let mut apply = false;
+        egui::Window::new("Select by Type")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(320.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Select by");
+                    for (i, label) in ["Shape type", "Master", "Layer"].into_iter().enumerate() {
+                        if ui
+                            .selectable_label(self.selby_criterion == i as u8, label)
+                            .clicked()
+                        {
+                            self.selby_criterion = i as u8;
+                            self.selby_value.clear();
+                        }
+                    }
+                });
+                ui.separator();
+                if pairs.is_empty() {
+                    ui.weak("(nothing on this page matches the criterion)");
+                } else {
+                    ui.label("Value:");
+                    for (label, _, ids) in &pairs {
+                        if ui
+                            .selectable_label(self.selby_value == *label, format!("{label} ({} shapes)", ids.len()))
+                            .clicked()
+                        {
+                            self.selby_value = label.clone();
+                        }
+                    }
+                }
+                ui.add_space(6.0);
+                let can = !self.selby_value.is_empty();
+                let btn = egui::Button::new("Select");
+                let r = ui.add_enabled(can, btn);
+                if r.clicked() {
+                    apply = true;
+                }
+            });
+        if apply {
+            if let Some((_, _, ids)) =
+                pairs.iter().find(|(l, _, _)| *l == self.selby_value)
+            {
+                let ids = ids.clone();
+                if let Some(page_id) = self.page_id() {
+                    let mut all: Vec<(i64, i64)> =
+                        ids.iter().map(|sid| (page_id, *sid)).collect();
+                    all.sort();
+                    all.dedup();
+                    if let Some(first) = all.first().copied() {
+                        self.sel = Some(first);
+                    }
+                    let n = all.len();
+                    self.sel_set = all;
+                    self.status = format!("selected {n} shapes by {}", match self.selby_criterion {
+                        0 => "shape type",
+                        1 => "master",
+                        _ => "layer",
+                    });
+                }
+            }
+        }
+        if !open {
+            self.selby_open = false;
+        }
+    }
+
     /// The Snap & Glue dialog (#109, Visio 2016's View ▸ Visual Aids):
     /// per-target toggles for snap (URS-1100) and glue (URS-1112)
     /// plus the dynamic-grid aid (URS-1088). Every change writes
@@ -9289,6 +9772,7 @@ impl App {
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
+        self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);

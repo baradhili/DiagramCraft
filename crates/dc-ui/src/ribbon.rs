@@ -30,6 +30,18 @@ pub enum Action {
     SnapGlue,
     PointerTool,
     ConnectorTool,
+    AlignLeft,
+    AlignHCenter,
+    AlignRight,
+    AlignTop,
+    AlignVCenter,
+    AlignBottom,
+    AlignToPage,
+    DistributeH,
+    DistributeV,
+    SelectAll,
+    SelectByType,
+    FormatPainter,
     ShowShapeSheet,
     Macros,
     FillMenu,
@@ -135,6 +147,11 @@ pub enum Icon {
     TellMe,
     Magnet,
     Connector,
+    AlignTop,
+    AlignMiddle,
+    AlignBottom,
+    DistH,
+    DistV,
 }
 
 impl Icon {
@@ -206,6 +223,11 @@ impl Icon {
             Icon::TellMe => "lightbulb",
             Icon::Magnet => "magnet",
             Icon::Connector => "connector",
+            Icon::AlignTop => "format-vertical-align-top",
+            Icon::AlignMiddle => "format-vertical-align-center",
+            Icon::AlignBottom => "format-vertical-align-bottom",
+            Icon::DistH => "arrow-expand-horizontal",
+            Icon::DistV => "arrow-expand-vertical",
         };
         Some(a)
     }
@@ -247,6 +269,9 @@ impl Icon {
             Icon::TellMe => Color32::from_rgb(0x82, 0x82, 0x82),
             Icon::Magnet => Color32::from_rgb(0x2e, 0x75, 0xb6),
             Icon::Connector => Color32::from_rgb(0x2e, 0x75, 0xb6),
+            Icon::AlignTop | Icon::AlignMiddle | Icon::AlignBottom | Icon::DistH | Icon::DistV => {
+                Color32::from_rgb(0x42, 0x42, 0x42)
+            }
             _ => Color32::from_rgb(0x42, 0x42, 0x42),
         }
     }
@@ -1081,6 +1106,34 @@ impl Icon {
                     [c + Vec2::new(-2.0, 5.0), c + Vec2::new(2.0, 5.0)],
                     Stroke::new(1.4, gray),
                 );
+            }
+            Icon::AlignTop | Icon::AlignMiddle | Icon::AlignBottom => {
+                let dy = match self {
+                    Icon::AlignTop => -6.0,
+                    Icon::AlignBottom => 6.0,
+                    _ => 0.0,
+                };
+                p.line_segment(
+                    [c + Vec2::new(-6.0, dy), c + Vec2::new(6.0, dy)],
+                    Stroke::new(1.6, gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, -6.0), c + Vec2::new(0.0, 6.0)],
+                    Stroke::new(1.2, gray),
+                );
+            }
+            Icon::DistH | Icon::DistV => {
+                let horiz = matches!(self, Icon::DistH);
+                let (a, b) = if horiz {
+                    (Vec2::new(-6.0, 0.0), Vec2::new(6.0, 0.0))
+                } else {
+                    (Vec2::new(0.0, -6.0), Vec2::new(0.0, 6.0))
+                };
+                p.line_segment([c + a, c + b], Stroke::new(1.6, gray));
+                for v in [a, b] {
+                    p.line_segment([c + v + Vec2::new(-2.0, 4.0), c + v], Stroke::new(1.2, gray));
+                    p.line_segment([c + v + Vec2::new(-2.0, -4.0), c + v], Stroke::new(1.2, gray));
+                }
             }
             Icon::Connector => {
                 // diagonal line + arrow tip (fallback; MDI ships)
