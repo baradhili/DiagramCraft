@@ -343,12 +343,9 @@ pub fn show(
     };
 
     // Stable literal ids are intended for the drag-state memory keys.
-    #[allow(deprecated)]
-    let mem_handle = egui::Id::new("dc-handle-drag");
-    #[allow(deprecated)]
-    let mem_start = egui::Id::new("dc-drag-start");
-    #[allow(deprecated)]
-    let mem_marquee = egui::Id::new("dc-marquee");
+    let mem_handle = egui::Id::unique("dc-handle-drag");
+    let mem_start = egui::Id::unique("dc-drag-start");
+    let mem_marquee = egui::Id::unique("dc-marquee");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 

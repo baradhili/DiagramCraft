@@ -210,8 +210,7 @@ pub fn show_overlay(
         .len()
         .max(1) as f64;
 
-    #[allow(deprecated)] // Id::new: one editor, stable identity wanted
-    let id = egui::Id::new("dc-canvas-text-edit");
+    let id = egui::Id::unique("dc-canvas-text-edit");
     let first_frame = !session.focus_requested;
     if first_frame {
         ui.ctx().memory_mut(|m| m.request_focus(id));

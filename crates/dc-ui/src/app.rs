@@ -4144,10 +4144,9 @@ impl App {
                     r.left_top() + Vec2::new(-9.0, -9.0),
                     Vec2::new(18.0, 15.0),
                 );
-                #[allow(deprecated)] // Id::new: one badge per shape, stable
                 let resp = ui.interact(
                     badge,
-                    egui::Id::new(("dc-comment-badge", target)),
+                    egui::Id::unique(("dc-comment-badge", target)),
                     Sense::click(),
                 );
                 resp.widget_info(|| {
@@ -4294,7 +4293,6 @@ impl App {
     /// reference (owner screenshots 2026-10-24): Insert, Delete, Rename,
     /// Duplicate, then Page Setup (later milestone) and Reorder Pages….
     /// All live items run through the undoable command layer.
-    #[allow(deprecated)] // Id::new: one tab menu, stable identity wanted
     fn tab_context_menu(&mut self, ctx: &egui::Context) {
         let Some((idx, anchor)) = self.tab_menu else {
             return;
@@ -4314,7 +4312,7 @@ impl App {
         }
         let mut act: Option<Act> = None;
         let menu = egui::Popup::new(
-            egui::Id::new("dc-tab-ctx-menu"),
+            egui::Id::unique("dc-tab-ctx-menu"),
             ctx.clone(),
             anchor,
             egui::LayerId::background(),
@@ -5765,7 +5763,6 @@ impl App {
         }
     }
 
-    #[allow(deprecated)] // Id::new: one context menu, stable identity wanted
     /// The Quick Shapes membership menu (#143), opened by
     /// right-clicking a master cell — in its source entry or in Quick
     /// Shapes (a quick cell's key IS its source key). One item whose
