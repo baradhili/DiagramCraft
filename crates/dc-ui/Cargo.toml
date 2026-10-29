@@ -55,4 +55,4 @@ image = "0.25"
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
 tempfile = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-sha2 = "0.10"
+sha2 = "0.11"
