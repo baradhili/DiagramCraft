@@ -316,10 +316,28 @@ pub enum DocItem {
     Raw(RawEl),
 }
 
+/// A media part added at runtime (GitHub #113, picture insertion):
+/// the package part (`visio/media/imageN.png`), its bytes, the OWNING
+/// page id, and the relationship id that page's `ForeignData`
+/// references — the writer materializes the part, the page-part rels
+/// entry, and the content-type default.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MediaRef {
+    pub part: String,
+    pub bytes: Vec<u8>,
+    pub page: i64,
+    pub rid: String,
+    /// `png` / `jpeg` — extension and content-type family.
+    pub ext: String,
+}
+
 /// A fully parsed VSDX-family package.
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     pub pages: Vec<Page>,
+    /// Runtime-added media parts (#113): empty for parsed-only docs;
+    /// the write path merges them (retained-package documents only).
+    pub extra_media: Vec<MediaRef>,
     /// Masters in masters-index order.
     pub masters: Vec<Master>,
     /// Stylesheets in document order.

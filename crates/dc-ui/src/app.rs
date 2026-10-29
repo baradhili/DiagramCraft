@@ -288,6 +288,8 @@ enum PendingDialog {
     SaveAs(Receiver<Option<PathBuf>>),
     /// "Open Existing Stencil…" (.vssx into the Shapes pane, #83).
     OpenStencil(Receiver<Option<PathBuf>>),
+    /// Insert ▸ Pictures (#113): a picked PNG/JPEG.
+    OpenPicture(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
@@ -296,6 +298,9 @@ enum PendingKind {
     SaveAs,
     /// "Open Existing Stencil…" from the Shapes pane (#83).
     OpenStencil,
+    /// Insert ▸ Pictures (#113, URS-1012): a PNG/JPEG file picked to
+    /// become a Foreign shape.
+    OpenPicture,
 }
 
 /// Backstage rail command.
@@ -1124,6 +1129,9 @@ impl App {
                         .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
                         .save_file(),
+                    PendingKind::OpenPicture => rfd::FileDialog::new()
+                        .add_filter("Pictures", &["png", "jpg", "jpeg"])
+                        .pick_file(),
                 },
             };
             let _ = tx.send(picked);
@@ -1132,6 +1140,7 @@ impl App {
             PendingKind::Open => PendingDialog::Open(rx),
             PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
+            PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
         });
     }
 
@@ -1145,7 +1154,8 @@ impl App {
         let (path, again) = match &dialog {
             PendingDialog::Open(rx)
             | PendingDialog::SaveAs(rx)
-            | PendingDialog::OpenStencil(rx) => match rx.try_recv() {
+            | PendingDialog::OpenStencil(rx)
+            | PendingDialog::OpenPicture(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -1165,6 +1175,7 @@ impl App {
         match dialog {
             PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
+            PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -3364,6 +3375,179 @@ impl App {
         );
     }
 
+    /// #113 (URS-1012): open the picture picker (PNG/JPEG).
+    fn open_picture_dialog(&mut self) {
+        self.begin_dialog(PendingKind::OpenPicture);
+    }
+
+    /// #113 (URS-1012): a picked picture file becomes a Foreign shape
+    /// centered on the page at natural size (pixels/96 in, capped at
+    /// 8 in per side) — the media part, the page rels entry, and the
+    /// content-type default all ride `extra_media` to the writer.
+    fn insert_picture_file(&mut self, path: &Path) {
+        match std::fs::read(path) {
+            Ok(bytes) => self.insert_picture_bytes(&bytes),
+            Err(e) => self.status = format!("could not read {}: {e}", path.display()),
+        }
+    }
+
+    /// The picture-insertion core (also the kittest path: bytes in,
+    /// no native dialog).
+    fn insert_picture_bytes(&mut self, bytes: &[u8]) {
+        let Some(page_id) = self.page_id() else { return };
+        let geom = self.page_geom();
+        let Some(ed) = self.ed.as_mut() else { return };
+        // Format sniff: PNG/JPEG magic.
+        let ext = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+            "png"
+        } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+            "jpeg"
+        } else {
+            self.status = "only PNG and JPEG pictures are supported".into();
+            return;
+        };
+        let compression = if ext == "png" { "PNG" } else { "JPG" };
+        let Ok(img) = image::load_from_memory(bytes) else {
+            self.status = "the picture could not be decoded".into();
+            return;
+        };
+        // Natural size, capped.
+        let (mw, mh) = (img.width() as f64, img.height() as f64);
+        let mut w = mw / 96.0;
+        let mut h = mh / 96.0;
+        let cap = 8.0_f64;
+        if w.max(h) > cap {
+            let k = cap / w.max(h);
+            w *= k;
+            h *= k;
+        }
+        let (w, h) = (w.max(0.1), h.max(0.1));
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut sh = vsdx::model::Shape {
+            id,
+            type_: Some("Foreign".into()),
+            name_u: Some(format!("Picture.{id}")),
+            ..vsdx::model::Shape::default()
+        };
+        let mut set = |n: &str, v: f64| {
+            sh.sheet
+                .set_cell(n, vsdx::model::Cell::value(format!("{v:.6}")));
+        };
+        set("PinX", geom.w_in / 2.0);
+        set("PinY", geom.h_in / 2.0);
+        set("Width", w);
+        set("Height", h);
+        set("LocPinX", w / 2.0);
+        set("LocPinY", h / 2.0);
+        set("Angle", 0.0);
+        set("FlipX", 0.0);
+        set("FlipY", 0.0);
+        set("ResizeMode", 0.0);
+        // The image fills the shape box.
+        let mut geo = vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..vsdx::model::Section::default()
+        };
+        for (n, v) in [("NoFill", "1"), ("NoLine", "0"), ("NoShow", "0")] {
+            geo.cells.push((n.to_string(), vsdx::model::Cell::value(v)));
+        }
+        for (ix, t, x, y) in [
+            (1i64, "MoveTo", 0.0, 0.0),
+            (2, "LineTo", w, 0.0),
+            (3, "LineTo", w, h),
+            (4, "LineTo", 0.0, h),
+            (5, "LineTo", 0.0, 0.0),
+        ] {
+            geo.rows.push(vsdx::model::Row {
+                t: Some(t.into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), vsdx::model::Cell::value(format!("{x:.6}"))),
+                    ("Y".to_string(), vsdx::model::Cell::value(format!("{y:.6}"))),
+                ],
+                ..vsdx::model::Row::default()
+            });
+        }
+        sh.sheet.children.push(vsdx::model::SheetChild::Section(geo));
+        // Media part + rel id: next free across the package and
+        // already-added media; the rid must not collide with the
+        // page part's existing rels.
+        let page = ed
+            .doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .expect("page");
+        let part = page.part.clone();
+        let n = ed
+            .doc
+            .extra_media
+            .iter()
+            .map(|m| m.part.clone())
+            .chain(
+                ed.doc
+                    .package
+                    .as_ref()
+                    .map(|p| p.part_names().iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            )
+            .filter_map(|name| {
+                name.rsplit('/').next()
+                    .and_then(|f| f.strip_prefix("image"))
+                    .and_then(|rest| rest.split('.').next())
+                    .and_then(|n| n.parse::<u32>().ok())
+            })
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let media_part = format!("visio/media/image{n}.{ext}");
+        let rid_n = ed
+            .doc
+            .package
+            .as_ref()
+            .map(|p| p.relationships(&part))
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(id, _, _)| id.strip_prefix("rId").and_then(|v| v.parse::<u32>().ok()))
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let rid = format!("rId{rid_n}");
+        sh.raw_children.push(vsdx::model::RawEl {
+            name: "ForeignData".into(),
+            attrs: vec![
+                ("Type".to_string(), "Bitmap".into()),
+                ("ForeignType".to_string(), "Bitmap".into()),
+                ("CompressionType".to_string(), compression.into()),
+                ("r:id".to_string(), rid.clone()),
+            ],
+            inner: String::new(),
+        });
+        let _ = &mut ed.doc;
+        // Own the page borrow scope.
+        let doc = &mut ed.doc;
+        doc.extra_media.push(vsdx::model::MediaRef {
+            part: media_part,
+            bytes: bytes.to_vec(),
+            page: page_id,
+            rid,
+            ext: ext.to_string(),
+        });
+        let shape = sh;
+        self.apply(dc_core::AddShape {
+            page: page_id,
+            parent: None,
+            shape,
+        });
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = format!(
+            "picture inserted ({}×{} px at {:.2}×{:.2} in)",
+            mw as u32, mh as u32, w, h
+        );
+    }
+
     /// #113 (URS-1200): render the selection as a PNG at `factor`
     /// (1 screen, 2 high, 4 print): the full-page SVG with every
     /// non-selected shape hidden, rasterized, then cropped to the
@@ -4352,6 +4536,7 @@ impl App {
             Action::PageOrientation => self.toggle_page_orientation(),
             Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
             Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
+            Action::InsertPicture => self.open_picture_dialog(),
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
@@ -4783,9 +4968,8 @@ impl App {
                 crate::ribbon::Group::new(
                     "Illustrations",
                     vec![
-                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::Macros)
-                            .enabled(false)
-                            .tip("Picture shapes — planned")),
+                        big(RibbonButton::new(Icon::Picture, "Pictures", Action::InsertPicture)
+                            .tip("Insert a PNG or JPEG picture from a file")),
                         stack(vec![RibbonButton::new(
                             Icon::OnlinePic,
                             "Online Pictures",
@@ -9126,6 +9310,26 @@ impl App {
     /// #113 tests: the last copy-as-picture PNG's byte length.
     pub fn debug_last_picture_len(&self) -> Option<usize> {
         self.last_picture.as_ref().map(|v| v.len())
+    }
+
+    /// #113 tests: insert a picture from bytes (the kittest path —
+    /// no native dialog).
+    pub fn debug_insert_picture_bytes(&mut self, bytes: &[u8]) {
+        self.insert_picture_bytes(bytes);
+    }
+
+    /// #113 tests: the document's runtime media parts.
+    pub fn debug_media_parts(&self) -> Vec<String> {
+        self.ed
+            .as_ref()
+            .map(|e| {
+                e.doc
+                    .extra_media
+                    .iter()
+                    .map(|m| m.part.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// #113 tests: the page's current size in inches.

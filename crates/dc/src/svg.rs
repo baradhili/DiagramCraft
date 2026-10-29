@@ -1569,13 +1569,32 @@ fn foreign_image_uri(doc: &Document, part: &str, s: &Shape) -> Option<String> {
         .map(|(_, v)| v.clone())
         .or_else(|| extract_rid(&fd.inner))?;
     let pkg = doc.package.as_ref()?;
-    let (_, _, target) = pkg
+    // Retained relationship first; runtime-inserted media (#113)
+    // resolves through `extra_media` by the owning page's part.
+    let target: String = pkg
         .relationships(part)
         .into_iter()
-        .find(|(id, ty, _)| id == &rid && ty.ends_with("/image"))?;
+        .find(|(id, ty, _)| id == &rid && ty.ends_with("/image"))
+        .map(|(_, _, t)| t)
+        .or_else(|| {
+            let page_id = doc.pages.iter().find(|p| p.part == part).map(|p| p.id)?;
+            doc.extra_media
+                .iter()
+                .find(|m| m.page == page_id && m.rid == rid)
+                .map(|m| m.part.clone())
+        })?;
     // `relationships` returns the target already resolved to an absolute
-    // package part name.
-    let bytes = pkg.part(target.trim_start_matches('/'))?;
+    // package part name. Runtime-inserted media (#113) lives in
+    // `extra_media`, not the retained package.
+    let name = target.trim_start_matches('/');
+    let bytes = pkg
+        .part(name)
+        .or_else(|| {
+            doc.extra_media
+                .iter()
+                .find(|m| m.part == name)
+                .map(|m| m.bytes.as_slice())
+        })?;
     Some(format!("data:{mime};base64,{}", base64(bytes)))
 }
 
