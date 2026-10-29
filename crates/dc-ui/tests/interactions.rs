@@ -942,6 +942,12 @@ fn line_body_drag_translates_endpoints() {
     // The Line master sits outside Quick Shapes' head set — reveal the
     // document stencil entry (#102) to place it.
     h.state_mut().show_doc_stencil_for_test();
+    // Pure translation semantics: turn the (default-on) snap engine
+    // off — #109's snap tests cover the snapped landings separately.
+    let mut snap_off = h.state().debug_snap_settings();
+    snap_off.snap_active = false;
+    snap_off.glue_active = false;
+    h.state_mut().debug_set_snap_for_test(snap_off);
     h.run();
     let (page, shape) = place_master(&mut h, LINE_MASTER);
 
@@ -4810,4 +4816,229 @@ fn metric_toggle_opens_the_metric_variant() {
         "opened Basic Shapes (metric)",
         "the metric twin opened under the session preference"
     );
+}
+
+// ---- GitHub #109: the snap & glue engine ---------------------------------
+
+/// The snap engine lands a dragged shape on a neighbor's alignment
+/// box (URS-1100): after a real drag whose release point is a few px
+/// off perfect alignment, the shape lands exactly aligned — and the
+/// dynamic grid (URS-1088) reports alignment hints while the drag is
+/// live and none after release. (A drag that never leaves the snap
+/// threshold stays a no-op: no movement, no undo entry — Visio's
+/// feel, and why the shape is first dragged well clear.)
+#[test]
+fn drag_snaps_to_neighbors_alignment_box() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    // Alignment-box targets only — a deterministic landing that does
+    // not depend on the grid or ruler spacings.
+    let mut s = h.state().debug_snap_settings();
+    s.snap_active = true;
+    s.snap_grid = false;
+    s.snap_ruler_subdivisions = false;
+    s.snap_guides = false;
+    s.snap_shape_extensions = false;
+    s.snap_shape_intersections = false;
+    s.snap_connection_points = false;
+    s.snap_alignment_boxes = true;
+    s.dynamic_grid = true;
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    // Two instances of the Rectangle master (both land at the canvas
+    // center; the second is on top and is the one a press grabs).
+    let (page, a) = place_master(&mut h, 2);
+    let (page2, b) = place_master(&mut h, 2);
+    assert_eq!(page, page2);
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+
+    // Drag B well clear of A (beyond the snap threshold the whole
+    // way, so this is a real move), then read its live position for
+    // the gesture below.
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect");
+    drag_naturally(&mut h, bs.center(), egui::vec2(120.0, 90.0));
+    let bp = h.state().debug_shape_page_rect(b).expect("B rect after moving away");
+    assert!(
+        (bp.0 - ar.0).abs() > 0.3,
+        "B moved clear of A first: {bp:?} vs {ar:?}"
+    );
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B screen rect (moved)");
+
+    // page (y-up) → screen affine derived from B's two rects.
+    let k = bs.width() as f64 / bp.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            bs.left() + ((x - bp.0) * k) as f32,
+            bs.top() + (((bp.1 + bp.3) - y) * k) as f32,
+        )
+    };
+    // Drag B back to within 3 px (both axes) of A's center: a real
+    // travel, with the release point inside the snap strength, so the
+    // engine must land it exactly aligned.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let target = p2s(
+        ar.0 + ar.2 / 2.0 + 3.0 / ppi as f64,
+        ar.1 + ar.3 / 2.0 + 3.0 / ppi as f64,
+    );
+    let from = bs.center();
+
+    let press = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let release = |pos| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(press(from));
+    h.run();
+    for t in [0.25, 0.5, 0.75] {
+        h.hover_at(from + (target - from) * t);
+        h.run();
+    }
+    // Mid-drag: the dynamic grid reports alignment hints (x and y)
+    // against the neighbor.
+    assert!(
+        h.state().debug_snap_hint_count() >= 2,
+        "alignment hints live mid-drag"
+    );
+    h.hover_at(target);
+    h.run();
+    h.event(release(target));
+    h.run();
+
+    let br = h.state().debug_shape_page_rect(b).expect("B rect after");
+    assert!(
+        (br.0 - ar.0).abs() < 1e-6,
+        "B snapped back onto A's left edge: {} vs {}",
+        br.0,
+        ar.0
+    );
+    assert!(
+        (br.1 - ar.1).abs() < 1e-6,
+        "B snapped onto A's bottom edge: {} vs {} ({:?} vs {:?})",
+        br.1,
+        ar.1,
+        br,
+        ar
+    );
+    assert_eq!(h.state().debug_snap_hint_count(), 0, "hints clear on release");
+}
+
+/// Glue settings decide where a 1D endpoint sticks (URS-1112): with
+/// shape-handle glue enabled, dropping the endpoint 3 px off a
+/// rectangle's corner lands exactly on the handle. The sticky Connect
+/// itself is #108's connector work — #109 delivers the settings and
+/// the landing.
+#[test]
+fn endpoint_glues_to_a_shape_handle() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let mut s = h.state().debug_snap_settings();
+    s.snap_active = false; // the snap side must not interfere
+    s.glue_active = true;
+    s.glue_guides = false;
+    s.glue_shape_handles = true;
+    s.glue_shape_vertices = false;
+    s.glue_connection_points = false;
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let (page, rect) = place_master(&mut h, 2);
+    // The Line master sits outside Quick Shapes' head set — reveal the
+    // document stencil entry (#102) to place it.
+    h.state_mut().show_doc_stencil_for_test();
+    h.run();
+    let (page2, line) = place_master(&mut h, LINE_MASTER);
+    assert_eq!(page, page2);
+    let r = h.state().debug_shape_page_rect(rect).expect("rect");
+    let corner = (r.0 + r.2, r.1 + r.3); // top-right, page y-up
+
+    let bp = h.state().debug_shape_page_rect(line).expect("line rect");
+    let bs = h
+        .state()
+        .debug_shape_screen_rect_for_test(line)
+        .expect("line screen rect");
+    let k = bs.width() as f64 / bp.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            bs.left() + ((x - bp.0) * k) as f32,
+            bs.top() + (((bp.1 + bp.3) - y) * k) as f32,
+        )
+    };
+    // The line rect's y extent is its stroke bbox; for p2s's y the
+    // rect height may be ~0 — fall back to B's screen rect height.
+    let k_y = (bs.height() as f64 / bp.3).max(k);
+
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("endpoint handle");
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let target = p2s(corner.0 - 3.0 / ppi as f64 * (k / k_y), corner.1);
+    drag_naturally(&mut h, end, target - end);
+
+    let (ex, ey) = (cell_of(&h, page, line, "EndX"), cell_of(&h, page, line, "EndY"));
+    assert!(
+        (ex - corner.0).abs() < 1e-5 && (ey - corner.1).abs() < 1e-5,
+        "endpoint glued to the handle: ({ex:.4}, {ey:.4}) vs ({:.4}, {:.4})",
+        corner.0,
+        corner.1
+    );
+    let status = h.state().debug_status();
+    assert!(
+        status.contains("glued"),
+        "the landing notes the glue target: {status}"
+    );
+}
+
+/// The Snap & Glue dialog writes every toggle straight into the
+/// document's DocumentSettings (GitHub #109) — a blank drawing grows
+/// the element on its first change, and the ribbon's Dynamic Grid
+/// toggle persists too.
+#[test]
+fn snap_glue_dialog_toggles_persist_to_the_document() {
+    let mut h = harness_with_blank();
+    h.run();
+    // The blank template carries no DocumentSettings — none reads as
+    // the shipped Visio 2016 defaults.
+    assert!(h.state().debug_doc_snap_glue().is_none());
+    assert_eq!(
+        h.state().debug_snap_settings().to_doc(),
+        vsdx::model::DocSnapGlue::CORPUS_DEFAULT
+    );
+
+    h.get_by_label_contains("View").click();
+    h.run();
+    h.get_by_label_contains("Snap & Glue").click();
+    h.run();
+    // "Alignment boxes" is off in the corpus default (295) — turn it
+    // on: 295 + 128 = 423 must land in the document.
+    h.get_by_label_contains("Alignment boxes").click();
+    h.run();
+    let d = h.state().debug_doc_snap_glue().expect("DocumentSettings written");
+    assert_eq!(d.snap, 423, "alignment-boxes bit persisted");
+    assert_eq!(d.glue, 9, "glue untouched");
+    assert!(h.state().debug_dirty(), "a settings change marks the doc dirty");
+
+    // The ribbon's Dynamic Grid toggle is the same write path.
+    h.get_by_label_contains("Dynamic Grid").click();
+    h.run();
+    let d = h.state().debug_doc_snap_glue().expect("DocumentSettings present");
+    assert!(!d.dynamic_grid, "dynamic grid toggled off in the doc");
+    assert!(!h.state().debug_snap_settings().dynamic_grid);
 }

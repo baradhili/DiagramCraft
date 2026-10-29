@@ -149,6 +149,27 @@ const RULER_SUBDIV: u32 = 4;
 /// never smear together when zooming out.
 const RULER_MIN_TICK_PX: f64 = 6.0;
 
+/// The displayed grid's line spacing (page inches) — one definition
+/// shared by the grid painting and the snap engine's grid target
+/// (#109).
+pub fn grid_step_in(view: &View) -> f64 {
+    view.unit.to_in(5.0)
+}
+
+/// The finest ruler subdivision interval currently drawn (page
+/// inches), shared by the rulers and the snap engine's
+/// ruler-subdivision target (#109): the tiered-tick logic of #62,
+/// which drops the finer halves/quarters as the zoom shrinks.
+pub fn ruler_interval_in(view: &View) -> f64 {
+    let ppi = view.px_per_in();
+    let dupx = view.unit.from_in(1.0) as f32 / ppi; // display units per px
+    let step = tick_step(dupx as f64, 45.0);
+    let px_per_major = step / dupx as f64;
+    let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
+    let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
+    view.unit.to_in(step / finest as f64)
+}
+
 /// Outcome of interacting with the canvas this frame.
 pub struct CanvasOut {
     pub page_rect: Rect,
@@ -247,8 +268,9 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
 /// Live drag feedback (#96) — drawn above the layers, under nothing:
 /// ghost layer quads (moved/stretched textures; a move preview is a
 /// quad translation, never a re-raster), dashed screen-space outline
-/// fallbacks (also used for the moved selection frame), and live 1D
-/// line previews. Default/empty = no drag in progress.
+/// fallbacks (also used for the moved selection frame), live 1D line
+/// previews, and the dynamic-grid hints of #109. Default/empty = no
+/// drag in progress.
 #[derive(Default)]
 pub struct DragFx {
     /// Layer textures at their live positions (page bbox space).
@@ -258,6 +280,29 @@ pub struct DragFx {
     pub outlines: Vec<Rect>,
     /// Live 1D endpoint previews (screen px segment).
     pub lines: Vec<(Pos2, Pos2)>,
+    /// Dynamic-grid alignment/spacing hints (#109, URS-1088), in page
+    /// inches y-up — painted as dashed full-canvas alignment lines and
+    /// labeled gap segments while a drag is live.
+    pub hints: Vec<crate::snap::Hint>,
+}
+
+/// The dynamic-grid hint color: Visio's blue dashed alignment aid.
+const HINT: Color32 = Color32::from_rgb(0x2E, 0x75, 0xB6);
+
+/// A dashed segment (`on`/`off` in px), the dynamic-grid line style.
+fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
+    let len = (b - a).length();
+    if len < 1.0 {
+        return;
+    }
+    let dir = (b - a) / len;
+    let (on, off) = (6.0, 4.0);
+    let mut t = 0.0;
+    while t < len {
+        let t2 = (t + on).min(len);
+        p.line_segment([a + dir * t, a + dir * t2], Stroke::new(1.0, color));
+        t += on + off;
+    }
 }
 
 /// Draw the whole canvas area (fills `ui`).
@@ -499,8 +544,7 @@ pub fn show(
 
     // Grid (5 mm spacing in display units).
     if view.show_grid {
-        let step_in = view.unit.to_in(5.0);
-        let step_px = step_in as f32 * view.px_per_in();
+        let step_px = grid_step_in(view) as f32 * view.px_per_in();
         if step_px >= 5.0 {
             let mut x = out.page_rect.left() + step_px;
             while x < out.page_rect.right() {
@@ -781,6 +825,39 @@ pub fn show(
         }
     }
 
+    // Dynamic-grid hints (#109): dashed full-canvas alignment lines
+    // and labeled equal-spacing gaps, Visio's drag-time feedback.
+    for hint in &drag.hints {
+        match *hint {
+            crate::snap::Hint::Align { vertical, at } => {
+                let (a, b) = if vertical {
+                    let x = page_to_screen(at, 0.0, view, page).x;
+                    (Pos2::new(x, canvas_r.top()), Pos2::new(x, canvas_r.bottom()))
+                } else {
+                    let y = page_to_screen(0.0, at, view, page).y;
+                    (Pos2::new(canvas_r.left(), y), Pos2::new(canvas_r.right(), y))
+                };
+                dashed(&p, a, b, HINT);
+            }
+            crate::snap::Hint::Spacing { a, b, len_in } => {
+                let a0 = page_to_screen(a.0, a.1, view, page);
+                let a1 = page_to_screen(a.2, a.3, view, page);
+                let b0 = page_to_screen(b.0, b.1, view, page);
+                let b1 = page_to_screen(b.2, b.3, view, page);
+                dashed(&p, a0, a1, HINT);
+                dashed(&p, b0, b1, HINT);
+                let mid = Pos2::new((a0.x + a1.x) / 2.0, (a0.y + a1.y) / 2.0);
+                p.text(
+                    mid + Vec2::new(3.0, -3.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    view.unit.fmt(len_in),
+                    egui::FontId::proportional(10.0),
+                    HINT,
+                );
+            }
+        }
+    }
+
     // Marquee (live rubber band while selecting on empty page).
     if let Some(mr) = out.marquee_live {
         p.rect_stroke(
@@ -893,12 +970,14 @@ fn draw_rulers(
     // half and quarter subdivisions, each minor tier dropped when its
     // pixel spacing would smear. Ticks are placed on the finest kept
     // interval and classified by integer index, so no float-multiple
-    // drift decides tiers.
+    // drift decides tiers. The interval computation lives in
+    // `ruler_interval_in` so the snap engine (#109) targets exactly
+    // the subdivisions the ruler shows.
     let step = tick_step(dupx as f64, 45.0);
     let px_per_major = step / dupx as f64;
     let tiers = tick_tiers(step, px_per_major, RULER_SUBDIV, RULER_MIN_TICK_PX);
     let finest = tiers.last().map_or(1, |t: &TickTier| t.div as i64);
-    let interval = step / finest as f64;
+    let interval = view.unit.from_in(ruler_interval_in(view));
     let tier_for = |k: i64| -> TickTier {
         *tiers
             .iter()
