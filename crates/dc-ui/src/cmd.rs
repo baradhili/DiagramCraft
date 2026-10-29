@@ -472,18 +472,43 @@ impl Command for RerouteConnectors {
             cells: Vec<(String, f64, Option<String>)>,
             rows: Vec<(i64, f64, f64)>,
         }
+        // Both ends may glue to moved shapes (a two-shape selection
+        // drag): each connector is planned ONCE from both new
+        // endpoints — per-Connect plans would race on stale opposite
+        // ends (CodeRabbit).
         let mut plans: Vec<Plan> = Vec::new();
         {
             use dc_core::connects::ConnectsHost;
+            use std::collections::BTreeMap;
             let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
                 return Ok(());
             };
             let connects = page.connects();
+            let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> =
+                BTreeMap::new();
             for c in &connects.list {
                 if !self.moved.contains(&c.to_sheet) {
                     continue;
                 }
-                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, c.from_sheet)
+                by_connector.entry(c.from_sheet).or_default().push(c);
+            }
+            let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
+                let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
+                let g = |n: &str| {
+                    doc.resolve_cell(t, &ch, n)
+                        .and_then(|v| v.numeric())
+                };
+                let (px, py) = (g("PinX")?, g("PinY")?);
+                let (w, h) = (g("Width").unwrap_or(1.0), g("Height").unwrap_or(1.0));
+                let (lx, ly) = (
+                    g("LocPinX").unwrap_or(w / 2.0),
+                    g("LocPinY").unwrap_or(h / 2.0),
+                );
+                let (x, y) = (px - lx, py - ly);
+                Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
+            };
+            for (conn_id, recs) in by_connector {
+                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, conn_id)
                 else {
                     continue;
                 };
@@ -498,16 +523,8 @@ impl Command for RerouteConnectors {
                 {
                     continue;
                 }
-                let Some(target) = vsdx::model::find_shape_by_id(&page.shapes, c.to_sheet)
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id)
                 else {
-                    continue;
-                };
-                let end = if c.from_cell == "BeginX" {
-                    crate::connectors::End::Begin
-                } else {
-                    crate::connectors::End::End
-                };
-                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id) else {
                     continue;
                 };
                 let get = |n: &str| {
@@ -519,87 +536,93 @@ impl Command for RerouteConnectors {
                 else {
                     continue;
                 };
-                let other = match end {
-                    crate::connectors::End::Begin => (ex, ey),
-                    crate::connectors::End::End => (bx, by),
-                };
-                let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
-                    let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
-                    let g = |n: &str| {
-                        doc.resolve_cell(t, &ch, n)
-                            .and_then(|v| v.numeric())
+                // Resolve every moved end's attachment against the
+                // post-move shapes BEFORE any write.
+                let mut beg = (bx, by);
+                let mut endp = (ex, ey);
+                let mut end_cells: Vec<(String, f64, Option<String>)> = Vec::new();
+                for c in recs {
+                    let end = if c.from_cell == "BeginX" {
+                        crate::connectors::End::Begin
+                    } else {
+                        crate::connectors::End::End
                     };
-                    let (px, py) = (g("PinX")?, g("PinY")?);
-                    let (w, h) = (g("Width").unwrap_or(1.0), g("Height").unwrap_or(1.0));
-                    let (lx, ly) = (
-                        g("LocPinX").unwrap_or(w / 2.0),
-                        g("LocPinY").unwrap_or(h / 2.0),
-                    );
-                    let (x, y) = (px - lx, py - ly);
-                    Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
-                };
-                let attach = if c.to_part >= 100 {
-                    let row_ix = c.to_part - 100;
-                    trect(target).and_then(|(rx, ry, _, _)| {
-                        let find = |sheet: &vsdx::model::Sheet| -> Option<(f64, f64)> {
-                            for sec in sheet.sections_named("Connection") {
-                                if let Some(row) = sec.rows.iter().find(|r| r.ix == row_ix) {
-                                    if let (Some(x), Some(y)) = (
-                                        row.cell("X").and_then(|v| v.numeric()),
-                                        row.cell("Y").and_then(|v| v.numeric()),
-                                    ) {
-                                        return Some((rx + x, ry + y));
+                    let Some(target) = vsdx::model::find_shape_by_id(&page.shapes, c.to_sheet)
+                    else {
+                        continue;
+                    };
+                    let other = match end {
+                        crate::connectors::End::Begin => endp,
+                        crate::connectors::End::End => beg,
+                    };
+                    let attach = if c.to_part >= 100 {
+                        let row_ix = c.to_part - 100;
+                        trect(target).and_then(|(rx, ry, _, _)| {
+                            let find = |sheet: &vsdx::model::Sheet| -> Option<(f64, f64)> {
+                                for sec in sheet.sections_named("Connection") {
+                                    if let Some(row) =
+                                        sec.rows.iter().find(|r| r.ix == row_ix)
+                                    {
+                                        if let (Some(x), Some(y)) = (
+                                            row.cell("X").and_then(|v| v.numeric()),
+                                            row.cell("Y").and_then(|v| v.numeric()),
+                                        ) {
+                                            return Some((rx + x, ry + y));
+                                        }
                                     }
                                 }
-                            }
-                            None
-                        };
-                        find(&target.sheet).or_else(|| {
-                            target
-                                .master
-                                .and_then(|mid| doc.master(mid))
-                                .and_then(|m| m.shapes.first())
-                                .and_then(|root| find(&root.sheet))
+                                None
+                            };
+                            find(&target.sheet).or_else(|| {
+                                target
+                                    .master
+                                    .and_then(|mid| doc.master(mid))
+                                    .and_then(|m| m.shapes.first())
+                                    .and_then(|root| find(&root.sheet))
+                            })
                         })
-                    })
-                } else {
-                    trect(target)
-                        .map(|r| crate::connectors::attach_point(r, other))
-                };
-                let Some(attach) = attach else { continue };
-                let (beg, endp) = match end {
-                    crate::connectors::End::Begin => (attach, (ex, ey)),
-                    crate::connectors::End::End => ((bx, by), attach),
-                };
+                    } else {
+                        trect(target)
+                            .map(|r| crate::connectors::attach_point(r, other))
+                    };
+                    let Some(attach) = attach else { continue };
+                    match end {
+                        crate::connectors::End::Begin => beg = attach,
+                        crate::connectors::End::End => endp = attach,
+                    }
+                    let endf = conn.sheet.cell(end.cell()).and_then(|v| v.f.clone());
+                    end_cells.push((end.cell().to_string(), attach.0, endf.clone()));
+                    end_cells.push((end.y_cell().to_string(), attach.1, endf));
+                }
+                if end_cells.is_empty() {
+                    continue;
+                }
+                // Frame + route once, from both new endpoints.
                 let style = get("ShapeRouteStyle")
                     .map(|v| format!("{}", v as i64))
                     .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
                 let pts = crate::connectors::route(&style, beg, endp);
                 let rows = crate::connectors::route_rows(beg, &pts);
-                let endf = conn
-                    .sheet
-                    .cell(end.cell())
-                    .and_then(|v| v.f.clone());
-                let mut cells: Vec<(String, f64, Option<String>)> = vec![
-                    (end.cell().to_string(), attach.0, endf.clone()),
-                    (end.y_cell().to_string(), attach.1, endf),
-                    ("PinX".to_string(), (beg.0 + endp.0) / 2.0, None),
-                    ("PinY".to_string(), (beg.1 + endp.1) / 2.0, None),
-                    ("Width".to_string(), endp.0 - beg.0, None),
-                    ("Height".to_string(), endp.1 - beg.1, None),
-                    ("LocPinX".to_string(), (endp.0 - beg.0) / 2.0, None),
-                    ("LocPinY".to_string(), (endp.1 - beg.1) / 2.0, None),
-                ];
-                cells.retain(|(n, _, _)| {
+                let mut cells = end_cells;
+                for (n, v) in [
+                    ("PinX", (beg.0 + endp.0) / 2.0),
+                    ("PinY", (beg.1 + endp.1) / 2.0),
+                    ("Width", endp.0 - beg.0),
+                    ("Height", endp.1 - beg.1),
+                    ("LocPinX", (endp.0 - beg.0) / 2.0),
+                    ("LocPinY", (endp.1 - beg.1) / 2.0),
+                ] {
                     // A formula-driven derived cell never literal-writes
                     // (the endpoint carries the glue formula instead).
-                    !matches!(n.as_str(), "PinX" | "PinY" | "Width" | "Height" | "LocPinX" | "LocPinY")
-                        || conn
-                            .sheet
-                            .cell(n)
-                            .and_then(|v| v.f.as_deref())
-                            .is_none_or(|f| f == "Inh")
-                });
+                    let formula_free = conn
+                        .sheet
+                        .cell(n)
+                        .and_then(|v| v.f.as_deref())
+                        .is_none_or(|f| f == "Inh");
+                    if formula_free {
+                        cells.push((n.to_string(), v, None));
+                    }
+                }
                 plans.push(Plan {
                     conn_id: conn.id,
                     cells,

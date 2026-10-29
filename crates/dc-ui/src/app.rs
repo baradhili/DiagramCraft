@@ -2956,10 +2956,16 @@ impl App {
             ("LocPinY", (b.1 - a.1) / 2.0),
         ]
         .into_iter()
+        // Visio-authored connectors GUARD their derived cells
+        // (GUARD(EndX-BeginX)…) — a literal write would refuse and
+        // abort the whole Macro (CodeRabbit); only formula-free
+        // derived cells write. The endpoint cells go through
+        // SetGluedCell (the glue engine owns their formulas).
+        .filter(|(n, _)| {
+            matches!(*n, "BeginX" | "BeginY" | "EndX" | "EndY")
+                || dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_none()
+        })
         .map(|(n, v)| {
-            // The endpoint cells may carry the glue engine's GUARDed
-            // formulas — a drag legitimately rewrites them
-            // (re-glue/release), so they go through SetGluedCell.
             if matches!(n, "BeginX" | "BeginY" | "EndX" | "EndY") {
                 Box::new(dc_core::SetGluedCell::new(scope.clone(), n, cell(v)))
                     as Box<dyn dc_core::Command>
@@ -3585,9 +3591,12 @@ impl App {
             });
         }
         let bucket = (self.view.px_per_in() * 4.0).round().max(4.0) as u32;
-        // Drop stale entries (page switch, version bump, zoom bucket).
+        let version = self.layer_base_version();
+        // Drop stale entries — page switch, version bump, zoom bucket
+        // (CodeRabbit: keeping version-stale handles leaked a texture
+        // per edit while a background was assigned).
         self.bg_underlays
-            .retain(|(p, _, b, _)| chain.contains(p) && *b == bucket);
+            .retain(|(p, v, b, _)| chain.contains(p) && *b == bucket && *v == version);
         let mut out: Vec<crate::layers::ShapeQuad> = Vec::new();
         for id in chain.iter().rev() {
             let Some(ed) = self.ed.as_ref() else { break };
@@ -3785,6 +3794,16 @@ impl App {
             .unwrap_or_default()
             .iter()
             .filter_map(|(id, _, _)| id.strip_prefix("rId").and_then(|v| v.parse::<u32>().ok()))
+            .chain(
+                // Pictures already inserted on this page own rids the
+                // package does not know (CodeRabbit: the second
+                // picture would collide and render the first's bytes).
+                ed.doc
+                    .extra_media
+                    .iter()
+                    .filter(|m| m.page == page_id)
+                    .filter_map(|m| m.rid.strip_prefix("rId").and_then(|v| v.parse::<u32>().ok())),
+            )
             .max()
             .unwrap_or(0)
             + 1;
@@ -4031,11 +4050,14 @@ impl App {
                 ui.strong("Custom");
                 let mut wd = cw;
                 let mut ht = ch;
+                // The range is ~10 mm .. 2 m, expressed in display
+                // units so inches never clamps at 10 in.
+                let (lo, hi) = (unit.from_in(10.0 / 25.4), unit.from_in(2000.0 / 25.4));
                 ui.horizontal(|ui| {
                     ui.label("Width");
-                    ui.add(egui::DragValue::new(&mut wd).range(10.0..=2000.0).suffix(unit.suffix()));
+                    ui.add(egui::DragValue::new(&mut wd).range(lo..=hi).suffix(unit.suffix()));
                     ui.label("Height");
-                    ui.add(egui::DragValue::new(&mut ht).range(10.0..=2000.0).suffix(unit.suffix()));
+                    ui.add(egui::DragValue::new(&mut ht).range(lo..=hi).suffix(unit.suffix()));
                 });
                 if ui.button("Apply custom size").clicked() && wd > 0.0 && ht > 0.0 {
                     custom = Some((unit.to_in(wd), unit.to_in(ht)));

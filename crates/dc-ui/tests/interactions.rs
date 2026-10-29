@@ -5966,3 +5966,112 @@ fn background_page_assignment_and_underlay() {
     h.run();
     assert_eq!(h.state().debug_back_page(), bp);
 }
+
+/// CodeRabbit pass over the branch: a two-shape move where BOTH ends
+/// of one connector are glued to moved shapes reroutes the connector
+/// once, from both new endpoints (the per-Connect race read stale
+/// opposite ends).
+#[test]
+fn moving_both_glued_shapes_reroutes_once_consistently() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = h.state().debug_shape_screen_rect_for_test(a).unwrap().center();
+    let release = h.state().debug_shape_screen_rect_for_test(b).unwrap().center();
+    ruler_drag(&mut h, press, release);
+    let conn = h.state().debug_connects()[0].0;
+
+    // Move BOTH shapes as one selection.
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let ars = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let brs = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, ars.center(), egui::PointerButton::Primary);
+    h.run();
+    h.hover_at(brs.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2);
+    // Drag B (a selection member) — both move together.
+    drag_naturally(&mut h, brs.center(), egui::vec2(-40.0, 30.0));
+
+    // Both attachments followed their shapes and the frame matches
+    // the endpoints: Pin is the midpoint, Width/Height the deltas.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    let bx = cell_of(&h, page, conn, "BeginX");
+    let by = cell_of(&h, page, conn, "BeginY");
+    let ex = cell_of(&h, page, conn, "EndX");
+    let ey = cell_of(&h, page, conn, "EndY");
+    // Begin attaches on A's left edge; end on B's right edge.
+    assert!(
+        (bx - ar.0).abs() < 1e-5,
+        "begin followed A: {bx} vs {}",
+        ar.0
+    );
+    assert!(
+        (ex - (br.0 + br.2)).abs() < 1e-5,
+        "end followed B: {ex} vs {}",
+        br.0 + br.2
+    );
+    let px = cell_of(&h, page, conn, "PinX");
+    let py = cell_of(&h, page, conn, "PinY");
+    let w = cell_of(&h, page, conn, "Width");
+    let hgt = cell_of(&h, page, conn, "Height");
+    assert!((px - (bx + ex) / 2.0).abs() < 1e-5, "frame matches ends");
+    assert!((py - (by + ey) / 2.0).abs() < 1e-5);
+    assert!((w - (ex - bx)).abs() < 1e-5);
+    assert!((hgt - (ey - by)).abs() < 1e-5);
+}
+
+/// CodeRabbit pass: a second picture on the same page gets its own
+/// relationship id (both render, both persist distinct parts).
+#[test]
+fn second_picture_gets_a_unique_relationship() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let png = |r: u8| {
+        let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([r, 40, 40, 255]));
+        let mut b = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut b), image::ImageFormat::Png)
+            .unwrap();
+        b
+    };
+    h.state_mut().debug_insert_picture_bytes(&png(30));
+    h.run();
+    // Deselect so the second insert is independent.
+    let deselect = h.state().debug_canvas_rect().left_top() + egui::vec2(40.0, 40.0);
+    click_at(&mut h, deselect, egui::PointerButton::Primary);
+    h.run();
+    h.state_mut().debug_insert_picture_bytes(&png(220));
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 2, "both pictures landed");
+    let media = h.state().debug_media_parts();
+    assert_eq!(media.len(), 2, "two distinct parts: {media:?}");
+    assert_ne!(media[0], media[1]);
+}
