@@ -221,7 +221,7 @@ impl Icon {
             | Icon::Container
             | Icon::Callout
             | Icon::DataGraphic
-            | Icon::Save => Color32::from_rgb(0x2a, 0x6f, 0xb5),
+            | Icon::Save => Color32::from_rgb(0x2e, 0x74, 0xb5),
             Icon::Painter | Icon::Comment | Icon::Effects | Icon::ClearAll => {
                 Color32::from_rgb(0xe0, 0x7b, 0x1f)
             }
@@ -302,7 +302,7 @@ impl Icon {
         };
         let lit = |col: Color32| if enabled { lift(col) } else { dim };
         let blue = lit(Color32::from_rgb(0x2a, 0x6f, 0xb5));
-        let accent_ink = lit(theme::ACCENT);
+        let accent_ink = lit(theme::HIGHLIGHT);
         let orange = lit(Color32::from_rgb(0xd8, 0x7b, 0x0b));
         let gray = if enabled {
             Color32::from_rgb(0x77, 0x77, 0x77)
@@ -539,7 +539,7 @@ impl Icon {
                 p.rect_stroke(
                     top,
                     1.5,
-                    Stroke::new(1.4, theme::ACCENT),
+                    Stroke::new(1.4, theme::HIGHLIGHT),
                     egui::StrokeKind::Middle,
                 );
                 let ay = if front { c.y - 6.5 } else { c.y + 6.5 };

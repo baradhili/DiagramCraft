@@ -3,11 +3,20 @@
 
 use egui::{Color32, Style, Visuals};
 
-/// The title/File/rail band accent — owner-selected warm gray
-/// #817e7b (2026-10-27, replacing the Visio 2016 brand green).
+/// The GENERAL CHROME grey — owner-selected warm gray #817e7b
+/// (2026-10-27). After the 2026-10-29 re-basing (#154) it fills
+/// chrome only (File-tab block, comment badges, the backstage rail
+/// fill); every highlight indicator is the blue below.
 pub const ACCENT: Color32 = Color32::from_rgb(0x81, 0x7e, 0x7b);
-/// Darker accent for hover/pressed states (the band accent at ~72%).
+/// Darker chrome grey for pressed chrome (the grey at ~72%).
 pub const ACCENT_DARK: Color32 = Color32::from_rgb(92, 90, 88);
+/// The HIGHLIGHT blue — the base of the UI palette (#154, owner
+/// 2026-10-29): selection frames and handles, the active-tab
+/// underline, armed states, ribbon accent lines, and the backstage
+/// rail's selected band. Highlights are blue; chrome is grey.
+pub const HIGHLIGHT: Color32 = Color32::from_rgb(0x2e, 0x74, 0xb5);
+/// Hover/pressed companion (the highlight blue at ~72%).
+pub const HIGHLIGHT_DARK: Color32 = Color32::from_rgb(0x21, 0x53, 0x81);
 /// Ribbon content background (Office 2016 light shell).
 pub const RIBBON_BG: Color32 = Color32::from_rgb(245, 245, 245);
 /// Tab strip + ribbon content surface (Office 2016 "Colorful": white
@@ -29,7 +38,7 @@ pub const DESK: Color32 = Color32::from_rgb(200, 200, 200);
 /// Page outline.
 pub const PAGE_EDGE: Color32 = Color32::from_rgb(140, 140, 140);
 /// Selection frame + handles (Visio 2016 selection is a thin blue).
-pub const SELECTION: Color32 = Color32::from_rgb(0, 112, 192);
+pub const SELECTION: Color32 = HIGHLIGHT;
 /// Status bar: light gray band with dark text (Visio 2016; the accent
 /// fill is only the title bar and File tab).
 pub const STATUS_BG: Color32 = Color32::from_rgb(238, 238, 238);
@@ -44,9 +53,10 @@ pub const RULER_TEXT: Color32 = Color32::from_rgb(90, 90, 90);
 pub const TABS_BG: Color32 = Color32::from_rgb(225, 225, 225);
 pub const TAB_ACTIVE: Color32 = Color32::from_rgb(255, 255, 255);
 /// Backstage (File screen) rail: the selected destination's band on
-/// the accent rail (Visio 2010 three-band rail, GitHub #55) — the
-/// band accent's darker companion so it reads on the band fill.
-pub const RAIL_SELECTED: Color32 = Color32::from_rgb(92, 90, 88);
+/// the grey rail (Visio 2010 three-band rail, GitHub #55) — the
+/// highlight blue's pressed companion so it reads on the grey fill
+/// (#154: selections are blue).
+pub const RAIL_SELECTED: Color32 = HIGHLIGHT_DARK;
 pub const RAIL_DISABLED: Color32 = Color32::from_gray(160);
 /// Backstage page headline text.
 pub const BACK_TITLE: Color32 = Color32::from_rgb(50, 50, 50);
@@ -63,16 +73,15 @@ pub const CARD_BG: Color32 = Color32::WHITE;
 /// it stays white in dark mode (the document, not the shell).
 #[derive(Clone, Copy)]
 pub struct ShellTokens {
-    /// The title/File/rail band fill — the owner-selected warm gray
+    /// The title/File/rail band fill — the general chrome grey
     /// (#817e7b) in both modes (Office keeps brand bands in dark
     /// themes).
     pub accent_band: Color32,
-    /// Accent for lines and small elements (tab underline, launcher
-    /// hover, armed stencil border): lifted in dark so it reads on
-    /// dark fills.
+    /// The HIGHLIGHT blue (#2e74b5) for lines and small elements —
+    /// tab underline, launcher hover, armed stencil border,
+    /// selections; lifted in dark so it reads on dark fills.
     pub accent: Color32,
-    /// Text-accent / pressed green: the deep green in light, a light
-    /// green in dark (the light one vanishes on dark surfaces).
+    /// The highlight blue's pressed/hover companion.
     pub accent_dark: Color32,
     pub ribbon_bg: Color32,
     pub ribbon_content: Color32,
@@ -121,8 +130,8 @@ pub struct ShellTokens {
 /// The light mapping: the constants above, verbatim.
 pub const LIGHT: ShellTokens = ShellTokens {
     accent_band: ACCENT,
-    accent: ACCENT,
-    accent_dark: ACCENT_DARK,
+    accent: HIGHLIGHT,
+    accent_dark: HIGHLIGHT_DARK,
     ribbon_bg: RIBBON_BG,
     ribbon_content: RIBBON_CONTENT,
     ribbon_edge: RIBBON_EDGE,
@@ -161,8 +170,10 @@ pub const LIGHT: ShellTokens = ShellTokens {
 /// the same warm-gray accents lifted to read on them (GitHub #52).
 pub const DARK: ShellTokens = ShellTokens {
     accent_band: ACCENT,
-    accent: Color32::from_rgb(178, 175, 172),
-    accent_dark: Color32::from_rgb(203, 199, 196),
+    // lift_for_dark precomputed (it is not const-callable): the
+    // highlight blue lifted so its strongest channel hits 200.
+    accent: Color32::from_rgb(50, 128, 200),
+    accent_dark: Color32::from_rgb(51, 128, 200),
     ribbon_bg: Color32::from_gray(43),
     ribbon_content: Color32::from_gray(54),
     ribbon_edge: Color32::from_gray(86),
@@ -239,7 +250,7 @@ pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
         egui::Stroke::new(1.0, Color32::from_rgb(60, 60, 60)),
     );
     v.selection.bg_fill = Color32::from_rgba_premultiplied(33, 115, 70, 36);
-    v.selection.stroke.color = ACCENT;
+    v.selection.stroke.color = HIGHLIGHT;
     style.visuals = v;
     ctx.set_style_of(egui::Theme::Light, style);
 
@@ -444,7 +455,7 @@ mod tests {
         assert_eq!(light.tabs_bg, TABS_BG);
         assert_eq!(light.card_bg, CARD_BG);
         assert_eq!(light.tellme_bg, Color32::WHITE);
-        assert_eq!(light.accent, ACCENT);
+        assert_eq!(light.accent, HIGHLIGHT);
         assert_eq!(light.accent_band, ACCENT);
 
         let dark = shell_tokens(&Visuals::dark());
@@ -504,7 +515,11 @@ mod tests {
             "accent lines must read on dark surfaces"
         );
         assert_ne!(dark.accent_band, dark.accent, "band vs line accent split");
-        assert_eq!(dark.accent_band, ACCENT, "the brand band stays green");
+        assert_eq!(dark.accent_band, ACCENT, "the chrome band stays grey (#154)");
+        assert_eq!(
+            light.selection, HIGHLIGHT,
+            "the selection frame is the highlight blue (#154)"
+        );
         // The desk stays darker than the page edge so the white page
         // floats (page paper is white in both modes).
         assert!(lum(dark.page_edge) > lum(dark.desk));

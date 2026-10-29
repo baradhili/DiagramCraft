@@ -59,7 +59,14 @@ impl View {
     pub fn apply_fit(&mut self, content: Vec2, origin: Vec2, page: &PageGeom) {
         let zx = content.x / (page.w_in as f32 * 96.0);
         let zy = content.y / (page.h_in as f32 * 96.0);
-        self.zoom = zx.min(zy).clamp(0.1, 8.0);
+        // Snap DOWN onto the raster ppi-bucket grid (the layer store
+        // quantizes to ±0.25 ppi = 1/384 zoom steps): the fit's
+        // scrollbar-hysteresis relaxation nudges the zoom for a few
+        // frames before settling, and every bucket crossing
+        // re-rasterized EVERY shape layer. A floored fit keeps the
+        // bucket pinned across the nudges — the step itself is
+        // imperceptible, and flooring never overflows the content.
+        self.zoom = ((zx.min(zy) * 384.0).floor() / 384.0).clamp(0.1, 8.0);
         let pw = page.w_in as f32 * self.px_per_in();
         let ph = page.h_in as f32 * self.px_per_in();
         self.pan = origin
@@ -336,12 +343,9 @@ pub fn show(
     };
 
     // Stable literal ids are intended for the drag-state memory keys.
-    #[allow(deprecated)]
-    let mem_handle = egui::Id::new("dc-handle-drag");
-    #[allow(deprecated)]
-    let mem_start = egui::Id::new("dc-drag-start");
-    #[allow(deprecated)]
-    let mem_marquee = egui::Id::new("dc-marquee");
+    let mem_handle = egui::Id::unique("dc-handle-drag");
+    let mem_start = egui::Id::unique("dc-drag-start");
+    let mem_marquee = egui::Id::unique("dc-marquee");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -974,9 +978,14 @@ mod tests {
         };
         view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
         assert!(view.fit_mode, "a fit enters fit mode");
-        // Height-constrained: 600 px / (11 in × 96 px/in).
-        let expected = 600.0 / (11.0 * 96.0);
-        assert!((view.zoom - expected).abs() < 1e-4, "zoom {}", view.zoom);
+        // Height-constrained: 600 px / (11 in × 96 px/in), floored
+        // onto the raster bucket grid (#67: the fit snaps down to
+        // 1/384 zoom steps so scrollbar-hysteresis nudges never cross
+        // a raster bucket).
+        let raw: f32 = 600.0 / (11.0 * 96.0);
+        let expected = (raw * 384.0).floor() / 384.0;
+        assert!((view.zoom - expected).abs() < 1e-6, "zoom {}", view.zoom);
+        assert!(view.zoom <= raw, "the snap never overflows the content");
         // The 8.5 in page is centered horizontally: origin + margin at
         // least 12 px, page height fills the content area.
         let pw = 8.5 * 96.0 * view.zoom;

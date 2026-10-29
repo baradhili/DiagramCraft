@@ -6,7 +6,6 @@
 //! All artwork is from the MDI open-source set — never extracted from
 //! Microsoft products (see assets/icons/README.md).
 
-#![allow(deprecated)] // egui::Id::new is stable-by-string; salt API churns
 
 use std::collections::HashMap;
 
@@ -112,7 +111,7 @@ pub fn texture(ctx: &Context, name: &'static str, color: Color32) -> Option<Text
     );
     let hit = ctx.memory(|m| {
         m.data
-            .get_temp::<IconCache>(egui::Id::new("dc-icon-tex"))
+            .get_temp::<IconCache>(egui::Id::unique("dc-icon-tex"))
             .and_then(|c| c.get(&key).cloned())
     });
     if let Some(t) = hit {
@@ -123,7 +122,7 @@ pub fn texture(ctx: &Context, name: &'static str, color: Color32) -> Option<Text
     let handle = ctx.load_texture(format!("icon-{name}"), img, egui::TextureOptions::LINEAR);
     ctx.memory_mut(|m| {
         m.data
-            .get_temp_mut_or_default::<IconCache>(egui::Id::new("dc-icon-tex"))
+            .get_temp_mut_or_default::<IconCache>(egui::Id::unique("dc-icon-tex"))
             .insert(key, handle.clone());
     });
     Some(handle)
