@@ -5,6 +5,10 @@
 //! (distribute with even gaps over 3+ shapes), URS-1053 (the painter
 //! cell set).
 
+/// One shape as the align/distribute math sees it: id + page rect
+/// (x, y, w, h — inches, y-up, normalized).
+pub type RectOf = (i64, (f64, f64, f64, f64));
+
 /// One alignment axis-anchored command (URS-1149).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AlignKind {
@@ -59,7 +63,7 @@ pub enum AlignTarget {
 /// component is always 0 (each kind moves one axis). `first` is the
 /// first-selected shape (aligned to itself: zero delta).
 pub fn align_moves(
-    shapes: &[(i64, (f64, f64, f64, f64))],
+    shapes: &[RectOf],
     kind: AlignKind,
     target: AlignTarget,
     page: (f64, f64),
@@ -92,7 +96,7 @@ pub fn align_moves(
 /// shapes stay, the gaps between all adjacent edges equalize.
 /// Returns per-shape pin deltas; `None` unless 3+ shapes.
 pub fn distribute_moves(
-    shapes: &[(i64, (f64, f64, f64, f64))],
+    shapes: &[RectOf],
     vertical: bool,
 ) -> Option<Vec<(i64, (f64, f64))>> {
     if shapes.len() < 3 {

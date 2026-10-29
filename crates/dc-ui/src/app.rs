@@ -4044,7 +4044,12 @@ impl App {
             Action::DistributeH => self.distribute_selection(false),
             Action::DistributeV => self.distribute_selection(true),
             Action::SelectAll => self.select_all(),
-            Action::SelectByType => self.selby_open = !self.selby_open,
+            Action::SelectByType => {
+                self.selby_open = !self.selby_open;
+                if self.selby_open {
+                    self.status = "select by type: pick a criterion and value".into();
+                }
+            }
             Action::FormatPainter => self.arm_format_painter(),
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
@@ -4256,22 +4261,14 @@ impl App {
                 vec![
                 crate::ribbon::Group::new(
                     "Tools",
-                    vec![
-                        big(RibbonButton::new(
-                            Icon::Pointer,
-                            "Pointer Tool",
-                            Action::PointerTool,
-                        )
-                        .selected(self.tool == Tool::Pointer)
-                        .tip("Select and drag (Esc from the Connector Tool)")),
-                        big(RibbonButton::new(
-                            Icon::Connector,
-                            "Connector",
-                            Action::ConnectorTool,
-                        )
-                        .selected(self.tool == Tool::Connector)
-                        .tip("Draw a connector between shapes or points")),
-                    ],
+                    vec![stack(vec![
+                        RibbonButton::new(Icon::Pointer, "Pointer Tool", Action::PointerTool)
+                            .selected(self.tool == Tool::Pointer)
+                            .tip("Select and drag (Esc from the Connector Tool)"),
+                        RibbonButton::new(Icon::Connector, "Connector", Action::ConnectorTool)
+                            .selected(self.tool == Tool::Connector)
+                            .tip("Draw a connector between shapes or points (Esc to finish)"),
+                    ])],
                 ),
                 crate::ribbon::Group::new(
                     "Clipboard",
@@ -4298,6 +4295,19 @@ impl App {
                             .selected(self.painter_armed.is_some())
                             .tip("Copy the selection's formatting to the next shape you click")],
                         ]),
+                        // Visio's Editing group rides beside Clipboard:
+                        // Select All + Select by Type (#110, URS-1160).
+                        grid(vec![vec![
+                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
+                                .tip("Select every shape on the page (Ctrl+A)"),
+                            RibbonButton::new(
+                                Icon::Shapes,
+                                "Select by Type…",
+                                Action::SelectByType,
+                            )
+                            .selected(self.selby_open)
+                            .tip("Select shapes by type, master, or layer"),
+                        ]]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -4408,88 +4418,50 @@ impl App {
                 crate::ribbon::Group::new(
                     "Arrange",
                     vec![
-                        big(
+                        stack(vec![
                             RibbonButton::new(Icon::BringFront, "Bring Forward", Action::Macros)
                                 .enabled(false)
                                 .tip("Z-order — planned"),
-                        ),
-                        big(
                             RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
                                 .enabled(false)
                                 .tip("Z-order — planned"),
-                        ),
+                            RibbonButton::new(Icon::Check, "To Page", Action::AlignToPage)
+                                .selected(self.align_to_page)
+                                .tip("Align against the page instead of the primary selection"),
+                        ]),
                         grid(vec![
                             vec![
-                                RibbonButton::new(Icon::Align, "Align Left", Action::AlignLeft)
+                                RibbonButton::new(Icon::Align, "Left", Action::AlignLeft)
                                     .enabled(multi_sel)
                                     .tip("Align left edges (first-selected or page)"),
-                                RibbonButton::new(
-                                    Icon::AlignCenter,
-                                    "Align Center",
-                                    Action::AlignHCenter,
-                                )
+                                RibbonButton::new(Icon::AlignCenter, "Center", Action::AlignHCenter)
                                 .enabled(multi_sel)
                                 .tip("Align vertical centers"),
-                                RibbonButton::new(Icon::AlignRight, "Align Right", Action::AlignRight)
+                                RibbonButton::new(Icon::AlignRight, "Right", Action::AlignRight)
                                     .enabled(multi_sel)
                                     .tip("Align right edges"),
                             ],
                             vec![
-                                RibbonButton::new(Icon::AlignTop, "Align Top", Action::AlignTop)
+                                RibbonButton::new(Icon::AlignTop, "Top", Action::AlignTop)
                                     .enabled(multi_sel)
                                     .tip("Align top edges"),
-                                RibbonButton::new(
-                                    Icon::AlignMiddle,
-                                    "Align Middle",
-                                    Action::AlignVCenter,
-                                )
+                                RibbonButton::new(Icon::AlignMiddle, "Middle", Action::AlignVCenter)
                                 .enabled(multi_sel)
                                 .tip("Align horizontal middles"),
-                                RibbonButton::new(
-                                    Icon::AlignBottom,
-                                    "Align Bottom",
-                                    Action::AlignBottom,
-                                )
+                                RibbonButton::new(Icon::AlignBottom, "Bottom", Action::AlignBottom)
                                 .enabled(multi_sel)
                                 .tip("Align bottom edges"),
                             ],
                             vec![
-                                RibbonButton::new(
-                                    Icon::DistH,
-                                    "Distribute H",
-                                    Action::DistributeH,
-                                )
+                                RibbonButton::new(Icon::DistH, "Dist H", Action::DistributeH)
                                 .enabled(tri_sel)
                                 .tip("Even horizontal spacing (3+ shapes)"),
-                                RibbonButton::new(
-                                    Icon::DistV,
-                                    "Distribute V",
-                                    Action::DistributeV,
-                                )
+                                RibbonButton::new(Icon::DistV, "Dist V", Action::DistributeV)
                                 .enabled(tri_sel)
                                 .tip("Even vertical spacing (3+ shapes)"),
-                                RibbonButton::new(Icon::Check, "To Page", Action::AlignToPage)
-                                    .selected(self.align_to_page)
-                                    .tip("Align against the page instead of the first-selected shape"),
                             ],
                         ]),
                     ],
-                ),
-                crate::ribbon::Group::new(
-                    "Editing",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
-                                .tip("Select every shape on the page (Ctrl+A)"),
-                            RibbonButton::new(
-                                Icon::Shapes,
-                                "Select by Type…",
-                                Action::SelectByType,
-                            )
-                            .selected(self.selby_open)
-                            .tip("Select shapes by type, master, or layer"),
-                        ],
-                    ])],
                 ),
                 ]
             }

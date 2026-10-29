@@ -5608,3 +5608,226 @@ fn endpoint_drag_releases_and_reglues() {
         Some("GUARD(_WALKGLUE(EndTrigger,BegTrigger,WalkPreference))")
     );
 }
+
+// ---- GitHub #110: align/distribute, select, painter, nudge -----------------
+
+/// Align Left lines every selected shape's left edge on the
+/// first-selected shape's (URS-1149), as one undoable command.
+#[test]
+fn align_left_lines_selection_on_first_selected() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-60.0, 60.0));
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let br = h.state().debug_shape_page_rect(b).unwrap();
+    assert!((ar.0 - br.0).abs() > 0.3, "shapes start unaligned");
+
+    // Select both (marquee over both), primary = A (first click).
+    // Simpler and deterministic: click A, shift-click B.
+    let ars = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let brs = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, ars.center(), egui::PointerButton::Primary);
+    h.run();
+    // kittest click convention: press + release queued together; the
+    // shift state rides an explicit Modifiers event.
+    h.hover_at(brs.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.event(egui::Event::PointerButton {
+        pos: brs.center(),
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::SHIFT,
+    });
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both selected");
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Left").click();
+    h.run();
+    let br2 = h.state().debug_shape_page_rect(b).unwrap();
+    let ar2 = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br2.0 - ar2.0).abs() < 1e-5,
+        "left edges aligned: {} vs {}",
+        br2.0,
+        ar2.0
+    );
+    // Visio's anchor is the PRIMARY selection — the last-clicked
+    // shape (B here; shift-clicking B made it primary), so B stays.
+    assert!((br2.0 - br.0).abs() < 1e-5, "the primary anchors");
+    // One undo returns B.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let br3 = h.state().debug_shape_page_rect(b).unwrap();
+    assert!(
+        (br3.0 - br.0).abs() < 1e-5,
+        "undo restores B: {} vs {}",
+        br3.0,
+        br.0
+    );
+}
+
+/// Distribute evens the gaps between three shapes (URS-1161).
+#[test]
+fn distribute_evens_spacing() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Three rectangles at staggered x positions.
+    let mut ids = Vec::new();
+    let (_page, a) = place_master(&mut h, 2);
+    ids.push(a);
+    let sr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(-180.0, -40.0));
+    let (_, b) = place_master(&mut h, 2);
+    ids.push(b);
+    let sr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(-60.0, 80.0));
+    let (_, c) = place_master(&mut h, 2);
+    ids.push(c);
+    let sr = h.state().debug_shape_screen_rect_for_test(c).unwrap();
+    drag_naturally(&mut h, sr.center(), egui::vec2(120.0, 160.0));
+
+    // Select all three via Ctrl+A (also covers URS-1160's select all).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::A);
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 3);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Dist H").click();
+    h.run();
+    let mut rs: Vec<(f64, f64)> = ids
+        .iter()
+        .map(|id| {
+            let r = h.state().debug_shape_page_rect(*id).unwrap();
+            (r.0, r.2)
+        })
+        .collect();
+    rs.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let g1 = rs[1].0 - (rs[0].0 + rs[0].1);
+    let g2 = rs[2].0 - (rs[1].0 + rs[1].1);
+    assert!(
+        (g1 - g2).abs() < 2e-3 && g1 > 0.0,
+        "even gaps: {g1} vs {g2} ({rs:?})"
+    );
+}
+
+/// Select by Type picks the class: both Rectangle instances via the
+/// Master criterion (URS-1160), plus an Ellipse staying out.
+#[test]
+fn select_by_type_master_criterion() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let (_, b) = place_master(&mut h, 2);
+    let (_, e) = place_master(&mut h, 3); // Ellipse
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Select by Type").click();
+    h.run();
+    h.get_by_label_contains("Master").click();
+    h.run();
+    h.get_by_label_contains(&format!("Rectangle ({} shapes)", 2)).click();
+    h.run();
+    h.get_by_label("Select").click();
+    h.run();
+    let sel = h.state().debug_sel_set();
+    assert_eq!(sel.len(), 2, "both rectangles: {sel:?}");
+    assert!(sel.contains(&(page, a)) && sel.contains(&(page, b)));
+    assert!(!sel.contains(&(page, e)), "the ellipse stays out");
+}
+
+/// The Format Painter copies the source's resolved formatting onto the
+/// clicked shape in one undo step (URS-1053).
+#[test]
+fn format_painter_copies_formatting() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 3); // Ellipse — different master
+
+    // The source is A: select it (the ellipse placement left B
+    // selected), then arm the painter on A.
+    let asr0 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr0.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Format Painter").click();
+    h.run();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, bsr.center(), egui::PointerButton::Primary);
+    h.run();
+    // The painter wrote A's resolved cells onto B as literals.
+    for cell in ["LineWeight", "FillForegnd", "FillPattern"] {
+        let bv = h.state().debug_cell(page, b, cell);
+        assert!(
+            bv.is_some(),
+            "cell {cell} written onto B"
+        );
+    }
+    assert!(
+        h.state().debug_status().contains("formatting cells copied"),
+        "status notes the copy: {}",
+        h.state().debug_status()
+    );
+    // The painter is single-shot: another click just selects.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_sel(), Some((page, a)));
+}
+
+/// Arrow keys nudge the selection (URS-1217 slice): one press = one
+/// undoable 0.25 in move; Shift widens to 1 in.
+#[test]
+fn arrow_keys_nudge_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let x0 = cell_of(&h, page, a, "PinX");
+    let y0 = cell_of(&h, page, a, "PinY");
+
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    let x1 = cell_of(&h, page, a, "PinX");
+    assert!((x1 - x0 - 0.25).abs() < 1e-5, "right arrow: {x0} → {x1}");
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    let y1 = cell_of(&h, page, a, "PinY");
+    assert!((y1 - y0 - 0.25).abs() < 1e-5, "up arrow (y-up): {y0} → {y1}");
+
+    // Shift widens the step.
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::ArrowRight);
+    h.run();
+    let x2 = cell_of(&h, page, a, "PinX");
+    assert!((x2 - x1 - 1.0).abs() < 1e-5, "shift widens: {x1} → {x2}");
+
+    // Each press undoes individually.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let x3 = cell_of(&h, page, a, "PinX");
+    assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
+}
