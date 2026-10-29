@@ -275,6 +275,11 @@ impl ShapeLayers {
             if hidden_member(shape) {
                 continue;
             }
+            // Guides are canvas-overlay furniture (#113), never ink:
+            // no raster layer for them.
+            if shape.type_.as_deref() == Some("Guide") {
+                continue;
+            }
             if let Some(g) = group_edit {
                 if shape.id != g {
                     continue;

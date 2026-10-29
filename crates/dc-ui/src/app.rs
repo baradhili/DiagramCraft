@@ -161,6 +161,11 @@ pub struct App {
     /// recomputed by `update_drag` while a move drag is live and
     /// painted by the canvas from `DragFx::hints`.
     snap_live: Vec<crate::snap::Hint>,
+    /// Guide-glue pending on the live drag (#113): the guide the
+    /// snapped axis came from and which pin axes to glue. Written by
+    /// `apply_drag_snap` when glue-to-guides is on, consumed by the
+    /// move commit as Visio's `PinX = Sheet.N!PinX` formulas.
+    drag_glue: Option<(i64, bool, bool)>,
     shot_frames: u32,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
@@ -399,6 +404,7 @@ impl App {
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
+            drag_glue: None,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1187,6 +1193,15 @@ impl App {
 
     fn shape_hit(&self, page_pos: (f64, f64)) -> Option<i64> {
         let ed = self.ed()?;
+        // Guides sit above shapes in hit priority (#113): a press on
+        // the line (within the screen threshold) grabs the guide, per
+        // Visio. Not while group-editing — guides are page furniture.
+        if self.group_edit.is_empty() {
+            let threshold = 5.0 / self.view.px_per_in() as f64;
+            if let Some(g) = crate::guides::guide_hit(&self.page_guides(), page_pos, threshold) {
+                return Some(g.id);
+            }
+        }
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
         // Group-edit mode (#78): only the innermost open group's
         // members are on the canvas — clicks resolve against them
@@ -1243,6 +1258,11 @@ impl App {
         let (page_id, shape_id) = self.sel?;
         let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
         let shape = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        // A selected guide draws as the guide overlay itself (#113):
+        // no selection frame, no handles.
+        if crate::guides::is_guide(shape) {
+            return None;
+        }
         let (x, y, w, h) = self.shape_rect(&ed.doc, page_id, shape)?;
         let geom = self.page_geom();
         Some(Rect::from_min_size(
@@ -1277,6 +1297,11 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
             return Vec::new();
         };
+        // Guides drag by their body (#113) — no resize/endpoint
+        // handles (tilting a guide is not a thing).
+        if crate::guides::is_guide(sh) {
+            return Vec::new();
+        }
         let nested = chain.len() >= 2;
         let page_h = Self::page_height(ed, page_id);
         let to_page = |p: (f64, f64)| -> (f64, f64) {
@@ -1578,6 +1603,9 @@ impl App {
             // one undo restores everything.
             if let Some(ed) = self.ed() {
                 cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page_id, &ids));
+                for sid in &ids {
+                    cmds.extend(self.guide_glue_release_cmds(page_id, *sid));
+                }
             }
             let n = ids.len();
             self.apply(Macro::new(format!("delete {n} shapes"), cmds));
@@ -1590,10 +1618,13 @@ impl App {
     }
 
     /// Delete a single shape, folding membership-row cleanup into the
-    /// same undo step when it is a container (#138).
+    /// same undo step when it is a container (#138) and glue-release
+    /// when it is a guide (#113: dependents keep their position, the
+    /// pin formulas referencing the gone guide are stripped).
     fn delete_one(&mut self, page_id: i64, shape_id: i64) {
         let mut cmds: Vec<Box<dyn dc_core::Command>> =
             vec![Box::new(RemoveShape::new(page_id, shape_id))];
+        cmds.extend(self.guide_glue_release_cmds(page_id, shape_id));
         if let Some(ed) = self.ed() {
             cmds.extend(dc_core::container_membership_cleanup(
                 &ed.doc,
@@ -2412,16 +2443,18 @@ impl App {
             .collect()
     }
 
-    /// A snap context over prebuilt targets: the displayed grid and
-    /// ruler-subdivision spacings, and the Visio-style screen snap
-    /// strength converted through the zoom.
+    /// A snap context over prebuilt targets and guides (#113 now
+    /// feeds them): the displayed grid and ruler-subdivision
+    /// spacings, and the Visio-style screen snap strength converted
+    /// through the zoom.
     fn snap_ctx_of<'t>(
         &self,
         targets: &'t [crate::snap::SnapTarget],
+        guides: &'t [crate::snap::Guide],
     ) -> crate::snap::SnapCtx<'t> {
         crate::snap::SnapCtx {
             targets,
-            guides: &[], // #113's guide objects feed in when they land
+            guides,
             grid_step_in: canvas::grid_step_in(&self.view),
             ruler_step_in: canvas::ruler_interval_in(&self.view),
             threshold_in: SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
@@ -2445,14 +2478,152 @@ impl App {
         excluded.extend(d.group.iter().copied());
         excluded.extend(self.container_member_ids(page_id, d.shape));
         let targets = self.snap_targets(page_id, &excluded);
-        let ctx = self.snap_ctx_of(&targets);
+        let guide_list = self.snap_guides(&excluded);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
         let live = (x + pin.0 - d.start_pin.0, y + pin.1 - d.start_pin.1, w, h);
         let res = crate::snap::snap_translation(live, &ctx, &self.snap);
         if self.snap.dynamic_grid {
             let snapped = (live.0 + res.dx, live.1 + res.dy, w, h);
             self.snap_live = crate::snap::dynamic_hints(snapped, &ctx);
         }
+        // #113: remember which guide an axis snapped onto — the move
+        // commit turns it into Visio's pin glue formula when
+        // glue-to-guides is enabled.
+        self.drag_glue = None;
+        if self.snap.glue_active && self.snap.glue_guides {
+            use crate::snap::SnapHit;
+            let guide_of = |h: &Option<(f64, SnapHit)>| match h {
+                Some((_, SnapHit::Guide(id))) => Some(*id),
+                _ => None,
+            };
+            let (gx, gy) = (
+                guide_of(&res.x_hit).is_some(),
+                guide_of(&res.y_hit).is_some(),
+            );
+            if let Some(id) = guide_of(&res.x_hit).or(guide_of(&res.y_hit)) {
+                self.drag_glue = Some((id, gx, gy));
+            }
+        }
         (pin.0 + res.dx, pin.1 + res.dy)
+    }
+
+    /// #113: commands that release every shape glued to `shape_id`
+    /// (no-ops for non-guides): each dependent's pin formula
+    /// referencing the guide is replaced by its cached value, so the
+    /// shape keeps its position when the guide goes — Visio's
+    /// release-on-delete.
+    fn guide_glue_release_cmds(
+        &self,
+        page_id: i64,
+        shape_id: i64,
+    ) -> Vec<Box<dyn dc_core::Command>> {
+        let Some(ed) = self.ed() else { return Vec::new() };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return Vec::new();
+        };
+        if !crate::guides::is_guide(sh) {
+            return Vec::new();
+        }
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        for (sid, axes) in crate::guides::glue_dependents(&page.shapes, shape_id) {
+            let Some(dep) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+                continue;
+            };
+            for (cell, _) in axes {
+                let v = dep.sheet.cell(cell).and_then(|c| c.numeric());
+                if let Some(v) = v {
+                    cmds.push(Box::new(SetCell::new(
+                        Scope::Shape {
+                            page: page_id,
+                            shape: sid,
+                        },
+                        cell,
+                        vsdx::Cell::value(format!("{v:.6}")),
+                    )));
+                }
+            }
+        }
+        cmds
+    }
+
+    /// #113: a ruler drag released over the page becomes a guide
+    /// (URS-1076): one undoable AddShape carrying the synthetic
+    /// clean-room guide cells, then selected like any placement.
+    fn add_guide(&mut self, src: canvas::GuideSource, at: (f64, f64)) {
+        use crate::guides::GuideKind;
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let geom = self.page_geom();
+        let kind = match src {
+            canvas::GuideSource::Vertical => GuideKind::Vertical,
+            canvas::GuideSource::Horizontal => GuideKind::Horizontal,
+            canvas::GuideSource::Point => GuideKind::Point,
+        };
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let shape = crate::guides::guide_shape(id, kind, at, (geom.w_in, geom.h_in));
+        let label = match kind {
+            GuideKind::Vertical => "add vertical guide",
+            GuideKind::Horizontal => "add horizontal guide",
+            GuideKind::Point => "add guide point",
+        };
+        self.apply(dc_core::AddShape {
+            page: page_id,
+            parent: None,
+            shape,
+        });
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = match kind {
+            GuideKind::Vertical => format!("vertical guide at {} added", self.view.unit.fmt(at.0)),
+            GuideKind::Horizontal => {
+                format!("horizontal guide at {} added", self.view.unit.fmt(at.1))
+            }
+            GuideKind::Point => format!(
+                "guide point at {} added",
+                self.view.unit.fmt_pt(at.0, at.1)
+            ),
+        };
+        let _ = label;
+    }
+
+    /// #113: commit a guide drag — the guide moves through the normal
+    /// 1D/pin move path, and every shape glued to it (pin formulas
+    /// naming this guide) follows: cached values rewritten in the
+    /// same undo step, formulas kept for the file's sake (a real
+    /// Visio re-evaluates them live).
+    fn apply_guide_move(&mut self, page_id: i64, guide_id: i64, to_pin: (f64, f64)) {
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![self.move_cmd_for(page_id, guide_id, to_pin)];
+        if let Some(ed) = self.ed() {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+            if let Some(page) = page {
+                for (sid, axes) in crate::guides::glue_dependents(&page.shapes, guide_id) {
+                    for (cell, guide_axis) in axes {
+                        let v = if guide_axis == "PinX" {
+                            to_pin.0
+                        } else {
+                            to_pin.1
+                        };
+                        cmds.push(Box::new(SetCell::new(
+                            Scope::Shape {
+                                page: page_id,
+                                shape: sid,
+                            },
+                            cell,
+                            vsdx::Cell {
+                                v: Some(format!("{v:.6}")),
+                                f: Some(crate::guides::glue_formula(guide_id, guide_axis)),
+                                ..vsdx::Cell::default()
+                            },
+                        )));
+                    }
+                }
+            }
+        }
+        self.apply(Macro::new(format!("move guide {guide_id}"), cmds));
     }
 
     /// #109: snap a single dragged point — a 1D endpoint under the
@@ -2466,8 +2637,65 @@ impl App {
     ) -> Option<((f64, f64), crate::snap::SnapHit)> {
         let page_id = self.page_id()?;
         let targets = self.snap_targets(page_id, &[dragged]);
-        let ctx = self.snap_ctx_of(&targets);
+        let guide_list = self.snap_guides(&[dragged]);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
         crate::snap::point_snap(p, &ctx, &self.snap, glue)
+    }
+
+    /// The page's guides as UI info (#113), resolved through the
+    /// inheritance chain.
+    fn page_guides(&self) -> Vec<crate::guides::GuideInfo> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page_id) = self.page_id() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| crate::guides::is_guide(s))
+            .filter_map(|s| {
+                let Ok(chain) = shape_chain(&ed.doc, page_id, s.id) else {
+                    return None;
+                };
+                let get = |n: &str| {
+                    ed.doc
+                        .resolve_cell(s, &chain, n)
+                        .and_then(|c| c.numeric())
+                };
+                crate::guides::guide_info(s.id, s, get)
+            })
+            .collect()
+    }
+
+    /// The guide list as engine targets (#113 → #109's Guide seam),
+    /// minus `excluded` (the dragged shape's set — a guide being
+    /// dragged never targets itself).
+    fn snap_guides(&self, excluded: &[i64]) -> Vec<crate::snap::Guide> {
+        self.page_guides()
+            .iter()
+            .filter(|g| !excluded.contains(&g.id))
+            .map(|g| match g.kind {
+                crate::guides::GuideKind::Vertical => crate::snap::Guide::Line {
+                    id: g.id,
+                    horizontal: false,
+                    at: g.x,
+                },
+                crate::guides::GuideKind::Horizontal => crate::snap::Guide::Line {
+                    id: g.id,
+                    horizontal: true,
+                    at: g.y,
+                },
+                crate::guides::GuideKind::Point => crate::snap::Guide::Point {
+                    id: g.id,
+                    x: g.x,
+                    y: g.y,
+                },
+            })
+            .collect()
     }
 
     /// Track an in-progress shape drag; commit on release.
@@ -2506,14 +2734,110 @@ impl App {
                     // the press actually landed on). Each member moves
                     // through `move_cmd_for`: 1D members translate their
                     // endpoints too, not just the pin.
-                    if d.group.is_empty() {
+                    // A guide drag (#113) is its own commit: the
+                    // guide moves and its glued dependents follow.
+                    let dragging_guide = self.ed.as_ref().is_some_and(|ed| {
+                        let page = &ed.doc.pages
+                            [self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+                        vsdx::model::find_shape_by_id(&page.shapes, d.shape)
+                            .is_some_and(crate::guides::is_guide)
+                    });
+                    if dragging_guide {
+                        self.apply_guide_move(page_id, d.shape, d.last_pin);
+                    } else if d.group.is_empty() {
                         // A container drag carries its members (Visio,
                         // #27): one undo step.
                         let member_ids = self.container_member_ids(page_id, d.shape);
                         if member_ids.is_empty() {
                             let label = format!("move shape {}", d.shape);
                             let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
-                            self.apply_boxed(&label, cmd);
+                            // #113: a shape dropped onto a guide with
+                            // glue-to-guides on glues its pin(s) to it
+                            // — Visio's `PinX = Sheet.N!PinX` formula
+                            // with the snapped cached value. Only for
+                            // plain 2D shapes (1D endpoint glue to
+                            // guides rides with #108's connectors).
+                            let glue = self.drag_glue.take().filter(|_| {
+                                self.ed.as_ref().is_some_and(|ed| {
+                                    let page = &ed.doc.pages[self.page_idx];
+                                    vsdx::model::find_shape_by_id(&page.shapes, d.shape)
+                                        .and_then(|sh| {
+                                            let chain =
+                                                shape_chain(&ed.doc, page_id, d.shape).ok()?;
+                                            ed.doc
+                                                .resolve_cell(sh, &chain, "BeginX")
+                                                .and_then(|c| c.numeric())
+                                        })
+                                        .is_none()
+                                })
+                            });
+                            match glue {
+                                Some((guide_id, gx, gy)) => {
+                                    // Guide glue ties the PIN to the
+                                    // guide (Visio semantics: the pin
+                                    // rides the line). An edge-snap
+                                    // must not glue — the formula
+                                    // would jump the shape half its
+                                    // width at drop — so each axis
+                                    // glues only when the snapped pin
+                                    // coordinate already IS the
+                                    // guide's.
+                                    let g = self
+                                        .page_guides()
+                                        .iter()
+                                        .find(|g| g.id == guide_id)
+                                        .copied();
+                                    let axis_target = |axis: &str| -> Option<f64> {
+                                        let g = g?;
+                                        match (axis, g.kind) {
+                                            ("PinX", crate::guides::GuideKind::Vertical)
+                                            | ("PinX", crate::guides::GuideKind::Point) => {
+                                                Some(g.x)
+                                            }
+                                            ("PinY", crate::guides::GuideKind::Horizontal)
+                                            | ("PinY", crate::guides::GuideKind::Point) => {
+                                                Some(g.y)
+                                            }
+                                            _ => None,
+                                        }
+                                    };
+                                    let mut glue_cmds: Vec<Box<dyn dc_core::Command>> =
+                                        Vec::new();
+                                    for (axis, want) in [("PinX", gx), ("PinY", gy)] {
+                                        let Some(target) = axis_target(axis) else {
+                                            continue;
+                                        };
+                                        let pin = if axis == "PinX" {
+                                            d.last_pin.0
+                                        } else {
+                                            d.last_pin.1
+                                        };
+                                        if want && (pin - target).abs() < 1e-6 {
+                                            glue_cmds.push(Box::new(SetCell::new(
+                                                Scope::Shape {
+                                                    page: page_id,
+                                                    shape: d.shape,
+                                                },
+                                                axis,
+                                                vsdx::Cell {
+                                                    v: Some(format!("{target:.6}")),
+                                                    f: Some(crate::guides::glue_formula(
+                                                        guide_id, axis,
+                                                    )),
+                                                    ..vsdx::Cell::default()
+                                                },
+                                            )));
+                                        }
+                                    }
+                                    if glue_cmds.is_empty() {
+                                        self.apply_boxed(&label, cmd);
+                                    } else {
+                                        glue_cmds.insert(0, cmd);
+                                        self.apply(Macro::new(label, glue_cmds));
+                                    }
+                                }
+                                None => self.apply_boxed(&label, cmd),
+                            }
                         } else {
                             let (dx, dy) =
                                 (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
@@ -2849,6 +3173,18 @@ impl App {
             return;
         };
         self.set_selection(Some((page_id, shape_id)));
+        // A guide has no text and no event to run (#113): selecting
+        // it is the whole double-click.
+        if let Some(ed) = self.ed() {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+            if let Some(sh) =
+                page.and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape_id))
+            {
+                if crate::guides::is_guide(sh) {
+                    return;
+                }
+            }
+        }
         let formula = self.ed.as_ref().and_then(|ed| {
             let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
             let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
@@ -4485,6 +4821,25 @@ impl App {
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
+        // The page's guides (#113): collected before the borrows below
+        // (the marquee-gating hit closure and the overlay both use
+        // them).
+        let page_guides = self.page_guides();
+        let guide_fx: Vec<canvas::GuideFx> = page_guides
+            .iter()
+            .map(|g| canvas::GuideFx {
+                id: g.id,
+                vertical: match g.kind {
+                    crate::guides::GuideKind::Vertical => Some(true),
+                    crate::guides::GuideKind::Horizontal => Some(false),
+                    crate::guides::GuideKind::Point => None,
+                },
+                x: g.x,
+                y: g.y,
+                selected: self.sel.is_some_and(|(_, sid)| sid == g.id),
+            })
+            .collect();
+        let guide_hit_threshold = 5.0 / self.view.px_per_in() as f64;
         // Live move feedback (#96): during a moved drag the dragged
         // shapes' static layers are suppressed and ghosted at the live
         // position — Visio moves the shape under the cursor for the
@@ -4632,6 +4987,11 @@ impl App {
         let hit = |pos: (f64, f64)| -> bool {
             let Some(ed) = ed else { return false };
             let Some(page) = page else { return false };
+            // Guides count as occupied page (#113): a press on one
+            // arms its move-drag, never a marquee.
+            if crate::guides::guide_hit(&page_guides, pos, guide_hit_threshold).is_some() {
+                return true;
+            }
             for shape in page.shapes.iter().rev() {
                 if let Some((x, y, w, h)) = Self::shape_rect_static(&ed.doc, page.id, shape) {
                     if hit_in_rect(pos, x, y, w, h) {
@@ -4650,6 +5010,7 @@ impl App {
             &extra_rects,
             &handles,
             &drag_fx,
+            &guide_fx,
             armed,
             &hit,
             &mut mouse,
@@ -4681,6 +5042,11 @@ impl App {
             }
             if let Some((x0, y0, x1, y1)) = out.marquee_done {
                 self.apply_marquee(x0, y0, x1, y1);
+            }
+            // A ruler drag released over the page drops a guide
+            // (#113, URS-1076).
+            if let Some((src, pos)) = out.guide_drop {
+                self.add_guide(src, pos);
             }
         }
         // Comment badges (#29 rework): a small bubble at the top-left
@@ -4836,7 +5202,18 @@ impl App {
         if let Some(pos) = out.right_click_page_pos {
             // Visio: right-click selects the shape under the cursor and
             // opens its context menu (empty page = no shape menu yet).
-            match self.shape_hit(pos) {
+            // Guides carry no shape context menu (#113): they are
+            // page furniture — right-click on one opens nothing.
+            let hit = self.shape_hit(pos).and_then(|id| {
+                let ed = self.ed()?;
+                let page_id = self.page_id()?;
+                let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+                match vsdx::model::find_shape_by_id(&page.shapes, id) {
+                    Some(sh) if crate::guides::is_guide(sh) => None,
+                    _ => Some(id),
+                }
+            });
+            match hit {
                 Some(shape_id) => {
                     if let Some(p) = self.page_id() {
                         // Right-clicking a member of the current
@@ -7302,6 +7679,31 @@ impl App {
     pub fn debug_set_snap_for_test(&mut self, s: crate::snap::SnapSettings) {
         self.snap = s;
     }
+
+    /// #113 tests: the page's guides — (id, kind name, x, y), page
+    /// inches y-up (x = the line for vertical, y for horizontal,
+    /// both for points).
+    pub fn debug_guides(&self) -> Vec<(i64, &'static str, f64, f64)> {
+        self.page_guides()
+            .iter()
+            .map(|g| {
+                let kind = match g.kind {
+                    crate::guides::GuideKind::Vertical => "vertical",
+                    crate::guides::GuideKind::Horizontal => "horizontal",
+                    crate::guides::GuideKind::Point => "point",
+                };
+                (g.id, kind, g.x, g.y)
+            })
+            .collect()
+    }
+
+    /// #113 tests: a cell's formula (the `F` attribute) on a shape.
+    pub fn debug_cell_formula(&self, page: i64, shape: i64, cell: &str) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet.cell(cell).and_then(|c| c.f.clone())
+    }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
     }
@@ -9228,7 +9630,7 @@ fn snap_hit_text(h: crate::snap::SnapHit) -> String {
     match h {
         Grid => "the grid".into(),
         Ruler => "a ruler subdivision".into(),
-        Guide => "a guide".into(),
+        Guide(id) => format!("guide {id}"),
         AlignmentBox(id) => format!("shape {id}'s alignment box"),
         ShapeExtension(id) => format!("shape {id}'s extension"),
         ShapeIntersection => "a shape intersection".into(),

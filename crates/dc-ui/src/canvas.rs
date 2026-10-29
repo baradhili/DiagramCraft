@@ -200,6 +200,9 @@ pub struct CanvasOut {
     /// Marquee (empty-area drag) finished: rect in page inches, y-up,
     /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
+    /// A ruler drag released over the page (#113 guides slice): the
+    /// guide kind and its page position (inches, y-up).
+    pub guide_drop: Option<(GuideSource, (f64, f64))>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,
     /// Shift held at click time (multi-select toggle).
@@ -217,6 +220,31 @@ pub enum Corner {
     BottomLeft,
     BottomRight,
 }
+
+/// Which ruler a guide is dragged out of (#113 guides slice).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuideSource {
+    /// The left (vertical) ruler → a vertical guide.
+    Vertical,
+    /// The top (horizontal) ruler → a horizontal guide.
+    Horizontal,
+    /// The ruler corner square → a guide point.
+    Point,
+}
+
+/// A guide to paint on the canvas overlay (page inches, y-up) —
+/// guides never raster as page ink (Visio: no print, no export).
+#[derive(Debug, Clone, Copy)]
+pub struct GuideFx {
+    pub id: i64,
+    pub vertical: Option<bool>, // None = guide point
+    pub x: f64,
+    pub y: f64,
+    pub selected: bool,
+}
+
+/// The guide color: Visio's teal guide lines.
+const GUIDE: Color32 = Color32::from_rgb(0x00, 0x8F, 0xA3);
 
 /// One grabbable selection handle (GitHub #59). 2D shapes expose the
 /// four resize corners; 1D shapes (lines/connectors, resolved
@@ -316,6 +344,7 @@ pub fn show(
     extra_sel_rects: &[Rect], // other multi-selection members
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
+    guides: &[GuideFx],      // #113: guide overlay, above ink
     stencil_hover: bool,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
@@ -332,6 +361,7 @@ pub fn show(
         handle_drag_done: None,
         press_page_pos: None,
         marquee_done: None,
+        guide_drop: None,
         marquee_live: None,
         shift_click: false,
         ctrl_click: false,
@@ -395,6 +425,7 @@ pub fn show(
     let mem_handle = egui::Id::unique("dc-handle-drag");
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
+    let mem_guide = egui::Id::unique("dc-guide-drag");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -413,6 +444,20 @@ pub fn show(
             // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else if view.show_rulers
+                && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
+            {
+                // A ruler drag pulls a guide out (#113): the corner
+                // square yields a guide point, the left band below it
+                // a vertical guide, the top band a horizontal one.
+                let src = if p.x < canvas_r.left() + RULER && p.y < canvas_r.top() + RULER {
+                    GuideSource::Point
+                } else if p.x < canvas_r.left() + RULER {
+                    GuideSource::Vertical
+                } else {
+                    GuideSource::Horizontal
+                };
+                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_guide, src));
             } else if !ui.input(|i| i.modifiers.command) {
                 let page_pos = screen_to_page(p, view, page);
                 if hit_shape(page_pos) {
@@ -445,6 +490,34 @@ pub fn show(
                     screen_to_page(e, view, page),
                 ));
             }
+        }
+    }
+
+    // Guide drag (#113): armed on a ruler press above; a dashed
+    // preview line/point follows the pointer while the button is
+    // held; releasing over the page drops the guide, releasing
+    // anywhere else cancels (Visio drops only onto the page).
+    let guide_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<GuideSource>(mem_guide));
+    let mut guide_live: Option<(GuideSource, (f64, f64))> = None;
+    if let Some(src) = guide_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx().memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
+            if primary_released {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    let page_pos = screen_to_page(p, view, page);
+                    if page_pos.0 >= 0.0
+                        && page_pos.0 <= page.w_in
+                        && page_pos.1 >= 0.0
+                        && page_pos.1 <= page.h_in
+                    {
+                        out.guide_drop = Some((src, page_pos));
+                    }
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            guide_live = Some((src, screen_to_page(p, view, page)));
         }
     }
 
@@ -569,6 +642,81 @@ pub fn show(
                 y += step_px;
             }
         }
+    }
+
+    // Guides (#113): dashed teal lines / point crosshairs above the
+    // ink, below the selection chrome. A selected guide draws solid;
+    // a live ruler-drag preview follows the pointer.
+    let draw_guide = |g: GuideFx, live: bool| {
+        let color = if g.selected { Color32::from_rgb(0x00, 0x6D, 0x7D) } else { GUIDE };
+        match g.vertical {
+            Some(true) => {
+                let x = page_to_screen(g.x, 0.0, view, page).x;
+                let (a, b) = (
+                    Pos2::new(x, out.page_rect.top()),
+                    Pos2::new(x, out.page_rect.bottom()),
+                );
+                if g.selected || live {
+                    p.line_segment([a, b], Stroke::new(1.2, color));
+                } else {
+                    dashed(&p, a, b, color);
+                }
+            }
+            Some(false) => {
+                let y = page_to_screen(0.0, g.y, view, page).y;
+                let (a, b) = (
+                    Pos2::new(out.page_rect.left(), y),
+                    Pos2::new(out.page_rect.right(), y),
+                );
+                if g.selected || live {
+                    p.line_segment([a, b], Stroke::new(1.2, color));
+                } else {
+                    dashed(&p, a, b, color);
+                }
+            }
+            None => {
+                // Guide point: a small crosshair.
+                let c = page_to_screen(g.x, g.y, view, page);
+                let r = if g.selected || live { 7.0 } else { 5.0 };
+                p.line_segment(
+                    [c + Vec2::new(-r, 0.0), c + Vec2::new(r, 0.0)],
+                    Stroke::new(1.2, color),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, -r), c + Vec2::new(0.0, r)],
+                    Stroke::new(1.2, color),
+                );
+            }
+        }
+    };
+    for g in guides {
+        draw_guide(*g, false);
+    }
+    if let Some((src, pos)) = guide_live {
+        let g = match src {
+            GuideSource::Vertical => GuideFx {
+                id: -1,
+                vertical: Some(true),
+                x: pos.0,
+                y: 0.0,
+                selected: false,
+            },
+            GuideSource::Horizontal => GuideFx {
+                id: -1,
+                vertical: Some(false),
+                x: 0.0,
+                y: pos.1,
+                selected: false,
+            },
+            GuideSource::Point => GuideFx {
+                id: -1,
+                vertical: None,
+                x: pos.0,
+                y: pos.1,
+                selected: false,
+            },
+        };
+        draw_guide(g, true);
     }
 
     // Selection frame (page-inch rect → screen).

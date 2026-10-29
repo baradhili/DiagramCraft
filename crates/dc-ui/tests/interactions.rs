@@ -727,6 +727,33 @@ fn drag_naturally(h: &mut Harness<'_, App>, from: Pos2, by: egui::Vec2) {
     h.run();
 }
 
+/// Drag a guide out of a ruler (#113): press in a ruler band, move
+/// across frames, release over the page. `from` must sit inside the
+/// ruler band, `to` inside the page.
+fn ruler_drag(h: &mut Harness<'_, App>, from: egui::Pos2, to: egui::Pos2) {
+    let press = egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let release = egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(from);
+    h.event(press);
+    h.run();
+    h.hover_at(from + (to - from) * 0.5);
+    h.run();
+    h.hover_at(to);
+    h.run();
+    h.event(release);
+    h.run();
+}
+
 /// Place a master through the stencil's click-to-arm, click-to-place
 /// path and return the (page, shape) of the placed instance.
 fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
@@ -5041,4 +5068,239 @@ fn snap_glue_dialog_toggles_persist_to_the_document() {
     let d = h.state().debug_doc_snap_glue().expect("DocumentSettings present");
     assert!(!d.dynamic_grid, "dynamic grid toggled off in the doc");
     assert!(!h.state().debug_snap_settings().dynamic_grid);
+}
+
+// ---- GitHub #113: the guides slice (URS-1076) -----------------------------
+
+/// A drag from each ruler becomes a guide (URS-1076): the left band a
+/// vertical guide, the top band a horizontal one, the corner square a
+/// guide point — each landing where released, each one undo step.
+#[test]
+fn ruler_drag_creates_guides() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run(); // fit settles
+    let canvas = h.state().debug_canvas_rect();
+    let (_page, a) = place_master(&mut h, 2);
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    assert!(h.state().debug_guides().is_empty(), "blank page has no guides");
+
+    // Left ruler → vertical guide at the release x.
+    let (tx, ty) = (ar.0 + 2.0, ar.1 + 1.0);
+    let drop = p2s(tx, ty);
+    let from = egui::pos2(canvas.left() + 10.0, drop.y);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 1, "vertical guide created: {guides:?}");
+    assert_eq!(guides[0].1, "vertical");
+    assert!(
+        (guides[0].2 - tx).abs() < 1e-3,
+        "guide landed at the release x: {} vs {tx}",
+        guides[0].2
+    );
+
+    // Top ruler → horizontal guide at the release y.
+    let hy = ar.1 + 2.5;
+    let drop = p2s(ar.0 + 1.0, hy);
+    let from = egui::pos2(drop.x, canvas.top() + 10.0);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 2, "{guides:?}");
+    assert_eq!(guides[1].1, "horizontal");
+    assert!(
+        (guides[1].3 - hy).abs() < 1e-3,
+        "guide landed at the release y: {} vs {hy}",
+        guides[1].3
+    );
+
+    // Ruler corner → guide point at the release position.
+    let (px, py) = (ar.0 + 3.0, ar.1 + 0.5);
+    let drop = p2s(px, py);
+    let from = egui::pos2(canvas.left() + 10.0, canvas.top() + 10.0);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!(guides.len(), 3, "{guides:?}");
+    assert_eq!(guides[2].1, "point");
+    assert!(
+        (guides[2].2 - px).abs() < 1e-3 && (guides[2].3 - py).abs() < 1e-3,
+        "point guide landed where released: {guides:?}"
+    );
+
+    // Each guide is one undo step.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_guides().len(), 2, "guide point undoes");
+}
+
+/// A dropped shape snaps onto a guide (URS-1076 / URS-1100's guides
+/// toggle): released a few px off, its alignment feature lands
+/// exactly on the guide's line.
+#[test]
+fn shape_snaps_to_a_guide() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let (_page, a) = place_master(&mut h, 2);
+    // Guides are the only snap target.
+    let s = dc_ui::snap::SnapSettings {
+        snap_active: true,
+        snap_grid: false,
+        snap_ruler_subdivisions: false,
+        snap_alignment_boxes: false,
+        snap_shape_extensions: false,
+        snap_connection_points: false,
+        snap_guides: true,
+        glue_active: false,
+        dynamic_grid: false,
+        ..dc_ui::snap::SnapSettings::default()
+    };
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    // A vertical guide 2 in right of the shape's left edge.
+    let gx = ar.0 + 2.0;
+    let drop = p2s(gx, ar.1 + 1.0);
+    let from = egui::pos2(canvas.left() + 10.0, drop.y);
+    ruler_drag(&mut h, from, drop);
+    let guides = h.state().debug_guides();
+    assert_eq!((guides.len(), guides[0].1), (1, "vertical"));
+
+    // Drag the shape so its LEFT edge lands 3 px off the guide.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let to = p2s(gx + ar.2 / 2.0 + 3.0 / ppi as f64, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, asr.center(), to - asr.center());
+    let br = h.state().debug_shape_page_rect(a).expect("rect after");
+    assert!(
+        (br.0 - gx).abs() < 1e-6,
+        "left edge snapped onto the guide: {} vs {gx}",
+        br.0
+    );
+}
+
+/// Dropping a shape with glue-to-guides on writes Visio's pin glue
+/// (`PinX = Sheet.N!PinX`), and dragging the guide carries the glued
+/// shape — one undo step for the whole move (URS-1076: "alignment
+/// persists across many shapes").
+#[test]
+fn glued_shape_follows_its_guide() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let (page, a) = place_master(&mut h, 2);
+    let s = dc_ui::snap::SnapSettings {
+        snap_active: true,
+        snap_grid: false,
+        snap_ruler_subdivisions: false,
+        snap_alignment_boxes: false,
+        snap_shape_extensions: false,
+        snap_connection_points: false,
+        snap_guides: true,
+        glue_active: true,
+        glue_guides: true,
+        glue_shape_handles: false,
+        glue_shape_vertices: false,
+        glue_connection_points: false,
+        dynamic_grid: false,
+        ..dc_ui::snap::SnapSettings::default()
+    };
+    h.state_mut().debug_set_snap_for_test(s);
+    h.run();
+
+    let ar = h.state().debug_shape_page_rect(a).expect("A rect");
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A screen rect");
+    let k = asr.width() as f64 / ar.2;
+    let p2s = |x: f64, y: f64| {
+        egui::pos2(
+            asr.left() + ((x - ar.0) * k) as f32,
+            asr.top() + (((ar.1 + ar.3) - y) * k) as f32,
+        )
+    };
+    // Vertical guide clear of the shape.
+    let gx = ar.0 + 2.0;
+    let gdrop = p2s(gx, ar.1 + 1.0);
+    let gfrom = egui::pos2(canvas.left() + 10.0, gdrop.y);
+    ruler_drag(&mut h, gfrom, gdrop);
+    let (gid, _, _, _) = h.state().debug_guides()[0];
+
+    // Drop the shape with its CENTER 3 px off the guide: the pin
+    // snaps on and glues.
+    let ppi = 96.0 * h.state().debug_view_zoom();
+    let to = p2s(gx + 3.0 / ppi as f64, ar.1 + ar.3 / 2.0);
+    drag_naturally(&mut h, asr.center(), to - asr.center());
+    assert_eq!(
+        h.state().debug_cell_formula(page, a, "PinX").as_deref(),
+        Some(format!("Sheet.{gid}!PinX").as_str()),
+        "pin glue formula written"
+    );
+    let br = h.state().debug_shape_page_rect(a).unwrap();
+    assert!((br.0 + br.2 / 2.0 - gx).abs() < 1e-6, "pin sits on the guide");
+
+    // Dragging the guide moves the glued shape with it. Snapping off
+    // keeps the guide's own landing clean.
+    let mut off = h.state().debug_snap_settings();
+    off.snap_active = false;
+    h.state_mut().debug_set_snap_for_test(off);
+    h.run();
+    let new_x = gx + 1.0;
+    let at = p2s(gx, ar.1 + 2.0); // on the guide line, clear of the shape
+    let to = p2s(new_x, ar.1 + 2.0);
+    drag_naturally(&mut h, at, to - at);
+    let guides = h.state().debug_guides();
+    assert!(
+        (guides[0].2 - new_x).abs() < 1e-3,
+        "guide moved: {:?}",
+        guides
+    );
+    let br = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br.0 + br.2 / 2.0 - new_x).abs() < 1e-6,
+        "glued shape followed the guide: center {} vs {new_x}",
+        br.0 + br.2 / 2.0
+    );
+
+    // Deleting the guide releases the shape: formula stripped,
+    // position kept.
+    click_at(&mut h, p2s(new_x, ar.1 + 2.0), egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_sel(), Some((page, gid)), "guide selected");
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert!(h.state().debug_guides().is_empty(), "guide deleted");
+    assert!(
+        h.state().debug_cell_formula(page, a, "PinX").is_none(),
+        "glue formula released"
+    );
+    let br2 = h.state().debug_shape_page_rect(a).unwrap();
+    assert!(
+        (br2.0 + br2.2 / 2.0 - new_x).abs() < 1e-6,
+        "shape keeps its position after the release"
+    );
 }
