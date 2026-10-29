@@ -7398,6 +7398,11 @@ impl App {
             theme::shell_tokens(ui.visuals()).ribbon_bg,
         );
 
+        // #67: the OS window carries the title; no in-app title band.
+        // Before the backstage return: a drawing replaced while the
+        // File screen is open (Save & New) must retitle immediately,
+        // not when the user leaves backstage (branch review).
+        self.sync_window_title(ui.ctx());
         if self.backstage {
             self.backstage_view(ui);
             self.confirm_new_window(&ctx);
@@ -7406,8 +7411,6 @@ impl App {
         }
 
         // Shell order: top bands, bottom bands, side panels, canvas.
-        // #67: the OS window carries the title; no in-app title band.
-        self.sync_window_title(ui.ctx());
         let t = theme::shell_tokens(ui.visuals());
         self.tab_strip(ui);
         egui::Panel::top("ribbon_content")
