@@ -1446,6 +1446,12 @@ pub fn add_container(
     // track container resizes; the band's height is the member pad.
     set(&mut sheet, "TxtPinX", "0.2");
     set(&mut sheet, "TxtLocPinX", "0");
+    // The text block is the BAND (0.25 in tall), its pin at the band
+    // center: TxtHeight defaults to the shape's full Height otherwise,
+    // and the block would tower a whole container-height above the
+    // band — the white heading rendered off the container, invisible
+    // (#138 branch review).
+    set(&mut sheet, "TxtHeight", "0.25");
     sheet.set_cell(
         "TxtPinY",
         vsdx::model::Cell {
@@ -1455,7 +1461,7 @@ pub fn add_container(
             ..vsdx::model::Cell::default()
         },
     );
-    set(&mut sheet, "TxtLocPinY", "0");
+    set(&mut sheet, "TxtLocPinY", "0.125");
     set(&mut sheet, "FillForegnd", "#2e74b5");
     // (Geometry rows are formula-authored below — the literal w/h the
     // old plain-frame rows used are gone.)
@@ -1599,6 +1605,13 @@ pub fn container_membership_cleanup(
     };
     let mut cmds = Vec::new();
     for s in &p.shapes {
+        // A shape the same delete removes carries its rows away with
+        // it (undo restores them verbatim) — emitting a row removal
+        // for it would error the whole Macro after the removal
+        // already ran (#138 branch review).
+        if gone.contains(&s.id) {
+            continue;
+        }
         let hits = s.sheet.sections_named("User").iter().any(|sec| {
             sec.named_row("msvSDContainerShape")
                 .and_then(|r| r.cell("Value"))
@@ -1722,6 +1735,19 @@ impl crate::Command for GroupShapes {
             bail!("grouping needs at least one member shape");
         }
         found.sort();
+        // #95 branch review: validate the nest target before ANY
+        // mutation — the members detach below, so a late bail would
+        // strand them in a dropped value.
+        if let Some(pid) = self.parent {
+            if self.members.contains(&pid) {
+                bail!("nest target {pid} cannot be its own member");
+            }
+            match doc.pages[pi].shapes.iter().find(|s| s.id == pid) {
+                Some(p) if p.type_.as_deref() == Some("Group") => {}
+                Some(_) => bail!("nest target {pid} is not a group"),
+                None => bail!("parent group {pid} not found"),
+            }
+        }
         // Union bbox from each member's absolute rect.
         let num = |s: &Shape, n: &str| -> f64 {
             doc.resolve_cell(s, &[], n)

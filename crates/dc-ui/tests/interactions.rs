@@ -2081,8 +2081,10 @@ fn container_delete_strips_membership_rows() {
     h.run();
     let (_, cont) = h.state().debug_sel().expect("container selected");
 
-    // Styled band (#138 §2): the heading carries the member count and
-    // the page SVG renders the band fill.
+    // Styled band (#138 §2): the heading carries the member count,
+    // the page SVG renders the band fill, and the heading GLYPHS sit
+    // INSIDE the band (branch review: the text block defaulted to the
+    // full container height and towered invisibly above it).
     assert_eq!(
         h.state().debug_shape_text(cont).as_deref(),
         Some("Container (2)"),
@@ -2093,6 +2095,30 @@ fn container_delete_strips_membership_rows() {
         svg.contains("#2e74b5"),
         "the band fill (the highlight blue) renders"
     );
+    {
+        // The heading tspan's local y-down y ≈ -(H - 0.125) — the band
+        // center of a 0.25-in band at the container's top.
+        let hgt = h
+            .state()
+            .debug_cell_for_test(cont, "Height")
+            .and_then(|v| v.parse::<f64>().ok())
+            .expect("container Height");
+        let band_center = -(hgt - 0.125);
+        let tspan = svg
+            .split("<tspan")
+            .find(|t| t.contains("Container (2)"))
+            .expect("the heading tspan");
+        let y: f64 = tspan
+            .split("y=\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("tspan y");
+        assert!(
+            (y - band_center).abs() < 0.06,
+            "the heading renders in the band: y={y} vs band center {band_center}"
+        );
+    }
 
     // Delete the container: members stay put, rows stripped.
     assert_eq!(h.state().debug_membership_rows_for_test(), 2);

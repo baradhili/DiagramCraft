@@ -1375,7 +1375,8 @@ impl App {
         let t = row.t.as_deref().unwrap_or("");
         if matches!(t, "RelMoveTo" | "RelLineTo") {
             self.status = format!(
-                "vertex drag refused: row {row_ix} is relative ({t}) —                  relative geometry editing arrives separately"
+                "vertex drag refused: row {row_ix} is relative ({t}) — \
+                 relative geometry editing arrives separately"
             );
             return;
         }
@@ -1384,7 +1385,8 @@ impl App {
                 .is_some()
             {
                 self.status = format!(
-                    "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven                      — edit the formula to change it"
+                    "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven \
+                     — edit the formula to change it"
                 );
                 return;
             }
@@ -1395,7 +1397,8 @@ impl App {
                 .is_some_and(|f| f != "Inh" && f != "No Formula")
             {
                 self.status = format!(
-                    "vertex drag refused: row {row_ix}'s {name} is formula-driven                      — edit the formula to change it"
+                    "vertex drag refused: row {row_ix}'s {name} is formula-driven \
+                     — edit the formula to change it"
                 );
                 return;
             }
@@ -2135,7 +2138,15 @@ impl App {
                     })
                 })
                 .unwrap_or_else(|| "Container".into());
-            let count = self.container_member_ids(page_id, container).len() + members.len();
+            // The UNION — already-members selected again must not
+            // double-count (#75 branch review).
+            let mut all = self.container_member_ids(page_id, container);
+            for m in &members {
+                if !all.contains(m) {
+                    all.push(*m);
+                }
+            }
+            let count = all.len();
             cmds.push(Box::new(dc_core::SetText::new(
                 Scope::Shape {
                     page: page_id,
@@ -6263,8 +6274,10 @@ impl App {
         let can_underlying = match underlying {
             Some(c) => {
                 let current = self.container_member_ids(self.page_id().unwrap_or(-1), c);
-                !sel_members.iter().all(|m| current.contains(m))
-                    || !current.iter().all(|m| sel_members.contains(m))
+                // Enables only when a selected shape is not yet a
+                // member — a pure re-add is a no-op and stays gray
+                // (#75 branch review).
+                sel_members.iter().any(|m| !current.contains(m))
             }
             None => false,
         };

@@ -798,6 +798,45 @@ fn container_delete_cleans_membership_rows() {
     ed.undo().unwrap();
     assert_eq!(rows(&ed), 2, "one undo restored the membership rows");
     assert!(ed.doc.pages[0].shapes.iter().any(|s| s.id == cid));
+
+    // #138 branch review: deleting the container AND its members in
+    // one Macro (the marquee+Delete case) must succeed — the cleanup
+    // skips shapes the same delete removes, instead of erroring on
+    // rows of already-removed shapes.
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![];
+    for id in [cid, 50, 51] {
+        cmds.push(Box::new(RemoveShape::new(page0, id)));
+    }
+    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid, 50, 51]));
+    ed.apply(dc_core::Macro::new("delete container + members", cmds)).unwrap();
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| ![cid, 50, 51].contains(&s.id)),
+        "the container and both members are gone, no error"
+    );
+    ed.undo().unwrap();
+    assert_eq!(rows(&ed), 2, "undo brings back container, members, and rows");
+
+    // #95 branch review: into_group with the parent among the members
+    // refuses BEFORE any mutation — nothing detaches.
+    let g1 = dc_core::commands::next_shape_id(&ed.doc, page0);
+    ed.apply(dc_core::commands::GroupShapes::new(page0, vec![50, 51])).unwrap();
+    let bad = dc_core::commands::GroupShapes::into_group(
+        page0,
+        vec![50, g1],
+        g1,
+        (0.0, 0.0),
+    );
+    let err = ed.apply(bad).unwrap_err();
+    assert!(err.to_string().contains("own member"), "{err}");
+    // 50 and 51 stay nested inside g1 (top-level holds only g1).
+    assert!(
+        ed.doc.pages[0].shapes.iter().all(|s| ![50, 51].contains(&s.id)),
+        "50 and 51 stayed grouped inside {g1} — nothing mutated"
+    );
+    assert!(
+        ed.doc.pages[0].shapes.iter().any(|s| s.id == g1),
+        "the group itself is untouched"
+    );
 }
 
 /// #69: a group resize scales its members — literal Xform cells
