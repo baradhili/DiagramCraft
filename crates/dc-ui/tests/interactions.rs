@@ -3671,6 +3671,23 @@ fn drag_moves_the_shape_live_under_the_cursor() {
 /// A synthetic standalone stencil (.vssx) written from an in-code
 /// model — DiagramCraft's own fixture, no Microsoft content. Master
 /// ids are caller-chosen so tests can make two stencils collide.
+/// Pump the harness until the dialog worker's answer lands in the
+/// stencil pane (a FIXED frame count races the worker thread on slow
+/// CI runners — the Windows job of PR #159 saw 8 frames not suffice);
+/// bounded, and yields a wall-clock slice periodically so the worker
+/// can actually finish.
+fn wait_for_stencil_entry(h: &mut egui_kittest::Harness<'_, App>) {
+    let mut waited = 0;
+    while h.state().debug_stencil_entries().is_empty() {
+        waited += 1;
+        assert!(waited < 20_000, "dialog worker never answered");
+        h.run();
+        if waited % 500 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
 fn synth_stencil(dir: &std::path::Path, stem: &str, masters: &[(&str, i64)]) -> std::path::PathBuf {
     synth_stencil_opts(dir, stem, masters, &[])
 }
@@ -3906,9 +3923,7 @@ fn more_shapes_menu_opens_a_stencil_into_the_pane() {
     h.run();
     h.get_by_label("Open Existing Stencil...").click();
     h.run();
-    for _ in 0..8 {
-        h.run(); // the worker thread's answer lands via poll_dialog
-    }
+    wait_for_stencil_entry(&mut h);
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries, vec![("gamma".to_string(), true)], "stencil opened expanded");
     assert!(
@@ -3936,9 +3951,7 @@ fn file_open_of_a_stencil_lands_in_the_pane_not_the_editor() {
     // File→Open through the real dialog-worker seam, preset-answered.
     h.state_mut().open_file_for_test(s);
     h.run();
-    for _ in 0..8 {
-        h.run();
-    }
+    wait_for_stencil_entry(&mut h);
     assert_eq!(
         h.state().debug_stencil_entries().len(),
         1,
