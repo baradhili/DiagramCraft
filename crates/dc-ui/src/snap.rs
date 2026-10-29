@@ -128,19 +128,26 @@ impl SnapTarget {
     }
 }
 
-/// A drawing guide line (the #113 object model, fed in when it lands).
+/// A drawing guide (#113's guides slice feeding the #109 engine): a
+/// full-width/height line or a guide point, carrying the guide
+/// shape's id so glue provenance can name it.
 #[derive(Debug, Clone, Copy)]
-pub struct GuideLine {
+pub enum Guide {
     /// A horizontal guide constrains y; a vertical one constrains x.
-    pub horizontal: bool,
-    pub at: f64,
+    Line {
+        id: i64,
+        horizontal: bool,
+        at: f64,
+    },
+    /// A guide point constrains both axes.
+    Point { id: i64, x: f64, y: f64 },
 }
 
 /// Everything a snap decision needs, in page inches (y-up).
 #[derive(Debug, Clone, Copy)]
 pub struct SnapCtx<'a> {
     pub targets: &'a [SnapTarget],
-    pub guides: &'a [GuideLine],
+    pub guides: &'a [Guide],
     /// Displayed-grid line spacing (5 mm in display units).
     pub grid_step_in: f64,
     /// The finest ruler subdivision interval currently drawn.
@@ -157,7 +164,7 @@ pub struct SnapCtx<'a> {
 pub enum SnapHit {
     Grid,
     Ruler,
-    Guide,
+    Guide(i64),
     AlignmentBox(i64),
     ShapeExtension(i64),
     /// A crossing of one target's x-extension with a target's
@@ -274,6 +281,14 @@ pub fn snap_translation(rect: (f64, f64, f64, f64), ctx: &SnapCtx, s: &SnapSetti
             consider_axis(p.1, hit, &sources_y, ctx.threshold_in, &mut best_y);
         }
     }
+    if s.snap_guides {
+        for g in ctx.guides {
+            if let Guide::Point { id, x, y } = *g {
+                consider_axis(x, SnapHit::Guide(id), &sources_x, ctx.threshold_in, &mut best_x);
+                consider_axis(y, SnapHit::Guide(id), &sources_y, ctx.threshold_in, &mut best_y);
+            }
+        }
+    }
     let mut res = SnapResult::default();
     if let Some(c) = best_x {
         res.dx = c.at - nearest(sources_x, c.at);
@@ -330,7 +345,14 @@ pub fn point_snap(
         }
         if s.glue_guides {
             for g in ctx.guides {
-                consider_line(g.at, !g.horizontal, SnapHit::Guide, None, &mut best);
+                match *g {
+                    Guide::Line { id, horizontal, at } => {
+                        consider_line(at, !horizontal, SnapHit::Guide(id), None, &mut best);
+                    }
+                    Guide::Point { id, x, y } => {
+                        consider_point((x, y), SnapHit::Guide(id), &mut best);
+                    }
+                }
             }
         }
         for t in ctx.targets {
@@ -382,6 +404,13 @@ pub fn point_snap(
         }
         for (q, hit) in point_targets(ctx, s.snap_shape_intersections, s.snap_connection_points) {
             consider_point(q, hit, &mut best);
+        }
+        if s.snap_guides {
+            for g in ctx.guides {
+                if let Guide::Point { id, x, y } = *g {
+                    consider_point((x, y), SnapHit::Guide(id), &mut best);
+                }
+            }
         }
     }
     best.map(|(p, hit, _)| (p, hit))
@@ -551,18 +580,22 @@ fn axis_lines(ctx: &SnapCtx, s: &SnapSettings) -> Vec<LineTarget> {
     }
     if s.snap_guides {
         for g in ctx.guides {
-            lines.push(LineTarget {
-                vertical: !g.horizontal,
-                at: g.at,
-                span: None,
-                hit: SnapHit::Guide,
-            });
+            if let Guide::Line { id, horizontal, at } = *g {
+                lines.push(LineTarget {
+                    vertical: !horizontal,
+                    at,
+                    span: None,
+                    hit: SnapHit::Guide(id),
+                });
+            }
         }
     }
     lines
 }
 
-/// Point targets: shape-extension crossings and connection points.
+/// Point targets: shape-extension crossings, connection points, and
+/// (gated by the caller's snap-guides flag handled at the call sites)
+/// guide points.
 fn point_targets(
     ctx: &SnapCtx,
     intersections: bool,
@@ -623,7 +656,7 @@ mod tests {
 
     const THRESH: f64 = 0.08; // ~8 px at 100 %
 
-    fn ctx<'a>(targets: &'a [SnapTarget], guides: &'a [GuideLine]) -> SnapCtx<'a> {
+    fn ctx<'a>(targets: &'a [SnapTarget], guides: &'a [Guide]) -> SnapCtx<'a> {
         SnapCtx {
             targets,
             guides,
@@ -988,5 +1021,108 @@ mod tests {
     #[test]
     fn no_targets_no_hints() {
         assert!(dynamic_hints(box_at(0.0, 0.0, 1.0, 1.0), &ctx(&[], &[])).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod guide_tests {
+    use super::*;
+
+    const THRESH: f64 = 0.08;
+
+    #[test]
+    fn guide_line_snaps_its_axis() {
+        let s = SnapSettings {
+            snap_active: true,
+            snap_grid: false,
+            snap_ruler_subdivisions: false,
+            snap_alignment_boxes: false,
+            snap_shape_extensions: false,
+            snap_connection_points: false,
+            ..SnapSettings::default()
+        };
+        let guides = [Guide::Line {
+            id: 5,
+            horizontal: false,
+            at: 2.5,
+        }];
+        let ctx = SnapCtx {
+            targets: &[],
+            guides: &guides,
+            grid_step_in: 5.0 / 25.4,
+            ruler_step_in: 1.0 / 25.4,
+            threshold_in: THRESH,
+        };
+        // Left edge 0.04 in off the guide's x.
+        let r = snap_translation((2.54, 0.0, 1.0, 1.0), &ctx, &s);
+        assert_eq!(
+            r.x_hit.as_ref().map(|(at, h)| (*at, *h)),
+            Some((2.5, SnapHit::Guide(5)))
+        );
+        assert!((r.dx - (-0.04)).abs() < 1e-9);
+        // The free axis is unconstrained.
+        assert!(r.y_hit.is_none());
+    }
+
+    #[test]
+    fn guide_point_snaps_both_axes() {
+        let s = SnapSettings {
+            snap_active: true,
+            snap_grid: false,
+            snap_ruler_subdivisions: false,
+            snap_alignment_boxes: false,
+            snap_shape_extensions: false,
+            snap_connection_points: false,
+            ..SnapSettings::default()
+        };
+        let guides = [Guide::Point { id: 8, x: 3.0, y: 4.0 }];
+        let ctx = SnapCtx {
+            targets: &[],
+            guides: &guides,
+            grid_step_in: 5.0 / 25.4,
+            ruler_step_in: 1.0 / 25.4,
+            threshold_in: THRESH,
+        };
+        let r = snap_translation((2.96, 3.94, 1.0, 1.0), &ctx, &s);
+        assert_eq!(
+            r.x_hit.as_ref().map(|(_, h)| *h),
+            Some(SnapHit::Guide(8))
+        );
+        assert_eq!(
+            r.y_hit.as_ref().map(|(_, h)| *h),
+            Some(SnapHit::Guide(8))
+        );
+    }
+
+    #[test]
+    fn endpoint_glues_to_a_guide_line_and_point() {
+        let s = SnapSettings::default(); // glue: guides + connection points
+        let guides = [
+            Guide::Line {
+                id: 5,
+                horizontal: false,
+                at: 2.5,
+            },
+            Guide::Point { id: 8, x: 3.0, y: 4.0 },
+        ];
+        let ctx = SnapCtx {
+            targets: &[],
+            guides: &guides,
+            grid_step_in: 5.0 / 25.4,
+            ruler_step_in: 1.0 / 25.4,
+            threshold_in: THRESH,
+        };
+        // Near the line: x snaps, y stays free.
+        let (p, hit) = point_snap((2.55, 6.0), &ctx, &s, true).unwrap();
+        assert!((p.0 - 2.5).abs() < 1e-9 && (p.1 - 6.0).abs() < 1e-9);
+        assert_eq!(hit, SnapHit::Guide(5));
+        // Near the point: both axes land on it.
+        let (p, hit) = point_snap((3.05, 3.95), &ctx, &s, true).unwrap();
+        assert!((p.0 - 3.0).abs() < 1e-9 && (p.1 - 4.0).abs() < 1e-9);
+        assert_eq!(hit, SnapHit::Guide(8));
+        // Glue off → no candidates.
+        let mut off = s;
+        off.glue_guides = false;
+        assert!(point_snap((2.55, 6.0), &ctx, &off, true).is_none());
     }
 }

@@ -460,6 +460,12 @@ fn render_page_opts(
         if hidden_member(shape) {
             continue;
         }
+        // Guides are page furniture, never ink (#113): Visio excludes
+        // them from print and export, and the canvas draws them as its
+        // own overlay.
+        if shape.type_.as_deref() == Some("Guide") {
+            continue;
+        }
         if let Some(only) = only {
             if shape.id != only {
                 continue;
