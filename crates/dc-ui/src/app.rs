@@ -152,6 +152,15 @@ pub struct App {
     mouse_page: Option<(f64, f64)>,
     status: String,
     show_shapesheet: bool,
+    /// Snap & glue settings (#109): the document's DocumentSettings,
+    /// mirrored in UI state; every toggle writes through to the doc.
+    snap: crate::snap::SnapSettings,
+    /// The Snap & Glue dialog is open (View ▸ Visual Aids, #109).
+    snap_dlg_open: bool,
+    /// Dynamic-grid hints for the frame in progress (#109, URS-1088),
+    /// recomputed by `update_drag` while a move drag is live and
+    /// painted by the canvas from `DragFx::hints`.
+    snap_live: Vec<crate::snap::Hint>,
     shot_frames: u32,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
@@ -304,6 +313,11 @@ impl BackPage {
     }
 }
 
+/// Snap distance in screen px (Visio's default snap strength feels
+/// like this at 100 %): converted to page inches per frame by
+/// `snap_ctx_of` (#109).
+const SNAP_STRENGTH_PX: f32 = 8.0;
+
 struct DragState {
     shape: i64,
     grab_off: (f64, f64), // pin − pointer, inches (y-up)
@@ -382,6 +396,9 @@ impl App {
             mouse_page: None,
             status: String::new(),
             show_shapesheet: false,
+            snap: crate::snap::SnapSettings::default(),
+            snap_dlg_open: false,
+            snap_live: Vec::new(),
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -526,6 +543,7 @@ impl App {
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
                 self.ed = Some(ed);
+                self.reload_snap_settings();
                 self.path = path;
                 self.dirty = false;
                 self.version += 1;
@@ -1004,6 +1022,7 @@ impl App {
         self.new_after_save = false;
         self.close_after_save = None;
         self.ed = Some(Editor::new_blank());
+        self.reload_snap_settings();
         self.path = PathBuf::new();
         self.dirty = false;
         self.version += 1;
@@ -2312,6 +2331,145 @@ impl App {
         Box::new(Macro::new(format!("move line shape {sid}"), cmds))
     }
 
+    // -- snap & glue (GitHub #109) ----------------------------------------
+
+    /// Reload the snap & glue toggles from the document (open / new /
+    /// after any model-level settings change).
+    fn reload_snap_settings(&mut self) {
+        self.snap = self
+            .ed
+            .as_ref()
+            .and_then(|e| e.doc.doc_snap_glue())
+            .map(crate::snap::SnapSettings::from_doc)
+            .unwrap_or_default();
+    }
+
+    /// Write the current toggles into the document. Settings are
+    /// document state, not drawing edits, so they never enter the
+    /// undo history (Visio's behavior — Snap & Glue has no undo).
+    fn apply_snap_settings(&mut self) {
+        if let Some(ed) = self.ed.as_mut() {
+            ed.doc.set_doc_snap_glue(self.snap.to_doc());
+            self.dirty = true;
+        }
+    }
+
+    /// The snap-side description of every top-level shape except
+    /// `excluded` (the dragged shape, its co-selected group, and any
+    /// container members riding along): alignment box, own geometry
+    /// vertices, and connection points — the shape's own rows first,
+    /// the master's for instances (Visio stencils define them on the
+    /// master, like the #137 geometry inheritance note).
+    fn snap_targets(&self, page_id: i64, excluded: &[i64]) -> Vec<crate::snap::SnapTarget> {
+        let Some(ed) = self.ed() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return Vec::new();
+        };
+        page.shapes
+            .iter()
+            .filter(|s| !excluded.contains(&s.id))
+            .filter_map(|s| {
+                let rect = self.shape_rect(&ed.doc, page_id, s)?;
+                let mut t = crate::snap::SnapTarget {
+                    id: s.id,
+                    rect,
+                    ..Default::default()
+                };
+                // Own geometry vertices (#137's mapping: shape-local
+                // y-up onto the chain-mapped bbox origin).
+                for geo in s.sheet.sections_named("Geometry") {
+                    for row in &geo.rows {
+                        let point_row = matches!(
+                            row.t.as_deref().unwrap_or(""),
+                            "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo"
+                                | "SplineKnot"
+                        );
+                        if !point_row {
+                            continue;
+                        }
+                        if let (Some(x), Some(y)) = (
+                            row.cell("X").and_then(|c| c.numeric()),
+                            row.cell("Y").and_then(|c| c.numeric()),
+                        ) {
+                            t.vertices.push((rect.0 + x, rect.1 + y));
+                        }
+                    }
+                }
+                collect_connection_points(&mut t, &s.sheet);
+                if t.connection_points.is_empty() {
+                    if let Some(mid) = s.master {
+                        if let Some(root) =
+                            ed.doc.master(mid).and_then(|m| m.shapes.first())
+                        {
+                            collect_connection_points(&mut t, &root.sheet);
+                        }
+                    }
+                }
+                Some(t)
+            })
+            .collect()
+    }
+
+    /// A snap context over prebuilt targets: the displayed grid and
+    /// ruler-subdivision spacings, and the Visio-style screen snap
+    /// strength converted through the zoom.
+    fn snap_ctx_of<'t>(
+        &self,
+        targets: &'t [crate::snap::SnapTarget],
+    ) -> crate::snap::SnapCtx<'t> {
+        crate::snap::SnapCtx {
+            targets,
+            guides: &[], // #113's guide objects feed in when they land
+            grid_step_in: canvas::grid_step_in(&self.view),
+            ruler_step_in: canvas::ruler_interval_in(&self.view),
+            threshold_in: SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
+        }
+    }
+
+    /// Snap the live drag position (#109) and refresh the dynamic-grid
+    /// hints. The model rect is still the press-time rect during the
+    /// gesture, so the live box is the rect translated by the pin
+    /// delta; the returned pin carries the snap translation, and the
+    /// commit path (move_cmd_for) lands snapped by construction.
+    fn apply_drag_snap(&mut self, d: &DragState, pin: (f64, f64)) -> (f64, f64) {
+        self.snap_live.clear();
+        let Some(page_id) = self.page_id() else { return pin };
+        let Some(ed) = self.ed.as_ref() else { return pin };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else { return pin };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, d.shape) else { return pin };
+        let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page_id, sh) else { return pin };
+        let mut excluded: Vec<i64> = Vec::with_capacity(d.group.len() + 3);
+        excluded.push(d.shape);
+        excluded.extend(d.group.iter().copied());
+        excluded.extend(self.container_member_ids(page_id, d.shape));
+        let targets = self.snap_targets(page_id, &excluded);
+        let ctx = self.snap_ctx_of(&targets);
+        let live = (x + pin.0 - d.start_pin.0, y + pin.1 - d.start_pin.1, w, h);
+        let res = crate::snap::snap_translation(live, &ctx, &self.snap);
+        if self.snap.dynamic_grid {
+            let snapped = (live.0 + res.dx, live.1 + res.dy, w, h);
+            self.snap_live = crate::snap::dynamic_hints(snapped, &ctx);
+        }
+        (pin.0 + res.dx, pin.1 + res.dy)
+    }
+
+    /// #109: snap a single dragged point — a 1D endpoint under the
+    /// glue settings, a geometry vertex under the snap settings —
+    /// against the page minus the dragged shape.
+    fn snap_point_for(
+        &self,
+        dragged: i64,
+        p: (f64, f64),
+        glue: bool,
+    ) -> Option<((f64, f64), crate::snap::SnapHit)> {
+        let page_id = self.page_id()?;
+        let targets = self.snap_targets(page_id, &[dragged]);
+        let ctx = self.snap_ctx_of(&targets);
+        crate::snap::point_snap(p, &ctx, &self.snap, glue)
+    }
+
     /// Track an in-progress shape drag; commit on release.
     fn update_drag(&mut self, ctx: &egui::Context) {
         let (pressed, pos) = ctx.input(|i| (i.pointer.primary_down(), i.pointer.interact_pos()));
@@ -2322,19 +2480,24 @@ impl App {
         let geom = self.page_geom();
 
         if pressed {
-            if let (Some(p), Some(d)) = (pointer, self.drag.as_mut()) {
+            // The drag is taken out for the frame so the snap pass can
+            // borrow the app (#109); it goes straight back.
+            if let (Some(p), Some(mut d)) = (pointer, self.drag.take()) {
                 let x_in = (p.x - self.view.pan.x) as f64 / self.view.px_per_in() as f64;
                 let y_up =
                     geom.h_in - (p.y - self.view.pan.y) as f64 / self.view.px_per_in() as f64;
                 let new_pin = (x_in + d.grab_off.0, y_up + d.grab_off.1);
+                let new_pin = self.apply_drag_snap(&d, new_pin);
                 if (new_pin.0 - d.last_pin.0).abs() * self.view.px_per_in() as f64 > 0.5
                     || (new_pin.1 - d.last_pin.1).abs() * self.view.px_per_in() as f64 > 0.5
                 {
                     d.moved = true;
                 }
                 d.last_pin = new_pin;
+                self.drag = Some(d);
             }
         } else if let Some(d) = self.drag.take() {
+            self.snap_live.clear();
             if d.moved {
                 if let Some(page_id) = self.page_id() {
                     // Moving a multi-selection moves every member by the
@@ -2751,6 +2914,11 @@ impl App {
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
             Action::ToggleComments => self.show_comments = !self.show_comments,
+            Action::ToggleDynamicGrid => {
+                self.snap.dynamic_grid = !self.snap.dynamic_grid;
+                self.apply_snap_settings();
+            }
+            Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -3384,13 +3552,22 @@ impl App {
                 ),
                 crate::ribbon::Group::new(
                     "Visual Aids",
-                    vec![big(RibbonButton::new(
-                        Icon::Check,
-                        "Visual Aids",
-                        Action::Macros,
-                    )
-                    .enabled(false)
-                    .tip("Snap & glue settings — planned"))],
+                    vec![
+                        stack(vec![RibbonButton::new(
+                            Icon::Grid,
+                            "Dynamic Grid",
+                            Action::ToggleDynamicGrid,
+                        )
+                        .selected(self.snap.dynamic_grid)
+                        .tip("Alignment and spacing hints while dragging")]),
+                        big(RibbonButton::new(
+                            Icon::Magnet,
+                            "Snap & Glue",
+                            Action::SnapGlue,
+                        )
+                        .selected(self.snap_dlg_open)
+                        .tip("Configure snap and glue targets")),
+                    ],
                 ),
                 crate::ribbon::Group::new(
                     "Macros",
@@ -4319,6 +4496,9 @@ impl App {
         if let Some(d) = self.drag.as_ref().filter(|d| d.moved) {
             if self.sel.is_some_and(|(p, _)| Some(p) == self.page_id()) {
                 live_drag = true;
+                // #109: the dynamic-grid hints computed by this frame's
+                // `apply_drag_snap` (update_drag runs before the paint).
+                drag_fx.hints = self.snap_live.clone();
                 // y-up pin delta → y-down bbox delta flips y.
                 let (dx, dy) = (d.last_pin.0 - d.start_pin.0, d.last_pin.1 - d.start_pin.1);
                 let mut ids: Vec<i64> = vec![d.shape];
@@ -4609,11 +4789,25 @@ impl App {
                         // handle's own position — the grab may start up
                         // to HANDLE_GRAB px away from the handle center,
                         // and snapping to the raw pointer would jump it.
+                        // #109: the glue settings decide where an
+                        // endpoint sticks (connection points, vertices,
+                        // handles; guides arrive with #113). The sticky
+                        // Connect itself is #108's connector work.
                         if let Some(origin) = handles.iter().find(|h| h.id == id).map(|h| h.pos) {
-                            self.apply_line_endpoint(
-                                id,
-                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
-                            );
+                            let raw = (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1);
+                            let dragged = self.sel.map(|(_, s)| s);
+                            let glue = dragged
+                                .and_then(|sid| self.snap_point_for(sid, raw, true));
+                            let (target, note) = match glue {
+                                Some((p, hit)) => {
+                                    (p, Some(format!("endpoint glued to {} — Connect persists with #108", snap_hit_text(hit))))
+                                }
+                                None => (raw, None),
+                            };
+                            self.apply_line_endpoint(id, target);
+                            if let Some(note) = note {
+                                self.status = note;
+                            }
                         }
                     }
                     HandleId::LineMid => {
@@ -4622,14 +4816,18 @@ impl App {
                     HandleId::GeoPoint { section_ix, row_ix } => {
                         // The DELTA from the handle's own position (the
                         // grab may start inside the grab radius).
+                        // #109: a vertex drag runs through the snap
+                        // engine's point snap (grid, ruler, alignment
+                        // targets — no glue; glue is for connectors).
                         if let Some(origin) =
                             handles.iter().find(|h| h.id == id).map(|h| h.pos)
                         {
-                            self.apply_geo_vertex(
-                                section_ix,
-                                row_ix,
-                                (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1),
-                            );
+                            let raw = (origin.0 + end.0 - start.0, origin.1 + end.1 - start.1);
+                            let target = self
+                                .sel
+                                .and_then(|(_, sid)| self.snap_point_for(sid, raw, false))
+                                .map_or(raw, |(p, _)| p);
+                            self.apply_geo_vertex(section_ix, row_ix, target);
                         }
                     }
                 }
@@ -5631,6 +5829,87 @@ impl App {
             self.shape_data_open = None;
             self.prop_bufs.clear();
             self.prop_add = None;
+        }
+    }
+
+    /// The Snap & Glue dialog (#109, Visio 2016's View ▸ Visual Aids):
+    /// per-target toggles for snap (URS-1100) and glue (URS-1112)
+    /// plus the dynamic-grid aid (URS-1088). Every change writes
+    /// through to the document's DocumentSettings — settings are
+    /// document state, not undoable drawing edits.
+    fn snap_glue_window(&mut self, ctx: &egui::Context) {
+        if !self.snap_dlg_open {
+            return;
+        }
+        let mut open = true;
+        let mut changed = false;
+        egui::Window::new("Snap & Glue")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(400.0)
+            .show(ctx, |ui| {
+                let s = &mut self.snap;
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.strong("Snap");
+                        if ui.checkbox(&mut s.snap_active, "Active").changed() {
+                            changed = true;
+                        }
+                        ui.add_enabled_ui(s.snap_active, |ui| {
+                            ui.label("Snap to:");
+                            for (v, label) in [
+                                (&mut s.snap_ruler_subdivisions, "Ruler subdivisions"),
+                                (&mut s.snap_grid, "Grid"),
+                                (&mut s.snap_guides, "Guides"),
+                                (&mut s.snap_alignment_boxes, "Alignment boxes"),
+                                (&mut s.snap_shape_extensions, "Shape extensions"),
+                                (&mut s.snap_shape_intersections, "Shape intersections"),
+                                (&mut s.snap_connection_points, "Connection points"),
+                            ] {
+                                if ui.checkbox(v, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.strong("Glue");
+                        if ui.checkbox(&mut s.glue_active, "Active").changed() {
+                            changed = true;
+                        }
+                        ui.add_enabled_ui(s.glue_active, |ui| {
+                            ui.label("Glue to:");
+                            for (v, label) in [
+                                (&mut s.glue_guides, "Guides"),
+                                (&mut s.glue_shape_handles, "Shape handles"),
+                                (&mut s.glue_shape_vertices, "Shape vertices"),
+                                (&mut s.glue_connection_points, "Connection points"),
+                            ] {
+                                if ui.checkbox(v, label).changed() {
+                                    changed = true;
+                                }
+                            }
+                        });
+                    });
+                });
+                ui.separator();
+                ui.strong("Drawing aids");
+                if ui.checkbox(&mut s.dynamic_grid, "Dynamic grid").changed() {
+                    changed = true;
+                }
+                ui.add_space(3.0);
+                ui.weak(
+                    "Settings are stored in the drawing. Guides as targets arrive with \
+                     #113; connector glue with #108.",
+                );
+            });
+        if !open {
+            self.snap_dlg_open = false;
+        }
+        if changed {
+            self.apply_snap_settings();
         }
     }
 
@@ -6990,6 +7269,39 @@ impl App {
     pub fn debug_sel_set_len(&self) -> usize {
         self.sel_set.len()
     }
+
+    /// #109 tests: the live snap & glue toggles.
+    pub fn debug_snap_settings(&self) -> crate::snap::SnapSettings {
+        self.snap
+    }
+
+    /// #109 tests: the document's persisted DocumentSettings values.
+    pub fn debug_doc_snap_glue(&self) -> Option<vsdx::model::DocSnapGlue> {
+        self.ed.as_ref().and_then(|e| e.doc.doc_snap_glue())
+    }
+
+    /// #109 tests: a shape's page rect (inches, y-up, bottom-left
+    /// origin) — the snap engine's own frame.
+    pub fn debug_shape_page_rect(&self, shape_id: i64) -> Option<(f64, f64, f64, f64)> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        self.shape_rect(&ed.doc, page_id, sh)
+    }
+
+    /// #109 tests: how many dynamic-grid hints the current frame
+    /// holds (nonzero only mid-drag).
+    pub fn debug_snap_hint_count(&self) -> usize {
+        self.snap_live.len()
+    }
+
+    /// #109 tests: replace the live snap settings in memory (drag
+    /// tests that verify pure translation semantics turn snapping
+    /// off; the document copy is untouched).
+    pub fn debug_set_snap_for_test(&mut self, s: crate::snap::SnapSettings) {
+        self.snap = s;
+    }
     pub fn debug_sel(&self) -> Option<(i64, i64)> {
         self.sel
     }
@@ -7912,6 +8224,7 @@ impl App {
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
+        self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
         self.shape_data_window(&ctx);
@@ -8892,6 +9205,39 @@ fn hit_in_rect(pos: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
 
 /// Every shape of a subtree, document (z) order, recursive (#78):
 /// the group-edit mode's hit-test and marquee candidate set.
+/// Connection rows of one sheet → page-space connection points on
+/// `t` (#109): rows carry shape-local X/Y (often cached formula
+/// values, e.g. `Width*0.5`), mapped through the same unrotated
+/// bbox frame as the #137 vertex handles.
+fn collect_connection_points(t: &mut crate::snap::SnapTarget, sheet: &vsdx::model::Sheet) {
+    for sec in sheet.sections_named("Connection") {
+        for row in &sec.rows {
+            if let (Some(x), Some(y)) = (
+                row.cell("X").and_then(|c| c.numeric()),
+                row.cell("Y").and_then(|c| c.numeric()),
+            ) {
+                t.connection_points.push((t.rect.0 + x, t.rect.1 + y));
+            }
+        }
+    }
+}
+
+/// One-line description of a snap landing, for status notes (#109).
+fn snap_hit_text(h: crate::snap::SnapHit) -> String {
+    use crate::snap::SnapHit::*;
+    match h {
+        Grid => "the grid".into(),
+        Ruler => "a ruler subdivision".into(),
+        Guide => "a guide".into(),
+        AlignmentBox(id) => format!("shape {id}'s alignment box"),
+        ShapeExtension(id) => format!("shape {id}'s extension"),
+        ShapeIntersection => "a shape intersection".into(),
+        ConnectionPoint(id) => format!("shape {id}'s connection point"),
+        ShapeHandle(id) => format!("shape {id}'s handle"),
+        ShapeVertex(id) => format!("shape {id}'s vertex"),
+    }
+}
+
 fn collect_members<'a>(shapes: &'a [Shape], out: &mut Vec<&'a Shape>) {
     for s in shapes {
         out.push(s);

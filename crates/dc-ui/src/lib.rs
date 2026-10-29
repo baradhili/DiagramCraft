@@ -17,6 +17,7 @@ mod rasterpool;
 pub mod quickshapes;
 pub mod recent;
 pub mod ribbon;
+pub mod snap;
 pub mod stencil;
 pub mod svgimg;
 pub mod textedit;

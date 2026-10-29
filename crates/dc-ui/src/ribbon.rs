@@ -26,6 +26,8 @@ pub enum Action {
     ToggleRulers,
     ToggleComments,
     ToggleUnits,
+    ToggleDynamicGrid,
+    SnapGlue,
     ShowShapeSheet,
     Macros,
     FillMenu,
@@ -129,6 +131,7 @@ pub enum Icon {
     Units,
     Delete,
     TellMe,
+    Magnet,
 }
 
 impl Icon {
@@ -198,6 +201,7 @@ impl Icon {
             Icon::Units => "units",
             Icon::Delete => "delete",
             Icon::TellMe => "lightbulb",
+            Icon::Magnet => "magnet",
         };
         Some(a)
     }
@@ -237,6 +241,7 @@ impl Icon {
                 Color32::from_rgb(0x2e, 0x8b, 0x57)
             }
             Icon::TellMe => Color32::from_rgb(0x82, 0x82, 0x82),
+            Icon::Magnet => Color32::from_rgb(0x2e, 0x75, 0xb6),
             _ => Color32::from_rgb(0x42, 0x42, 0x42),
         }
     }
@@ -1070,6 +1075,41 @@ impl Icon {
                 p.line_segment(
                     [c + Vec2::new(-2.0, 5.0), c + Vec2::new(2.0, 5.0)],
                     Stroke::new(1.4, gray),
+                );
+            }
+            Icon::Magnet => {
+                // horseshoe magnet (fallback; the MDI glyph is shipped):
+                // two prongs over a bezier heel, blue pole tips.
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(-3.0, -1.0), Vec2::new(3.0, 10.0)),
+                    0.5,
+                    gray,
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(3.0, -1.0), Vec2::new(3.0, 10.0)),
+                    0.5,
+                    gray,
+                );
+                p.line_segment(
+                    [
+                        c + Vec2::new(-4.5, 4.0),
+                        c + Vec2::new(0.0, 8.5),
+                    ],
+                    Stroke::new(3.0, gray),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.0, 8.5), c + Vec2::new(4.5, 4.0)],
+                    Stroke::new(3.0, gray),
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(-3.0, -6.0), Vec2::new(4.0, 3.0)),
+                    0.5,
+                    blue,
+                );
+                p.rect_filled(
+                    Rect::from_center_size(c + Vec2::new(3.0, -6.0), Vec2::new(4.0, 3.0)),
+                    0.5,
+                    blue,
                 );
             }
         }
