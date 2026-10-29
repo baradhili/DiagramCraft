@@ -173,6 +173,8 @@ pub struct App {
     selby_criterion: u8,
     /// Select-by-Type chosen value.
     selby_value: String,
+    /// The Page Setup dialog is open (#113, URS-1122).
+    pagesetup_open: bool,
     /// The Format Painter is armed for one target (#110, URS-1053):
     /// the source shape whose resolved formatting the next shape
     /// click receives.
@@ -436,6 +438,7 @@ impl App {
             selby_open: false,
             selby_criterion: 0,
             selby_value: String::new(),
+            pagesetup_open: false,
             painter_armed: None,
             shot_frames: 0,
             dialog: None,
@@ -3308,6 +3311,154 @@ impl App {
         self.apply_moves("nudge selection", page_id, &moves);
     }
 
+    /// #113 (URS-1122): swap the page's width/height — portrait ↔
+    /// landscape, one undoable step, then refit the view.
+    fn toggle_page_orientation(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sheet) = page.sheet() else { return };
+        let get = |n: &str| sheet.cell(n).and_then(|c| c.numeric());
+        let Some((w, h)) = get("PageWidth").zip(get("PageHeight")) else {
+            return;
+        };
+        self.apply_page_size((h, w));
+    }
+
+    /// #113 (URS-1122): write the page's size (page inches, portrait
+    /// orientation of the pair as given) as one undo Macro, then
+    /// refit the view to the new page.
+    fn apply_page_size(&mut self, (w, h): (f64, f64)) {
+        let Some(page_id) = self.page_id() else { return };
+        let scope = Scope::PageSheet { page: page_id };
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(SetCell::new(
+                scope.clone(),
+                "PageWidth",
+                vsdx::Cell::value(format!("{w:.6}")),
+            )),
+            Box::new(SetCell::new(
+                scope,
+                "PageHeight",
+                vsdx::Cell::value(format!("{h:.6}")),
+            )),
+        ];
+        self.apply(Macro::new("set page size", cmds));
+        self.view.fit_pending = true;
+        self.layers.set_page(-1); // force re-key on the new geometry
+        self.status = format!(
+            "page size {} × {}",
+            self.view.unit.fmt(w),
+            self.view.unit.fmt(h)
+        );
+    }
+
+    /// The Page Setup dialog (#113, URS-1122): ISO/ANSI presets plus
+    /// custom dimensions (display units) and orientation.
+    fn page_setup_window(&mut self, ctx: &egui::Context) {
+        if !self.pagesetup_open {
+            return;
+        }
+        /// (name, portrait w, h) in inches — Visio's Printer paper
+        /// preset table, metric and ANSI families.
+        const SIZES: &[(&str, f64, f64)] = &[
+            ("A5", 5.83, 8.27),
+            ("A4", 8.27, 11.69),
+            ("A3", 11.69, 16.54),
+            ("A2", 16.54, 23.39),
+            ("A1", 23.39, 33.11),
+            ("A0", 33.11, 46.81),
+            ("Letter (ANSI A)", 8.5, 11.0),
+            ("Legal", 8.5, 14.0),
+            ("Tabloid (ANSI B)", 11.0, 17.0),
+            ("ANSI C", 17.0, 22.0),
+            ("ANSI D", 22.0, 34.0),
+            ("ANSI E", 34.0, 44.0),
+        ];
+        let unit = self.view.unit;
+        let geom = self.page_geom();
+        // Current dims in display units.
+        let (cw, ch) = (
+            unit.from_in(geom.w_in),
+            unit.from_in(geom.h_in),
+        );
+        let mut open = true;
+        let mut apply: Option<(f64, f64)> = None; // portrait pair, inches
+        let mut custom: Option<(f64, f64)> = None;
+        egui::Window::new("Page Size")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(300.0)
+            .show(ctx, |ui| {
+                ui.label("Current:");
+                ui.label(format!(
+                    "{:.1} × {:.1} {}",
+                    cw.max(ch),
+                    cw.min(ch),
+                    unit.suffix()
+                ));
+                ui.separator();
+                ui.strong("Preset sizes");
+                let mut picked: Option<(f64, f64)> = None;
+                egui::Grid::new("dc-sizes")
+                    .num_columns(3)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for chunk in SIZES.chunks(3) {
+                            for (name, w, h) in chunk {
+                                if ui.button(*name).clicked() {
+                                    picked = Some((*w, *h));
+                                }
+                            }
+                            ui.end_row();
+                        }
+                    });
+                if let Some(p) = picked {
+                    apply = Some(p);
+                }
+                ui.separator();
+                ui.strong("Custom");
+                let mut wd = cw;
+                let mut ht = ch;
+                ui.horizontal(|ui| {
+                    ui.label("Width");
+                    ui.add(egui::DragValue::new(&mut wd).range(10.0..=2000.0).suffix(unit.suffix()));
+                    ui.label("Height");
+                    ui.add(egui::DragValue::new(&mut ht).range(10.0..=2000.0).suffix(unit.suffix()));
+                });
+                if ui.button("Apply custom size").clicked() && wd > 0.0 && ht > 0.0 {
+                    custom = Some((unit.to_in(wd), unit.to_in(ht)));
+                }
+                ui.separator();
+                ui.strong("Orientation");
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(geom.w_in <= geom.h_in, "Portrait")
+                        .clicked()
+                        && geom.w_in > geom.h_in
+                    {
+                        apply = Some((geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in)));
+                    }
+                    if ui
+                        .selectable_label(geom.w_in > geom.h_in, "Landscape")
+                        .clicked()
+                        && geom.w_in <= geom.h_in
+                    {
+                        apply = Some((geom.h_in.max(geom.w_in), geom.h_in.min(geom.w_in)));
+                    }
+                });
+            });
+        if let Some((w, h)) = apply.or(custom) {
+            self.apply_page_size((w, h));
+        }
+        if !open {
+            self.pagesetup_open = false;
+        }
+    }
+
     /// #110 (URS-1160): select every shape on the page.
     fn select_all(&mut self) {
         let Some(page_id) = self.page_id() else { return };
@@ -4051,6 +4202,8 @@ impl App {
                 }
             }
             Action::FormatPainter => self.arm_format_painter(),
+            Action::PageOrientation => self.toggle_page_orientation(),
+            Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
@@ -4549,12 +4702,11 @@ impl App {
                     "Page Setup",
                     vec![grid(vec![
                         vec![
-                            RibbonButton::new(Icon::Orientation, "Orientation", Action::Macros)
-                                .enabled(false)
-                                .tip("Page orientation — planned"),
-                            RibbonButton::new(Icon::NewPage, "Size", Action::Macros)
-                                .enabled(false)
-                                .tip("Page size — planned"),
+                            RibbonButton::new(Icon::Orientation, "Orientation", Action::PageOrientation)
+                                .tip("Swap portrait/landscape (swaps width and height)"),
+                            RibbonButton::new(Icon::NewPage, "Size", Action::PageSizeDialog)
+                                .selected(self.pagesetup_open)
+                                .tip("Page size — ISO/ANSI presets or custom"),
                         ],
                         vec![RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros)
                             .enabled(false)
@@ -9744,6 +9896,7 @@ impl App {
         self.poll_dialog(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
+        self.page_setup_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
         self.hyperlink_window(&ctx);

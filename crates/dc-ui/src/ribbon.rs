@@ -42,6 +42,8 @@ pub enum Action {
     SelectAll,
     SelectByType,
     FormatPainter,
+    PageOrientation,
+    PageSizeDialog,
     ShowShapeSheet,
     Macros,
     FillMenu,
