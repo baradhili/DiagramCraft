@@ -9863,6 +9863,11 @@ impl App {
     pub fn debug_snap_hint_count(&self) -> usize {
         self.snap_live.len()
     }
+    /// kittest (#168 diagnosis): the live dynamic-grid hints.
+    #[doc(hidden)]
+    pub fn debug_snap_hints_for_test(&self) -> Vec<crate::snap::Hint> {
+        self.snap_live.clone()
+    }
 
     /// #109 tests: replace the live snap settings in memory (drag
     /// tests that verify pure translation semantics turn snapping

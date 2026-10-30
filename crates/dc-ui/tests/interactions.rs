@@ -4936,13 +4936,17 @@ fn drag_snaps_to_neighbors_alignment_box() {
         h.hover_at(from + (target - from) * t);
         h.run();
     }
-    // Mid-drag: the dynamic grid reports alignment hints (x and y)
-    // against the neighbor.
-    assert!(
-        h.state().debug_snap_hint_count() >= 2,
-        "alignment hints live mid-drag"
-    );
     h.hover_at(target);
+    h.run();
+    // At the endpoint: the dynamic grid reports alignment hints on
+    // BOTH axes — and since #168, EXACTLY one line per axis (the
+    // nearest coincidence), not the pair-product stack.
+    assert_eq!(
+        h.state().debug_snap_hint_count(),
+        2,
+        "one alignment line per axis: {:?}",
+        h.state().debug_snap_hints_for_test()
+    );
     h.run();
     h.event(release(target));
     h.run();

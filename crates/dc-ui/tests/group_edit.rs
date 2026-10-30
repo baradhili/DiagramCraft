@@ -721,3 +721,4 @@ fn group_edit_mode_golden() {
 }
 
 
+// temporary diagnostic appended to group_edit.rs
