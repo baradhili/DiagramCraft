@@ -33,10 +33,15 @@
 //! documents measure with the user's installed fonts, exactly what
 //! rasterizes.
 //!
-//! Not modeled (v1, tracked as #146): OpenType pair kerning (resvg
-//! applies it; the sub-glyph differences rarely move a wrap decision)
-//! and complex shaping (Arabic joining changes advance sums — the wrap
-//! treats a run as the sum of isolated advances).
+//! Shaped measurement (#146): usvg 0.49 rasterizes text through
+//! harfrust (BIDI visual runs at base LTR, default features — pair
+//! kerning on, ligatures and contextual forms applied, script and
+//! language guessed). `width_in` runs the SAME pipeline over the SAME
+//! face, so the wrap decision and the raster shape identically by
+//! construction. Glyphs the resolved face lacks keep the
+//! per-character Carlito/conservative fallback advance (usvg swaps a
+//! fallback font in there — the one documented divergence, coverage
+//! gaps only).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -259,10 +264,52 @@ impl ResolvedFace {
         out
     }
 
-    /// Width of `text` at `size_in` inches (Char.Size units): the sum
-    /// of per-glyph advances.
+    /// Width of `text` at `size_in` inches (Char.Size units): the
+    /// SHAPED advance sum (#146) — the same harfrust shaping usvg
+    /// 0.49 rasterizes with (pair kerning on, ligatures and
+    /// contextual forms applied, BIDI visual runs at base LTR,
+    /// script/language guessed), missing glyphs falling back per
+    /// character. The isolated-advance sum survives as the fallback
+    /// when the face bytes cannot be shaped.
     pub fn width_in(&self, text: &str, size_in: f64) -> f64 {
-        text.chars().map(|c| self.char_em(c)).sum::<f64>() * size_in
+        self.shaped_width_em(text) * size_in
+    }
+
+    /// Shaped width of `text` in em units, through a per-(database,
+    /// face, text) cache — the wrap loop measures growing candidate
+    /// strings repeatedly, and a shaped width is far too costly to
+    /// recompute per candidate. The cache is bounded by clearing it
+    /// wholesale past 65 536 entries (text blocks are small; this is
+    /// a recompute, not a correctness, bound).
+    fn shaped_width_em(&self, text: &str) -> f64 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        type Widths =
+            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, String), f64>>;
+        static WIDTHS: OnceLock<Widths> = OnceLock::new();
+        let m = metrics();
+        let key = (m as *const MetricsDb as usize, self.id, text.to_string());
+        let cache = WIDTHS.get_or_init(Default::default);
+        if let Some(hit) = cache.lock().unwrap().get(&key) {
+            return *hit;
+        }
+        let fallback = |c: char| self.char_em(c);
+        let db_key = m as *const MetricsDb as usize;
+        let width = m
+            .db
+            .with_face_data(self.id, |data, index| {
+                shaped_face(db_key, self.id, data, index)
+                    .map(|shaped| shape_width_em(&shaped, text, &fallback))
+            })
+            .flatten()
+            .unwrap_or_else(|| text.chars().map(fallback).sum());
+        let mut c = cache.lock().unwrap();
+        if c.len() > 65_536 {
+            c.clear();
+        }
+        c.insert(key, width);
+        width
     }
 
     /// The face's ascender in em units (hhea) — the GUI overlay places
@@ -279,6 +326,109 @@ impl ResolvedFace {
             .flatten()
             .unwrap_or(0.8)
     }
+}
+
+/// A face prepared for harfrust shaping: the face bytes and
+/// `FontRef` are leaked once per (database, face) — the process-wide
+/// database owns its data for the process lifetime, so the leak is
+/// bounded by the set of faces actually measured, and it is what
+/// makes the `&'static FontRef` (and the `ShaperData` built from it)
+/// shareable as a plain `Arc` cache entry.
+struct ShapedFace {
+    upem: f64,
+    font: &'static harfrust::FontRef<'static>,
+    shaper_data: harfrust::ShaperData,
+}
+
+/// The per-(database, face) shaped-face cache (see [`ShapedFace`]).
+fn shaped_face(
+    db_key: usize,
+    id: fontdb::ID,
+    data: &[u8],
+    index: u32,
+) -> Option<std::sync::Arc<ShapedFace>> {
+    type Faces =
+        std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID), std::sync::Arc<ShapedFace>>>;
+    static FACES: OnceLock<Faces> = OnceLock::new();
+    let key = (db_key, id);
+    let cache = FACES.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return Some(hit.clone());
+    }
+    let bytes: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
+    let font: &'static harfrust::FontRef<'static> =
+        Box::leak(Box::new(harfrust::FontRef::from_index(bytes, index).ok()?));
+    let shaper_data = harfrust::ShaperData::new(font);
+    let upem = ttf_parser::Face::parse(data, index)
+        .ok()
+        .map(|f| f.units_per_em() as f64)
+        .unwrap_or(1000.0);
+    let shaped = std::sync::Arc::new(ShapedFace {
+        upem,
+        font,
+        shaper_data,
+    });
+    cache.lock().unwrap().insert(key, shaped.clone());
+    Some(shaped)
+}
+
+/// The usvg-0.49 shaping pipeline, measurement-side (#146): BIDI
+/// visual runs (base LTR), each run shaped by harfrust with DEFAULT
+/// features — pair kerning on, ligatures/contextual forms applied,
+/// script and language guessed — advances summed in em units. That is
+/// verbatim what usvg does per text chunk (its `shape_text`), so a
+/// width measured here is the width the rasterizer will draw.
+fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> f64 {
+    use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
+    let shaper = face.shaper_data.shaper(face.font).build();
+    let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+    let Some(paragraph) = bidi.paragraphs.first() else {
+        return 0.0;
+    };
+    let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+    let mut total = 0.0;
+    for run in runs.iter() {
+        let sub = &text[run.clone()];
+        if sub.is_empty() {
+            continue;
+        }
+        let direction = if levels[run.start].is_ltr() {
+            Direction::LeftToRight
+        } else {
+            Direction::RightToLeft
+        };
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(sub);
+        buffer.set_direction(direction);
+        buffer.guess_segment_properties();
+        let out = shaper.shape(buffer, ShapeOptions::new());
+        let infos = out.glyph_infos();
+        let positions = out.glyph_positions();
+        for i in 0..out.len() {
+            let info = &infos[i];
+            if info.glyph_id == 0 {
+                // Missing glyph: charge the cluster's characters the
+                // per-character fallback advance (usvg swaps a fallback
+                // font in here; the divergence is coverage-gap only —
+                // #146 keeps the documented per-character estimate).
+                let start = info.cluster as usize;
+                let next = infos
+                    .get(i + 1)
+                    .map_or(sub.len(), |n| n.cluster as usize);
+                let (lo, hi) = if start <= next { (start, next) } else { (next, start) };
+                let hi = hi.min(sub.len());
+                total += sub
+                    .get(lo..hi)
+                    .unwrap_or("")
+                    .chars()
+                    .map(fallback)
+                    .sum::<f64>();
+            } else {
+                total += positions[i].x_advance as f64 / face.upem;
+            }
+        }
+    }
+    total
 }
 
 /// The actual face a shape's text rasterizes in, as bytes — for
@@ -384,6 +534,42 @@ mod tests {
         assert_eq!(i.id, m.carlito_italic, "italic resolves the italic face");
         let bi = resolve(Some("Certainly-Not-Installed-21"), true, true);
         assert_eq!(bi.id, m.carlito_bold_italic, "bold+italic resolves its corner");
+    }
+
+    /// #146: measurement SHAPES the run the way the rasterizer draws
+    /// it. A kerned pair (AV in Liberation Serif — the vendored face
+    /// carries GPOS kerning) must measure narrower than the isolated
+    /// sum; this is exactly the gap that used to wrap kerned lines
+    /// one word early.
+    #[test]
+    fn kerned_pairs_measure_kerned() {
+        let f = resolve(Some("Liberation Serif"), false, false);
+        let pair = f.width_in("AV", 1.0);
+        let isolated = f.width_in("A", 1.0) + f.width_in("V", 1.0);
+        assert!(
+            pair < isolated,
+            "shaped {pair} must be kerned under the isolated sum {isolated}"
+        );
+        // A kern-free string still measures the plain advance sum
+        // (shaping agrees with the isolated tables when no feature
+        // applies): same string, spaced so no pair kerns.
+        let plain = f.width_in("nn", 1.0);
+        let isolated_n = 2.0 * f.width_in("n", 1.0);
+        assert!((plain - isolated_n).abs() < 1e-9);
+    }
+
+    /// Coverage gaps keep the per-character fallback under shaping
+    /// (#146): a CJK glyph Carlito lacks still contributes its
+    /// fallback advance inside a shaped run instead of vanishing.
+    #[test]
+    fn shaped_runs_fall_back_per_character_on_gaps() {
+        let f = face();
+        let latin = f.width_in("a", 1.0);
+        let mixed = f.width_in("按a", 1.0);
+        assert!(
+            mixed > latin,
+            "the missing CJK glyph must add its fallback advance: {mixed} vs {latin}"
+        );
     }
 
     /// The resolved (style, weight) of a face, for assertions about

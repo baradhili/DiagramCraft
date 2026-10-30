@@ -923,8 +923,10 @@ dependencies = [
  "clap",
  "dc-core",
  "fontdb",
+ "harfrust",
  "tempfile",
  "ttf-parser",
+ "unicode-bidi",
  "vsdx",
 ]
 
