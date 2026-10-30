@@ -6198,3 +6198,63 @@ fn hyperlink_dialog_relative_paths_browse_and_page_picker() {
         "three undos removed everything"
     );
 }
+
+/// GitHub #105: the default stencil set auto-opens from the stencil
+/// preferences (Visio's 2016 companion set), My Shapes file names in
+/// the default list are skipped when absent, and the configured
+/// category order drives More Shapes.
+#[test]
+fn default_stencils_auto_open_and_categories_are_configurable() {
+    // The defaults: the Visio 2016 companion set, in open order
+    // (through the same disk-first path a menu toggle uses — the
+    // embedded fallback, since kittest never extracts).
+    let mut h = harness_with_blank();
+    h.state_mut().apply_stencil_defaults_for_test();
+    h.run();
+    assert_eq!(
+        h.state().debug_open_stencil_titles(),
+        [
+            "Basic Shapes",
+            "Callouts",
+            "Containers",
+            "Backgrounds Gallery",
+            "Borders & Titles Gallery",
+        ],
+        "the default companion set auto-opened"
+    );
+    // The pane lists each open stencil as its own entry.
+    assert!(
+        h.state().debug_visible_entry_ids().len() >= 5,
+        "one pane entry per default stencil"
+    );
+
+    // A custom config: one built-in default, a category SUBSET in a
+    // custom order (Engineering above General).
+    let mut h2 = harness_with_blank();
+    h2.state_mut().set_stencil_prefs_for_test(dc_ui::stencil::prefs::StencilPrefs::for_test(
+        vec!["basic".into(), "not-there.vssx".into()],
+        Some(vec!["Engineering".into(), "General".into()]),
+    ));
+    h2.state_mut().apply_stencil_defaults_for_test();
+    h2.run();
+    assert_eq!(
+        h2.state().debug_open_stencil_titles(),
+        ["Basic Shapes"],
+        "the configured default opened; the absent My Shapes file was skipped"
+    );
+    // More Shapes shows the configured categories in the configured
+    // order.
+    h2.get_by_label("More Shapes").click();
+    h2.run();
+    let eng = h2.get_by_label("Engineering").rect();
+    let gen = h2.get_by_label("General").rect();
+    assert!(
+        eng.min.y < gen.min.y,
+        "configured category order: Engineering ({}) above General ({})",
+        eng.min.y,
+        gen.min.y
+    );
+    // A hidden category is absent from the configured list (the
+    // menu renders exactly this list).
+    assert!(!h2.state().debug_builtin_categories().contains(&"Software".to_string()));
+}

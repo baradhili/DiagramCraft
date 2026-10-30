@@ -281,6 +281,9 @@ pub struct App {
     /// "Use relative paths for hyperlinks" per document (#71),
     /// app-side keyed by path (Visio keeps the toggle app-level).
     relative_paths: crate::hyperlink::RelativePaths,
+    /// Default stencil set + category order (#105) — app config,
+    /// never .vsdx content; ephemeral in every headless constructor.
+    stencil_prefs: crate::stencil::prefs::StencilPrefs,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -416,6 +419,12 @@ impl App {
         app.recent = RecentFiles::open();
         app.quick_shapes = crate::quickshapes::QuickShapes::open();
         app.relative_paths = crate::hyperlink::RelativePaths::open();
+        // #105: the default stencil set auto-opens with the app
+        // (Visio's companion set), and More Shapes shows the
+        // configured categories in the configured order.
+        app.stencil_prefs = crate::stencil::prefs::StencilPrefs::open();
+        app.apply_stencil_preferences();
+        app.open_default_stencils();
         // #104: the built-in catalog also exists as real `.vssx`
         // files under My Shapes — extracted idempotently (missing or
         // size-mismatched files rewritten and digest-verified) so
@@ -514,6 +523,7 @@ impl App {
             recent: RecentFiles::ephemeral(),
             quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
             relative_paths: crate::hyperlink::RelativePaths::ephemeral(),
+            stencil_prefs: crate::stencil::prefs::StencilPrefs::ephemeral(),
             os_theme: None,
         };
         if let Some(p) = path {
@@ -1140,6 +1150,73 @@ impl App {
                     format!("built-in stencil failed to load: {title}", title = b.title);
             }
         }
+    }
+
+    /// Apply the configured category list/order to the pane (#105):
+    /// the configured subset, or the catalog's manifest order when
+    /// unset.
+    fn apply_stencil_preferences(&mut self) {
+        self.stencil.builtin_categories = match self.stencil_prefs.categories.clone() {
+            Some(cats) => cats,
+            None => crate::stencil::builtin::categories()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+    }
+
+    /// Open the default stencil set (#105): built-in slugs through
+    /// the disk-first path (#104), plus files named under My Shapes
+    /// opened like user stencils. Dedupe keeps a re-run cheap (and
+    /// the startup path never toggles anything closed).
+    fn open_default_stencils(&mut self) {
+        let my_shapes = Self::my_shapes_dir();
+        for entry in self.stencil_prefs.default_open.clone() {
+            if let Some(b) = crate::stencil::builtin::by_slug(&entry) {
+                self.open_builtin_stencil(b);
+                continue;
+            }
+            let Some(dir) = &my_shapes else {
+                continue;
+            };
+            // A My Shapes file name (config entries are trusted —
+            // the user's own config file).
+            let p = dir.join(entry.trim_start_matches(['/', '\\']));
+            if p.is_file() {
+                if let Err(e) = self.stencils.open_file(&p) {
+                    self.status = format!("default stencil {entry:?} failed to load: {e:#}");
+                }
+            }
+        }
+        // Startup opens land at the pane top; no reveal-scroll.
+        self.stencil.reveal = None;
+    }
+
+    /// kittest (#105): run the startup preference application against
+    /// the current (ephemeral-by-default) prefs.
+    #[doc(hidden)]
+    pub fn apply_stencil_defaults_for_test(&mut self) {
+        self.apply_stencil_preferences();
+        self.open_default_stencils();
+    }
+
+    /// kittest (#105): swap the prefs (e.g. a custom default set /
+    /// category order) before applying.
+    #[doc(hidden)]
+    pub fn set_stencil_prefs_for_test(&mut self, prefs: crate::stencil::prefs::StencilPrefs) {
+        self.stencil_prefs = prefs;
+    }
+
+    /// kittest (#105/#104): the open stencils' titles, in pane order.
+    #[doc(hidden)]
+    pub fn debug_open_stencil_titles(&self) -> Vec<String> {
+        self.stencils.iter().map(|(_, st)| st.title.clone()).collect()
+    }
+
+    /// kittest (#105): the category list More Shapes shows, in order.
+    #[doc(hidden)]
+    pub fn debug_builtin_categories(&self) -> Vec<String> {
+        self.stencil.builtin_categories.clone()
     }
 
     /// File → New: replace the current document with a blank drawing,

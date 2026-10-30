@@ -9,6 +9,7 @@
 
 pub mod builtin;
 pub mod disk;
+pub mod prefs;
 pub mod source;
 
 pub use source::{MasterKey, Origin, StencilId, StencilSet, DOC_SERIAL};
@@ -103,6 +104,10 @@ pub struct Stencil {
     /// millimetres — and the shipped files carry no units marker, so
     /// the choice is this session preference).
     pub metric_units: bool,
+    /// The built-in categories that appear in More Shapes, in menu
+    /// order (#105): the catalog's manifest order by default, or the
+    /// configured subset/order from the stencil preferences.
+    pub builtin_categories: Vec<String>,
     /// The Quick Shapes virtual entry's own expand flag (#88) —
     /// initialized expanded at the App construction site.
     pub quick_expanded: bool,
@@ -169,6 +174,10 @@ impl Stencil {
             collapsed: false,
             doc_stencil_visible: false,
             metric_units: false,
+            builtin_categories: builtin::categories()
+                .into_iter()
+                .map(String::from)
+                .collect(),
             quick_expanded: false,
             quick_rect: None,
             quick_keys: Vec::new(),
@@ -232,17 +241,28 @@ impl Stencil {
                     // One submenu per category, one checkable entry per
                     // built-in stencil; the checkbox reflects (and
                     // toggles) the stencil's pane entry (observed Visio
-                    // 2016 menu behavior).
-                    for cat in builtin::categories() {
+                    // 2016 menu behavior). The category list/order is
+                    // configurable (#105) — default the manifest's.
+                    for cat in &self.builtin_categories {
                         ui.menu_button(cat, |ui| {
                             // The full catalog's largest category holds 41
                             // stencils — cap the flyout at a scrollable
                             // height instead of running past the window.
                             egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                                for b in builtin::by_category(cat) {
-                                    let source = builtin::source_path(b.slug);
-                                    let mut open =
-                                        set.iter().any(|(_, st)| st.source == source);
+                                for b in builtin::BUILTINS
+                                    .iter()
+                                    .filter(|b| b.category == cat.as_str())
+                                {
+                                    // Either identity counts as open: the
+                                    // extracted file (#104) or the
+                                    // builtin/<slug> fallback — a
+                                    // builtin-origin entry with the
+                                    // slug's stem, however it opened.
+                                    let stem = std::ffi::OsStr::new(b.slug);
+                                    let mut open = set.iter().any(|(_, st)| {
+                                        st.origin == crate::stencil::Origin::Builtin
+                                            && st.source.file_stem() == Some(stem)
+                                    });
                                     if ui.checkbox(&mut open, b.title).changed() {
                                         self.request = Some(Request::ToggleBuiltin(b.slug));
                                         ui.close();
