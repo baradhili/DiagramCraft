@@ -1,0 +1,17 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: Liberation fonts
+Source: https://github.com/liberationfonts/liberation-fonts (release 2.1.5)
+
+Files: Liberation*.ttf
+Copyright: 2012 Red Hat, Inc. (Reserved Font Name Liberation);
+ digitized data Copyright 2010 Google Corporation
+ (Reserved Font Names Arimo, Tinos and Cousine).
+License: OFL-1.1
+ This Font Software is licensed under the SIL Open Font License,
+ Version 1.1. The complete license text ships with every release
+ tarball of the upstream project and at
+ https://openfontlicense.org/open-font-license-official-text/
+ .
+ Vendored here (GitHub #145) as the deterministic metric faces for
+ the Arial/Times New Roman/Courier New substitution chains — third-
+ party OFL fonts, not Microsoft content (the Carlito precedent).

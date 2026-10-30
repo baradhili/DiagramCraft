@@ -1399,7 +1399,7 @@ fn emit_text(
     // average-advance guess that re-wrapped lines the author had
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
-    let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold);
+    let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
     let width_in = |s: &str| face.width_in(s, size);
     let mut lines: Vec<String> = Vec::new();
     // Visio stores line breaks as CRLF: breaking on each of \r and \n
@@ -4153,7 +4153,7 @@ mod tests {
     fn narrow_wrap_breaking_in_a_space_run_keeps_the_space() {
         let doc = Document::default();
         let size = 0.13889; // the text-block default (10 pt)
-        let face = crate::textmetrics::resolve(None, false);
+        let face = crate::textmetrics::resolve(None, false, false);
         let usable = face.width_in("a", size) + 0.4 * face.width_in(" ", size);
         let mut s = Shape::default();
         s.sheet.text = Some("a  b".into());
@@ -4190,7 +4190,7 @@ mod tests {
         // The greedy invariant: every line except the last is full —
         // adding the next word would overflow.
         let usable = 0.8 - 0.1 - 0.1;
-        let face = crate::textmetrics::resolve(None, false);
+        let face = crate::textmetrics::resolve(None, false, false);
         for pair in lines.windows(2) {
             let joined = format!("{} {}", pair[0], pair[1]);
             assert!(

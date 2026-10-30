@@ -6,9 +6,11 @@
 //! advances from the SAME faces the rasterizer draws:
 //!
 //! - the database is **fontdb** — the same crate resvg's rasterizer
-//!   uses — loaded with the vendored metric-compatible Carlito plus
-//!   **every installed system font** (the app renders with real
-//!   Arial/Calibri/Noto where installed; owner note 2026-10-27);
+//!   uses — loaded with the vendored metric faces (Carlito,
+//!   style-complete; Liberation Sans/Serif/Mono for the Arial/Times/
+//!   Courier substitution chains — #145) plus **every installed
+//!   system font** (the app renders with real Arial/Calibri/Noto where
+//!   installed; owner note 2026-10-27);
 //! - family resolution walks the CSS chain the renderer emits
 //!   (`Calibri, Carlito, sans-serif`, …): the first INSTALLED named
 //!   family wins (case-insensitive, like `svgimg`'s raster font db),
@@ -31,18 +33,43 @@
 //! documents measure with the user's installed fonts, exactly what
 //! rasterizes.
 //!
-//! Not modeled (v1): OpenType pair kerning (resvg applies it; the
-//! sub-glyph differences rarely move a wrap decision) and complex
-//! shaping (Arabic joining changes advance sums — the wrap treats a
-//! run as the sum of isolated advances).
+//! Not modeled (v1, tracked as #146): OpenType pair kerning (resvg
+//! applies it; the sub-glyph differences rarely move a wrap decision)
+//! and complex shaping (Arabic joining changes advance sums — the wrap
+//! treats a run as the sum of isolated advances).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Conservative advance for a glyph no loaded face covers (wide-ish
-/// Latin; CJK full-width runs wider, but coverage gaps are rare in
-/// the corpus and never wrap-decisive at this precision).
+/// Latin; CJK full-width runs wider, but coverage gaps are rare in the
+/// corpus and never wrap-decisive at this precision).
 const UNCOVERED_EM: f64 = 0.55;
+
+/// Every vendored face (GitHub #145): the Carlito set is style-complete
+/// (Regular/Bold/Italic/BoldItalic — italic used to measure as the
+/// upright face), and the Liberation metric faces (Sans/Serif/Mono × 4
+/// styles) make the Arial/Times New Roman/Courier New substitution
+/// chains resolve the face they NAME on every machine, not only hosts
+/// with Liberation installed. Licenses live beside the files.
+const EMBEDDED_FONTS: [&[u8]; 16] = [
+    include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
+    include_bytes!("../assets/fonts/Carlito-Bold.ttf"),
+    include_bytes!("../assets/fonts/Carlito-Italic.ttf"),
+    include_bytes!("../assets/fonts/Carlito-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-BoldItalic.ttf"),
+];
 
 /// CSS generic keywords the chain builder can emit — they resolve to
 /// the embedded default, matching the raster db's generic mappings.
@@ -53,33 +80,50 @@ fn is_generic(name: &str) -> bool {
     )
 }
 
-/// The font database: vendored Carlito + system fonts, or
-/// Carlito-only for hermetic measurement.
+/// The font database: the vendored faces plus system fonts, or
+/// vendored-only for hermetic measurement (system fonts stay the
+/// measurement source wherever installed — the vendored set is the
+/// deterministic floor, owner note 2026-10-30).
 struct MetricsDb {
     db: fontdb::Database,
-    /// The vendored fallback faces (per-character coverage + the
-    /// chain-end default).
+    /// The vendored Carlito faces (per-character coverage + the
+    /// chain-end default), one per (weight, style) corner.
     carlito: fontdb::ID,
     carlito_bold: fontdb::ID,
+    carlito_italic: fontdb::ID,
+    carlito_bold_italic: fontdb::ID,
+}
+
+/// Rank one face against the wanted (weight, style): upright faces
+/// stay preferred for upright text (v1 measured italic as upright),
+/// and a family that lacks the wanted style still resolves its
+/// nearest face instead of nothing.
+fn style_rank(f: &fontdb::FaceInfo, want_style: fontdb::Style, target: i32) -> (usize, i32) {
+    (usize::from(f.style != want_style), (f.weight.0 as i32 - target).abs())
 }
 
 fn build_db(embedded_only: bool) -> MetricsDb {
     let mut db = fontdb::Database::new();
-    db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+    for bytes in EMBEDDED_FONTS {
+        db.load_font_data(bytes.to_vec());
+    }
     if !embedded_only {
         db.load_system_fonts();
     }
-    let pick = |want_bold: bool| -> Option<fontdb::ID> {
+    let pick = |bold: bool, italic: bool| -> Option<fontdb::ID> {
+        let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+        let target = if bold { 700 } else { 400 };
         db.faces()
             .filter(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case("Carlito")))
-            .filter(|f| f.style == fontdb::Style::Normal)
-            .min_by_key(|f| (f.weight.0 as i32 - if want_bold { 700 } else { 400 }).abs())
+            .filter(|f| matches!(f.style, fontdb::Style::Normal | fontdb::Style::Italic))
+            .min_by_key(|f| style_rank(f, want_style, target))
             .map(|f| f.id)
     };
     MetricsDb {
-        carlito: pick(false).expect("vendored Carlito Regular is embedded"),
-        carlito_bold: pick(true).expect("vendored Carlito Bold is embedded"),
+        carlito: pick(false, false).expect("vendored Carlito Regular is embedded"),
+        carlito_bold: pick(true, false).expect("vendored Carlito Bold is embedded"),
+        carlito_italic: pick(false, true).expect("vendored Carlito Italic is embedded"),
+        carlito_bold_italic: pick(true, true).expect("vendored Carlito BoldItalic is embedded"),
         db,
     }
 }
@@ -115,10 +159,14 @@ pub struct ResolvedFace {
 
 /// Resolve the face a shape's text measures (and rasterizes) in: the
 /// family chain the renderer emits, first installed family wins,
-/// Carlito fallback. `bold` prefers the family's bold weight.
-pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
+/// Carlito fallback. `bold`/`italic` prefer the family's matching
+/// weight/style corner (#145: the italic faces are vendored, so
+/// italic text now measures italic advances instead of the upright
+/// face's).
+pub fn resolve(font: Option<&str>, bold: bool, italic: bool) -> ResolvedFace {
     let m = metrics();
     let target = if bold { 700 } else { 400 };
+    let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
     let installed = |family: &str| -> Option<fontdb::ID> {
         m.db
             .faces()
@@ -127,9 +175,7 @@ pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
                     .iter()
                     .any(|(n, _)| n.eq_ignore_ascii_case(family))
             })
-            // Italic measures as regular (v1 — see module docs).
-            .filter(|f| f.style == fontdb::Style::Normal || f.style == fontdb::Style::Italic)
-            .min_by_key(|f| (f.weight.0 as i32 - target).abs())
+            .min_by_key(|f| style_rank(f, want_style, target))
             .map(|f| f.id)
     };
     for name in crate::svg::family_chain(font) {
@@ -140,7 +186,12 @@ pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
             return ResolvedFace { id, carlito: m.carlito, is_carlito: false };
         }
     }
-    let id = if bold { m.carlito_bold } else { m.carlito };
+    let id = match (bold, italic) {
+        (false, false) => m.carlito,
+        (true, false) => m.carlito_bold,
+        (false, true) => m.carlito_italic,
+        (true, true) => m.carlito_bold_italic,
+    };
     ResolvedFace { id, carlito: m.carlito, is_carlito: true }
 }
 
@@ -234,9 +285,9 @@ pub struct FaceData {
 /// The bytes + identity of the face `resolve` picks for `font` —
 /// reading a system font file on first use (vendored faces are
 /// embedded; callers cache what they register from this).
-pub fn face_data(font: Option<&str>, bold: bool) -> Option<FaceData> {
+pub fn face_data(font: Option<&str>, bold: bool, italic: bool) -> Option<FaceData> {
     let m = metrics();
-    let face = resolve(font, bold);
+    let face = resolve(font, bold, italic);
     let info = m.db.faces().find(|f| f.id == face.id)?;
     let family = info
         .families
@@ -270,7 +321,7 @@ mod tests {
     /// any machine); these tests only assert relationships that hold
     /// under metric-compatible substitution too.
     fn face() -> ResolvedFace {
-        resolve(None, false)
+        resolve(None, false, false)
     }
 
     #[test]
@@ -308,9 +359,55 @@ mod tests {
     #[test]
     fn resolve_pins_uninstalled_families_to_carlito() {
         let m = metrics();
-        let f = resolve(Some("Certainly-Not-Installed-21"), false);
+        let f = resolve(Some("Certainly-Not-Installed-21"), false, false);
         assert_eq!(f.id, m.carlito, "unresolved chains measure Carlito");
-        let g = resolve(Some("Certainly-Not-Installed-21"), true);
+        let g = resolve(Some("Certainly-Not-Installed-21"), true, false);
         assert_eq!(g.id, m.carlito_bold, "bold resolves the bold face");
+        let i = resolve(Some("Certainly-Not-Installed-21"), false, true);
+        assert_eq!(i.id, m.carlito_italic, "italic resolves the italic face");
+        let bi = resolve(Some("Certainly-Not-Installed-21"), true, true);
+        assert_eq!(bi.id, m.carlito_bold_italic, "bold+italic resolves its corner");
+    }
+
+    /// The resolved (style, weight) of a face, for assertions about
+    /// WHICH face a chain picks (#145 verification).
+    fn resolved_style(font: Option<&str>, bold: bool, italic: bool) -> (fontdb::Style, u16) {
+        let m = metrics();
+        let f = resolve(font, bold, italic);
+        let info = m.db.faces().find(|x| x.id == f.id).expect("resolved id is in the db");
+        (info.style, info.weight.0)
+    }
+
+    /// #145: the Liberation faces are vendored, so the Arial chain
+    /// resolves a Liberation Sans face (the system one where
+    /// installed, the vendored copy otherwise — either way NOT the
+    /// Carlito the chain used to fall through to), and the style
+    /// corners resolve their own faces instead of measuring upright.
+    #[test]
+    fn arial_chain_measures_liberation_and_styles_resolve() {
+        let m = metrics();
+        let f = resolve(Some("Arial"), false, false);
+        assert_ne!(f.id, m.carlito, "Arial resolves Liberation Sans, not Carlito");
+        // It measures different advances than the Carlito fallback
+        // (the two designs share Arial metrics only approximately).
+        let carlito = ResolvedFace { id: m.carlito, carlito: m.carlito, is_carlito: true };
+        assert_ne!(
+            f.width_in("measurement", 1.0),
+            carlito.width_in("measurement", 1.0),
+            "Liberation advances differ from Carlito's"
+        );
+        // Style corners pick the matching (style, weight) face.
+        assert_eq!(
+            resolved_style(Some("Arial"), false, false),
+            (fontdb::Style::Normal, 400)
+        );
+        assert_eq!(
+            resolved_style(Some("Arial"), false, true),
+            (fontdb::Style::Italic, 400)
+        );
+        assert_eq!(
+            resolved_style(Some("Arial"), true, true),
+            (fontdb::Style::Italic, 700)
+        );
     }
 }
