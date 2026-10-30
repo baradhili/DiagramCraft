@@ -71,8 +71,11 @@ impl TextMeasure for SheetTextMeasure {
 
     fn text_width(&self, text: &str) -> Option<f64> {
         let face = crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
-        // The trailing break never widens a line (it starts one):
-        // measure the trimmed text like `emit_text` does (#148).
+        // TEXTWIDTH = the text's bare advance width (CodeRabbit
+        // cross-check against Visio's own caches: DBUML_M's
+        // `TEXTWIDTH(TheText)` on 'PK\r\n' at 10 pt caches 0.17536 in
+        // = Segoe UI's bare P+K, no insets; the trailing break never
+        // widens a line — measure trimmed like `emit_text`, #148).
         let text = text.trim_end();
         let mut best = 0.0;
         for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
@@ -85,13 +88,23 @@ impl TextMeasure for SheetTextMeasure {
     }
 
     fn text_height(&self, text: &str, width: f64) -> Option<f64> {
+        // TEXTHEIGHT = wrapped lines × line height + the block's top
+        // and bottom insets (corpus gold: DBUML_M's all-zero-margin
+        // 'PK\r\n' caches exactly 1.2 em — no insets added; TIMELN's
+        // default-T/B-margins shape caches 1 line + 2×0.0555). The
+        // wrap runs against the width minus the LEFT/RIGHT insets —
+        // the same usable width `emit_text` wraps at, so the
+        // refreshed cache and the rendered lines cannot disagree.
         let text = text.trim_end();
-        if text.is_empty() {
+        let ins_tb = self.tb.insets.2 + self.tb.insets.3;
+        let lines = if text.is_empty() {
             // An empty block still composes one line (the corpus's
             // bare "\r\n" texts measure one line height, #148).
-            return Some(self.tb.line_height);
-        }
-        Some(self.lines_at(text, width).len() as f64 * self.tb.line_height)
+            1.0
+        } else {
+            self.lines_at(text, width).len() as f64
+        };
+        Some(lines * self.tb.line_height + ins_tb)
     }
 }
 
@@ -193,23 +206,42 @@ mod tests {
         let chain = [&s];
         let m = SheetTextMeasure::new(&doc, &s, &chain, "");
         let one = "label";
+        // Corpus equation (CodeRabbit pass on #147): height = lines ×
+        // line height + top/bottom insets (default 2×0.0555 here).
+        let ins_tb = m.tb.insets.2 + m.tb.insets.3;
+        assert!((ins_tb - 0.111).abs() < 1e-9, "fixture uses default T/B insets");
         let h1 = m.text_height(&format!("{one}\r\n"), 2.0).unwrap();
         let h1_plain = m.text_height(one, 2.0).unwrap();
         assert_eq!(h1, h1_plain, "trailing CRLF adds no line (#148)");
-        // Empty text still composes one line.
-        assert_eq!(m.text_height("", 2.0), Some(m.tb.line_height));
+        assert!((h1 - (m.tb.line_height + ins_tb)).abs() < 1e-12);
+        // Empty text still composes one line (plus the same insets).
+        assert_eq!(m.text_height("", 2.0), Some(m.tb.line_height + ins_tb));
         assert_eq!(
             m.text_height("\r\n", 2.0),
-            Some(m.tb.line_height),
+            Some(m.tb.line_height + ins_tb),
             "a bare break is one empty paragraph — one line (#148)"
         );
-        // Two visual lines double the height (wrap-independent).
+        // Two visual lines add exactly ONE more line height.
         let h2 = m.text_height(&format!("{one}\r\n{one}\r\n"), 2.0).unwrap();
-        assert!((h2 - 2.0 * h1).abs() < 1e-12);
+        assert!((h2 - h1 - m.tb.line_height).abs() < 1e-12);
         // A narrow block wraps the same words into more lines.
         let wide = m.text_height("one two three four", 4.0).unwrap();
         let narrow = m.text_height("one two three four", 0.6).unwrap();
         assert!(narrow > wide, "narrow={narrow} wide={wide}");
+        // Zero-margin blocks (DBUML's 'PK\r\n' masters, all four
+        // margins explicit 0) add NOTHING: exactly n line heights —
+        // the corpus's 1.2004 em single-line gold.
+        let mut z = text_aware_shape();
+        for n in ["LeftMargin", "RightMargin", "TopMargin", "BottomMargin"] {
+            z.sheet.set_cell(n, Cell::value("0"));
+        }
+        let chain_z = [&z];
+        let mz = SheetTextMeasure::new(&doc, &z, &chain_z, "");
+        assert!((mz.tb.insets.2 + mz.tb.insets.3).abs() < 1e-12);
+        assert!(
+            (mz.text_height("PK\r\n", 1.0).unwrap() - mz.tb.line_height).abs() < 1e-12,
+            "zero margins: exactly one line height"
+        );
         // Width measures the widest paragraph, untrimmed never wider.
         assert!(m.text_width(one).unwrap() > 0.0);
         assert_eq!(
@@ -316,21 +348,16 @@ mod tests {
         let chain: [&Shape; 0] = [];
         let shape = &doc.pages[0].shapes[0];
         let measure = SheetTextMeasure::new(&doc, shape, &chain, text);
-        let one_line = measure.tb.line_height;
+        let one_line = measure.text_height(text, 2.0).unwrap();
         // Preconditions on the fixture text: it wraps at the STALE
         // width and fits at the REFRESHED one.
         assert!(
             measure.text_height(text, 1.0).unwrap() > one_line,
             "fixture must wrap at the stale width"
         );
-        assert_eq!(
-            measure.text_height(text, 2.0),
-            Some(one_line),
-            "fixture must fit at the refreshed width"
-        );
         assert!(
             (th - one_line).abs() < 1e-9,
-            "one line at the refreshed width: {th} vs {one_line}"
+            "one line (+ insets) at the refreshed width: {th} vs {one_line}"
         );
     }
 }

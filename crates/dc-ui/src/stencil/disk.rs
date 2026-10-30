@@ -73,6 +73,15 @@ fn sha256_hex(data: &[u8]) -> String {
 /// build time); a written file is read back and digest-verified
 /// against the embedded asset before it counts as written.
 pub fn extract_catalog(my_shapes: Option<&Path>) -> Extraction {
+    extract_catalog_with(my_shapes, |_, _| {})
+}
+
+/// [`extract_catalog`] with a progress callback: `progress(done,
+/// total)` fires after every file.
+pub fn extract_catalog_with(
+    my_shapes: Option<&Path>,
+    mut progress: impl FnMut(usize, usize),
+) -> Extraction {
     let Some(my_shapes) = my_shapes else {
         return Extraction::default();
     };
@@ -83,6 +92,11 @@ pub fn extract_catalog(my_shapes: Option<&Path>) -> Extraction {
             ..Extraction::default()
         };
     }
+    let total: usize = super::builtin::BUILTINS
+        .iter()
+        .map(|b| 1 + usize::from(b.metric_bytes.is_some()))
+        .sum();
+    let mut done = 0usize;
     let mut out = Extraction::default();
     for b in super::builtin::BUILTINS {
         let variants: &[(&str, &[u8])] = match b.metric_bytes {
@@ -90,6 +104,8 @@ pub fn extract_catalog(my_shapes: Option<&Path>) -> Extraction {
             None => &[("", b.bytes)],
         };
         for (suffix, bytes) in variants {
+            progress(done, total);
+            done += 1;
             let target = builtins_dir(my_shapes).join(format!("{}{suffix}.vssx", b.slug));
             // Present and length-matching: untouched (the embedded
             // bytes are digest-pinned at build time by the manifest
@@ -108,7 +124,51 @@ pub fn extract_catalog(my_shapes: Option<&Path>) -> Extraction {
             }
         }
     }
+    progress(total, total);
     out
+}
+
+/// Progress messages from the background extraction (startup
+/// feedback, owner report 2026-10-30: the first-run 43 MB write must
+/// never block or silence the app).
+pub enum ExtractionMsg {
+    /// Files handled so far / total files.
+    Progress { done: usize, total: usize },
+    /// The pass finished.
+    Done(Extraction),
+}
+
+/// A running background extraction.
+pub struct ExtractionHandle {
+    rx: std::sync::mpsc::Receiver<ExtractionMsg>,
+}
+
+impl ExtractionHandle {
+    /// Drain everything ready right now; the LAST message wins
+    /// (progress supersedes progress), `None` when nothing new.
+    pub fn poll(&self) -> Option<ExtractionMsg> {
+        let mut last = None;
+        while let Ok(msg) = self.rx.try_recv() {
+            last = Some(msg);
+        }
+        last
+    }
+}
+
+/// [`extract_catalog_with`] on a background thread with progress
+/// messages. `None` when there is no My Shapes directory to extract
+/// into. Partial files are safe: `open_from_disk` falls back to the
+/// embedded bytes whenever a file fails to read or parse.
+pub fn extract_catalog_async(my_shapes: Option<PathBuf>) -> Option<ExtractionHandle> {
+    let dir = my_shapes?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = extract_catalog_with(Some(&dir), |done, total| {
+            let _ = tx.send(ExtractionMsg::Progress { done, total });
+        });
+        let _ = tx.send(ExtractionMsg::Done(out));
+    });
+    Some(ExtractionHandle { rx })
 }
 
 /// Open a built-in from its extracted file: the variant's bytes read
@@ -186,6 +246,30 @@ mod tests {
             builtin::by_slug("basic").unwrap().bytes,
             "healed back to the embedded bytes"
         );
+    }
+
+    /// The background pass completes and reports; the callback form
+    /// fires per file and lands on (total, total).
+    #[test]
+    fn extraction_reports_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let h = extract_catalog_async(Some(tmp.path().to_path_buf())).expect("handle");
+        let done = loop {
+            match h.poll() {
+                Some(ExtractionMsg::Done(e)) => break e,
+                Some(ExtractionMsg::Progress { .. }) => {}
+                None => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        };
+        assert!(done.written > 0, "the async pass wrote the catalog");
+        // Drained after Done (channel closed).
+        assert!(h.poll().is_none());
+
+        let tmp2 = tempfile::tempdir().unwrap();
+        let mut last = (0usize, 0usize);
+        let e = extract_catalog_with(Some(tmp2.path()), |d, t| last = (d, t));
+        let files = e.written + e.present + e.failed;
+        assert_eq!(last, (files, files), "progress lands on (total, total)");
     }
 
     /// No home directory: nothing to do, nothing fails loudly.

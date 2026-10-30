@@ -284,6 +284,15 @@ pub struct App {
     /// Default stencil set + category order (#105) — app config,
     /// never .vsdx content; ephemeral in every headless constructor.
     stencil_prefs: crate::stencil::prefs::StencilPrefs,
+    /// Whether built-ins open from the extracted My Shapes files
+    /// (#104). Production only: every headless constructor disables
+    /// it so kittest never reads (or depends on) the user's real
+    /// My Shapes — the embedded fallback keeps tests hermetic.
+    stencil_disk: bool,
+    /// The background first-run extraction (#104), polled for
+    /// startup feedback (owner report 2026-10-30: the 43 MB write
+    /// must neither block the first frame nor run silently).
+    stencil_extract: Option<crate::stencil::disk::ExtractionHandle>,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -419,6 +428,10 @@ impl App {
         app.recent = RecentFiles::open();
         app.quick_shapes = crate::quickshapes::QuickShapes::open();
         app.relative_paths = crate::hyperlink::RelativePaths::open();
+        // Production entry only: built-ins open from the extracted
+        // My Shapes files (#104) — headless constructors stay on the
+        // embedded fallback so they never touch the user's home.
+        app.stencil_disk = true;
         // #105: the default stencil set auto-opens with the app
         // (Visio's companion set), and More Shapes shows the
         // configured categories in the configured order.
@@ -426,12 +439,14 @@ impl App {
         app.apply_stencil_preferences();
         app.open_default_stencils();
         // #104: the built-in catalog also exists as real `.vssx`
-        // files under My Shapes — extracted idempotently (missing or
-        // size-mismatched files rewritten and digest-verified) so
-        // users can open, copy, and inspect them like any stencil.
-        // Best-effort: an unwritable My Shapes degrades to the
-        // embedded bytes everywhere.
-        let _ = crate::stencil::disk::extract_catalog(Self::my_shapes_dir().as_deref());
+        // files under My Shapes — extracted on a BACKGROUND thread
+        // (missing or size-mismatched files rewritten and
+        // digest-verified) so users can open, copy, and inspect them
+        // like any stencil without the first run blocking or going
+        // silent (owner report 2026-10-30). Best-effort: an
+        // unwritable My Shapes degrades to the embedded bytes.
+        app.stencil_extract =
+            crate::stencil::disk::extract_catalog_async(Self::my_shapes_dir());
         if let Some(p) = path {
             app.load(p);
         }
@@ -524,6 +539,8 @@ impl App {
             quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
             relative_paths: crate::hyperlink::RelativePaths::ephemeral(),
             stencil_prefs: crate::stencil::prefs::StencilPrefs::ephemeral(),
+            stencil_disk: false,
+            stencil_extract: None,
             os_theme: None,
         };
         if let Some(p) = path {
@@ -1086,7 +1103,7 @@ impl App {
         };
         // The dedupe key matches however the entry was opened: the
         // extracted file (#104) or the `builtin/<slug>` fallback.
-        let my_shapes = Self::my_shapes_dir();
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
         let source = crate::stencil::disk::extracted_path(
             my_shapes.as_deref().unwrap_or_else(|| std::path::Path::new("")),
             b.slug,
@@ -1120,7 +1137,7 @@ impl App {
         // follow-up): US by default, the metric twin with "Metric
         // Stencils" ticked.
         let metric = self.stencil.metric_units;
-        let my_shapes = Self::my_shapes_dir();
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
         let opened = crate::stencil::disk::open_from_disk(my_shapes.as_deref(), b, metric)
             .map(|(doc, source)| (doc, source, true))
             .or_else(|| {
@@ -1170,7 +1187,7 @@ impl App {
     /// opened like user stencils. Dedupe keeps a re-run cheap (and
     /// the startup path never toggles anything closed).
     fn open_default_stencils(&mut self) {
-        let my_shapes = Self::my_shapes_dir();
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
         for entry in self.stencil_prefs.default_open.clone() {
             if let Some(b) = crate::stencil::builtin::by_slug(&entry) {
                 self.open_builtin_stencil(b);
@@ -1243,6 +1260,9 @@ impl App {
         self.set_selection(None);
         self.group_edit.clear();
         self.stencil = Stencil::default();
+        // The reset pane drops the configured category order (#105,
+        // CodeRabbit): re-apply the stencil preferences right after.
+        self.apply_stencil_preferences();
         self.tex.clear();
         self.layers.clear();
         self.page_states.clear();
@@ -1303,6 +1323,43 @@ impl App {
             PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
             PendingKind::HyperlinkAddress => PendingDialog::HyperlinkAddress(rx),
         });
+    }
+
+    /// Poll the background stencil extraction (#104): progress lands
+    /// in the status bar — the one piece of UI every shell state
+    /// shows — with a repaint heartbeat so it advances without user
+    /// input, and a completion note when files were actually written.
+    fn poll_stencil_extraction(&mut self, ctx: &Context) {
+        let Some(h) = self.stencil_extract.take() else {
+            return;
+        };
+        // Drain everything ready this frame (the writer is fast).
+        match h.poll() {
+            Some(crate::stencil::disk::ExtractionMsg::Progress { done, total }) => {
+                self.status = format!("Extracting built-in stencils to My Shapes ({done}/{total})…");
+                self.stencil_extract = Some(h);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Some(crate::stencil::disk::ExtractionMsg::Done(e)) => {
+                if e.failed > 0 {
+                    self.status = format!(
+                        "Built-in stencils: {} extracted, {} failed — embedded copies in use",
+                        e.written, e.failed
+                    );
+                } else if e.written > 0 {
+                    self.status = format!(
+                        "Extracted {} built-in stencil files to My Shapes/Built-ins",
+                        e.written
+                    );
+                }
+                // Nothing written (files already current): no noise.
+            }
+            None => {
+                // Nothing ready yet — keep waiting with a heartbeat.
+                self.stencil_extract = Some(h);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
     }
 
     /// Consume a finished dialog result; keep a slow repaint heartbeat
@@ -10877,6 +10934,7 @@ impl App {
         self.poll_os_image();
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
+        self.poll_stencil_extraction(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
@@ -11175,6 +11233,9 @@ impl App {
         self.dirty = false;
         self.set_selection(None);
         self.stencil = Stencil::default();
+        // The reset pane drops the configured category order (#105,
+        // CodeRabbit): re-apply the stencil preferences right after.
+        self.apply_stencil_preferences();
         self.tex.clear();
         self.layers.clear();
         self.page_states.clear();
