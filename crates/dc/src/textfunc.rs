@@ -128,10 +128,11 @@ pub fn text_edit_macro(doc: &Document, scope: &Scope, text: &str) -> Macro {
                     if !up.contains("TEXTWIDTH") && !up.contains("TEXTHEIGHT") {
                         continue; // the cell's size does not depend on the text
                     }
-                    // TxtHeight sees the REFRESHED TxtWidth when its
-                    // formula references it.
-                    if let Some((_, v)) = refreshed.iter().find(|(n, _)| n == name) {
-                        env.insert(name.to_string(), *v);
+                    // Later cells see earlier refreshes (CodeRabbit):
+                    // TxtHeight's formula references the REFRESHED
+                    // TxtWidth, not the stale cache.
+                    for (n, v) in &refreshed {
+                        env.insert(n.clone(), *v);
                     }
                     match vsdx::formula::eval_measured(&f, &env, &measure) {
                         Ok(v) => {
@@ -280,5 +281,56 @@ mod tests {
         let scope = Scope::Shape { page: 0, shape: 0 };
         let m = text_edit_macro(&doc, &scope, "hello");
         assert_eq!(m.cmds.len(), 1, "no cache refresh without formulas");
+    }
+
+    /// TxtHeight evaluates against the REFRESHED TxtWidth (CodeRabbit
+    /// on #147): a text that would wrap at the stale width but fits at
+    /// the refreshed one must cache a one-line height.
+    #[test]
+    fn txt_height_uses_the_refreshed_txt_width() {
+        let mut doc = Document::default();
+        let mut s = text_aware_shape();
+        // Stale cache: TxtWidth V=1.0 (usable 0.8 with default insets)
+        // — the long text wraps there. The formula is
+        // MAX(Width=2.0, TEXTWIDTH) so the refresh widens the block to
+        // 2.0 (usable 1.8) where the same text fits on one line.
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell {
+            v: Some("1.0".into()),
+            f: Some("MAX(Width,TEXTWIDTH(TheText))".into()),
+            ..Cell::default()
+        });
+        doc.pages.push(vsdx::model::Page {
+            id: 0,
+            shapes: vec![s],
+            ..vsdx::model::Page::default()
+        });
+        let scope = Scope::Shape { page: 0, shape: 0 };
+        let text = "a moderately wide label";
+        let mut m = text_edit_macro(&doc, &scope, text);
+        m.apply(&mut doc).unwrap();
+        let after = &doc.pages[0].shapes[0].sheet;
+        let th: f64 = after.cell("TxtHeight").unwrap().v.clone().unwrap().parse().unwrap();
+        let tw: f64 = after.cell("TxtWidth").unwrap().v.clone().unwrap().parse().unwrap();
+        assert!((tw - 2.0).abs() < 1e-9, "MAX(Width, TEXTWIDTH) = {tw}");
+        let chain: [&Shape; 0] = [];
+        let shape = &doc.pages[0].shapes[0];
+        let measure = SheetTextMeasure::new(&doc, shape, &chain, text);
+        let one_line = measure.tb.line_height;
+        // Preconditions on the fixture text: it wraps at the STALE
+        // width and fits at the REFRESHED one.
+        assert!(
+            measure.text_height(text, 1.0).unwrap() > one_line,
+            "fixture must wrap at the stale width"
+        );
+        assert_eq!(
+            measure.text_height(text, 2.0),
+            Some(one_line),
+            "fixture must fit at the refreshed width"
+        );
+        assert!(
+            (th - one_line).abs() < 1e-9,
+            "one line at the refreshed width: {th} vs {one_line}"
+        );
     }
 }

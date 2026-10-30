@@ -512,7 +512,8 @@ impl<'a> Parser<'a> {
                 .and_then(|v| v.as_f64())
                 .ok_or_else(|| format!("{name}: arg {} not numeric", i + 1))
         };
-        match name.to_ascii_uppercase().as_str() {
+        let upper_name = name.to_ascii_uppercase();
+        match upper_name.as_str() {
             "GUARD" | "THEMEGUARD" => match args.len() {
                 1 => Ok(args.pop().unwrap()),
                 _ => Err(format!("{name} takes one argument")),
@@ -558,14 +559,18 @@ impl<'a> Parser<'a> {
             // MAX/MIN: the corpus's text-aware blocks compose them
             // around the text functions (`MAX(Width,TEXTWIDTH(TheText))`,
             // GDT's `MAX(3*Char.Size*Scratch.B1,TEXTWIDTH(TheText))`).
+            // `upper` keeps the selection case-insensitive like every
+            // other arm (CodeRabbit: comparing `name` made `max(...)`
+            // silently take the MIN branch).
             "MAX" | "MIN" => {
                 if args.is_empty() {
                     return Err(format!("{name} needs arguments"));
                 }
+                let is_max = upper_name == "MAX";
                 let mut best = arg(&args, 0)?;
                 for i in 1..args.len() {
                     let v = arg(&args, i)?;
-                    let take = if name == "MAX" { v > best } else { v < best };
+                    let take = if is_max { v > best } else { v < best };
                     if take {
                         best = v;
                     }
@@ -727,6 +732,10 @@ mod tests {
                 .as_f64(),
             Some(0.5)
         );
+        // Case-insensitive dispatch selects the right function
+        // (CodeRabbit: `max(...)` used to take the MIN branch).
+        assert_eq!(eval("max(1, 2)", &e2).unwrap().as_f64(), Some(2.0));
+        assert_eq!(eval("Min(3, 2)", &e2).unwrap().as_f64(), Some(2.0));
         // TEXTHEIGHT forwards the resolved width argument.
         assert_eq!(
             eval_measured("TEXTHEIGHT(TheText, 0.25)", &e, &m)
