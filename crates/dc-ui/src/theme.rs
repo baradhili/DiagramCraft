@@ -236,20 +236,26 @@ pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
     v.window_fill = Color32::from_rgb(250, 250, 250);
     v.extreme_bg_color = Color32::WHITE;
     v.faint_bg_color = Color32::from_rgb(240, 240, 240);
-    // widget state palette via craft-ui (local fork, egui 0.37)
+    // widget state palette via craft-ui (local fork, egui 0.37) —
+    // every state tints toward HIGHLIGHT (#154/#165: egui's stock
+    // greens must not survive into dialog buttons and menus)
     craft_ui::theme::WidgetPalette {
         noninteractive: RIBBON_BG,
         inactive: RIBBON_BG,
-        hovered: Color32::from_rgb(228, 240, 233),
-        active: Color32::from_rgb(210, 230, 217),
-        open: Color32::from_rgb(210, 230, 217),
+        hovered: Color32::from_rgb(228, 238, 248),
+        active: Color32::from_rgb(209, 228, 243),
+        open: Color32::from_rgb(209, 228, 243),
     }
     .apply_to(
         &mut v.widgets,
         egui::CornerRadius::same(3),
         egui::Stroke::new(1.0, Color32::from_rgb(60, 60, 60)),
     );
-    v.selection.bg_fill = Color32::from_rgba_premultiplied(33, 115, 70, 36);
+    // Selection fill = HIGHLIGHT (46,116,181) at 14% — the green
+    // (33,115,70) it replaces was egui's stock light selection
+    // (#165); this is the fill text/list selection shows in the
+    // close prompt and the file-select surfaces.
+    v.selection.bg_fill = Color32::from_rgba_premultiplied(6, 16, 26, 36);
     v.selection.stroke.color = HIGHLIGHT;
     style.visuals = v;
     ctx.set_style_of(egui::Theme::Light, style);
@@ -263,16 +269,20 @@ pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
     craft_ui::theme::WidgetPalette {
         noninteractive: Color32::from_gray(47),
         inactive: DARK.ribbon_content,
-        hovered: Color32::from_rgb(58, 86, 66),
-        active: Color32::from_rgb(52, 78, 60),
-        open: Color32::from_rgb(52, 78, 60),
+        // HIGHLIGHT_DARK-tinted states (#165) — the blues that
+        // replace egui's stock dark greens at the same lightness.
+        hovered: Color32::from_rgb(44, 66, 92),
+        active: Color32::from_rgb(38, 58, 82),
+        open: Color32::from_rgb(38, 58, 82),
     }
     .apply_to(
         &mut v.widgets,
         egui::CornerRadius::same(3),
         egui::Stroke::new(1.0, Color32::from_gray(150)),
     );
-    v.selection.bg_fill = Color32::from_rgba_premultiplied(56, 167, 110, 46);
+    // Selection fill = the highlight blue at 18% (the stock dark
+    // green (56,167,110) it replaces, #165).
+    v.selection.bg_fill = Color32::from_rgba_premultiplied(8, 21, 33, 46);
     v.selection.stroke.color = DARK.accent_dark;
     style.visuals = v;
     ctx.set_style_of(egui::Theme::Dark, style);
@@ -350,7 +360,8 @@ pub(crate) fn lift_for_dark(c: Color32) -> Color32 {
 pub fn menu_tokens(v: &Visuals) -> MenuTokens {
     if v.dark_mode {
         MenuTokens {
-            hover_fill: Color32::from_rgb(43, 74, 56),
+            // HIGHLIGHT_DARK-tinted hover (#165), not egui's green.
+            hover_fill: Color32::from_rgb(43, 66, 94),
             label: v.text_color(),
             label_disabled: Color32::from_gray(135),
             hint: Color32::from_gray(150),
@@ -359,7 +370,8 @@ pub fn menu_tokens(v: &Visuals) -> MenuTokens {
         }
     } else {
         MenuTokens {
-            hover_fill: Color32::from_rgb(206, 227, 212),
+            // Pale HIGHLIGHT wash (#165), not egui's pale green.
+            hover_fill: Color32::from_rgb(206, 224, 239),
             label: Color32::from_rgb(30, 30, 30),
             label_disabled: Color32::from_gray(160),
             hint: Color32::from_gray(140),
@@ -384,7 +396,7 @@ mod tests {
     #[test]
     fn menu_tokens_follow_the_active_visuals() {
         let light = menu_tokens(&Visuals::light());
-        assert_eq!(light.hover_fill, Color32::from_rgb(206, 227, 212));
+        assert_eq!(light.hover_fill, Color32::from_rgb(206, 224, 239));
         assert_eq!(light.label, Color32::from_rgb(30, 30, 30));
         assert_eq!(light.label_disabled, Color32::from_gray(160));
         assert_eq!(light.hint, Color32::from_gray(140));
@@ -524,4 +536,41 @@ mod tests {
         // floats (page paper is white in both modes).
         assert!(lum(dark.page_edge) > lum(dark.desk));
     }
+    /// #165: no egui-default GREEN survives into selection, widget,
+    /// or menu states — every state fill is blue-family (the
+    /// highlight base). Green is g-dominant; the blues are
+    /// b-dominant, so a channel-order check pins the family without
+    /// pinning exact shades.
+    #[test]
+    fn selection_and_state_fills_are_highlight_family_not_green() {
+        let ctx = egui::Context::default();
+        install_for(&ctx, egui::ThemePreference::Light);
+        for theme in [egui::Theme::Light, egui::Theme::Dark] {
+            let style = ctx.style_of(theme);
+            let v = &style.visuals;
+            let fills = [
+                v.selection.bg_fill,
+                v.widgets.inactive.bg_fill,
+                v.widgets.hovered.bg_fill,
+                v.widgets.active.bg_fill,
+                v.widgets.open.bg_fill,
+            ];
+            for c in fills {
+                assert!(
+                    c.b() >= c.g(),
+                    "{theme:?} state fill {c:?} leans green — tie it to the highlight blue (#165)"
+                );
+            }
+        }
+        // Menu hover fills, both modes.
+        for v in [&Visuals::light(), &Visuals::dark()] {
+            let t = menu_tokens(v);
+            assert!(
+                t.hover_fill.b() >= t.hover_fill.g(),
+                "menu hover {:?} leans green (#165)",
+                t.hover_fill
+            );
+        }
+    }
+
 }
