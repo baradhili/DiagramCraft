@@ -625,6 +625,12 @@ impl App {
     pub fn debug_close_prompt(&self) -> bool {
         self.confirm_close.is_some()
     }
+    /// kittest (#166): the active ribbon tab — clicking a tab behind
+    /// an open MODAL must not change it.
+    #[doc(hidden)]
+    pub fn debug_active_ribbon_tab(&self) -> String {
+        format!("{:?}", self.tab)
+    }
     #[doc(hidden)]
     pub fn debug_close_chain_armed(&self) -> bool {
         self.close_after_save.is_some()
@@ -11162,11 +11168,13 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "the drawing".into());
-        egui::Window::new("Save changes?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
+        // MODAL (#166): the backdrop blocks input to everything
+        // behind the prompt — the document cannot change underneath
+        // the Save / Don't-Save decision. The title rides inside the
+        // dialog frame (a modal has no title bar).
+        egui::Modal::new(egui::Id::unique("dc-confirm-close")).show(ctx, |ui| {
+            ui.strong("Save changes?");
+            ui.add_space(4.0);
                 ui.label(format!("Save changes to {name}?"));
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -11196,7 +11204,7 @@ impl App {
                         self.confirm_close = None;
                     }
                 });
-            });
+        });
     }
 
     /// Execute a confirmed close: the app window (re-issue the close
@@ -11252,12 +11260,12 @@ impl App {
         if !self.confirm_new {
             return;
         }
-        egui::Window::new("Save changes?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label("The current drawing has unsaved changes.");
+        // MODAL (#166), same as the close prompt: nothing behind the
+        // dialog is interactive while the decision is pending.
+        egui::Modal::new(egui::Id::unique("dc-confirm-new")).show(ctx, |ui| {
+            ui.strong("Save changes?");
+            ui.add_space(4.0);
+            ui.label("The current drawing has unsaved changes.");
                 ui.horizontal(|ui| {
                     if ui.button("Save & New").clicked() {
                         self.confirm_new = false;
@@ -11279,7 +11287,7 @@ impl App {
                         self.confirm_new = false;
                     }
                 });
-            });
+        });
     }
 
     /// The File backstage (Visio 2016): green command rail on the left,
