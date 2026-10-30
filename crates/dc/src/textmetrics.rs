@@ -94,12 +94,29 @@ struct MetricsDb {
     carlito_bold_italic: fontdb::ID,
 }
 
+/// CSS-style distance from the wanted posture (CodeRabbit, #145):
+/// an Oblique face serves an italic request ahead of Normal — the
+/// same order resvg's fontdb query uses, so measurement and raster
+/// pick the same face when a family lacks a true Italic.
+fn style_penalty(have: fontdb::Style, want_italic: bool) -> usize {
+    use fontdb::Style::{Italic, Normal, Oblique};
+    match (want_italic, have) {
+        (true, Italic) | (true, Oblique) => 0,
+        (true, Normal) => 1,
+        (false, Normal) => 0,
+        (false, Italic) | (false, Oblique) => 1,
+    }
+}
+
 /// Rank one face against the wanted (weight, style): upright faces
 /// stay preferred for upright text (v1 measured italic as upright),
 /// and a family that lacks the wanted style still resolves its
 /// nearest face instead of nothing.
 fn style_rank(f: &fontdb::FaceInfo, want_style: fontdb::Style, target: i32) -> (usize, i32) {
-    (usize::from(f.style != want_style), (f.weight.0 as i32 - target).abs())
+    (
+        style_penalty(f.style, want_style == fontdb::Style::Italic),
+        (f.weight.0 as i32 - target).abs(),
+    )
 }
 
 fn build_db(embedded_only: bool) -> MetricsDb {
