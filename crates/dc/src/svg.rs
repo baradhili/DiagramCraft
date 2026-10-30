@@ -1349,10 +1349,15 @@ fn emit_text(
     }
     // Authored leading spacing is content (#144): trim only the END —
     // the first paragraph's leading space run must survive into its
-    // line, while the trailing trim keeps the corpus-standard
-    // "text ends with CRLF" authoring pattern (Enter after the last
-    // line) at the same line count Visio shows instead of adding an
-    // empty line and shifting the block's vertical centering.
+    // line. The trailing trim is now GOLD-BACKED (#148, 2026-10-30):
+    // the shipped corpus carries Visio's own cached
+    // `TEXTHEIGHT(TheText,TxtWidth)` values, and 25 one-visual-line
+    // texts ending in the corpus-standard CRLF (DBUML_M/U "PK\r\n",
+    // TITLE_M/U "\r\n", ELETEL_M, OFFEQP…) cache exactly ONE line
+    // height (1.2003–1.2004 em at the canonical 120% spacing) — Visio
+    // does NOT count the trailing break as a line, so dropping it
+    // here keeps the block's line count and vertical centering where
+    // Visio puts them.
     let Some(text) = s
         .sheet
         .text
