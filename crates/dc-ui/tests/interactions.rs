@@ -6149,10 +6149,18 @@ fn hyperlink_dialog_relative_paths_browse_and_page_picker() {
         vec![("spec.pdf".into(), "Page-2".into())],
         "Apply committed the relativized address and the picked page"
     );
-    // The draft is still open (Apply semantics); Cancel discards it.
+    // The draft is still open (Apply semantics), and a SECOND Apply
+    // updates the row it created — never duplicates (CodeRabbit).
     assert!(
         h.get_all_by_label("OK").count() == 1,
         "the draft stays open under Apply"
+    );
+    h.get_by_label("Apply").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![("spec.pdf".into(), "Page-2".into())],
+        "the second Apply edited the row, not duplicated it"
     );
     h.get_by_label("Cancel").click();
     h.run();
@@ -6179,13 +6187,14 @@ fn hyperlink_dialog_relative_paths_browse_and_page_picker() {
         "a typed absolute inside path stored relative"
     );
 
-    // One undo per commit: two undos clear both rows.
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
-    h.run();
-    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
-    h.run();
+    // One undo per commit: three commits happened (first Apply,
+    // the second Apply's row edit, the OK) — three undos clear all.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+        h.run();
+    }
     assert!(
         h.state().debug_hyperlinks_for_test(sid).is_empty(),
-        "two undos removed both rows"
+        "three undos removed everything"
     );
 }

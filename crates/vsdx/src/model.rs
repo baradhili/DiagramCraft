@@ -934,55 +934,6 @@ impl Document {
             }),
         );
     }
-
-    /// Whether hyperlink addresses are stored relative to the
-    /// document (GitHub #71, the 2016 Hyperlinks dialog's "Use
-    /// relative paths for hyperlinks" checkbox). Reconstructed as a
-    /// `<UseRelativePaths>` child of `<DocumentSettings>` — the
-    /// shipped corpus never carries the element (Visio 2016 keeps
-    /// the toggle application-level), so absence reads as OFF and
-    /// this stays a per-document DiagramCraft setting.
-    pub fn doc_hyperlinks_relative(&self) -> bool {
-        let Some(raw) = self.items.iter().find_map(|it| match it {
-            DocItem::Raw(r) if r.name == "DocumentSettings" => Some(r),
-            _ => None,
-        }) else {
-            return false;
-        };
-        read_settings_child(&raw.inner, "UseRelativePaths")
-            .map(|v| v != 0)
-            .unwrap_or(false)
-    }
-
-    /// Write the relative-hyperlinks toggle (see
-    /// [`Document::doc_hyperlinks_relative`]). Document state, not an
-    /// edit: callers write it like the snap & glue cells (no undo,
-    /// the file saves it back).
-    pub fn set_doc_hyperlinks_relative(&mut self, on: bool) {
-        let v = if on { "1" } else { "0" };
-        if let Some(ix) =
-            self.items
-                .iter()
-                .position(|it| matches!(it, DocItem::Raw(r) if r.name == "DocumentSettings"))
-        {
-            if let DocItem::Raw(r) = &mut self.items[ix] {
-                r.inner = set_settings_child(&r.inner, "UseRelativePaths", v);
-            }
-            return;
-        }
-        // No element yet (the blank package): synthesize one carrying
-        // the toggle (the snap & glue synthesis shape, minus its
-        // defaults — those stay untouched here).
-        let inner = set_settings_child("", "UseRelativePaths", v);
-        self.items.insert(
-            0,
-            DocItem::Raw(RawEl {
-                name: "DocumentSettings".to_string(),
-                attrs: Vec::new(),
-                inner,
-            }),
-        );
-    }
 }
 
 #[cfg(test)]

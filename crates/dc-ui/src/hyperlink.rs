@@ -68,6 +68,87 @@ pub fn doc_dir(path: &Path) -> Option<&Path> {
     path.parent().filter(|p| !p.as_os_str().is_empty())
 }
 
+/// The "Use relative paths for hyperlinks" toggle, per document
+/// (GitHub #71). Visio 2016 keeps this toggle APPLICATION-level
+/// (observed, cleanroom); we persist it app-side keyed by the
+/// document's path — never inside the .vsdx, whose
+/// `<DocumentSettings>` schema is closed (CodeRabbit: an unknown
+/// child element can fail Visio's validation on open). Same app-owned
+/// config pattern as the MRU list and Quick Shapes membership.
+#[derive(Default)]
+pub struct RelativePaths {
+    on: std::collections::BTreeMap<PathBuf, bool>,
+    /// Where the map persists; `None` = in-memory only (the headless
+    /// constructors never touch the user's real config).
+    store: Option<PathBuf>,
+}
+
+impl RelativePaths {
+    /// A non-persisting map (headless tests, kittest).
+    pub fn ephemeral() -> RelativePaths {
+        RelativePaths::default()
+    }
+
+    /// Load from the user-config path, starting empty on any error
+    /// (missing file, corrupt JSON, unknown schema). With no config
+    /// base discoverable the store is ephemeral.
+    pub fn open() -> RelativePaths {
+        let Some(path) = crate::recent::config_base()
+            .map(|b| b.join("diagramcraft").join("hyperlink-relative.json"))
+        else {
+            return RelativePaths::ephemeral();
+        };
+        let on = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|v| {
+                v.get("on")
+                    .and_then(|a| a.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| {
+                                Some((
+                                    PathBuf::from(e.get(0)?.as_str()?),
+                                    e.get(1)?.as_bool()?,
+                                ))
+                            })
+                            .collect()
+                    })
+            })
+            .unwrap_or_default();
+        RelativePaths {
+            on,
+            store: Some(path),
+        }
+    }
+
+    /// The toggle for `doc` (an unsaved document keys the empty path
+    /// — session-only, since nothing else identifies it).
+    pub fn get(&self, doc: &Path) -> bool {
+        self.on.get(doc).copied().unwrap_or(false)
+    }
+
+    /// Set the toggle for `doc`; persistence is best-effort — a
+    /// read-only config dir must not break the toggle.
+    pub fn set(&mut self, doc: &Path, value: bool) {
+        self.on.insert(doc.to_path_buf(), value);
+        if let Some(path) = &self.store {
+            let entries: Vec<(&PathBuf, &bool)> = self.on.iter().collect();
+            let _ = std::fs::create_dir_all(path.parent().unwrap_or(path));
+            let _ = std::fs::write(
+                path,
+                serde_json::json!({
+                    "version": 1,
+                    "on": entries.iter()
+                        .map(|(p, v)| serde_json::json!([p.to_string_lossy(), v]))
+                        .collect::<Vec<_>>(),
+                })
+                .to_string(),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,7 +170,10 @@ mod tests {
         );
     }
 
+    // POSIX path literals: Windows `is_absolute` requires a drive
+    // prefix (CodeRabbit) — the path logic itself is platform-neutral.
     #[test]
+    #[cfg(unix)]
     fn inside_paths_relativize_only_when_told() {
         let dir = Path::new("/drawings");
         // Toggle on: a file inside the doc's directory stores as its
@@ -123,6 +207,7 @@ mod tests {
     /// resolved against the document's directory, and the ORIGINAL
     /// absolute path comes back out.
     #[test]
+    #[cfg(unix)]
     fn stored_relative_addresses_resolve_back() {
         let dir = Path::new("/drawings");
         let stored = store_address("/drawings/sub/spec.pdf", Some(dir), true);
@@ -133,6 +218,20 @@ mod tests {
         );
         // An unsaved document passes the relative form through.
         assert_eq!(resolve_address(&stored, None), stored);
+    }
+
+    /// The per-document toggle store: set/get per path, default off,
+    /// and independent of persistence (the ephemeral store covers the
+    /// kittest constructors).
+    #[test]
+    fn relative_paths_toggle_is_per_document() {
+        let mut p = RelativePaths::ephemeral();
+        let a = Path::new("/docs/a.vsdx");
+        let b = Path::new("/docs/b.vsdx");
+        assert!(!p.get(a), "absent reads off");
+        p.set(a, true);
+        assert!(p.get(a));
+        assert!(!p.get(b), "the toggle is per document");
     }
 
     #[test]

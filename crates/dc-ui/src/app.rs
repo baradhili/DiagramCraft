@@ -278,6 +278,9 @@ pub struct App {
     /// Per-user Quick Shapes membership (#143) — app-side, persisted
     /// beside the MRU; ephemeral in every headless constructor.
     quick_shapes: crate::quickshapes::QuickShapes,
+    /// "Use relative paths for hyperlinks" per document (#71),
+    /// app-side keyed by path (Visio keeps the toggle app-level).
+    relative_paths: crate::hyperlink::RelativePaths,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -412,6 +415,7 @@ impl App {
         // touch the user's real config dir).
         app.recent = RecentFiles::open();
         app.quick_shapes = crate::quickshapes::QuickShapes::open();
+        app.relative_paths = crate::hyperlink::RelativePaths::open();
         if let Some(p) = path {
             app.load(p);
         }
@@ -502,6 +506,7 @@ impl App {
             color_pick: None,
             recent: RecentFiles::ephemeral(),
             quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
+            relative_paths: crate::hyperlink::RelativePaths::ephemeral(),
             os_theme: None,
         };
         if let Some(p) = path {
@@ -1221,10 +1226,7 @@ impl App {
             // it (a path inside the document's directory shows as its
             // relative form when the toggle is on — what 2016 shows).
             PendingDialog::HyperlinkAddress(_) => {
-                let relative = self
-                    .ed
-                    .as_ref()
-                    .is_some_and(|e| e.doc.doc_hyperlinks_relative());
+                let relative = self.relative_paths.get(&self.path);
                 let stored = crate::hyperlink::store_address(
                     &path.to_string_lossy(),
                     crate::hyperlink::doc_dir(&self.path),
@@ -8192,14 +8194,11 @@ impl App {
         // drops master rows an instance row already shadows.
         let rows = self.hyperlink_rows(shape_id);
         let mut draft = self.hyperlink_draft.take();
-        // #71: the 2016 dialog's per-document storage toggle. Document
-        // state, not an edit — written like the snap & glue cells
-        // (no undo, saved with the file).
-        let mut relative_paths = self
-            .ed
-            .as_ref()
-            .map(|e| e.doc.doc_hyperlinks_relative())
-            .unwrap_or(false);
+        // #71: the 2016 dialog's storage toggle. Visio keeps it
+        // app-level (observed); ours persists app-side keyed by the
+        // document's path — never inside the .vsdx, whose
+        // DocumentSettings schema is closed.
+        let mut relative_paths = self.relative_paths.get(&self.path);
         let doc_dir = crate::hyperlink::doc_dir(&self.path).map(|p| p.to_path_buf());
         // Page names for the Sub-address picker (#71): a SubAddress
         // names a page (the follow path), so the dropdown lists them.
@@ -8225,10 +8224,7 @@ impl App {
                     .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
                     .changed()
                 {
-                    if let Some(ed) = self.ed.as_mut() {
-                        ed.doc.set_doc_hyperlinks_relative(relative_paths);
-                        self.dirty = true;
-                    }
+                    self.relative_paths.set(&self.path, relative_paths);
                 }
                 if rows.is_empty() && draft.is_none() {
                     ui.weak("No hyperlinks on this shape.");
@@ -8352,7 +8348,11 @@ impl App {
                     // OK / Apply / Cancel (#71): Apply commits without
                     // closing the draft — the 2016 triad. One undo per
                     // commit either way.
-                    let commit = |self_: &mut Self| -> bool {
+                    // Returns the committed row ix (None when the
+                    // draft was all-empty and wrote nothing) — Apply
+                    // feeds it back so a second commit EDITS the row
+                    // instead of duplicating it (CodeRabbit).
+                    let commit = |self_: &mut Self| -> Option<i64> {
                         let ix = edit_row.unwrap_or_else(|| {
                             rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
                         });
@@ -8398,17 +8398,25 @@ impl App {
                         }
                         // An all-empty draft writes nothing (and
                         // must not record a no-op undo step).
-                        if !cmds.is_empty() {
-                            self_.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                        if cmds.is_empty() {
+                            return None;
                         }
-                        true
+                        self_.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                        Some(ix)
                     };
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            close_draft = commit(self);
+                            commit(self);
+                            close_draft = true;
                         }
                         if ui.button("Apply").clicked() {
-                            commit(self);
+                            if let Some(ix) = commit(self) {
+                                // The draft now edits the row it just
+                                // created (a second Apply updates it,
+                                // never duplicates).
+                                d.edit_row = Some(ix);
+                                d.from_master = false;
+                            }
                         }
                         if ui.button("Cancel").clicked() {
                             close_draft = true;
