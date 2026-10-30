@@ -8,6 +8,7 @@
 //! the built-in catalog in `catalog` (#87).
 
 pub mod builtin;
+pub mod disk;
 pub mod source;
 
 pub use source::{MasterKey, Origin, StencilId, StencilSet, DOC_SERIAL};

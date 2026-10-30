@@ -416,6 +416,13 @@ impl App {
         app.recent = RecentFiles::open();
         app.quick_shapes = crate::quickshapes::QuickShapes::open();
         app.relative_paths = crate::hyperlink::RelativePaths::open();
+        // #104: the built-in catalog also exists as real `.vssx`
+        // files under My Shapes — extracted idempotently (missing or
+        // size-mismatched files rewritten and digest-verified) so
+        // users can open, copy, and inspect them like any stencil.
+        // Best-effort: an unwritable My Shapes degrades to the
+        // embedded bytes everywhere.
+        let _ = crate::stencil::disk::extract_catalog(Self::my_shapes_dir().as_deref());
         if let Some(p) = path {
             app.load(p);
         }
@@ -1028,18 +1035,16 @@ impl App {
     /// reveals the entry, and notes the status. Parse failures surface
     /// as a status note, like other load failures.
     /// The user's My Shapes folder (Visio convention, owner direction
-    /// 2026-10-27): `<home>/Documents/My Shapes`. Created on demand —
-    /// the Open Existing Stencil dialog starts there (#105 will grow
-    /// the auto-open default set out of it). None when no home
-    /// directory is known (neither HOME nor USERPROFILE): the dialog
-    /// then keeps its default start location and nothing is created.
+    /// 2026-10-27): `<home>/Documents/My Shapes`. PURE — no directory
+    /// is created here (kittest reaches this through the built-in
+    /// menu, #104); the extraction pass and the Open Existing Stencil
+    /// dialog create it on demand. None when no home directory is
+    /// known (neither HOME nor USERPROFILE).
     fn my_shapes_dir() -> Option<std::path::PathBuf> {
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from)?;
-        let dir = my_shapes_path(Some(home));
-        let _ = std::fs::create_dir_all(&dir);
-        Some(dir)
+        Some(my_shapes_path(Some(home)))
     }
 
     fn open_stencil(&mut self, path: PathBuf) {
@@ -1069,8 +1074,19 @@ impl App {
         let Some(b) = crate::stencil::builtin::by_slug(slug) else {
             return;
         };
-        let source = crate::stencil::builtin::source_path(b.slug);
-        if let Some(ix) = self.stencils.position_for(&source) {
+        // The dedupe key matches however the entry was opened: the
+        // extracted file (#104) or the `builtin/<slug>` fallback.
+        let my_shapes = Self::my_shapes_dir();
+        let source = crate::stencil::disk::extracted_path(
+            my_shapes.as_deref().unwrap_or_else(|| std::path::Path::new("")),
+            b.slug,
+        );
+        let fallback = crate::stencil::builtin::source_path(b.slug);
+        if let Some(ix) = self
+            .stencils
+            .position_for(&source)
+            .or_else(|| self.stencils.position_for(&fallback))
+        {
             let title = self
                 .stencils
                 .get(ix)
@@ -1080,12 +1096,30 @@ impl App {
             self.status = format!("closed {title}");
             return;
         }
+        self.open_builtin_stencil(b);
+    }
+
+    /// Open one built-in catalog stencil (#87), DISK-FIRST (#104):
+    /// the extracted `.vssx` under My Shapes when it is there (the
+    /// file identity — the same entry the user gets opening that
+    /// file), else the embedded bytes with the `builtin/<slug>`
+    /// pseudo-path. Title and origin stay the catalog's, so menu
+    /// provenance is kept either way.
+    fn open_builtin_stencil(&mut self, b: &'static crate::stencil::builtin::BuiltinStencil) {
         // Which variant opens is the pane's session preference (#85
         // follow-up): US by default, the metric twin with "Metric
         // Stencils" ticked.
         let metric = self.stencil.metric_units;
-        match vsdx::parse::parse_bytes(b.bytes_for(metric)) {
-            Ok(doc) => {
+        let my_shapes = Self::my_shapes_dir();
+        let opened = crate::stencil::disk::open_from_disk(my_shapes.as_deref(), b, metric)
+            .map(|(doc, source)| (doc, source, true))
+            .or_else(|| {
+                vsdx::parse::parse_bytes(b.bytes_for(metric))
+                    .ok()
+                    .map(|doc| (doc, crate::stencil::builtin::source_path(b.slug), false))
+            });
+        match opened {
+            Some((doc, source, from_disk)) => {
                 let (ix, _) = self.stencils.open_parsed(
                     doc,
                     source,
@@ -1093,13 +1127,18 @@ impl App {
                     crate::stencil::Origin::Builtin,
                 );
                 self.stencil.reveal = Some(StencilId::Open(ix));
-                self.status = if metric {
+                self.status = if from_disk {
+                    format!("opened {title} (My Shapes)", title = b.title)
+                } else if metric {
                     format!("opened {title} (metric)", title = b.title)
                 } else {
                     format!("opened {title}", title = b.title)
                 };
             }
-            Err(e) => self.status = format!("built-in stencil failed to load: {e:#}"),
+            None => {
+                self.status =
+                    format!("built-in stencil failed to load: {title}", title = b.title);
+            }
         }
     }
 
@@ -1162,6 +1201,7 @@ impl App {
                         let mut dlg =
                             rfd::FileDialog::new().add_filter("Visio stencil", &["vssx"]);
                         if let Some(dir) = Self::my_shapes_dir() {
+                            let _ = std::fs::create_dir_all(&dir);
                             dlg = dlg.set_directory(dir);
                         }
                         dlg.pick_file()

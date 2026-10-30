@@ -53,9 +53,10 @@ rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] 
 # carries (same version as Cargo.lock's).
 arboard = "3.7"
 vsdx = { version = "0.1.0", path = "../vsdx" }
+# Digest-verified built-in extraction to My Shapes (#104).
+sha2 = "0.11"
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
 tempfile = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }
-sha2 = "0.11"
