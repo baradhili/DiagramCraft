@@ -11,7 +11,7 @@ use dc_core::commands::{
     RenamePage, ReorderShape,
 };
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
-use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
+use dc_core::{Editor, Macro, SetCell, SetRowCell};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
@@ -2339,12 +2339,15 @@ impl App {
                 }
             }
             let count = all.len();
-            cmds.push(Box::new(dc_core::SetText::new(
-                Scope::Shape {
+            // Text edit as one undo step incl. text-derived cache
+            // refresh (#147).
+            cmds.push(Box::new(dc::textfunc::text_edit_macro(
+                &ed.doc,
+                &Scope::Shape {
                     page: page_id,
                     shape: container,
                 },
-                format!("{title} ({count})"),
+                &format!("{title} ({count})"),
             )));
         }
         if !cmds.is_empty() {
@@ -7428,13 +7431,20 @@ impl App {
                                         let date = date.clone();
                                         let new_text =
                                             format!("{} — {}: {}", author, date, buf.trim());
-                                        self.apply(dc_core::SetText::new(
-                                            Scope::Shape {
-                                                page: page_id,
-                                                shape: *ann_id,
-                                            },
-                                            new_text,
-                                        ));
+                                        // One undo step incl. text-derived
+                                        // cache refresh (#147).
+                                        let scope = Scope::Shape {
+                                            page: page_id,
+                                            shape: *ann_id,
+                                        };
+                                        let doc = self
+                                            .ed()
+                                            .map(|ed| &ed.doc);
+                                        if let Some(doc) = doc {
+                                            self.apply(
+                                                dc::textfunc::text_edit_macro(doc, &scope, &new_text),
+                                            );
+                                        }
                                         edit_done = true;
                                     }
                                     if ui.button("Cancel").clicked() {
@@ -9427,13 +9437,17 @@ impl App {
             return;
         };
         if sess.draft != current {
-            self.apply(SetText::new(
-                Scope::Shape {
-                    page: sess.page,
-                    shape: sess.shape,
-                },
-                sess.draft,
-            ));
+            // One undo step: the text plus refreshed cached Vs for
+            // text-derived block cells (#147).
+            let scope = Scope::Shape {
+                page: sess.page,
+                shape: sess.shape,
+            };
+            let doc = self.ed.as_ref().map(|ed| &ed.doc);
+            if let Some(doc) = doc {
+                let mac = dc::textfunc::text_edit_macro(doc, &scope, &sess.draft);
+                self.apply(mac);
+            }
         }
     }
 

@@ -1250,7 +1250,7 @@ pub fn text_first_baseline(tb: &TextBlock, total_h: f64) -> f64 {
 
 /// The cell resolution behind [`TextBlock`] — shared by `emit_text`
 /// (which paints from it) and the public [`text_block`] wrapper.
-fn resolve_text_block(
+pub(crate) fn resolve_text_block(
     doc: &Document,
     s: &Shape,
     chain: &[&Shape],
@@ -1332,6 +1332,80 @@ fn resolve_text_block(
     }
 }
 
+/// The greedy wrap both the renderer (`emit_text`) and the
+/// `TEXTHEIGHT` measurement (#147) run — one wrap, so block-size
+/// caches and the rendered lines can never disagree.
+///
+/// Visio stores line breaks as CRLF: breaking on each of \r and \n
+/// separately would insert an empty paragraph between every pair of
+/// lines, so normalize CRLF (and lone CR) to one break first.
+/// Character-exact lines (#144): each paragraph is reconstructed
+/// verbatim — `split(' ')` words joined back with their separator
+/// spaces — so a paragraph-leading space run (empty first words)
+/// survives into the first line, interior runs stay, and a
+/// whitespace-only paragraph emits its spaces instead of an empty
+/// line. `started` distinguishes "no words consumed yet" from "an
+/// empty word consumed" (a pending leading space): a bare
+/// `cur.is_empty()` test cannot tell them apart, which is how the
+/// leading run used to vanish.
+pub(crate) fn wrap_block_text(
+    face: &crate::textmetrics::ResolvedFace,
+    text: &str,
+    size: f64,
+    usable_w: f64,
+) -> Vec<String> {
+    let width_in = |s: &str| face.width_in(s, size);
+    let mut lines: Vec<String> = Vec::new();
+    for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        let mut cur = String::new();
+        let mut started = false;
+        for word in para.split(' ') {
+            let candidate = if started {
+                format!("{cur} {word}")
+            } else {
+                word.to_string()
+            };
+            if started && width_in(&candidate) > usable_w {
+                if cur.is_empty() {
+                    // The break lands on a pending separator space (an
+                    // authored space run or a leading indent too wide
+                    // to share a line with the word): the space is
+                    // content (#144 review) — it becomes a line of its
+                    // own, never an empty line, never dropped.
+                    lines.push(" ".to_string());
+                } else {
+                    lines.push(std::mem::take(&mut cur));
+                }
+                cur = word.to_string();
+            } else {
+                cur = candidate;
+            }
+            started = true;
+            // A single word wider than the line: hard-split at the
+            // longest character prefix that fits (always ≥1 char, so
+            // the loop makes progress).
+            while width_in(&cur) > usable_w && cur.chars().count() > 1 {
+                let mut split_at = cur
+                    .char_indices()
+                    .nth(1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(cur.len());
+                for (i, _) in cur.char_indices().skip(1) {
+                    if width_in(&cur[..i]) <= usable_w {
+                        split_at = i;
+                    } else {
+                        break;
+                    }
+                }
+                let rest = cur.split_off(split_at);
+                lines.push(std::mem::replace(&mut cur, rest));
+            }
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
 #[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
 fn emit_text(
     doc: &Document,
@@ -1405,67 +1479,7 @@ fn emit_text(
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
     let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
-    let width_in = |s: &str| face.width_in(s, size);
-    let mut lines: Vec<String> = Vec::new();
-    // Visio stores line breaks as CRLF: breaking on each of \r and \n
-    // separately would insert an empty paragraph between every pair of
-    // lines, so normalize CRLF (and lone CR) to one break first.
-    // Character-exact lines (#144): each paragraph is reconstructed
-    // verbatim — `split(' ')` words joined back with their separator
-    // spaces — so a paragraph-leading space run (empty first words)
-    // survives into the first line, interior runs stay, and a
-    // whitespace-only paragraph emits its spaces instead of an empty
-    // line. `started` distinguishes "no words consumed yet" from "an
-    // empty word consumed" (a pending leading space): a bare
-    // `cur.is_empty()` test cannot tell them apart, which is how the
-    // leading run used to vanish.
-    for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
-        let mut cur = String::new();
-        let mut started = false;
-        for word in para.split(' ') {
-            let candidate = if started {
-                format!("{cur} {word}")
-            } else {
-                word.to_string()
-            };
-            if started && width_in(&candidate) > usable_w {
-                if cur.is_empty() {
-                    // The break lands on a pending separator space (an
-                    // authored space run or a leading indent too wide
-                    // to share a line with the word): the space is
-                    // content (#144 review) — it becomes a line of its
-                    // own, never an empty line, never dropped.
-                    lines.push(" ".to_string());
-                } else {
-                    lines.push(std::mem::take(&mut cur));
-                }
-                cur = word.to_string();
-            } else {
-                cur = candidate;
-            }
-            started = true;
-            // A single word wider than the line: hard-split at the
-            // longest character prefix that fits (always ≥1 char, so
-            // the loop makes progress).
-            while width_in(&cur) > usable_w && cur.chars().count() > 1 {
-                let mut split_at = cur
-                    .char_indices()
-                    .nth(1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(cur.len());
-                for (i, _) in cur.char_indices().skip(1) {
-                    if width_in(&cur[..i]) <= usable_w {
-                        split_at = i;
-                    } else {
-                        break;
-                    }
-                }
-                let rest = cur.split_off(split_at);
-                lines.push(std::mem::replace(&mut cur, rest));
-            }
-        }
-        lines.push(cur);
-    }
+    let lines = wrap_block_text(&face, text, size, usable_w);
     let n_lines = lines.len() as f64;
     let total_h = n_lines * line_h;
 
@@ -2781,7 +2795,7 @@ fn font_family_attr(font: Option<&str>) -> String {
 }
 
 /// Resolved (Width, Height) for geometry scaling.
-fn shape_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> (f64, f64) {
+pub(crate) fn shape_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> (f64, f64) {
     let env = shape_env(doc, s, chain);
     let get = |n: &str| {
         doc.resolve_cell(s, chain, n)

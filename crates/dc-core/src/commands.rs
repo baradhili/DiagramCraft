@@ -162,6 +162,78 @@ pub struct SetCell {
 }
 
 /// The glue engine's cell write (GitHub #108): like [`SetCell`], but
+/// The text engine's cache write (GitHub #147): refresh a derived
+/// cell's cached `V` while keeping its `N`/`U`/`F` byte-identical.
+/// Text-aware blocks carry formulas like
+/// `TxtWidth = MAX(Width, TEXTWIDTH(TheText))`; when the text changes,
+/// the evaluator re-runs the formula and this command lands the new
+/// cache in the same undo step as the text edit. Like
+/// [`SetGluedCell`] this is an OWNER write (the machinery is the
+/// formula's maintainer), so no user-protection refusal applies —
+/// but unlike it the formula is never touched, only its cache.
+#[derive(Debug, Clone)]
+pub struct SetCellCache {
+    scope: Scope,
+    name: String,
+    new_v: f64,
+    old: Option<Cell>,
+}
+
+impl SetCellCache {
+    /// Refresh `name`'s cached value on `scope`'s sheet. The sheet
+    /// must already carry the cell — a shape without the cell keeps
+    /// its inherited/default resolution (introducing cells here would
+    /// change how the renderer resolves the block).
+    pub fn new(scope: Scope, name: impl Into<String>, new_v: f64) -> SetCellCache {
+        SetCellCache {
+            scope,
+            name: name.into(),
+            new_v,
+            old: None,
+        }
+    }
+}
+
+impl crate::Command for SetCellCache {
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        SetCell {
+            scope: self.scope.clone(),
+            name: self.name.clone(),
+            new: Cell::default(),
+            old: None,
+        }
+        .touched(doc)
+    }
+
+    fn label(&self) -> String {
+        format!("refresh {}:{} cache = {}", self.scope, self.name, self.new_v)
+    }
+
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let (name, v) = (self.name.clone(), self.new_v);
+        let s = sheet_mut(doc, &self.scope)?;
+        let Some(cell) = s.cell(&name).cloned() else {
+            // Absent cells are skipped, not created (see `new`).
+            return Ok(());
+        };
+        self.old = Some(cell.clone());
+        let mut next = cell;
+        // Shortest round-trip form, like the shipped `V`s ("0.25",
+        // "0.2667160732693142").
+        next.v = Some(format!("{v}"));
+        s.set_cell(&name, next);
+        Ok(())
+    }
+
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let s = sheet_mut(doc, &self.scope)?;
+        if let Some(old) = self.old.clone() {
+            restore_cell(s, &self.name, old);
+        }
+        Ok(())
+    }
+}
+
 /// `SetCell`'s GUARD refusal is waived — that refusal protects user
 /// edits from clobbering formulas, while the glue machinery IS the
 /// formula's owner (the corpus shows Visio rewriting
