@@ -6075,3 +6075,117 @@ fn second_picture_gets_a_unique_relationship() {
     assert_eq!(media.len(), 2, "two distinct parts: {media:?}");
     assert_ne!(media[0], media[1]);
 }
+
+/// GitHub #71: 2016 dialog parity — the "Use relative paths"
+/// toggle stores an inside-the-directory Address relative (a
+/// Browse… pick lands as its relative form), the Sub-address
+/// dropdown lists the document's pages, and Apply commits without
+/// closing the draft.
+#[test]
+fn hyperlink_dialog_relative_paths_browse_and_page_picker() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("spec.pdf");
+    std::fs::write(&target, b"%PDF- stub").unwrap();
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = harness_with_blank();
+    h.run();
+    // A saved document: its directory is what relative addresses
+    // resolve against.
+    h.state_mut().debug_set_doc_path_for_test(tmp.path().join("drawing.vsdx"));
+    // A second page so the picker has a choice.
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row in the context menu")
+        .click();
+    h.run();
+
+    // The 2016 storage toggle, on.
+    h.get_by_label("Use relative paths for hyperlinks").click();
+    h.run();
+
+    // New…, then Browse… resolves with the preset sibling file and
+    // lands in the Address field as its RELATIVE form.
+    h.get_by_label("New…").click();
+    h.run();
+    h.state_mut().preset_file_dialog_for_test(Some(target.clone()));
+    h.get_by_label("Browse…").click();
+    h.run();
+
+    // Sub-address from the page dropdown: the popup option sits
+    // above the page tabs, so the topmost Page-2 is the picker's.
+    h.get_by_label("Sub-address page").click();
+    h.run();
+    h.get_all_by_label("Page-2")
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Page-2 option in the dropdown")
+        .click();
+    h.run();
+
+    // Apply commits without closing the draft (the 2016 triad).
+    h.get_by_label("Apply").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![("spec.pdf".into(), "Page-2".into())],
+        "Apply committed the relativized address and the picked page"
+    );
+    // The draft is still open (Apply semantics); Cancel discards it.
+    assert!(
+        h.get_all_by_label("OK").count() == 1,
+        "the draft stays open under Apply"
+    );
+    h.get_by_label("Cancel").click();
+    h.run();
+
+    // A hand-typed absolute inside address also stores relative at
+    // commit (the toggle governs any Address, not just picks).
+    h.get_by_label("New…").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit(tmp.path().join("notes.txt").to_str().unwrap());
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![
+            ("spec.pdf".into(), "Page-2".into()),
+            ("notes.txt".into(), String::new()),
+        ],
+        "a typed absolute inside path stored relative"
+    );
+
+    // One undo per commit: two undos clear both rows.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        h.state().debug_hyperlinks_for_test(sid).is_empty(),
+        "two undos removed both rows"
+    );
+}

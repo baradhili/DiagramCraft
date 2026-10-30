@@ -301,6 +301,9 @@ enum PendingDialog {
     OpenStencil(Receiver<Option<PathBuf>>),
     /// Insert ▸ Pictures (#113): a picked PNG/JPEG.
     OpenPicture(Receiver<Option<PathBuf>>),
+    /// Hyperlinks ▸ Address browse (#71): a picked target file for
+    /// the draft's Address field.
+    HyperlinkAddress(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
@@ -312,6 +315,8 @@ enum PendingKind {
     /// Insert ▸ Pictures (#113, URS-1012): a PNG/JPEG file picked to
     /// become a Foreign shape.
     OpenPicture,
+    /// Hyperlinks ▸ Address browse (#71).
+    HyperlinkAddress,
 }
 
 /// Backstage rail command.
@@ -563,6 +568,19 @@ impl App {
     #[doc(hidden)]
     pub fn preset_save_as_for_test(&mut self, answer: Option<PathBuf>) {
         self.dialog_preset_for_test = Some(answer);
+    }
+    /// kittest (#71): the next native dialog (any kind — e.g. the
+    /// Hyperlinks Address browse) resolves with `answer` instead of
+    /// opening rfd.
+    #[doc(hidden)]
+    pub fn preset_file_dialog_for_test(&mut self, answer: Option<PathBuf>) {
+        self.dialog_preset_for_test = Some(answer);
+    }
+    /// kittest (#71): pretend the document was saved at `path` — the
+    /// relative-hyperlink logic keys off the document's directory.
+    #[doc(hidden)]
+    pub fn debug_set_doc_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
     }
     #[doc(hidden)]
     pub fn debug_close_prompt(&self) -> bool {
@@ -1150,6 +1168,8 @@ impl App {
                     PendingKind::OpenPicture => rfd::FileDialog::new()
                         .add_filter("Pictures", &["png", "jpg", "jpeg"])
                         .pick_file(),
+                    // Any file can be a hyperlink target (#71).
+                    PendingKind::HyperlinkAddress => rfd::FileDialog::new().pick_file(),
                 },
             };
             let _ = tx.send(picked);
@@ -1159,6 +1179,7 @@ impl App {
             PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
             PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
+            PendingKind::HyperlinkAddress => PendingDialog::HyperlinkAddress(rx),
         });
     }
 
@@ -1173,7 +1194,8 @@ impl App {
             PendingDialog::Open(rx)
             | PendingDialog::SaveAs(rx)
             | PendingDialog::OpenStencil(rx)
-            | PendingDialog::OpenPicture(rx) => match rx.try_recv() {
+            | PendingDialog::OpenPicture(rx)
+            | PendingDialog::HyperlinkAddress(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -1194,6 +1216,24 @@ impl App {
             PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
+            // The picked target lands in the open draft's Address
+            // field (#71), stored the way the document's toggle wants
+            // it (a path inside the document's directory shows as its
+            // relative form when the toggle is on — what 2016 shows).
+            PendingDialog::HyperlinkAddress(_) => {
+                let relative = self
+                    .ed
+                    .as_ref()
+                    .is_some_and(|e| e.doc.doc_hyperlinks_relative());
+                let stored = crate::hyperlink::store_address(
+                    &path.to_string_lossy(),
+                    crate::hyperlink::doc_dir(&self.path),
+                    relative,
+                );
+                if let Some(d) = self.hyperlink_draft.as_mut() {
+                    d.address = stored;
+                }
+            }
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -7141,6 +7181,13 @@ impl App {
             self.status = "the link has no address".into();
             return;
         }
+        // A stored relative address opens against the document's
+        // directory (#71): the link survives the file and its folder
+        // moving together.
+        let address = crate::hyperlink::resolve_address(
+            address,
+            crate::hyperlink::doc_dir(&self.path),
+        );
         #[cfg(target_os = "linux")]
         let open = "xdg-open";
         #[cfg(target_os = "macos")]
@@ -7155,7 +7202,7 @@ impl App {
         if !flag.is_empty() {
             cmd.arg(flag);
         }
-        match cmd.arg(address).spawn() {
+        match cmd.arg(&address).spawn() {
             Ok(_) => self.status = format!("opened {address}"),
             Err(e) => self.status = format!("could not open {address}: {e}"),
         }
@@ -8145,6 +8192,21 @@ impl App {
         // drops master rows an instance row already shadows.
         let rows = self.hyperlink_rows(shape_id);
         let mut draft = self.hyperlink_draft.take();
+        // #71: the 2016 dialog's per-document storage toggle. Document
+        // state, not an edit — written like the snap & glue cells
+        // (no undo, saved with the file).
+        let mut relative_paths = self
+            .ed
+            .as_ref()
+            .map(|e| e.doc.doc_hyperlinks_relative())
+            .unwrap_or(false);
+        let doc_dir = crate::hyperlink::doc_dir(&self.path).map(|p| p.to_path_buf());
+        // Page names for the Sub-address picker (#71): a SubAddress
+        // names a page (the follow path), so the dropdown lists them.
+        let page_names: Vec<String> = self
+            .ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
         // Cancel mechanism (live report + the 2016 dialog's Cancel):
         // the title-bar X and an explicit Close button both discard
         // any draft and dismiss the window.
@@ -8158,6 +8220,16 @@ impl App {
             .collapsible(false)
             .default_width(380.0)
             .show(ctx, |ui| {
+                // The 2016 storage toggle (#71) sits above the list.
+                if ui
+                    .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
+                    .changed()
+                {
+                    if let Some(ed) = self.ed.as_mut() {
+                        ed.doc.set_doc_hyperlinks_relative(relative_paths);
+                        self.dirty = true;
+                    }
+                }
                 if rows.is_empty() && draft.is_none() {
                     ui.weak("No hyperlinks on this shape.");
                 }
@@ -8219,12 +8291,42 @@ impl App {
                         });
                     };
                     egui::Grid::new("dc-hyperlink-draft")
-                        .num_columns(2)
+                        .num_columns(3)
                         .spacing(egui::vec2(8.0, 4.0))
                         .show(ui, |ui| {
                             field(ui, "Address", &mut d.address);
+                            // Browse… (#71): the native file picker (the
+                            // Open/Save As worker-thread pattern); the
+                            // pick lands in the Address field once the
+                            // dialog resolves.
+                            if ui.button("Browse…").clicked() {
+                                self.begin_dialog(PendingKind::HyperlinkAddress);
+                            }
                             ui.end_row();
                             field(ui, "Sub-address", &mut d.sub);
+                            // Page picker (#71): a SubAddress names a
+                            // page — the dropdown offers the document's.
+                            // The accessible name satisfies the dialog
+                            // label requirement (#56 pattern).
+                            let combo = egui::ComboBox::from_id_salt("dc-hyperlink-sub-page")
+                                .selected_text(if d.sub.is_empty() {
+                                    "Pages…".into()
+                                } else {
+                                    d.sub.clone()
+                                })
+                                .width(110.0)
+                                .show_ui(ui, |ui| {
+                                    for name in &page_names {
+                                        ui.selectable_value(&mut d.sub, name.clone(), name);
+                                    }
+                                });
+                            combo.response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::ComboBox,
+                                    true,
+                                    "Sub-address page",
+                                )
+                            });
                             ui.end_row();
                             field(ui, "Description", &mut d.desc);
                             ui.end_row();
@@ -8236,60 +8338,77 @@ impl App {
                         d.sub.clone(),
                         d.desc.clone(),
                     );
+                    // Commit stores the address the way the toggle
+                    // wants it (#71): inside the document's directory
+                    // and relative-paths on → relative form. Picked
+                    // paths already arrived relativized; this covers
+                    // hand-typed ones too (idempotent).
+                    let address = crate::hyperlink::store_address(
+                        &address,
+                        doc_dir.as_deref(),
+                        relative_paths,
+                    );
                     let mut close_draft = false;
+                    // OK / Apply / Cancel (#71): Apply commits without
+                    // closing the draft — the 2016 triad. One undo per
+                    // commit either way.
+                    let commit = |self_: &mut Self| -> bool {
+                        let ix = edit_row.unwrap_or_else(|| {
+                            rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
+                        });
+                        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+                        if let Some(old) = edit_row {
+                            // An instance edit replaces its row. A
+                            // master-inherited row has no local row
+                            // to replace: SetRowCell's first-edit
+                            // materialization seeds the local
+                            // section+row (inherited values
+                            // included) — the master stays
+                            // untouched (#139).
+                            if !from_master {
+                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(old),
+                                )));
+                            }
+                        }
+                        for (name, val) in [
+                            ("Address", &address),
+                            ("SubAddress", &sub),
+                            ("Description", &desc),
+                        ] {
+                            // A materializing edit writes every
+                            // field, cleared ones as explicit
+                            // empty values: the materialized row
+                            // is seeded with the inherited cells,
+                            // so a skipped field would silently
+                            // keep its master value (#139 review).
+                            if from_master || !val.trim().is_empty() {
+                                cmds.push(Box::new(dc_core::SetRowCell::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(ix),
+                                    name,
+                                    vsdx::model::Cell::value(val.trim()),
+                                )));
+                            }
+                        }
+                        // An all-empty draft writes nothing (and
+                        // must not record a no-op undo step).
+                        if !cmds.is_empty() {
+                            self_.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                        }
+                        true
+                    };
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            let ix = edit_row.unwrap_or_else(|| {
-                                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
-                            });
-                            let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
-                            if let Some(old) = edit_row {
-                                // An instance edit replaces its row. A
-                                // master-inherited row has no local row
-                                // to replace: SetRowCell's first-edit
-                                // materialization seeds the local
-                                // section+row (inherited values
-                                // included) — the master stays
-                                // untouched (#139).
-                                if !from_master {
-                                    cmds.push(Box::new(
-                                        dc_core::commands::RemoveSectionRow::new(
-                                            scope.clone(),
-                                            "Hyperlink",
-                                            0,
-                                            dc_core::commands::RowSel::Ix(old),
-                                        ),
-                                    ));
-                                }
-                            }
-                            for (name, val) in [
-                                ("Address", &address),
-                                ("SubAddress", &sub),
-                                ("Description", &desc),
-                            ] {
-                                // A materializing edit writes every
-                                // field, cleared ones as explicit
-                                // empty values: the materialized row
-                                // is seeded with the inherited cells,
-                                // so a skipped field would silently
-                                // keep its master value (#139 review).
-                                if from_master || !val.trim().is_empty() {
-                                    cmds.push(Box::new(dc_core::SetRowCell::new(
-                                        scope.clone(),
-                                        "Hyperlink",
-                                        0,
-                                        dc_core::commands::RowSel::Ix(ix),
-                                        name,
-                                        vsdx::model::Cell::value(val.trim()),
-                                    )));
-                                }
-                            }
-                            // An all-empty draft writes nothing (and
-                            // must not record a no-op undo step).
-                            if !cmds.is_empty() {
-                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
-                            }
-                            close_draft = true;
+                            close_draft = commit(self);
+                        }
+                        if ui.button("Apply").clicked() {
+                            commit(self);
                         }
                         if ui.button("Cancel").clicked() {
                             close_draft = true;
