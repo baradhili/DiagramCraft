@@ -1564,14 +1564,26 @@ impl App {
                         })
                         .map(|(r, s)| (Some(r), s))
                         .unwrap_or((None, (1.0, 1.0)));
-                    if let Some(rect) = Self::shape_rect_static(&ed.doc, page.id, shape) {
+                    // #179: the full placement frame (rotation +
+                    // flips) — a rotated connector's ink lives outside
+                    // its unrotated rect, so the gate uses the
+                    // rotated corner union.
+                    let frame = crate::connectors::hit_frame(
+                        &ed.doc,
+                        &chain,
+                        shape,
+                        msize,
+                    );
+                    let (bx0, by0, bx1, by1) = frame.page_bounds();
+                    if page_pos.0 >= bx0 - threshold
+                        && page_pos.0 <= bx1 + threshold
+                        && page_pos.1 >= by0 - threshold
+                        && page_pos.1 <= by1 + threshold
+                    {
                         let segs = crate::connectors::geometry_hit_segments(
                             shape,
                             root,
-                            (g("PinX").unwrap_or(rect.0) - g("LocPinX").unwrap_or(0.0),
-                             g("PinY").unwrap_or(rect.1) - g("LocPinY").unwrap_or(0.0)),
-                            (g("Width").unwrap_or(rect.2), g("Height").unwrap_or(rect.3)),
-                            msize,
+                            &frame,
                         );
                         for (a, b) in segs {
                             if segment_hit(a, b, page_pos, threshold) {
@@ -1599,7 +1611,39 @@ impl App {
             return None;
         }
         for shape in page.shapes.iter().rev() {
-            if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
+            // #179: a rotated shape's claim uses its ROTATED bounds —
+            // the unrotated Pin/Width/Height rect of a rotated box is
+            // far bigger than the visible ink and steals clicks from
+            // thin connectors crossing the corners (utilisation.vsdx).
+            let rotated = shape
+                .sheet
+                .cell("Angle")
+                .and_then(|c| c.numeric())
+                .filter(|a| a.abs() > 1e-6)
+                .is_some()
+                || shape_chain(&ed.doc, page.id, shape.id)
+                    .ok()
+                    .and_then(|ch| {
+                        ed.doc
+                            .resolve_cell(shape, &ch, "Angle")
+                            .and_then(|c| c.numeric())
+                    })
+                    .is_some_and(|a| a.abs() > 1e-6);
+            if rotated {
+                let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) else {
+                    continue;
+                };
+                let (x0, y0, x1, y1) =
+                    crate::connectors::hit_frame(&ed.doc, &chain, shape, (1.0, 1.0))
+                        .page_bounds();
+                if page_pos.0 >= x0
+                    && page_pos.0 <= x1
+                    && page_pos.1 >= y0
+                    && page_pos.1 <= y1
+                {
+                    return Some(shape.id);
+                }
+            } else if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
                 if hit_in_rect(page_pos, x, y, w, h) {
                     return Some(shape.id);
                 }
@@ -3254,6 +3298,15 @@ impl App {
         } else if existing.is_some() {
             self.status = "connector end released".into();
         }
+        // #179: the drop moved an endpoint — a master-based
+        // connector's formula-driven frame caches and geometry rows
+        // must refresh in the SAME undo step or the render keeps the
+        // pre-drag pose (the glue writes alone leave Pin/Width/Height
+        // stale under their GUARDs). Planned by ID: works for the
+        // re-glue and the release alike.
+        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
+            page_id, vec![sid],
+        )));
         self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
     }
 
@@ -7035,6 +7088,42 @@ impl App {
         let conn_threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
         let conn_snap = self.snap;
         let conn_sel = self.sel;
+        // #179: live endpoint snapping — two target sets: one
+        // excluding the selected connector (its own endpoint handle
+        // is the dragged thing) and one excluding nothing (the
+        // Connector Tool's fresh draw). The context is built inside
+        // the closure (SnapCtx borrows the targets).
+        let snap_settings = self.snap;
+        let (snap_grid, snap_ruler, snap_thr) = (
+            canvas::grid_step_in(&self.view),
+            canvas::ruler_interval_in(&self.view),
+            SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
+        );
+        let (t_sel, g_sel, t_all, g_all) = {
+            let pid = self.page_id().unwrap_or(-1);
+            let sel_id = conn_sel.map(|(_, s)| s).unwrap_or(-1);
+            (
+                self.snap_targets(pid, &[sel_id]),
+                self.snap_guides(&[sel_id]),
+                self.snap_targets(pid, &[-1]),
+                self.snap_guides(&[-1]),
+            )
+        };
+        let snap_end = move |endpoint_drag: bool, p: (f64, f64)| -> (f64, f64) {
+            let (targets, guides) = if endpoint_drag {
+                (&t_sel, &g_sel)
+            } else {
+                (&t_all, &g_all)
+            };
+            let ctx = crate::snap::SnapCtx {
+                targets,
+                guides,
+                grid_step_in: snap_grid,
+                ruler_step_in: snap_ruler,
+                threshold_in: snap_thr,
+            };
+            crate::snap::point_snap(p, &ctx, &snap_settings, true).map_or(p, |(q, _)| q)
+        };
         let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
         let App {
@@ -7099,6 +7188,7 @@ impl App {
             self.tool == Tool::Connector,
             armed,
             &conn_fx,
+            &snap_end,
             &hit,
             &mut mouse,
             // While the in-place text editor is open (#22) the canvas
@@ -7273,7 +7363,14 @@ impl App {
                                 })
                             });
                             if is_conn {
-                                self.commit_connector_endpoint(id, raw);
+                                // #179: snap the drop like the plain
+                                // 1D path — Visio's endpoint magnetizes
+                                // to connection points (and the other
+                                // snap targets) on release.
+                                let snapped = dragged
+                                    .and_then(|sid| self.snap_point_for(sid, raw, true))
+                                    .map_or(raw, |(p, _)| p);
+                                self.commit_connector_endpoint(id, snapped);
                             } else {
                                 let glue = dragged
                                     .and_then(|sid| self.snap_point_for(sid, raw, true));

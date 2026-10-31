@@ -438,6 +438,11 @@ pub(crate) fn pin_of(doc: &Document, page: i64, shape: i64) -> Option<(f64, f64)
 pub struct RerouteConnectors {
     page: i64,
     moved: Vec<i64>,
+    /// #179: connector ids to plan REGARDLESS of which shape moved —
+    /// an endpoint drop re-glues or RELEASES the connector, and a
+    /// master-based connector's formula-driven frame caches must
+    /// refresh either way or the render keeps the pre-drag pose.
+    also: Vec<i64>,
     inner: Vec<Box<dyn dc_core::Command>>,
     /// The apply-time touch list, merged once pass 2 finishes. `undo`
     /// clears `inner` (its commands are spent), but the history asks
@@ -452,6 +457,20 @@ impl RerouteConnectors {
         RerouteConnectors {
             page,
             moved,
+            also: Vec::new(),
+            inner: Vec::new(),
+            touched_cache: dc_core::TouchList::default(),
+        }
+    }
+
+    /// Plan these connectors by ID — every glue record they carry
+    /// (or a frame-only refresh when released), no shape-move needed
+    /// (#179's endpoint-drop path).
+    pub fn new_including(page: i64, also: Vec<i64>) -> RerouteConnectors {
+        RerouteConnectors {
+            page,
+            moved: Vec::new(),
+            also,
             inner: Vec::new(),
             touched_cache: dc_core::TouchList::default(),
         }
@@ -505,6 +524,22 @@ impl Command for RerouteConnectors {
                     continue;
                 }
                 by_connector.entry(c.from_sheet).or_default().push(c);
+            }
+            // #179: also-listed connectors plan by ID — carrying ALL
+            // their glue records (both ends re-resolve), or none when
+            // just released (a frame-only refresh from the endpoint
+            // cells).
+            for id in &self.also {
+                if !by_connector.contains_key(id) {
+                    by_connector.insert(
+                        *id,
+                        connects
+                            .list
+                            .iter()
+                            .filter(|c| c.from_sheet == *id)
+                            .collect(),
+                    );
+                }
             }
             let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
                 let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
@@ -612,7 +647,7 @@ impl Command for RerouteConnectors {
                     end_cells.push((end.cell().to_string(), attach.0, endf.clone()));
                     end_cells.push((end.y_cell().to_string(), attach.1, endf));
                 }
-                if end_cells.is_empty() {
+                if end_cells.is_empty() && !self.also.contains(&conn_id) {
                     continue;
                 }
                 // Frame + route once, from both new endpoints.
@@ -1345,6 +1380,86 @@ mod reroute_master_tests {
                 .iter()
                 .any(|t| t.shape == 11 && t.touch == dc_core::Touch::Ink),
             "post-undo touches still name the connector (the cache): {touched:?}"
+        );
+    }
+
+    /// #179: an endpoint drop plans the connector BY ID — even a
+    /// RELEASED (unglued) master-based connector refreshes its
+    /// formula-driven frame caches from the endpoint cells, so the
+    /// render follows the dropped end instead of keeping the
+    /// pre-drag pose.
+    #[test]
+    fn reroute_including_refreshes_a_released_connector() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        // The drop path already wrote the new endpoint values and
+        // removed the Connect (released): replay that state.
+        {
+            let page = &mut ed.doc.pages[0];
+            use dc_core::connects::ConnectsHost;
+            let mut list = page.connects();
+            list.list.clear();
+            page.set_connects(&list);
+        }
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 11 {
+                sh.sheet.set_cell("EndX", VCell::value("3.0"));
+                sh.sheet.set_cell("EndY", VCell::value("5.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new_including(page_id, vec![11]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let cell = |n: &str| {
+            conn.sheet
+                .cell(n)
+                .and_then(|c| c.numeric())
+                .unwrap()
+        };
+        // The guarded caches refresh through their GUARDs; the band
+        // guard is overridden so the frame spans the endpoints
+        // (dx = 2, dy = −1 — begin (1, 6), end (3, 5)).
+        assert!(
+            (cell("PinX") - 2.0).abs() < 1e-6,
+            "PinX = (B+E)/2: {}",
+            cell("PinX")
+        );
+        assert!(
+            (cell("PinY") - 5.5).abs() < 1e-6,
+            "PinY = (B+E)/2: {}",
+            cell("PinY")
+        );
+        assert!(
+            (cell("Height") - (-1.0)).abs() < 1e-6,
+            "the band guard is overridden to span dy: {}",
+            cell("Height")
+        );
+        let pinx = conn.sheet.cell("PinX").unwrap();
+        assert!(
+            pinx.f.as_deref().is_some_and(|f| f.contains("GUARD")),
+            "the GUARD formula is kept: {:?}",
+            pinx.f
+        );
+        cmd.undo(&mut ed.doc).unwrap();
+        let h = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap()
+            .sheet
+            .cell("Height")
+            .unwrap();
+        assert!(
+            (h.numeric().unwrap() - 0.2).abs() < 1e-9,
+            "undo restores the band: {:?}",
+            h.v
         );
     }
 

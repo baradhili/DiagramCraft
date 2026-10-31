@@ -6625,4 +6625,37 @@ fn connection_points_reveal_highlight_and_show_glued_sites() {
         connects.iter().any(|c| c.0 == conn_id && c.5 == 103),
         "re-glued to the bottom point (ToPart 103): {connects:?}"
     );
+    // #179: the drop ATTACHES — the end cell reads exactly the
+    // connection point and the frame places the ink's end there
+    // (origin + last row = the connection point), not at the raw
+    // pointer.
+    let page2 = h.state().debug_sel().map(|(p, _)| p).unwrap_or(page);
+    let (ex, ey) = (
+        cell_of(&h, page2, conn_id, "EndX"),
+        cell_of(&h, page2, conn_id, "EndY"),
+    );
+    assert!(
+        (ex - (pad_page.0 + 0.5)).abs() < 1e-6 && (ey - pad_page.1).abs() < 1e-6,
+        "the end lands exactly on the bottom connection point: ({ex}, {ey})"
+    );
+    let (pinx, lpx) = (
+        cell_of(&h, page2, conn_id, "PinX"),
+        cell_of(&h, page2, conn_id, "LocPinX"),
+    );
+    // the LAST geometry row carries the endpoint (a 4-row elbow
+    // connector: row 4).
+    let last_x = [4i64, 3, 2]
+        .iter()
+        .find_map(|ix| {
+            h.state()
+                .debug_geo_row_cell_for_test(conn_id, *ix, "X")
+                .and_then(|(v, _)| v)
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .unwrap_or_default();
+    assert!(
+        ((pinx - lpx + last_x) - ex).abs() < 1e-4,
+        "the rendered frame's end row reaches the connection point: {} vs {ex}",
+        pinx - lpx + last_x
+    );
 }

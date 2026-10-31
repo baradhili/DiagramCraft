@@ -153,20 +153,157 @@ pub fn is_connector_in(doc: &vsdx::Document, chain: &[&Shape], s: &Shape) -> boo
 /// fallback), 3 interior samples per curve. When the instance has no
 /// local Geometry the master root's first section stands in, scaled
 /// from the master's size to the instance's.
+/// Everything the hit walk needs to place a shape's geometry rows on
+/// the page (#173/#179): the placement frame INCLUDING rotation and
+/// flips (the renderer's `translate(Pin) rotate(-Angle) scale(Flip)`
+/// composed into page y-up space), and the cell-evaluation
+/// environment — geometry row formulas (`Width*1`, `Height*0.5`)
+/// evaluate against the INSTANCE's sizes.
+#[derive(Debug, Clone)]
+pub struct HitFrame {
+    pub pin: (f64, f64),
+    pub loc_pin: (f64, f64),
+    pub size: (f64, f64),
+    pub master_size: (f64, f64),
+    pub angle: f64,
+    /// (+1/−1, +1/−1) from FlipX/FlipY.
+    pub flip: (f64, f64),
+    pub env: vsdx::formula::Env,
+}
+
+impl HitFrame {
+    /// Local (row-space, post-Rel scaling) → page: the renderer's
+    /// transform in y-up coordinates.
+    pub fn to_page(&self, p: (f64, f64)) -> (f64, f64) {
+        let (dx, dy) = ((p.0 - self.loc_pin.0) * self.flip.0, (p.1 - self.loc_pin.1) * self.flip.1);
+        let (sn, cs) = self.angle.sin_cos();
+        (self.pin.0 + dx * cs - dy * sn, self.pin.1 + dx * sn + dy * cs)
+    }
+
+    /// The axis-aligned bounds of the shape's local box through the
+    /// full frame — a rotated connector's ink lives OUTSIDE its
+    /// unrotated Pin/Width/Height rect, so gates must use this.
+    pub fn page_bounds(&self) -> (f64, f64, f64, f64) {
+        let (w, h) = self.size;
+        let c = [
+            self.to_page((0.0, 0.0)),
+            self.to_page((w, 0.0)),
+            self.to_page((w, h)),
+            self.to_page((0.0, h)),
+        ];
+        let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
+        let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
+        (
+            xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::INFINITY, f64::min),
+            xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        )
+    }
+}
+
+/// Build a shape's [`HitFrame`] from resolved cells (a minimal
+/// renderer-parity env: the names geometry formulas reference).
+pub fn hit_frame(
+    doc: &vsdx::model::Document,
+    chain: &[&Shape],
+    s: &Shape,
+    master_size: (f64, f64),
+) -> HitFrame {
+    let get = |n: &str| doc.resolve_cell(s, chain, n).and_then(|c| c.numeric());
+    let size = (get("Width").unwrap_or(1.0), get("Height").unwrap_or(1.0));
+    let mut env = vsdx::formula::Env::new();
+    for n in [
+        "PinX", "PinY", "Width", "Height", "LocPinX", "LocPinY", "Angle",
+    ] {
+        if let Some(v) = get(n) {
+            env.insert(n.to_string(), v);
+        }
+    }
+    HitFrame {
+        pin: (get("PinX").unwrap_or(0.0), get("PinY").unwrap_or(0.0)),
+        loc_pin: (
+            get("LocPinX").unwrap_or(size.0 / 2.0),
+            get("LocPinY").unwrap_or(size.1 / 2.0),
+        ),
+        size,
+        master_size,
+        angle: get("Angle").unwrap_or(0.0),
+        flip: (
+            if get("FlipX").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+            if get("FlipY").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+        ),
+        env,
+    }
+}
+
+/// Resolve one geometry-row cell to a number through inheritance
+/// (#179): the instance's literal, then the instance's formula
+/// against the instance env, then the MASTER's formula (evaluated in
+/// instance terms — `Width*1` means the instance's Width), then the
+/// master's cached value scaled master→instance. Omitted cells
+/// default to 0 (Visio's default) at the caller.
+fn row_cell_value(
+    inst: Option<&Cell>,
+    master: Option<&Cell>,
+    axis_scale: f64,
+    env: &vsdx::formula::Env,
+) -> Option<f64> {
+    let eval = |f: &str| -> Option<f64> {
+        vsdx::formula::eval(f, env)
+            .ok()
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite())
+    };
+    let literal = |c: &Cell| -> Option<f64> {
+        let plain = c
+            .f
+            .as_deref()
+            .is_none_or(|f| f == "Inh" || f == "No Formula");
+        plain.then(|| c.numeric()).flatten()
+    };
+    if let Some(c) = inst {
+        if let Some(v) = literal(c) {
+            return Some(v);
+        }
+        if let Some(v) = c.f.as_deref().and_then(&eval) {
+            return Some(v);
+        }
+        // A formula that failed to evaluate: its cached V is the
+        // last-known instance value — better than dropping the row.
+        if let Some(v) = c.numeric() {
+            return Some(v);
+        }
+    }
+    if let Some(c) = master {
+        if let Some(v) = c.f.as_deref().and_then(&eval) {
+            return Some(v);
+        }
+        if let Some(v) = literal(c) {
+            return Some(v * axis_scale);
+        }
+        if let Some(v) = c.numeric() {
+            return Some(v * axis_scale);
+        }
+    }
+    None
+}
+
+/// The connector hit segments of a shape's geometry in PAGE space
+/// (#173/#179): walks the shape's Geometry rows — merging inherited
+/// rows and cells from the master — sampling arcs, and mapping every
+/// point through the full placement frame (rotation + flips).
 pub fn geometry_hit_segments(
     s: &Shape,
     master_root: Option<&Shape>,
-    origin: (f64, f64),
-    size: (f64, f64),
-    master_size: (f64, f64),
+    frame: &HitFrame,
 ) -> Vec<((f64, f64), (f64, f64))> {
-    // (rows, owning width/height for Rel rows, x/y scale onto the
-    // instance). `origin` is the LOCAL frame's page origin
-    // (PinX-LocPinX, PinY-LocPinY) — NOT the normalized bbox corner:
-    // the corpus connector's Width is SIGNED (EndX-BeginX), so the
-    // begin corner can be the max-x corner and a bbox-corner mapping
-    // mirrors the route onto whatever sits left of it (#173).
     let mut sections: Vec<&Section> = s.sheet.sections_named("Geometry");
+    // (owning width/height for Rel rows, x/y scale). The scale only
+    // applies when the WHOLE section is the master's (its cached
+    // literals are in master units); per-cell inheritance evaluates
+    // master formulas in instance terms and scales only cached
+    // literals (#179).
     let (own, scale) = if sections.is_empty() {
         let Some(root) = master_root else {
             return Vec::new();
@@ -175,27 +312,42 @@ pub fn geometry_hit_segments(
         if sections.is_empty() {
             return Vec::new();
         }
+        let ms = frame.master_size;
         (
-            master_size,
-            if master_size.0.abs() > 1e-6 && master_size.1.abs() > 1e-6 {
-                (size.0 / master_size.0, size.1 / master_size.1)
+            ms,
+            if ms.0.abs() > 1e-6 && ms.1.abs() > 1e-6 {
+                (frame.size.0 / ms.0, frame.size.1 / ms.1)
             } else {
                 (1.0, 1.0)
             },
         )
     } else {
-        (size, (1.0, 1.0))
+        (frame.size, (1.0, 1.0))
     };
-    // Row-local → shape-local: relative rows are fractions of the
-    // owning size; then scale (master → instance) onto the page rect.
-    let local = |t: &str, x: f64, y: f64| -> (f64, f64) {
-        if t.starts_with("Rel") {
-            (x * own.0, y * own.1)
+    // The master rows of the FIRST geometry section, for per-cell
+    // inheritance and master-only rows (shape 1017-style connectors
+    // inherit their MoveTo entirely).
+    let master_rows: Vec<&Row> = master_root
+        .and_then(|r| r.sheet.sections_named("Geometry").into_iter().next())
+        .map(|g| g.rows.iter().collect::<Vec<_>>())
+        .unwrap_or_default();
+    let master_row = |ix: i64| master_rows.iter().find(|r| r.ix == ix).copied();
+    let axis_scale = |cell: &str| {
+        if cell == "X" || cell == "A" {
+            scale.0
         } else {
-            (x, y)
+            scale.1
         }
     };
-    let to_page = |p: (f64, f64)| (origin.0 + p.0 * scale.0, origin.1 + p.1 * scale.1);
+    let cell = |row: &Row, master: Option<&Row>, name: &str| -> Option<f64> {
+        row_cell_value(
+            row.cell(name),
+            master.and_then(|m| m.cell(name)),
+            axis_scale(name),
+            &frame.env,
+        )
+    };
+    let to_page = |p: (f64, f64)| -> (f64, f64) { frame.to_page(p) };
     let quad = |c0: (f64, f64), ctrl: (f64, f64), c1: (f64, f64), u: f64| -> (f64, f64) {
         (
             (1.0 - u).powi(2) * c0.0 + 2.0 * u * (1.0 - u) * ctrl.0 + u * u * c1.0,
@@ -205,62 +357,82 @@ pub fn geometry_hit_segments(
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut cur: Option<(f64, f64)> = None; // shape-local
     const MAX_ROWS: usize = 64;
+    // The ordered walk: the instance's rows, then master-only rows
+    // (by ix) the instance never overrode.
+    let mut walk: Vec<(&Row, Option<&Row>)> = Vec::new();
     for geo in &sections {
         for row in geo.rows.iter().take(MAX_ROWS) {
-            let t = row.t.as_deref().unwrap_or("");
-            let (Some(x), Some(y)) = (
-                row.cell("X").and_then(|c| c.numeric()),
-                row.cell("Y").and_then(|c| c.numeric()),
-            ) else {
-                continue;
-            };
-            let end = local(t, x, y);
-            match t {
-                "MoveTo" | "RelMoveTo" => {
-                    cur = Some(end);
-                    pts.push(to_page(end));
-                }
-                "ArcTo" | "RelArcTo" => {
-                    // |A| = sagitta, bulging right of travel; the
-                    // quadratic control that reproduces the apex.
-                    let a = row.cell("A").and_then(|c| c.numeric()).unwrap_or(0.0);
-                    if let Some(c0) = cur {
-                        let d = (end.0 - c0.0, end.1 - c0.1);
-                        let len = d.0.hypot(d.1).max(1e-9);
-                        let mid = (
-                            (c0.0 + end.0) / 2.0 + d.1 / len * a,
-                            (c0.1 + end.1) / 2.0 - d.0 / len * a,
-                        );
-                        let ctrl = (2.0 * mid.0 - (c0.0 + end.0) / 2.0, 2.0 * mid.1 - (c0.1 + end.1) / 2.0);
-                        for u in [0.25, 0.5, 0.75] {
-                            pts.push(to_page(quad(c0, ctrl, end, u)));
-                        }
-                    }
-                    pts.push(to_page(end));
-                    cur = Some(end);
-                }
-                "EllipticalArcTo" | "RelEllipticalArcTo" => {
-                    // (A,B) is an ON-curve point → quadratic control.
-                    match (row.cell("A").and_then(|c| c.numeric()), row.cell("B").and_then(|c| c.numeric())) {
-                        (Some(a), Some(b)) if cur.is_some() => {
-                            let c0 = cur.unwrap();
-                            let ctrl = (2.0 * a - (c0.0 + end.0) / 2.0, 2.0 * b - (c0.1 + end.1) / 2.0);
-                            for u in [0.25, 0.5, 0.75] {
-                                pts.push(to_page(quad(c0, ctrl, end, u)));
-                            }
-                        }
-                        _ => {}
-                    }
-                    pts.push(to_page(end));
-                    cur = Some(end);
-                }
-                _ if t.ends_with("To") || t.contains("Spline") || t == "InfiniteLine" => {
-                    // LineTo plus the v0.2 chord approximations.
-                    pts.push(to_page(end));
-                    cur = Some(end);
-                }
-                _ => {}
+            walk.push((row, master_row(row.ix)));
+        }
+    }
+    for r in master_rows.iter().take(MAX_ROWS) {
+        if !walk.iter().any(|(row, _)| row.ix == r.ix) {
+            walk.push((r, None));
+        }
+    }
+    walk.sort_by_key(|(row, _)| row.ix);
+    for (row, master) in walk.iter().take(MAX_ROWS) {
+        let t = row.t.as_deref().or(master.and_then(|m| m.t.as_deref())).unwrap_or("");
+        // Omitted geometry cells default to 0 (the corpus arcs omit Y
+        // and inherit it); a row nothing resolves is still walked as a
+        // 0-coordinate row — never dropped (#179).
+        let x = cell(row, *master, "X").unwrap_or(0.0);
+        let y = cell(row, *master, "Y").unwrap_or(0.0);
+        let rel = t.starts_with("Rel");
+        let end = if rel {
+            (x * own.0, y * own.1)
+        } else {
+            (x, y)
+        };
+        // Master-section cached literals are in master units.
+        let end = if scale != (1.0, 1.0) {
+            (end.0 * scale.0, end.1 * scale.1)
+        } else {
+            end
+        };
+        match t {
+            "MoveTo" | "RelMoveTo" => {
+                cur = Some(end);
+                pts.push(to_page(end));
             }
+            "ArcTo" | "RelArcTo" => {
+                // |A| = sagitta, bulging right of travel; the
+                // quadratic control that reproduces the apex.
+                let a = cell(row, *master, "A").unwrap_or(0.0);
+                if let Some(c0) = cur {
+                    let d = (end.0 - c0.0, end.1 - c0.1);
+                    let len = d.0.hypot(d.1).max(1e-9);
+                    let mid = (
+                        (c0.0 + end.0) / 2.0 + d.1 / len * a,
+                        (c0.1 + end.1) / 2.0 - d.0 / len * a,
+                    );
+                    let ctrl = (2.0 * mid.0 - (c0.0 + end.0) / 2.0, 2.0 * mid.1 - (c0.1 + end.1) / 2.0);
+                    for u in [0.25, 0.5, 0.75] {
+                        pts.push(to_page(quad(c0, ctrl, end, u)));
+                    }
+                }
+                pts.push(to_page(end));
+                cur = Some(end);
+            }
+            "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                // (A,B) is an ON-curve point → quadratic control.
+                let a = cell(row, *master, "A");
+                let b = cell(row, *master, "B");
+                if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
+                    let ctrl = (2.0 * a - (c0.0 + end.0) / 2.0, 2.0 * b - (c0.1 + end.1) / 2.0);
+                    for u in [0.25, 0.5, 0.75] {
+                        pts.push(to_page(quad(c0, ctrl, end, u)));
+                    }
+                }
+                pts.push(to_page(end));
+                cur = Some(end);
+            }
+            _ if t.ends_with("To") || t.contains("Spline") || t == "InfiniteLine" => {
+                // LineTo plus the v0.2 chord approximations.
+                pts.push(to_page(end));
+                cur = Some(end);
+            }
+            _ => {}
         }
     }
     pts.windows(2).map(|w| (w[0], w[1])).collect()
@@ -642,6 +814,24 @@ mod tests {
     /// #172: the hit segments follow the geometry rows — an arc's
     /// belly gets sampled points OFF the chord, so a click there can
     /// hit the connector instead of a neighbor's bbox.
+    /// A plain axis-aligned frame at `origin` with the given sizes
+    /// (rotation-free hit tests).
+    fn plain_frame(
+        origin: (f64, f64),
+        size: (f64, f64),
+        master_size: (f64, f64),
+    ) -> HitFrame {
+        HitFrame {
+            pin: (origin.0 + size.0 / 2.0, origin.1 + size.1 / 2.0),
+            loc_pin: (size.0 / 2.0, size.1 / 2.0),
+            size,
+            master_size,
+            angle: 0.0,
+            flip: (1.0, 1.0),
+            env: vsdx::formula::Env::new(),
+        }
+    }
+
     #[test]
     fn hit_segments_sample_the_arc_belly() {
         let mut s = Shape::default();
@@ -667,7 +857,7 @@ mod tests {
             &[("X", "4"), ("Y", "0"), ("A", "2"), ("B", "2")],
         ));
         s.sheet.children.push(SheetChild::Section(geo));
-        let segs = geometry_hit_segments(&s, None, (10.0, 10.0), (4.0, 4.0), (1.0, 1.0));
+        let segs = geometry_hit_segments(&s, None, &plain_frame((10.0, 10.0), (4.0, 4.0), (1.0, 1.0)));
         assert!(!segs.is_empty(), "the arc produced segments");
         // The sampled interior sits above the chord (y > 10 in page
         // space, y-up): the belly is covered.
@@ -712,11 +902,181 @@ mod tests {
         root.sheet.children.push(SheetChild::Section(geo));
         // Instance rect is 2x the master: local (2,2) → page (10+4,
         // 10+4).
-        let segs = geometry_hit_segments(&inst, Some(&root), (10.0, 10.0), (4.0, 4.0), (2.0, 2.0));
+        let segs = geometry_hit_segments(&inst, Some(&root), &plain_frame((10.0, 10.0), (4.0, 4.0), (2.0, 2.0)));
         assert_eq!(
             segs,
             vec![((10.0, 10.0), (14.0, 14.0))],
             "master rows scale onto the instance rect"
+        );
+    }
+
+
+    /// #179: a corpus arc connector (utilisation.vsdx) carries local
+    /// rows whose Y cells are ABSENT and X/A/B are `F="Inh"` — the
+    /// coordinates live in the master's formulas. The walk must
+    /// resolve them (formula in instance terms / inherited value),
+    /// not drop the rows.
+    #[test]
+    fn hit_segments_resolve_inherited_row_cells() {
+        let mut inst = Shape {
+            id: 2,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            ..Shape::default()
+        };
+        inst.sheet.set_cell("Width", Cell::value("2"));
+        inst.sheet.set_cell("Height", Cell::value("1"));
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        // The owner-file pattern: MoveTo with only X (F=Inh), an
+        // EllipticalArcTo with X/A/B and NO Y anywhere on the
+        // instance.
+        let inh = || Cell {
+            f: Some("Inh".into()),
+            ..Cell::default()
+        };
+        geo.rows.push(Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            cells: vec![("X".to_string(), inh())],
+            ..Row::default()
+        });
+        geo.rows.push(Row {
+            t: Some("EllipticalArcTo".into()),
+            ix: 2,
+            cells: vec![
+                ("X".to_string(), inh()),
+                ("A".to_string(), inh()),
+                ("B".to_string(), inh()),
+            ],
+            ..Row::default()
+        });
+        inst.sheet.children.push(SheetChild::Section(geo));
+        // The master: MoveTo (0, Height*0), EllipticalArcTo
+        // (Width*1, Height*0) through (Width*0.5, Height*1) — a
+        // half-height arc over the full instance width.
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("Width", Cell::value("1"));
+        root.sheet.set_cell("Height", Cell::value("1"));
+        let fcell = |f: &str| Cell {
+            f: Some(f.into()),
+            ..Cell::default()
+        };
+        let mut mgeo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        mgeo.rows.push(Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            cells: vec![
+                ("X".to_string(), fcell("Width*0")),
+                ("Y".to_string(), fcell("Height*0")),
+            ],
+            ..Row::default()
+        });
+        mgeo.rows.push(Row {
+            t: Some("EllipticalArcTo".into()),
+            ix: 2,
+            cells: vec![
+                ("X".to_string(), fcell("Width*1")),
+                ("Y".to_string(), fcell("Height*0")),
+                ("A".to_string(), fcell("Width*0.5")),
+                ("B".to_string(), fcell("Height*1")),
+            ],
+            ..Row::default()
+        });
+        root.sheet.children.push(SheetChild::Section(mgeo));
+        // Instance is 2x1 at origin (10, 10): the arc runs (10,10) →
+        // (12,10) bulging through (11, 11) — page-space belly y > 10.
+        let frame = HitFrame {
+            pin: (11.0, 10.5),
+            loc_pin: (1.0, 0.5),
+            size: (2.0, 1.0),
+            master_size: (1.0, 1.0),
+            angle: 0.0,
+            flip: (1.0, 1.0),
+            env: [
+                ("Width".to_string(), 2.0),
+                ("Height".to_string(), 1.0),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let segs = geometry_hit_segments(&inst, Some(&root), &frame);
+        assert!(!segs.is_empty(), "inherited rows still produce segments");
+        let last = segs.last().unwrap().1;
+        assert!(
+            (last.0 - 12.0).abs() < 1e-9 && (last.1 - 10.0).abs() < 1e-9,
+            "the arc's end lands on (Width, 0) = (12, 10): {last:?}"
+        );
+        assert!(
+            segs.iter().any(|(a, b)| a.1 > 10.5 || b.1 > 10.5),
+            "the master's Height*1 formula bulges the belly in INSTANCE terms: {segs:?}"
+        );
+    }
+
+    /// #179: a rotated connector (utilisation's shape 1017 carries
+    /// Angle ≈ −0.98 rad) — the segments must rotate with the ink,
+    /// and `page_bounds` must widen past the unrotated rect.
+    #[test]
+    fn hit_segments_rotate_by_angle() {
+        let mut s = Shape::default();
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        let row = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), Cell::value(x.to_string())),
+                ("Y".to_string(), Cell::value(y.to_string())),
+            ],
+            ..Row::default()
+        };
+        geo.rows.push(row(1, "MoveTo", "0", "0"));
+        geo.rows.push(row(2, "LineTo", "2", "0"));
+        s.sheet.children.push(SheetChild::Section(geo));
+        // A flat 2×1 box rotated 90° around the pin (1, 10): the
+        // local +x axis maps to page +y. Local (0,0) is (−1,−0.5)
+        // from the loc pin → rotated to (0.5,−1) → page (1.5, 9);
+        // local (2,0) → page (1.5, 11).
+        let frame = HitFrame {
+            pin: (1.0, 10.0),
+            loc_pin: (1.0, 0.5),
+            size: (2.0, 1.0),
+            master_size: (2.0, 1.0),
+            angle: std::f64::consts::FRAC_PI_2,
+            flip: (1.0, 1.0),
+            env: vsdx::formula::Env::new(),
+        };
+        let segs = geometry_hit_segments(&s, None, &frame);
+        assert_eq!(segs.len(), 1, "one segment");
+        let (a, b) = segs[0];
+        assert!(
+            (a.0 - 1.5).abs() < 1e-9 && (a.1 - 9.0).abs() < 1e-9,
+            "the begin rotated 90°: {a:?}"
+        );
+        assert!(
+            (b.0 - 1.5).abs() < 1e-9 && (b.1 - 11.0).abs() < 1e-9,
+            "the end rotated onto +y: {b:?}"
+        );
+        // Unrotated the box spans 2 wide × 1 tall; rotated the spans
+        // SWAP — the gate must follow the rotation (#179).
+        let (x0, y0, x1, y1) = frame.page_bounds();
+        assert!(
+            (x1 - x0 - 1.0).abs() < 1e-9 && (y1 - y0 - 2.0).abs() < 1e-9,
+            "the rotated bounds swap the axis spans: {x0}..{x1} × {y0}..{y1}"
         );
     }
 
