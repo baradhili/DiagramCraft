@@ -73,17 +73,40 @@ pub fn pin_determinism_for_tests() {
 /// (always Carlito), and their fixture documents carry no Character
 /// Font cells, so they render the same on every machine; real
 /// documents render with the user's real fonts.
-/// The font database, built once: Carlito Regular/Bold plus generic
-/// family mappings — usvg resolves unknown/no font-family through the
-/// generic defaults (Arial / Times New Roman), which don't exist in a
-/// Carlito-only database and would drop the text entirely.
+/// The font database, built once: the vendored metric faces —
+/// Carlito (style-complete) and Liberation Sans/Serif/Mono (the
+/// Arial/Times/Courier substitution chains' named faces, #145) —
+/// plus generic family mappings (usvg resolves unknown/no
+/// font-family through the generic defaults, which don't exist in a
+/// vendored-only database and would drop the text entirely) and every
+/// installed system font (the primary source — a host with real
+/// Arial/Liberation keeps measuring and rasterizing it).
 fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
     static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
         std::sync::OnceLock::new();
     DB.get_or_init(|| {
         let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf").to_vec());
-        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf").to_vec());
+        const VENDORED: [&[u8]; 16] = [
+            include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf"),
+            include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf"),
+            include_bytes!("../../dc/assets/fonts/Carlito-Italic.ttf"),
+            include_bytes!("../../dc/assets/fonts/Carlito-BoldItalic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSans-Regular.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSans-Bold.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSans-Italic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSans-BoldItalic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSerif-Regular.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSerif-Bold.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSerif-Italic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationSerif-BoldItalic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationMono-Regular.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationMono-Bold.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationMono-Italic.ttf"),
+            include_bytes!("../../dc/assets/fonts/LiberationMono-BoldItalic.ttf"),
+        ];
+        for bytes in VENDORED {
+            db.load_font_data(bytes.to_vec());
+        }
         db.set_sans_serif_family("Carlito");
         db.set_serif_family("Carlito");
         db.set_monospace_family("Carlito");
@@ -138,16 +161,35 @@ fn resolve_font_chain(chain: &str, installed: &dyn Fn(&str) -> Option<String>) -
 }
 
 /// Rewrite every `font-family="…"` attribute of the SVG to the single
-/// family the GUI will actually render (see the `rasterize` comment).
-/// An unbalanced quote leaves the rest of the input untouched rather
-/// than corrupting the SVG.
+/// family the GUI will actually render (see the `rasterize` comment):
+/// against the passed database, or against the vendored-family set
+/// when the test pin is active. An unbalanced quote leaves the rest
+/// of the input untouched rather than corrupting the SVG.
 fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> String {
-    const NEEDLE: &str = "font-family=\"";
     let pinned = PIN_EMBEDDED.load(Ordering::Relaxed);
     let from_db = |name: &str| installed_family(db, name);
-    let embedded_only =
-        |name: &str| (name.eq_ignore_ascii_case("Carlito")).then(|| "Carlito".to_string());
+    // Pinned (kittest) mode resolves against the VENDORED faces only
+    // (#145): the substitution chains' named families (Carlito,
+    // Liberation) resolve their vendored faces on every machine — the
+    // measurement pin in `dc::textmetrics` mirrors exactly this set.
+    let embedded_only = |name: &str| {
+        const VENDORED: [&str; 4] =
+            ["Carlito", "Liberation Sans", "Liberation Serif", "Liberation Mono"];
+        VENDORED
+            .iter()
+            .find(|v| v.eq_ignore_ascii_case(name))
+            .map(|v| v.to_string())
+    };
     let installed: &dyn Fn(&str) -> Option<String> = if pinned { &embedded_only } else { &from_db };
+    resolve_font_families_with(svg, installed)
+}
+
+/// [`resolve_font_families`] with the family lookup injected — the
+/// database-driven unit tests stay hermetic regardless of whether
+/// another test in the same process has set the kittest pin (the pin
+/// is process-global and deliberately one-way).
+fn resolve_font_families_with(svg: &str, installed: &dyn Fn(&str) -> Option<String>) -> String {
+    const NEEDLE: &str = "font-family=\"";
     let mut out = String::with_capacity(svg.len());
     let mut rest = svg;
     while let Some(i) = rest.find(NEEDLE) {
@@ -497,11 +539,13 @@ mod tests {
     #[test]
     fn chains_rewrite_against_the_database() {
         let db = carlito_only_db();
-        // No MS fonts in a Carlito-only database: the chain resolves to
-        // the embedded face — deterministic on every machine.
+        // No MS or Liberation faces in a Carlito-only database: the
+        // chain resolves to the embedded face — deterministic on any
+        // machine and independent of the process-wide test pin.
         let svg = r##"<text font-family="Arial, 'Liberation Sans', Carlito, sans-serif" font-size="0.1">x</text>"##;
+        let from_db = |name: &str| installed_family(&db, name);
         assert_eq!(
-            resolve_font_families(svg, &db),
+            resolve_font_families_with(svg, &from_db),
             r#"<text font-family="Carlito" font-size="0.1">x</text>"#
         );
         assert_eq!(
@@ -516,34 +560,51 @@ mod tests {
     fn unbalanced_quote_leaves_svg_untouched() {
         let db = carlito_only_db();
         let bad = r#"<text font-family="oops>"#;
-        assert_eq!(resolve_font_families(bad, &db), bad);
+        let from_db = |name: &str| installed_family(&db, name);
+        assert_eq!(resolve_font_families_with(bad, &from_db), bad);
     }
 
     #[test]
     fn svg_without_families_is_unchanged() {
         let db = carlito_only_db();
         let plain = r#"<svg><rect x="0"/></svg>"#;
-        assert_eq!(resolve_font_families(plain, &db), plain);
+        let from_db = |name: &str| installed_family(&db, name);
+        assert_eq!(resolve_font_families_with(plain, &from_db), plain);
     }
 
-    /// Face stability under the pinned (kittest) mode: a document
-    /// chain, an explicit Carlito and a bare no-family text element
-    /// must rasterize to identical pixels — the goldens depend on it.
+    /// Face stability under the pinned (kittest) mode: the pinned
+    /// database resolves the VENDORED faces (#145), so an Arial chain
+    /// rasterizes the vendored Liberation Sans (identically on every
+    /// machine — the goldens' determinism) and the default/Calibri
+    /// chain rasterizes the vendored Carlito. What may never happen
+    /// is a chain leaking onto a system face under the pin.
     #[test]
     fn rasterized_text_is_face_stable_when_pinned() {
         pin_embedded_fonts_for_tests();
         let head = r#"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="50"><text x="10" y="35" font-size="24""#;
         let tail = ">Hamburg fi 51</text></svg>";
-        let doc_chain =
+        let arial_chain =
             format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
-        let explicit = format!(r#"{head} font-family="Carlito"{tail}"#);
+        let explicit_liberation =
+            format!(r#"{head} font-family="Liberation Sans"{tail}"#);
+        let explicit_carlito = format!(r#"{head} font-family="Carlito"{tail}"#);
+        let calibri_chain =
+            format!(r#"{head} font-family="Calibri, Carlito, sans-serif"{tail}"#);
         let bare = format!(r#"{head}{tail}"#);
-        let a = rasterize(&doc_chain, 200.0, crate::perf::Kind::Page).unwrap();
-        let b = rasterize(&explicit, 200.0, crate::perf::Kind::Page).unwrap();
+        let a = rasterize(&arial_chain, 200.0, crate::perf::Kind::Page).unwrap();
+        let l = rasterize(&explicit_liberation, 200.0, crate::perf::Kind::Page).unwrap();
+        let b = rasterize(&explicit_carlito, 200.0, crate::perf::Kind::Page).unwrap();
+        let d = rasterize(&calibri_chain, 200.0, crate::perf::Kind::Page).unwrap();
         let c = rasterize(&bare, 200.0, crate::perf::Kind::Page).unwrap();
-        assert_eq!(a.size, b.size);
-        assert_eq!(a.pixels, b.pixels, "resolved chain == explicit Carlito");
-        assert_eq!(a.pixels, c.pixels, "no-family default == Carlito");
+        assert_eq!(a.size, l.size);
+        assert_eq!(a.pixels, l.pixels, "Arial chain == vendored Liberation Sans");
+        assert_ne!(
+            a.pixels, b.pixels,
+            "Liberation and Carlito are different faces — the chain must not silently fall to Carlito"
+        );
+        assert_eq!(d.pixels, b.pixels, "default-family chain == Carlito");
+        // The no-family default is Carlito (`Options::font_family`).
+        assert_eq!(c.pixels, b.pixels, "no-family default == Carlito");
     }
 
     /// Machine-dependent by design (GitHub #17's requirement: honor

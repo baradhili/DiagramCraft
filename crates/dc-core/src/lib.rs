@@ -24,10 +24,10 @@ pub use commands::{
     Macro, MovePage, RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage,
     ReorderShape, SetCell, SetRowCell, SetText, find_imported, next_master_id,
     place_master_from_stencil, scale_group_members, container_membership_cleanup,
-    SetGluedCell,
+    SetGluedCell, SetCellCache, effective_formula,
 };
 pub use connects::{Connect, Connects, ConnectsOwner};
-pub use scope::{find_shape_mut, Scope};
+pub use scope::{find_shape_mut, shape_chain, Scope};
 
 use anyhow::Result;
 use std::path::Path;

@@ -11,7 +11,7 @@ use dc_core::commands::{
     RenamePage, ReorderShape,
 };
 use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
-use dc_core::{Editor, Macro, SetCell, SetRowCell, SetText};
+use dc_core::{Editor, Macro, SetCell, SetRowCell};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
 
@@ -162,6 +162,10 @@ pub struct App {
     /// recomputed by `update_drag` while a move drag is live and
     /// painted by the canvas from `DragFx::hints`.
     snap_live: Vec<crate::snap::Hint>,
+    /// The last frame's connection-point affordances (#177): what the
+    /// canvas painted — reveal symbols, glue-target highlight, glued
+    /// sites of the selected connector. Kept as the test seam.
+    conn_fx_last: crate::connectors::ConnPointFx,
     /// The active mouse tool (#108).
     tool: Tool,
     /// #110: align against the page instead of the first-selected
@@ -278,6 +282,21 @@ pub struct App {
     /// Per-user Quick Shapes membership (#143) — app-side, persisted
     /// beside the MRU; ephemeral in every headless constructor.
     quick_shapes: crate::quickshapes::QuickShapes,
+    /// "Use relative paths for hyperlinks" per document (#71),
+    /// app-side keyed by path (Visio keeps the toggle app-level).
+    relative_paths: crate::hyperlink::RelativePaths,
+    /// Default stencil set + category order (#105) — app config,
+    /// never .vsdx content; ephemeral in every headless constructor.
+    stencil_prefs: crate::stencil::prefs::StencilPrefs,
+    /// Whether built-ins open from the extracted My Shapes files
+    /// (#104). Production only: every headless constructor disables
+    /// it so kittest never reads (or depends on) the user's real
+    /// My Shapes — the embedded fallback keeps tests hermetic.
+    stencil_disk: bool,
+    /// The background first-run extraction (#104), polled for
+    /// startup feedback (owner report 2026-10-30: the 43 MB write
+    /// must neither block the first frame nor run silently).
+    stencil_extract: Option<crate::stencil::disk::ExtractionHandle>,
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
@@ -301,6 +320,9 @@ enum PendingDialog {
     OpenStencil(Receiver<Option<PathBuf>>),
     /// Insert ▸ Pictures (#113): a picked PNG/JPEG.
     OpenPicture(Receiver<Option<PathBuf>>),
+    /// Hyperlinks ▸ Address browse (#71): a picked target file for
+    /// the draft's Address field.
+    HyperlinkAddress(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
@@ -312,6 +334,8 @@ enum PendingKind {
     /// Insert ▸ Pictures (#113, URS-1012): a PNG/JPEG file picked to
     /// become a Foreign shape.
     OpenPicture,
+    /// Hyperlinks ▸ Address browse (#71).
+    HyperlinkAddress,
 }
 
 /// Backstage rail command.
@@ -362,6 +386,10 @@ impl BackPage {
 /// like this at 100 %): converted to page inches per frame by
 /// `snap_ctx_of` (#109).
 const SNAP_STRENGTH_PX: f32 = 8.0;
+/// How close a connector endpoint must come to a shape before its
+/// connection points reveal (#177) — page inches, generous like
+/// Visio's approach affordance.
+const CONN_REVEAL_IN: f64 = 0.6;
 
 /// An OS clipboard image probe's payload: (w, h, RGBA bytes).
 type OsImage = (u32, u32, Vec<u8>);
@@ -407,6 +435,26 @@ impl App {
         // touch the user's real config dir).
         app.recent = RecentFiles::open();
         app.quick_shapes = crate::quickshapes::QuickShapes::open();
+        app.relative_paths = crate::hyperlink::RelativePaths::open();
+        // Production entry only: built-ins open from the extracted
+        // My Shapes files (#104) — headless constructors stay on the
+        // embedded fallback so they never touch the user's home.
+        app.stencil_disk = true;
+        // #105: the default stencil set auto-opens with the app
+        // (Visio's companion set), and More Shapes shows the
+        // configured categories in the configured order.
+        app.stencil_prefs = crate::stencil::prefs::StencilPrefs::open();
+        app.apply_stencil_preferences();
+        app.open_default_stencils();
+        // #104: the built-in catalog also exists as real `.vssx`
+        // files under My Shapes — extracted on a BACKGROUND thread
+        // (missing or size-mismatched files rewritten and
+        // digest-verified) so users can open, copy, and inspect them
+        // like any stencil without the first run blocking or going
+        // silent (owner report 2026-10-30). Best-effort: an
+        // unwritable My Shapes degrades to the embedded bytes.
+        app.stencil_extract =
+            crate::stencil::disk::extract_catalog_async(Self::my_shapes_dir());
         if let Some(p) = path {
             app.load(p);
         }
@@ -457,6 +505,7 @@ impl App {
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
+            conn_fx_last: crate::connectors::ConnPointFx::default(),
             drag_glue: None,
             tool: Tool::Pointer,
             align_to_page: false,
@@ -497,6 +546,10 @@ impl App {
             color_pick: None,
             recent: RecentFiles::ephemeral(),
             quick_shapes: crate::quickshapes::QuickShapes::ephemeral(),
+            relative_paths: crate::hyperlink::RelativePaths::ephemeral(),
+            stencil_prefs: crate::stencil::prefs::StencilPrefs::ephemeral(),
+            stencil_disk: false,
+            stencil_extract: None,
             os_theme: None,
         };
         if let Some(p) = path {
@@ -564,9 +617,28 @@ impl App {
     pub fn preset_save_as_for_test(&mut self, answer: Option<PathBuf>) {
         self.dialog_preset_for_test = Some(answer);
     }
+    /// kittest (#71): the next native dialog (any kind — e.g. the
+    /// Hyperlinks Address browse) resolves with `answer` instead of
+    /// opening rfd.
+    #[doc(hidden)]
+    pub fn preset_file_dialog_for_test(&mut self, answer: Option<PathBuf>) {
+        self.dialog_preset_for_test = Some(answer);
+    }
+    /// kittest (#71): pretend the document was saved at `path` — the
+    /// relative-hyperlink logic keys off the document's directory.
+    #[doc(hidden)]
+    pub fn debug_set_doc_path_for_test(&mut self, path: PathBuf) {
+        self.path = path;
+    }
     #[doc(hidden)]
     pub fn debug_close_prompt(&self) -> bool {
         self.confirm_close.is_some()
+    }
+    /// kittest (#166): the active ribbon tab — clicking a tab behind
+    /// an open MODAL must not change it.
+    #[doc(hidden)]
+    pub fn debug_active_ribbon_tab(&self) -> String {
+        format!("{:?}", self.tab)
     }
     #[doc(hidden)]
     pub fn debug_close_chain_armed(&self) -> bool {
@@ -1005,18 +1077,16 @@ impl App {
     /// reveals the entry, and notes the status. Parse failures surface
     /// as a status note, like other load failures.
     /// The user's My Shapes folder (Visio convention, owner direction
-    /// 2026-10-27): `<home>/Documents/My Shapes`. Created on demand —
-    /// the Open Existing Stencil dialog starts there (#105 will grow
-    /// the auto-open default set out of it). None when no home
-    /// directory is known (neither HOME nor USERPROFILE): the dialog
-    /// then keeps its default start location and nothing is created.
+    /// 2026-10-27): `<home>/Documents/My Shapes`. PURE — no directory
+    /// is created here (kittest reaches this through the built-in
+    /// menu, #104); the extraction pass and the Open Existing Stencil
+    /// dialog create it on demand. None when no home directory is
+    /// known (neither HOME nor USERPROFILE).
     fn my_shapes_dir() -> Option<std::path::PathBuf> {
         let home = std::env::var_os("HOME")
             .or_else(|| std::env::var_os("USERPROFILE"))
             .map(std::path::PathBuf::from)?;
-        let dir = my_shapes_path(Some(home));
-        let _ = std::fs::create_dir_all(&dir);
-        Some(dir)
+        Some(my_shapes_path(Some(home)))
     }
 
     fn open_stencil(&mut self, path: PathBuf) {
@@ -1046,8 +1116,19 @@ impl App {
         let Some(b) = crate::stencil::builtin::by_slug(slug) else {
             return;
         };
-        let source = crate::stencil::builtin::source_path(b.slug);
-        if let Some(ix) = self.stencils.position_for(&source) {
+        // The dedupe key matches however the entry was opened: the
+        // extracted file (#104) or the `builtin/<slug>` fallback.
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
+        let source = crate::stencil::disk::extracted_path(
+            my_shapes.as_deref().unwrap_or_else(|| std::path::Path::new("")),
+            b.slug,
+        );
+        let fallback = crate::stencil::builtin::source_path(b.slug);
+        if let Some(ix) = self
+            .stencils
+            .position_for(&source)
+            .or_else(|| self.stencils.position_for(&fallback))
+        {
             let title = self
                 .stencils
                 .get(ix)
@@ -1057,12 +1138,30 @@ impl App {
             self.status = format!("closed {title}");
             return;
         }
+        self.open_builtin_stencil(b);
+    }
+
+    /// Open one built-in catalog stencil (#87), DISK-FIRST (#104):
+    /// the extracted `.vssx` under My Shapes when it is there (the
+    /// file identity — the same entry the user gets opening that
+    /// file), else the embedded bytes with the `builtin/<slug>`
+    /// pseudo-path. Title and origin stay the catalog's, so menu
+    /// provenance is kept either way.
+    fn open_builtin_stencil(&mut self, b: &'static crate::stencil::builtin::BuiltinStencil) {
         // Which variant opens is the pane's session preference (#85
         // follow-up): US by default, the metric twin with "Metric
         // Stencils" ticked.
         let metric = self.stencil.metric_units;
-        match vsdx::parse::parse_bytes(b.bytes_for(metric)) {
-            Ok(doc) => {
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
+        let opened = crate::stencil::disk::open_from_disk(my_shapes.as_deref(), b, metric)
+            .map(|(doc, source)| (doc, source, true))
+            .or_else(|| {
+                vsdx::parse::parse_bytes(b.bytes_for(metric))
+                    .ok()
+                    .map(|doc| (doc, crate::stencil::builtin::source_path(b.slug), false))
+            });
+        match opened {
+            Some((doc, source, from_disk)) => {
                 let (ix, _) = self.stencils.open_parsed(
                     doc,
                     source,
@@ -1070,14 +1169,86 @@ impl App {
                     crate::stencil::Origin::Builtin,
                 );
                 self.stencil.reveal = Some(StencilId::Open(ix));
-                self.status = if metric {
+                self.status = if from_disk {
+                    format!("opened {title} (My Shapes)", title = b.title)
+                } else if metric {
                     format!("opened {title} (metric)", title = b.title)
                 } else {
                     format!("opened {title}", title = b.title)
                 };
             }
-            Err(e) => self.status = format!("built-in stencil failed to load: {e:#}"),
+            None => {
+                self.status =
+                    format!("built-in stencil failed to load: {title}", title = b.title);
+            }
         }
+    }
+
+    /// Apply the configured category list/order to the pane (#105):
+    /// the configured subset, or the catalog's manifest order when
+    /// unset.
+    fn apply_stencil_preferences(&mut self) {
+        self.stencil.builtin_categories = match self.stencil_prefs.categories.clone() {
+            Some(cats) => cats,
+            None => crate::stencil::builtin::categories()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+    }
+
+    /// Open the default stencil set (#105): built-in slugs through
+    /// the disk-first path (#104), plus files named under My Shapes
+    /// opened like user stencils. Dedupe keeps a re-run cheap (and
+    /// the startup path never toggles anything closed).
+    fn open_default_stencils(&mut self) {
+        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
+        for entry in self.stencil_prefs.default_open.clone() {
+            if let Some(b) = crate::stencil::builtin::by_slug(&entry) {
+                self.open_builtin_stencil(b);
+                continue;
+            }
+            let Some(dir) = &my_shapes else {
+                continue;
+            };
+            // A My Shapes file name (config entries are trusted —
+            // the user's own config file).
+            let p = dir.join(entry.trim_start_matches(['/', '\\']));
+            if p.is_file() {
+                if let Err(e) = self.stencils.open_file(&p) {
+                    self.status = format!("default stencil {entry:?} failed to load: {e:#}");
+                }
+            }
+        }
+        // Startup opens land at the pane top; no reveal-scroll.
+        self.stencil.reveal = None;
+    }
+
+    /// kittest (#105): run the startup preference application against
+    /// the current (ephemeral-by-default) prefs.
+    #[doc(hidden)]
+    pub fn apply_stencil_defaults_for_test(&mut self) {
+        self.apply_stencil_preferences();
+        self.open_default_stencils();
+    }
+
+    /// kittest (#105): swap the prefs (e.g. a custom default set /
+    /// category order) before applying.
+    #[doc(hidden)]
+    pub fn set_stencil_prefs_for_test(&mut self, prefs: crate::stencil::prefs::StencilPrefs) {
+        self.stencil_prefs = prefs;
+    }
+
+    /// kittest (#105/#104): the open stencils' titles, in pane order.
+    #[doc(hidden)]
+    pub fn debug_open_stencil_titles(&self) -> Vec<String> {
+        self.stencils.iter().map(|(_, st)| st.title.clone()).collect()
+    }
+
+    /// kittest (#105): the category list More Shapes shows, in order.
+    #[doc(hidden)]
+    pub fn debug_builtin_categories(&self) -> Vec<String> {
+        self.stencil.builtin_categories.clone()
     }
 
     /// File → New: replace the current document with a blank drawing,
@@ -1104,6 +1275,9 @@ impl App {
         self.set_selection(None);
         self.group_edit.clear();
         self.stencil = Stencil::default();
+        // The reset pane drops the configured category order (#105,
+        // CodeRabbit): re-apply the stencil preferences right after.
+        self.apply_stencil_preferences();
         self.tex.clear();
         self.layers.clear();
         self.page_states.clear();
@@ -1139,6 +1313,7 @@ impl App {
                         let mut dlg =
                             rfd::FileDialog::new().add_filter("Visio stencil", &["vssx"]);
                         if let Some(dir) = Self::my_shapes_dir() {
+                            let _ = std::fs::create_dir_all(&dir);
                             dlg = dlg.set_directory(dir);
                         }
                         dlg.pick_file()
@@ -1150,6 +1325,8 @@ impl App {
                     PendingKind::OpenPicture => rfd::FileDialog::new()
                         .add_filter("Pictures", &["png", "jpg", "jpeg"])
                         .pick_file(),
+                    // Any file can be a hyperlink target (#71).
+                    PendingKind::HyperlinkAddress => rfd::FileDialog::new().pick_file(),
                 },
             };
             let _ = tx.send(picked);
@@ -1159,7 +1336,45 @@ impl App {
             PendingKind::OpenStencil => PendingDialog::OpenStencil(rx),
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
             PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
+            PendingKind::HyperlinkAddress => PendingDialog::HyperlinkAddress(rx),
         });
+    }
+
+    /// Poll the background stencil extraction (#104): progress lands
+    /// in the status bar — the one piece of UI every shell state
+    /// shows — with a repaint heartbeat so it advances without user
+    /// input, and a completion note when files were actually written.
+    fn poll_stencil_extraction(&mut self, ctx: &Context) {
+        let Some(h) = self.stencil_extract.take() else {
+            return;
+        };
+        // Drain everything ready this frame (the writer is fast).
+        match h.poll() {
+            Some(crate::stencil::disk::ExtractionMsg::Progress { done, total }) => {
+                self.status = format!("Extracting built-in stencils to My Shapes ({done}/{total})…");
+                self.stencil_extract = Some(h);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+            Some(crate::stencil::disk::ExtractionMsg::Done(e)) => {
+                if e.failed > 0 {
+                    self.status = format!(
+                        "Built-in stencils: {} extracted, {} failed — embedded copies in use",
+                        e.written, e.failed
+                    );
+                } else if e.written > 0 {
+                    self.status = format!(
+                        "Extracted {} built-in stencil files to My Shapes/Built-ins",
+                        e.written
+                    );
+                }
+                // Nothing written (files already current): no noise.
+            }
+            None => {
+                // Nothing ready yet — keep waiting with a heartbeat.
+                self.stencil_extract = Some(h);
+                ctx.request_repaint_after(Duration::from_millis(100));
+            }
+        }
     }
 
     /// Consume a finished dialog result; keep a slow repaint heartbeat
@@ -1173,7 +1388,8 @@ impl App {
             PendingDialog::Open(rx)
             | PendingDialog::SaveAs(rx)
             | PendingDialog::OpenStencil(rx)
-            | PendingDialog::OpenPicture(rx) => match rx.try_recv() {
+            | PendingDialog::OpenPicture(rx)
+            | PendingDialog::HyperlinkAddress(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
                 Err(mpsc::TryRecvError::Disconnected) => (None, false),
@@ -1194,6 +1410,21 @@ impl App {
             PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
+            // The picked target lands in the open draft's Address
+            // field (#71), stored the way the document's toggle wants
+            // it (a path inside the document's directory shows as its
+            // relative form when the toggle is on — what 2016 shows).
+            PendingDialog::HyperlinkAddress(_) => {
+                let relative = self.relative_paths.get(&self.path);
+                let stored = crate::hyperlink::store_address(
+                    &path.to_string_lossy(),
+                    crate::hyperlink::doc_dir(&self.path),
+                    relative,
+                );
+                if let Some(d) = self.hyperlink_draft.as_mut() {
+                    d.address = stored;
+                }
+            }
             PendingDialog::SaveAs(_) => {
                 self.save_to(&path);
                 if self.new_after_save {
@@ -1285,15 +1516,20 @@ impl App {
             }
         }
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
-        // Connectors hit by their LINE, not a degenerate bbox (#108 —
-        // the corpus model's bbox can be a zero-height band).
+        // Connectors hit by their INK, not a degenerate bbox (#108 —
+        // the corpus model's bbox can be a zero-height band). #172: the
+        // ink follows the GEOMETRY rows — the Begin→End chord first
+        // (the common straight route), then the row walk (arcs leave
+        // the chord; a belly click would otherwise land on whatever
+        // shape's bbox overlaps it). Master instances count (#172):
+        // `ObjType=2` often lives on the master.
         if self.group_edit.is_empty() {
             let threshold = 5.0 / self.view.px_per_in() as f64;
             for shape in page.shapes.iter().rev() {
-                if !crate::connectors::is_connector(shape) {
-                    continue;
-                }
                 if let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) {
+                    if !crate::connectors::is_connector_in(&ed.doc, &chain, shape) {
+                        continue;
+                    }
                     let g = |n: &str| {
                         ed.doc
                             .resolve_cell(shape, &chain, n)
@@ -1304,6 +1540,55 @@ impl App {
                     {
                         if segment_hit((bx, by), (ex, ey), page_pos, threshold) {
                             return Some(shape.id);
+                        }
+                    }
+                    // The geometry walk (master root rows when the
+                    // instance carries none), mapped through the
+                    // chain-resolved bbox.
+                    let (root, msize) = shape
+                        .master
+                        .and_then(|mid| {
+                            ed.doc.master(mid).and_then(|m| m.shapes.first().map(|root| {
+                                let size = (
+                                    root.sheet
+                                        .cell("Width")
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(1.0),
+                                    root.sheet
+                                        .cell("Height")
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(1.0),
+                                );
+                                (root, size)
+                            }))
+                        })
+                        .map(|(r, s)| (Some(r), s))
+                        .unwrap_or((None, (1.0, 1.0)));
+                    // #179: the full placement frame (rotation +
+                    // flips) — a rotated connector's ink lives outside
+                    // its unrotated rect, so the gate uses the
+                    // rotated corner union.
+                    let frame = crate::connectors::hit_frame(
+                        &ed.doc,
+                        &chain,
+                        shape,
+                        msize,
+                    );
+                    let (bx0, by0, bx1, by1) = frame.page_bounds();
+                    if page_pos.0 >= bx0 - threshold
+                        && page_pos.0 <= bx1 + threshold
+                        && page_pos.1 >= by0 - threshold
+                        && page_pos.1 <= by1 + threshold
+                    {
+                        let segs = crate::connectors::geometry_hit_segments(
+                            shape,
+                            root,
+                            &frame,
+                        );
+                        for (a, b) in segs {
+                            if segment_hit(a, b, page_pos, threshold) {
+                                return Some(shape.id);
+                            }
                         }
                     }
                 }
@@ -1326,7 +1611,39 @@ impl App {
             return None;
         }
         for shape in page.shapes.iter().rev() {
-            if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
+            // #179: a rotated shape's claim uses its ROTATED bounds —
+            // the unrotated Pin/Width/Height rect of a rotated box is
+            // far bigger than the visible ink and steals clicks from
+            // thin connectors crossing the corners (utilisation.vsdx).
+            let rotated = shape
+                .sheet
+                .cell("Angle")
+                .and_then(|c| c.numeric())
+                .filter(|a| a.abs() > 1e-6)
+                .is_some()
+                || shape_chain(&ed.doc, page.id, shape.id)
+                    .ok()
+                    .and_then(|ch| {
+                        ed.doc
+                            .resolve_cell(shape, &ch, "Angle")
+                            .and_then(|c| c.numeric())
+                    })
+                    .is_some_and(|a| a.abs() > 1e-6);
+            if rotated {
+                let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) else {
+                    continue;
+                };
+                let (x0, y0, x1, y1) =
+                    crate::connectors::hit_frame(&ed.doc, &chain, shape, (1.0, 1.0))
+                        .page_bounds();
+                if page_pos.0 >= x0
+                    && page_pos.0 <= x1
+                    && page_pos.1 >= y0
+                    && page_pos.1 <= y1
+                {
+                    return Some(shape.id);
+                }
+            } else if let Some((x, y, w, h)) = self.shape_rect(&ed.doc, page.id, shape) {
                 if hit_in_rect(page_pos, x, y, w, h) {
                     return Some(shape.id);
                 }
@@ -2082,11 +2399,12 @@ impl App {
             ("LocPinX", w / 2.0),
             ("LocPinY", 0.0),
         ] {
-            let formula = ed
-                .doc
-                .resolve_cell(sh, &chain, name)
-                .and_then(|c| c.f.clone())
-                .filter(|f| f != "Inh");
+            // effective_formula, not the instance cell's own F — an
+            // 'Inh' PinX over a master's GUARD((BeginX+EndX)/2) is
+            // still formula-driven to the command layer, and a refused
+            // write aborts the whole macro (#172).
+            let formula =
+                dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
                 kept_note = Some(format!(
                     "endpoint moved, but {name} is formula-driven and kept"
@@ -2176,11 +2494,10 @@ impl App {
             ("EndY", ey + dy),
         ];
         for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
-            let formula = ed
-                .doc
-                .resolve_cell(sh, &chain, name)
-                .and_then(|c| c.f.clone())
-                .filter(|f| f != "Inh");
+            // effective_formula (#172): an 'Inh' instance cell over a
+            // master's GUARD would otherwise refuse and abort the move.
+            let formula =
+                dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
                 kept_note = Some(format!("line moved, but {name} is formula-driven and kept"));
             } else {
@@ -2197,6 +2514,116 @@ impl App {
         if let Some(note) = kept_note {
             self.status = note;
         }
+    }
+
+    /// #172: translate a CONNECTOR by dragging its body. Free endpoints
+    /// move as plain values; glued endpoints carry their glue formula
+    /// (`PAR(PNT(...))`/`_WALKGLUE`) and move through [`SetGluedCell`]
+    /// — the GUARD-waived write that keeps the formula — exactly the
+    /// reroute engine's own cache-update pattern, so the glue survives
+    /// and the reroute tail re-attaches the moved ends (a both-ends
+    /// glued connector pins back to its targets, like Visio). Derived
+    /// XForm cells a formula owns are kept, never literal-written (an
+    /// aborted macro was the #172 "drag does nothing").
+    fn apply_connector_body_move(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        // Locks refuse; formulas do not (they ride SetGluedCell).
+        if let Some(reason) = self.line_lock_guard(&["LockBegin", "LockEnd"]) {
+            self.status = format!("connector move refused: {reason}");
+            return;
+        }
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let Some(((bx, by), (ex, ey))) = get("BeginX")
+            .zip(get("BeginY"))
+            .zip(get("EndX").zip(get("EndY")))
+        else {
+            return;
+        };
+        // A shape without a pin is not a movable 1D frame.
+        if get("PinX").zip(get("PinY")).is_none() {
+            return;
+        }
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        // Endpoints: a formula-owned end (glue: PAR(PNT(...)) /
+        // _WALKGLUE) is NOT written — the formula owns its value too,
+        // and a moved cache would desync render from evaluation. It
+        // stays pinned to its target (Visio's feel). A free end moves
+        // as a plain value through the GUARD-waived write.
+        let mut free: [bool; 2] = [true, true];
+        for (i, (name, v)) in [
+            ("BeginX", bx + dx),
+            ("BeginY", by + dy),
+            ("EndX", ex + dx),
+            ("EndY", ey + dy),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, name).is_some() {
+                free[i / 2] = false;
+                continue;
+            }
+            cmds.push(Box::new(dc_core::SetGluedCell::new(
+                scope.clone(),
+                name,
+                cell(v),
+            )));
+        }
+        if !free[0] && !free[1] {
+            self.status = "connector is glued at both ends — drag an endpoint or its shapes".into();
+            return;
+        }
+        // The frame (Pin/Width/Height/LocPin caches) and the route
+        // rows derive from the POST-MOVE endpoints — the reroute
+        // planner's own corpus rules (review pass: the hand-rolled
+        // writes here materialized missing Geometry rows on
+        // master-based connectors and skipped formula-owned Pin
+        // caches; the planner refreshes through guards and only
+        // rewrites rows the connector already has).
+        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
+            page_id, vec![shape_id],
+        )));
+        // Connectors glued TO this one re-attach in the same undo
+        // step.
+        if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
+            cmds.push(r);
+        }
+        self.apply(Macro::new(format!("move connector {shape_id}"), cmds));
+    }
+
+    /// The Protection locks of the selected 1D shape, without the
+    /// formula half of [`Self::line_drag_guard`] (glue formulas are
+    /// expected on connectors and ride [`dc_core::SetGluedCell`]).
+    fn line_lock_guard(&self, locks: &[&str]) -> Option<String> {
+        let ed = self.ed()?;
+        let (page_id, shape_id) = self.sel?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        for lock in locks {
+            if protection_flag(&ed.doc, sh, &chain, lock) {
+                return Some(format!("{lock} is set (Protection section)"));
+            }
+        }
+        None
     }
 
     /// Apply a pre-boxed command (the multi-shape move paths build
@@ -2339,12 +2766,15 @@ impl App {
                 }
             }
             let count = all.len();
-            cmds.push(Box::new(dc_core::SetText::new(
-                Scope::Shape {
+            // Text edit as one undo step incl. text-derived cache
+            // refresh (#147).
+            cmds.push(Box::new(dc::textfunc::text_edit_macro(
+                &ed.doc,
+                &Scope::Shape {
                     page: page_id,
                     shape: container,
                 },
-                format!("{title} ({count})"),
+                &format!("{title} ({count})"),
             )));
         }
         if !cmds.is_empty() {
@@ -2848,6 +3278,15 @@ impl App {
         } else if existing.is_some() {
             self.status = "connector end released".into();
         }
+        // #179: the drop moved an endpoint — a master-based
+        // connector's formula-driven frame caches and geometry rows
+        // must refresh in the SAME undo step or the render keeps the
+        // pre-drag pose (the glue writes alone leave Pin/Width/Height
+        // stale under their GUARDs). Planned by ID: works for the
+        // re-glue and the release alike.
+        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
+            page_id, vec![sid],
+        )));
         self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
     }
 
@@ -6049,28 +6488,42 @@ impl App {
                     ui,
                     &cur,
                     &|k: &str| k.to_string(),
+                    // #171: labels match Visio 2016's measured gallery
+                    // (Analysis/line-patterns-visio2016.md) — 9 is the
+                    // short 4-2 dash, 16 the long dash.
                     &[
                         ("0", "None"),
                         ("1", "Solid"),
-                        ("2", "Dotted"),
-                        ("3", "Dash-dot"),
-                        ("4", "Dashed"),
-                        ("9", "Long dash"),
+                        ("2", "Dash"),
+                        ("3", "Dot"),
+                        ("4", "Dash-dot"),
+                        ("5", "Dash-dot-dot"),
+                        ("9", "Short Dash"),
+                        ("10", "Fine Dot"),
+                        ("16", "Long Dash"),
+                        ("23", "Fine Dash"),
                     ],
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
-                // Begin/End Arrow (#72): the named gallery the renderer
-                // draws — value 0 none, 1-6 the classic set, 13 double.
+                // Begin/End Arrow (#72, corrected #169): the gallery the
+                // renderer draws per Visio 2016's observed numbering —
+                // no value below 34 is double-headed there; 4 is the
+                // classic triangle, 6 the stealth dart, 13 a single
+                // filled head. 35 offers the double chevron.
                 const ARROWS: &[(&str, &str)] = &[
                     ("0", "None"),
                     ("1", "Arrow"),
-                    ("2", "Open Arrow"),
-                    ("3", "Concave"),
-                    ("4", "Stealth"),
-                    ("5", "Diamond"),
-                    ("6", "Oval"),
-                    ("13", "Double Arrow"),
+                    ("2", "Small Arrow"),
+                    ("3", "Concave Arrow"),
+                    ("4", "Classic Arrow"),
+                    ("6", "Stealth"),
+                    ("7", "Open Arrow"),
+                    ("9", "Slash"),
+                    ("10", "Circle"),
+                    ("11", "Diamond"),
+                    ("13", "Filled Arrow"),
+                    ("35", "Double Arrow"),
                 ];
                 let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
                 if let Some(v) =
@@ -6608,6 +7061,50 @@ impl App {
         // Background pages render beneath this page's ink (#113) —
         // built before the field borrows below.
         let underlays = self.build_bg_underlays(ui.ctx());
+        // #177: everything the connection-point overlay needs, built
+        // before the destructuring borrows below (the closure runs
+        // inside `canvas::show`, while `view` is borrowed).
+        let conn_cands = self.glue_candidates(&[]);
+        let conn_threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let conn_snap = self.snap;
+        let conn_sel = self.sel;
+        // #179: live endpoint snapping — two target sets: one
+        // excluding the selected connector (its own endpoint handle
+        // is the dragged thing) and one excluding nothing (the
+        // Connector Tool's fresh draw). The context is built inside
+        // the closure (SnapCtx borrows the targets).
+        let snap_settings = self.snap;
+        let (snap_grid, snap_ruler, snap_thr) = (
+            canvas::grid_step_in(&self.view),
+            canvas::ruler_interval_in(&self.view),
+            SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
+        );
+        let (t_sel, g_sel, t_all, g_all) = {
+            let pid = self.page_id().unwrap_or(-1);
+            let sel_id = conn_sel.map(|(_, s)| s).unwrap_or(-1);
+            (
+                self.snap_targets(pid, &[sel_id]),
+                self.snap_guides(&[sel_id]),
+                self.snap_targets(pid, &[-1]),
+                self.snap_guides(&[-1]),
+            )
+        };
+        let snap_end = move |endpoint_drag: bool, p: (f64, f64)| -> (f64, f64) {
+            let (targets, guides) = if endpoint_drag {
+                (&t_sel, &g_sel)
+            } else {
+                (&t_all, &g_all)
+            };
+            let ctx = crate::snap::SnapCtx {
+                targets,
+                guides,
+                grid_step_in: snap_grid,
+                ruler_step_in: snap_ruler,
+                threshold_in: snap_thr,
+            };
+            crate::snap::point_snap(p, &ctx, &snap_settings, true).map_or(p, |(q, _)| q)
+        };
+        let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -6631,6 +7128,32 @@ impl App {
             }
             false
         };
+        // #177: connection-point affordances for the frame — the
+        // closure paints from inside `canvas::show` and its result is
+        // kept as the test seam.
+        let conn_fx = |live: Option<(f64, f64)>| -> crate::connectors::ConnPointFx {
+            let mut fx = crate::connectors::ConnPointFx::default();
+            if let (Some(ed), Some(pg)) = (ed, page) {
+                if let Some((_, cid)) = conn_sel.filter(|(p, _)| *p == pg.id) {
+                    fx.glued = crate::connectors::glued_sites(&ed.doc, pg, cid, &conn_cands);
+                }
+            }
+            if let Some(p) = live {
+                let g = crate::connectors::conn_point_fx(
+                    &conn_cands,
+                    p,
+                    p,
+                    conn_threshold,
+                    CONN_REVEAL_IN,
+                    conn_snap.glue_active,
+                    conn_snap.glue_connection_points,
+                );
+                fx.reveal = g.reveal;
+                fx.glue_target = g.glue_target;
+            }
+            *conn_fx_seen.borrow_mut() = fx.clone();
+            fx
+        };
         let out = canvas::show(
             ui,
             view,
@@ -6644,6 +7167,8 @@ impl App {
             &underlays,
             self.tool == Tool::Connector,
             armed,
+            &conn_fx,
+            &snap_end,
             &hit,
             &mut mouse,
             // While the in-place text editor is open (#22) the canvas
@@ -6653,6 +7178,7 @@ impl App {
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
+        self.conn_fx_last = conn_fx_seen.into_inner();
         if self.text_edit.is_some() {
             // Click anywhere on the canvas = click outside the text:
             // end the edit (commit; the editor decided Esc the same
@@ -6806,11 +7332,25 @@ impl App {
                                     let page =
                                         &ed.doc.pages[self.page_idx];
                                     vsdx::model::find_shape_by_id(&page.shapes, sid)
-                                        .is_some_and(crate::connectors::is_connector)
+                                        .and_then(|sh| {
+                                            shape_chain(&ed.doc, page.id, sid)
+                                                .ok()
+                                                .map(|ch| (sh, ch))
+                                        })
+                                        .is_some_and(|(sh, ch)| {
+                                            crate::connectors::is_connector_in(&ed.doc, &ch, sh)
+                                        })
                                 })
                             });
                             if is_conn {
-                                self.commit_connector_endpoint(id, raw);
+                                // #179: snap the drop like the plain
+                                // 1D path — Visio's endpoint magnetizes
+                                // to connection points (and the other
+                                // snap targets) on release.
+                                let snapped = dragged
+                                    .and_then(|sid| self.snap_point_for(sid, raw, true))
+                                    .map_or(raw, |(p, _)| p);
+                                self.commit_connector_endpoint(id, snapped);
                             } else {
                                 let glue = dragged
                                     .and_then(|sid| self.snap_point_for(sid, raw, true));
@@ -6828,21 +7368,28 @@ impl App {
                         }
                     }
                     HandleId::LineMid => {
-                        // #108: dragging a glued connector's body
-                        // would rewrite its formula-driven endpoints
-                        // as plain values (dropping the glue); body
-                        // drag arrives with the connector routing UX.
+                        // #172: connectors translate like any shape —
+                        // free ends move plainly, glued ends move through
+                        // the GUARD-waived write that KEEPS the glue
+                        // formula (the reroute tail then re-attaches
+                        // them, Visio's pinned feel). Master instances
+                        // count as connectors (ObjType on the master).
                         let is_conn = self.sel.is_some_and(|(_, sid)| {
                             self.ed.as_ref().is_some_and(|ed| {
                                 let page = &ed.doc.pages[self.page_idx];
                                 vsdx::model::find_shape_by_id(&page.shapes, sid)
-                                    .is_some_and(crate::connectors::is_connector)
+                                    .and_then(|sh| {
+                                        shape_chain(&ed.doc, page.id, sid)
+                                            .ok()
+                                            .map(|ch| (sh, ch))
+                                    })
+                                    .is_some_and(|(sh, ch)| {
+                                        crate::connectors::is_connector_in(&ed.doc, &ch, sh)
+                                    })
                             })
                         });
                         if is_conn {
-                            self.status =
-                                "drag the connector's endpoints — body drag arrives with routing UX"
-                                    .into();
+                            self.apply_connector_body_move(start, end);
                         } else {
                             self.apply_line_move(start, end);
                         }
@@ -7138,6 +7685,13 @@ impl App {
             self.status = "the link has no address".into();
             return;
         }
+        // A stored relative address opens against the document's
+        // directory (#71): the link survives the file and its folder
+        // moving together.
+        let address = crate::hyperlink::resolve_address(
+            address,
+            crate::hyperlink::doc_dir(&self.path),
+        );
         #[cfg(target_os = "linux")]
         let open = "xdg-open";
         #[cfg(target_os = "macos")]
@@ -7152,7 +7706,7 @@ impl App {
         if !flag.is_empty() {
             cmd.arg(flag);
         }
-        match cmd.arg(address).spawn() {
+        match cmd.arg(&address).spawn() {
             Ok(_) => self.status = format!("opened {address}"),
             Err(e) => self.status = format!("could not open {address}: {e}"),
         }
@@ -7428,13 +7982,20 @@ impl App {
                                         let date = date.clone();
                                         let new_text =
                                             format!("{} — {}: {}", author, date, buf.trim());
-                                        self.apply(dc_core::SetText::new(
-                                            Scope::Shape {
-                                                page: page_id,
-                                                shape: *ann_id,
-                                            },
-                                            new_text,
-                                        ));
+                                        // One undo step incl. text-derived
+                                        // cache refresh (#147).
+                                        let scope = Scope::Shape {
+                                            page: page_id,
+                                            shape: *ann_id,
+                                        };
+                                        let doc = self
+                                            .ed()
+                                            .map(|ed| &ed.doc);
+                                        if let Some(doc) = doc {
+                                            self.apply(
+                                                dc::textfunc::text_edit_macro(doc, &scope, &new_text),
+                                            );
+                                        }
                                         edit_done = true;
                                     }
                                     if ui.button("Cancel").clicked() {
@@ -8135,6 +8696,18 @@ impl App {
         // drops master rows an instance row already shadows.
         let rows = self.hyperlink_rows(shape_id);
         let mut draft = self.hyperlink_draft.take();
+        // #71: the 2016 dialog's storage toggle. Visio keeps it
+        // app-level (observed); ours persists app-side keyed by the
+        // document's path — never inside the .vsdx, whose
+        // DocumentSettings schema is closed.
+        let mut relative_paths = self.relative_paths.get(&self.path);
+        let doc_dir = crate::hyperlink::doc_dir(&self.path).map(|p| p.to_path_buf());
+        // Page names for the Sub-address picker (#71): a SubAddress
+        // names a page (the follow path), so the dropdown lists them.
+        let page_names: Vec<String> = self
+            .ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.name.clone()).collect())
+            .unwrap_or_default();
         // Cancel mechanism (live report + the 2016 dialog's Cancel):
         // the title-bar X and an explicit Close button both discard
         // any draft and dismiss the window.
@@ -8148,6 +8721,13 @@ impl App {
             .collapsible(false)
             .default_width(380.0)
             .show(ctx, |ui| {
+                // The 2016 storage toggle (#71) sits above the list.
+                if ui
+                    .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
+                    .changed()
+                {
+                    self.relative_paths.set(&self.path, relative_paths);
+                }
                 if rows.is_empty() && draft.is_none() {
                     ui.weak("No hyperlinks on this shape.");
                 }
@@ -8209,12 +8789,42 @@ impl App {
                         });
                     };
                     egui::Grid::new("dc-hyperlink-draft")
-                        .num_columns(2)
+                        .num_columns(3)
                         .spacing(egui::vec2(8.0, 4.0))
                         .show(ui, |ui| {
                             field(ui, "Address", &mut d.address);
+                            // Browse… (#71): the native file picker (the
+                            // Open/Save As worker-thread pattern); the
+                            // pick lands in the Address field once the
+                            // dialog resolves.
+                            if ui.button("Browse…").clicked() {
+                                self.begin_dialog(PendingKind::HyperlinkAddress);
+                            }
                             ui.end_row();
                             field(ui, "Sub-address", &mut d.sub);
+                            // Page picker (#71): a SubAddress names a
+                            // page — the dropdown offers the document's.
+                            // The accessible name satisfies the dialog
+                            // label requirement (#56 pattern).
+                            let combo = egui::ComboBox::from_id_salt("dc-hyperlink-sub-page")
+                                .selected_text(if d.sub.is_empty() {
+                                    "Pages…".into()
+                                } else {
+                                    d.sub.clone()
+                                })
+                                .width(110.0)
+                                .show_ui(ui, |ui| {
+                                    for name in &page_names {
+                                        ui.selectable_value(&mut d.sub, name.clone(), name);
+                                    }
+                                });
+                            combo.response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::ComboBox,
+                                    true,
+                                    "Sub-address page",
+                                )
+                            });
                             ui.end_row();
                             field(ui, "Description", &mut d.desc);
                             ui.end_row();
@@ -8226,60 +8836,89 @@ impl App {
                         d.sub.clone(),
                         d.desc.clone(),
                     );
+                    // Commit stores the address the way the toggle
+                    // wants it (#71): inside the document's directory
+                    // and relative-paths on → relative form. Picked
+                    // paths already arrived relativized; this covers
+                    // hand-typed ones too (idempotent).
+                    let address = crate::hyperlink::store_address(
+                        &address,
+                        doc_dir.as_deref(),
+                        relative_paths,
+                    );
                     let mut close_draft = false;
+                    // OK / Apply / Cancel (#71): Apply commits without
+                    // closing the draft — the 2016 triad. One undo per
+                    // commit either way.
+                    // Returns the committed row ix (None when the
+                    // draft was all-empty and wrote nothing) — Apply
+                    // feeds it back so a second commit EDITS the row
+                    // instead of duplicating it (CodeRabbit).
+                    let commit = |self_: &mut Self| -> Option<i64> {
+                        let ix = edit_row.unwrap_or_else(|| {
+                            rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
+                        });
+                        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+                        if let Some(old) = edit_row {
+                            // An instance edit replaces its row. A
+                            // master-inherited row has no local row
+                            // to replace: SetRowCell's first-edit
+                            // materialization seeds the local
+                            // section+row (inherited values
+                            // included) — the master stays
+                            // untouched (#139).
+                            if !from_master {
+                                cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(old),
+                                )));
+                            }
+                        }
+                        for (name, val) in [
+                            ("Address", &address),
+                            ("SubAddress", &sub),
+                            ("Description", &desc),
+                        ] {
+                            // A materializing edit writes every
+                            // field, cleared ones as explicit
+                            // empty values: the materialized row
+                            // is seeded with the inherited cells,
+                            // so a skipped field would silently
+                            // keep its master value (#139 review).
+                            if from_master || !val.trim().is_empty() {
+                                cmds.push(Box::new(dc_core::SetRowCell::new(
+                                    scope.clone(),
+                                    "Hyperlink",
+                                    0,
+                                    dc_core::commands::RowSel::Ix(ix),
+                                    name,
+                                    vsdx::model::Cell::value(val.trim()),
+                                )));
+                            }
+                        }
+                        // An all-empty draft writes nothing (and
+                        // must not record a no-op undo step).
+                        if cmds.is_empty() {
+                            return None;
+                        }
+                        self_.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                        Some(ix)
+                    };
                     ui.horizontal(|ui| {
                         if ui.button("OK").clicked() {
-                            let ix = edit_row.unwrap_or_else(|| {
-                                rows.iter().map(|r| r.ix).max().unwrap_or(-1) + 1
-                            });
-                            let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
-                            if let Some(old) = edit_row {
-                                // An instance edit replaces its row. A
-                                // master-inherited row has no local row
-                                // to replace: SetRowCell's first-edit
-                                // materialization seeds the local
-                                // section+row (inherited values
-                                // included) — the master stays
-                                // untouched (#139).
-                                if !from_master {
-                                    cmds.push(Box::new(
-                                        dc_core::commands::RemoveSectionRow::new(
-                                            scope.clone(),
-                                            "Hyperlink",
-                                            0,
-                                            dc_core::commands::RowSel::Ix(old),
-                                        ),
-                                    ));
-                                }
-                            }
-                            for (name, val) in [
-                                ("Address", &address),
-                                ("SubAddress", &sub),
-                                ("Description", &desc),
-                            ] {
-                                // A materializing edit writes every
-                                // field, cleared ones as explicit
-                                // empty values: the materialized row
-                                // is seeded with the inherited cells,
-                                // so a skipped field would silently
-                                // keep its master value (#139 review).
-                                if from_master || !val.trim().is_empty() {
-                                    cmds.push(Box::new(dc_core::SetRowCell::new(
-                                        scope.clone(),
-                                        "Hyperlink",
-                                        0,
-                                        dc_core::commands::RowSel::Ix(ix),
-                                        name,
-                                        vsdx::model::Cell::value(val.trim()),
-                                    )));
-                                }
-                            }
-                            // An all-empty draft writes nothing (and
-                            // must not record a no-op undo step).
-                            if !cmds.is_empty() {
-                                self.apply(dc_core::Macro::new("edit hyperlink", cmds));
-                            }
+                            commit(self);
                             close_draft = true;
+                        }
+                        if ui.button("Apply").clicked() {
+                            if let Some(ix) = commit(self) {
+                                // The draft now edits the row it just
+                                // created (a second Apply updates it,
+                                // never duplicates).
+                                d.edit_row = Some(ix);
+                                d.from_master = false;
+                            }
                         }
                         if ui.button("Cancel").clicked() {
                             close_draft = true;
@@ -9427,13 +10066,17 @@ impl App {
             return;
         };
         if sess.draft != current {
-            self.apply(SetText::new(
-                Scope::Shape {
-                    page: sess.page,
-                    shape: sess.shape,
-                },
-                sess.draft,
-            ));
+            // One undo step: the text plus refreshed cached Vs for
+            // text-derived block cells (#147).
+            let scope = Scope::Shape {
+                page: sess.page,
+                shape: sess.shape,
+            };
+            let doc = self.ed.as_ref().map(|ed| &ed.doc);
+            if let Some(doc) = doc {
+                let mac = dc::textfunc::text_edit_macro(doc, &scope, &sess.draft);
+                self.apply(mac);
+            }
         }
     }
 
@@ -9517,6 +10160,14 @@ impl App {
         self.sel_set.len()
     }
 
+    /// kittest (#177): the last painted connection-point overlay —
+    /// reveal points, glue-target highlight, and the selected
+    /// connector's glued sites, all page inches y-up.
+    #[doc(hidden)]
+    pub fn debug_conn_fx(&self) -> crate::connectors::ConnPointFx {
+        self.conn_fx_last.clone()
+    }
+
     /// #109 tests: the live snap & glue toggles.
     pub fn debug_snap_settings(&self) -> crate::snap::SnapSettings {
         self.snap
@@ -9541,6 +10192,11 @@ impl App {
     /// holds (nonzero only mid-drag).
     pub fn debug_snap_hint_count(&self) -> usize {
         self.snap_live.len()
+    }
+    /// kittest (#168 diagnosis): the live dynamic-grid hints.
+    #[doc(hidden)]
+    pub fn debug_snap_hints_for_test(&self) -> Vec<crate::snap::Hint> {
+        self.snap_live.clone()
     }
 
     /// #109 tests: replace the live snap settings in memory (drag
@@ -10619,6 +11275,7 @@ impl App {
         self.poll_os_image();
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
+        self.poll_stencil_extraction(&ctx);
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
@@ -10846,11 +11503,13 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "the drawing".into());
-        egui::Window::new("Save changes?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
+        // MODAL (#166): the backdrop blocks input to everything
+        // behind the prompt — the document cannot change underneath
+        // the Save / Don't-Save decision. The title rides inside the
+        // dialog frame (a modal has no title bar).
+        egui::Modal::new(egui::Id::unique("dc-confirm-close")).show(ctx, |ui| {
+            ui.strong("Save changes?");
+            ui.add_space(4.0);
                 ui.label(format!("Save changes to {name}?"));
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -10880,7 +11539,7 @@ impl App {
                         self.confirm_close = None;
                     }
                 });
-            });
+        });
     }
 
     /// Execute a confirmed close: the app window (re-issue the close
@@ -10917,6 +11576,9 @@ impl App {
         self.dirty = false;
         self.set_selection(None);
         self.stencil = Stencil::default();
+        // The reset pane drops the configured category order (#105,
+        // CodeRabbit): re-apply the stencil preferences right after.
+        self.apply_stencil_preferences();
         self.tex.clear();
         self.layers.clear();
         self.page_states.clear();
@@ -10933,12 +11595,12 @@ impl App {
         if !self.confirm_new {
             return;
         }
-        egui::Window::new("Save changes?")
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
-            .show(ctx, |ui| {
-                ui.label("The current drawing has unsaved changes.");
+        // MODAL (#166), same as the close prompt: nothing behind the
+        // dialog is interactive while the decision is pending.
+        egui::Modal::new(egui::Id::unique("dc-confirm-new")).show(ctx, |ui| {
+            ui.strong("Save changes?");
+            ui.add_space(4.0);
+            ui.label("The current drawing has unsaved changes.");
                 ui.horizontal(|ui| {
                     if ui.button("Save & New").clicked() {
                         self.confirm_new = false;
@@ -10960,7 +11622,7 @@ impl App {
                         self.confirm_new = false;
                     }
                 });
-            });
+        });
     }
 
     /// The File backstage (Visio 2016): green command rail on the left,

@@ -158,7 +158,7 @@ pub fn show_overlay(
     // (≈ logical px) = inches × 96 × zoom.
     let ppi = view.px_per_in();
     let font_pts = (tb.font_size as f32 * 96.0 * view.zoom).clamp(4.0, 400.0);
-    let (family, ascent_em) = overlay_font(ui.ctx(), tb.font.as_deref(), tb.bold);
+    let (family, ascent_em) = overlay_font(ui.ctx(), tb.font.as_deref(), tb.bold, tb.italic);
     let font_id = FontId::new(font_pts, family);
     let color = parse_hex_color(&tb.color);
     let line_pts = (tb.line_height as f32 * 96.0 * view.zoom).clamp(font_pts, 1000.0);
@@ -282,26 +282,37 @@ fn overlay_font(
     ctx: &egui::Context,
     font: Option<&str>,
     bold: bool,
+    italic: bool,
 ) -> (egui::FontFamily, f64) {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};
-    /// (document family, bold) → (egui family, ascender em, canvas
-    /// name, payload). All clones are Arc-grade — the payload is
-    /// shared, never copied.
+    /// (document family, bold, italic) → (egui family, ascender em,
+    /// canvas name, payload). All clones are Arc-grade — the payload
+    /// is shared, never copied.
     type Resolved = (egui::FontFamily, f64, Arc<str>, egui::FontData);
-    static CACHE: OnceLock<Mutex<HashMap<(String, bool), Resolved>>> = OnceLock::new();
+    /// (document family, bold, italic) → resolved tuple — see below.
+    type CacheKey = (String, bool, bool);
+    static CACHE: OnceLock<Mutex<HashMap<CacheKey, Resolved>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let key = (font.unwrap_or_default().to_string(), bold);
+    let key = (font.unwrap_or_default().to_string(), bold, italic);
     let hit = cache.lock().unwrap().get(&key).cloned();
+    let style_name = |bold: bool, italic: bool| {
+        match (bold, italic) {
+            (false, false) => "regular",
+            (true, false) => "bold",
+            (false, true) => "italic",
+            (true, true) => "bolditalic",
+        }
+    };
     let (family, ascent, name, data) = match hit {
         Some(r) => r,
         None => {
-            let out = match dc::textmetrics::face_data(font, bold) {
+            let out = match dc::textmetrics::face_data(font, bold, italic) {
                 Some(fd) => {
                     let name: Arc<str> = Arc::from(format!(
                         "dc-canvas-{}-{}",
                         fd.family,
-                        if bold { "bold" } else { "regular" }
+                        style_name(bold, italic)
                     ));
                     let data = egui::FontData {
                         font: fd.data.clone(),
@@ -318,12 +329,20 @@ fn overlay_font(
                 None => {
                     let name: Arc<str> = Arc::from(format!(
                         "dc-canvas-carlito-{}",
-                        if bold { "bold" } else { "regular" }
+                        style_name(bold, italic)
                     ));
-                    let bold_ttf: &[u8] = include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf");
-                    let reg_ttf: &[u8] =
-                        include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf");
-                    let ttf: &[u8] = if bold { bold_ttf } else { reg_ttf };
+                    let ttf: &[u8] = match (bold, italic) {
+                        (false, false) => {
+                            include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf")
+                        }
+                        (true, false) => include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf"),
+                        (false, true) => {
+                            include_bytes!("../../dc/assets/fonts/Carlito-Italic.ttf")
+                        }
+                        (true, true) => {
+                            include_bytes!("../../dc/assets/fonts/Carlito-BoldItalic.ttf")
+                        }
+                    };
                     let family = egui::FontFamily::Name(name.clone());
                     (family, 0.75, name, egui::FontData::from_static(ttf))
                 }

@@ -11,6 +11,7 @@ pub mod group_fixture;
 pub mod align;
 pub mod connectors;
 pub mod guides;
+pub mod hyperlink;
 pub mod icontex;
 mod layers;
 pub mod os_theme;

@@ -1250,7 +1250,7 @@ pub fn text_first_baseline(tb: &TextBlock, total_h: f64) -> f64 {
 
 /// The cell resolution behind [`TextBlock`] — shared by `emit_text`
 /// (which paints from it) and the public [`text_block`] wrapper.
-fn resolve_text_block(
+pub(crate) fn resolve_text_block(
     doc: &Document,
     s: &Shape,
     chain: &[&Shape],
@@ -1332,88 +1332,30 @@ fn resolve_text_block(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
-fn emit_text(
-    doc: &Document,
-    s: &Shape,
-    chain: &[&Shape],
-    width: f64,
-    height: f64,
-    sx: f64,
-    sy: f64,
-    skip: bool,
-    out: &mut String,
-) {
-    if skip {
-        return;
-    }
-    // Authored leading spacing is content (#144): trim only the END —
-    // the first paragraph's leading space run must survive into its
-    // line, while the trailing trim keeps the corpus-standard
-    // "text ends with CRLF" authoring pattern (Enter after the last
-    // line) at the same line count Visio shows instead of adding an
-    // empty line and shifting the block's vertical centering.
-    let Some(text) = s
-        .sheet
-        .text
-        .as_deref()
-        .map(str::trim_end)
-        .filter(|t| !t.is_empty())
-    else {
-        return;
-    };
-    let tb = resolve_text_block(doc, s, chain, width, height);
-    let (tx, ty) = tb.pin;
-    let (tw, th) = tb.size;
-    let angle = tb.angle;
-    let size = tb.font_size;
-    let color = tb.color.clone();
-    let style_bits = (tb.bold as u32) | ((tb.italic as u32) << 1);
-    let font_attrs = format!(
-        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
-        s = size,
-        ff = font_family_attr(tb.font.as_deref()),
-        // Document-supplied color text (e.g. a `#…` value) is attribute
-        // content — escape it like every other attribute.
-        c = escape_attr(&color),
-        b = if style_bits & 1 != 0 {
-            r#" font-weight="bold""#
-        } else {
-            ""
-        },
-        i = if style_bits & 2 != 0 {
-            r#" font-style="italic""#
-        } else {
-            ""
-        },
-    );
-    let halign = tb.halign;
-    let valign = tb.valign;
-    let (ins_l, ins_r, ins_t, ins_b) = tb.insets;
-    let line_h = tb.line_height;
-
-    // Greedy word wrap against REAL font metrics (GitHub #21): runs
-    // are measured as the sum of per-glyph advances from the face the
-    // rasterizer will draw (system font where installed, vendored
-    // Carlito otherwise — `textmetrics`), replacing the ~0.5 em
-    // average-advance guess that re-wrapped lines the author had
-    // fitted to the block.
-    let usable_w = (tw - ins_l - ins_r).max(0.02);
-    let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold);
+/// The greedy wrap both the renderer (`emit_text`) and the
+/// `TEXTHEIGHT` measurement (#147) run — one wrap, so block-size
+/// caches and the rendered lines can never disagree.
+///
+/// Visio stores line breaks as CRLF: breaking on each of \r and \n
+/// separately would insert an empty paragraph between every pair of
+/// lines, so normalize CRLF (and lone CR) to one break first.
+/// Character-exact lines (#144): each paragraph is reconstructed
+/// verbatim — `split(' ')` words joined back with their separator
+/// spaces — so a paragraph-leading space run (empty first words)
+/// survives into the first line, interior runs stay, and a
+/// whitespace-only paragraph emits its spaces instead of an empty
+/// line. `started` distinguishes "no words consumed yet" from "an
+/// empty word consumed" (a pending leading space): a bare
+/// `cur.is_empty()` test cannot tell them apart, which is how the
+/// leading run used to vanish.
+pub(crate) fn wrap_block_text(
+    face: &crate::textmetrics::ResolvedFace,
+    text: &str,
+    size: f64,
+    usable_w: f64,
+) -> Vec<String> {
     let width_in = |s: &str| face.width_in(s, size);
     let mut lines: Vec<String> = Vec::new();
-    // Visio stores line breaks as CRLF: breaking on each of \r and \n
-    // separately would insert an empty paragraph between every pair of
-    // lines, so normalize CRLF (and lone CR) to one break first.
-    // Character-exact lines (#144): each paragraph is reconstructed
-    // verbatim — `split(' ')` words joined back with their separator
-    // spaces — so a paragraph-leading space run (empty first words)
-    // survives into the first line, interior runs stay, and a
-    // whitespace-only paragraph emits its spaces instead of an empty
-    // line. `started` distinguishes "no words consumed yet" from "an
-    // empty word consumed" (a pending leading space): a bare
-    // `cur.is_empty()` test cannot tell them apart, which is how the
-    // leading run used to vanish.
     for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
         let mut cur = String::new();
         let mut started = false;
@@ -1461,6 +1403,83 @@ fn emit_text(
         }
         lines.push(cur);
     }
+    lines
+}
+
+#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
+fn emit_text(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    width: f64,
+    height: f64,
+    sx: f64,
+    sy: f64,
+    skip: bool,
+    out: &mut String,
+) {
+    if skip {
+        return;
+    }
+    // Authored leading spacing is content (#144): trim only the END —
+    // the first paragraph's leading space run must survive into its
+    // line. The trailing trim is now GOLD-BACKED (#148, 2026-10-30):
+    // the shipped corpus carries Visio's own cached
+    // `TEXTHEIGHT(TheText,TxtWidth)` values, and 25 one-visual-line
+    // texts ending in the corpus-standard CRLF (DBUML_M/U "PK\r\n",
+    // TITLE_M/U "\r\n", ELETEL_M, OFFEQP…) cache exactly ONE line
+    // height (1.2003–1.2004 em at the canonical 120% spacing) — Visio
+    // does NOT count the trailing break as a line, so dropping it
+    // here keeps the block's line count and vertical centering where
+    // Visio puts them.
+    let Some(text) = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim_end)
+        .filter(|t| !t.is_empty())
+    else {
+        return;
+    };
+    let tb = resolve_text_block(doc, s, chain, width, height);
+    let (tx, ty) = tb.pin;
+    let (tw, th) = tb.size;
+    let angle = tb.angle;
+    let size = tb.font_size;
+    let color = tb.color.clone();
+    let style_bits = (tb.bold as u32) | ((tb.italic as u32) << 1);
+    let font_attrs = format!(
+        r#"font-size="{s:.4}"{ff} fill="{c}"{b}{i}"#,
+        s = size,
+        ff = font_family_attr(tb.font.as_deref()),
+        // Document-supplied color text (e.g. a `#…` value) is attribute
+        // content — escape it like every other attribute.
+        c = escape_attr(&color),
+        b = if style_bits & 1 != 0 {
+            r#" font-weight="bold""#
+        } else {
+            ""
+        },
+        i = if style_bits & 2 != 0 {
+            r#" font-style="italic""#
+        } else {
+            ""
+        },
+    );
+    let halign = tb.halign;
+    let valign = tb.valign;
+    let (ins_l, ins_r, ins_t, ins_b) = tb.insets;
+    let line_h = tb.line_height;
+
+    // Greedy word wrap against REAL font metrics (GitHub #21): runs
+    // are measured as the sum of per-glyph advances from the face the
+    // rasterizer will draw (system font where installed, vendored
+    // Carlito otherwise — `textmetrics`), replacing the ~0.5 em
+    // average-advance guess that re-wrapped lines the author had
+    // fitted to the block.
+    let usable_w = (tw - ins_l - ins_r).max(0.02);
+    let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
+    let lines = wrap_block_text(&face, text, size, usable_w);
     let n_lines = lines.len() as f64;
     let total_h = n_lines * line_h;
 
@@ -2181,10 +2200,17 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
         let mut attrs = String::new();
-        // #72: per-value arrowheads — Visio's named gallery subset,
-        // drawn from our own paths (behavior reference: observed Visio
-        // 2016; artwork ours). Unmapped gallery values fall back to
-        // the filled triangle. Sizes ride markerUnits=strokeWidth
+        // #72/#169: per-value arrowheads — Visio 2016's Begin/EndArrow
+        // gallery, drawn from our own paths (behavior reference: the
+        // shipped Visio 2016 gallery plus a Visio-authored fixture with
+        // EndArrow 0–50 printed at 600 dpi — see
+        // Analysis/arrow-gallery-visio2016.md; artwork ours). Key
+        // facts: 13 is a single filled head (the #169 report: it drew
+        // our two chevrons); 4 — the corpus's default — is the classic
+        // filled triangle, 6 the stealth dart, 9 the slanted dimension
+        // tick; the only double forms are the chevrons (12 open, 34
+        // open, 35 filled). Unmapped gallery values fall back to the
+        // filled triangle. Sizes ride markerUnits=strokeWidth
         // (LineWeight) times the ArrowSize factor.
         let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
             if arrow < 0.5 {
@@ -2201,24 +2227,41 @@ fn render_geometry(
                 // Paths point ALONG +x (end markers, tip at x=10/12);
                 // begin markers mirror around the viewBox center, which
                 // orients the tip at the path start (orient=auto).
-                // (path body, tip_x, box_w, stroke_only); the oval is
+                // (path body, tip_x, box_w, stroke_only); the circle is
                 // a circle element, handled separately.
                 let spec: (&str, f64, f64, bool) = match kind {
-                    // 1 Arrow — the filled triangle.
+                    // 1 — narrow filled triangle.
                     1 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 2 Open Arrow — the open V.
-                    2 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
-                    // 3 Concave — filled with a dipped base.
+                    // 2 — small filled triangle.
+                    2 => ("M0,1.5 L8,5 L0,8.5 z", 8.0, 10.0, false),
+                    // 3 — filled, concave (dipped) base.
                     3 => ("M0,0 L10,5 L0,10 Q3.5,5 0,0 z", 10.0, 10.0, false),
-                    // 4 Stealth — the dart.
-                    4 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
-                    // 5 Diamond (tip at both ends; anchor the right
-                    // tip on the line end).
-                    5 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
-                    // 6 Oval — the circle (symmetric, no mirror).
-                    6 => ("", 12.0, 12.0, false),
-                    // 13 Double Arrow — two chevrons.
-                    13 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
+                    // 4 — the classic filled triangle (the corpus
+                    // default; was wrongly the stealth dart pre-#169).
+                    4 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 5 — filled triangle, wide.
+                    5 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 6 — the stealth dart (was wrongly the circle).
+                    6 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
+                    // 7 — open chevron (the open V).
+                    7 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
+                    // 9 — the slanted dimension tick.
+                    9 => ("M2,-1 L6,9", 5.0, 10.0, true),
+                    // 10 — the filled circle (symmetric, no mirror).
+                    10 => ("", 12.0, 12.0, false),
+                    // 11 — the filled diamond (tip at both ends; anchor
+                    // the right tip on the line end).
+                    11 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
+                    // 12 — open double chevron.
+                    12 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 13 — single filled triangle, plain base (Visio's
+                    // 13 is NOT a double — #169's core fix).
+                    13 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 34 — open double chevron (wide).
+                    34 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 35 — filled double chevron (the gallery's first
+                    // filled double; the old wrong-13 glyph lives on).
+                    35 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
                     // Unmapped gallery values: the filled triangle.
                     _ => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
                 };
@@ -2256,12 +2299,12 @@ fn render_geometry(
                 };
                 // Begin markers mirror horizontally so the tip faces
                 // the path start (orient=auto supplies direction).
-                let d = if begin && kind != 6 {
+                let d = if begin && kind != 10 {
                     mirror_x(d)
                 } else {
                     d.to_string()
                 };
-                let body = if kind == 6 {
+                let body = if kind == 10 {
                     format!(
                         r#"<circle cx="6" cy="5" r="5" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
                         c = line_color,
@@ -2488,13 +2531,34 @@ fn style_attr(
 /// against the gold. Patterns outside this set stay solid until a corpus
 /// exercises them.
 fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
+    // #171: the table is measured from Visio 2016 itself — the
+    // owner-authored fixture `Sample/test files/lines.vsdx` (patterns
+    // 0–23, 0.02 in weight) printed at 600 dpi, run/gap sequences in
+    // stroke-width units (Analysis/line-patterns-visio2016.md). 0/1
+    // stay None (0 hides the line entirely at the call site).
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 3.0],                     // dashed (lgDash)
-        3 => &[1.0, 3.0],                     // dotted (dot)
-        4 => &[4.0, 3.0, 1.0, 3.0],           // dash-dot (dashDot)
-        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0], // dash-dot-dot (dashDotDot)
-        7 => &[8.0, 3.0, 4.0, 3.0],           // long dash + normal dash
-        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0], // long + 2× normal dashes
+        2 => &[8.0, 4.0], // dash
+        3 => &[1.0, 4.0], // dot
+        4 => &[8.0, 4.0, 1.0, 4.0], // dash-dot
+        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0], // dash-dot-dot
+        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0], // dash-dash-dot
+        7 => &[20.0, 4.0, 8.0, 4.0], // long + short dash
+        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0], // long + 2 short dashes
+        9 => &[4.0, 2.0], // short dash (the corpus legend "long dash" label was wrong)
+        10 => &[1.0, 2.0], // fine dot
+        11 => &[4.0, 2.0, 1.0, 2.0], // short dash-dot
+        12 => &[4.0, 2.0, 1.0, 2.0, 1.0, 2.0], // short dash-dot-dot
+        13 => &[4.0, 2.0, 4.0, 2.0, 1.0, 2.0], // short dash-dash-dot
+        14 => &[10.0, 2.0, 4.0, 2.0], // medium-short dash pair
+        15 => &[10.0, 2.0, 4.0, 2.0, 4.0, 2.0], // medium + 2 short dashes
+        16 => &[16.0, 8.0], // long dash
+        17 => &[1.0, 8.0], // sparse dot
+        18 => &[16.0, 8.0, 1.0, 8.0], // long dash-dot
+        19 => &[16.0, 8.0, 1.0, 8.0, 1.0, 8.0], // long dash-dot-dot
+        20 => &[16.0, 8.0, 16.0, 8.0, 1.0, 8.0], // long dash-dash-dot
+        21 => &[40.0, 8.0, 16.0, 8.0], // extra-long + long dash
+        22 => &[40.0, 8.0, 16.0, 8.0, 16.0, 8.0], // extra-long + 2 long
+        23 => &[2.0, 1.0], // fine dash
         _ => return None,
     };
     Some(
@@ -2776,7 +2840,7 @@ fn font_family_attr(font: Option<&str>) -> String {
 }
 
 /// Resolved (Width, Height) for geometry scaling.
-fn shape_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> (f64, f64) {
+pub(crate) fn shape_size(doc: &Document, s: &Shape, chain: &[&Shape]) -> (f64, f64) {
     let env = shape_env(doc, s, chain);
     let get = |n: &str| {
         doc.resolve_cell(s, chain, n)
@@ -3117,32 +3181,75 @@ mod tests {
 
     #[test]
     fn line_pattern_dasharrays_scale_with_weight() {
-        // ECMA-376 preset primitives (issue #13): dash 4,3 · lgDash 8,3 ·
-        // dot 1,3, composed per the Visio gallery semantics.
-        let w = 0.01041666666666667; // 0.75 pt
-        assert_eq!(line_dasharray(2.0, w).as_deref(), Some("0.08333 0.03125"));
-        assert_eq!(line_dasharray(3.0, w).as_deref(), Some("0.01042 0.03125"));
+        // #171: every value measured from Visio 2016 itself (the
+        // owner-authored lines.vsdx fixture printed at 600 dpi — see
+        // Analysis/line-patterns-visio2016.md); units are stroke
+        // widths, so the numbers below are pattern × weight.
+        let w = 0.02; // the fixture's weight
+        let arr = |p: f64| line_dasharray(p, w);
+        assert_eq!(arr(2.0).as_deref(), Some("0.16000 0.08000"));
+        assert_eq!(arr(3.0).as_deref(), Some("0.02000 0.08000"));
         assert_eq!(
-            line_dasharray(4.0, w).as_deref(),
-            Some("0.04167 0.03125 0.01042 0.03125")
+            arr(4.0).as_deref(),
+            Some("0.16000 0.08000 0.02000 0.08000")
         );
         assert_eq!(
-            line_dasharray(5.0, w).as_deref(),
-            Some("0.04167 0.03125 0.01042 0.03125 0.01042 0.03125")
-        );
-        // 7/8: long dash (lgDash) + normal dash(es).
-        assert_eq!(
-            line_dasharray(7.0, w).as_deref(),
-            Some("0.08333 0.03125 0.04167 0.03125")
+            arr(5.0).as_deref(),
+            Some("0.16000 0.08000 0.02000 0.08000 0.02000 0.08000")
         );
         assert_eq!(
-            line_dasharray(8.0, w).as_deref(),
-            Some("0.08333 0.03125 0.04167 0.03125 0.04167 0.03125")
+            arr(6.0).as_deref(),
+            Some("0.16000 0.08000 0.16000 0.08000 0.02000 0.08000")
         );
-        // Solid (1), hidden (0, handled elsewhere) and uncalibrated
-        // patterns render solid — no dasharray attribute.
+        assert_eq!(arr(7.0).as_deref(), Some("0.40000 0.08000 0.16000 0.08000"));
+        assert_eq!(
+            arr(8.0).as_deref(),
+            Some("0.40000 0.08000 0.16000 0.08000 0.16000 0.08000")
+        );
+        assert_eq!(arr(9.0).as_deref(), Some("0.08000 0.04000"));
+        assert_eq!(arr(10.0).as_deref(), Some("0.02000 0.04000"));
+        assert_eq!(
+            arr(11.0).as_deref(),
+            Some("0.08000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(
+            arr(12.0).as_deref(),
+            Some("0.08000 0.04000 0.02000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(
+            arr(13.0).as_deref(),
+            Some("0.08000 0.04000 0.08000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(arr(14.0).as_deref(), Some("0.20000 0.04000 0.08000 0.04000"));
+        assert_eq!(
+            arr(15.0).as_deref(),
+            Some("0.20000 0.04000 0.08000 0.04000 0.08000 0.04000")
+        );
+        assert_eq!(arr(16.0).as_deref(), Some("0.32000 0.16000"));
+        assert_eq!(arr(17.0).as_deref(), Some("0.02000 0.16000"));
+        assert_eq!(
+            arr(18.0).as_deref(),
+            Some("0.32000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(
+            arr(19.0).as_deref(),
+            Some("0.32000 0.16000 0.02000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(
+            arr(20.0).as_deref(),
+            Some("0.32000 0.16000 0.32000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(arr(21.0).as_deref(), Some("0.80000 0.16000 0.32000 0.16000"));
+        assert_eq!(
+            arr(22.0).as_deref(),
+            Some("0.80000 0.16000 0.32000 0.16000 0.32000 0.16000")
+        );
+        assert_eq!(arr(23.0).as_deref(), Some("0.04000 0.02000"));
+        // Solid (1) and hidden (0, handled at the call site) render
+        // without a dasharray; so do out-of-gallery values.
         assert!(line_dasharray(1.0, w).is_none());
-        assert!(line_dasharray(23.0, w).is_none());
+        assert!(line_dasharray(0.0, w).is_none());
+        assert!(line_dasharray(24.0, w).is_none());
     }
 
     /// A Character row with Font/Size/Color cells for char_font tests.
@@ -3218,14 +3325,21 @@ mod tests {
         let none = line_with(&[("EndArrow", "0")]);
         assert!(!none.contains("marker"), "value 0 emits no head: {none}");
         // Each gallery value emits a marker with its own kind id and
-        // the expected body shape.
+        // the expected body shape (#169: mapped to Visio 2016's observed
+        // gallery — no value below 34 is double-headed there).
         for (v, needle) in [
             (1, "M0,0 L10,5 L0,10 z"),
-            (2, r#"fill="none""#),
+            (2, "M0,1.5 L8,5 L0,8.5 z"),
             (3, "Q3.5,5"),
-            (4, "L5,5 z"),
-            (5, "M0,5 L5,0 L10,5 L5,10 z"),
-            (13, "M6,0 L12,5 L6,10 z"),
+            (4, "M0,0 L10,5 L0,10 z"),
+            (5, "M0,0 L10,5 L0,10 z"),
+            (6, "L5,5 z"),
+            (7, r#"fill="none""#),
+            (9, "M2,-1 L6,9"),
+            (11, "M0,5 L5,0 L10,5 L5,10 z"),
+            (12, "M6,0 L12,5 L6,10"),
+            (13, "M0,0 L10,5 L0,10 z"),
+            (35, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
@@ -3234,9 +3348,27 @@ mod tests {
             );
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
-        // The oval is a circle.
-        let oval = line_with(&[("EndArrow", "6")]);
-        assert!(oval.contains("<circle"), "value 6 is a circle: {oval}");
+        // The circle is a circle.
+        let circle = line_with(&[("EndArrow", "10")]);
+        assert!(circle.contains("<circle"), "value 10 is a circle: {circle}");
+        // #169 regression: values below 34 are all SINGLE-headed — the
+        // marker body must close at most one filled triangle, the
+        // double chevron living only at 34/35.
+        for v in 1..=33i64 {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            if let Some(body) = out.split("<marker").nth(1) {
+                let closes = body.matches(" z").count();
+                assert!(
+                    closes <= 1,
+                    "value {v} must not stack triangles: {body}"
+                );
+            }
+        }
+        let dbl = line_with(&[("EndArrow", "35")]);
+        assert!(
+            dbl.matches(" z").count() >= 2,
+            "value 35 is the double chevron: {dbl}"
+        );
         // Weight scaling: the head rides stroke width.
         let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
         assert!(
@@ -4153,7 +4285,7 @@ mod tests {
     fn narrow_wrap_breaking_in_a_space_run_keeps_the_space() {
         let doc = Document::default();
         let size = 0.13889; // the text-block default (10 pt)
-        let face = crate::textmetrics::resolve(None, false);
+        let face = crate::textmetrics::resolve(None, false, false);
         let usable = face.width_in("a", size) + 0.4 * face.width_in(" ", size);
         let mut s = Shape::default();
         s.sheet.text = Some("a  b".into());
@@ -4190,7 +4322,7 @@ mod tests {
         // The greedy invariant: every line except the last is full —
         // adding the next word would overflow.
         let usable = 0.8 - 0.1 - 0.1;
-        let face = crate::textmetrics::resolve(None, false);
+        let face = crate::textmetrics::resolve(None, false, false);
         for pair in lines.windows(2) {
             let joined = format!("{} {}", pair[0], pair[1]);
             assert!(

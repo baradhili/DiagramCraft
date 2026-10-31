@@ -13,6 +13,43 @@ use std::collections::HashMap;
 
 pub type Env = HashMap<String, f64>;
 
+/// Text measurement bridge for `TEXTWIDTH`/`TEXTHEIGHT` (GitHub #147).
+/// The evaluator lives in this bottom crate while the metrics engine
+/// (`dc::textmetrics`) lives further up; callers that CAN measure
+/// implement this trait and pass it to [`eval_measured`], and the two
+/// functions evaluate against real font metrics instead of erroring
+/// back to the shape's cached `V`. [`eval`] keeps the no-metrics
+/// behavior: `TEXTWIDTH`/`TEXTHEIGHT`/`TheText` are unsupported there
+/// and callers fall back to the cached value.
+pub trait TextMeasure {
+    /// The sheet's `TheText` — the composed text the shape carries.
+    fn the_text(&self) -> Option<String>;
+    /// `TEXTWIDTH(text)`: single-line width of `text` in the shape's
+    /// resolved character formatting, internal inches.
+    fn text_width(&self, text: &str) -> Option<f64>;
+    /// `TEXTHEIGHT(text, width)`: height of `text` wrapped at `width`
+    /// internal inches (the same wrap the renderer performs — a
+    /// trailing line break does NOT add a line, #148).
+    fn text_height(&self, text: &str, width: f64) -> Option<f64>;
+}
+
+/// [`TextMeasure`] for callers without a metrics engine: every method
+/// is unavailable, so text functions fail evaluation and callers use
+/// the cached `V` (the pre-#147 behavior).
+struct NoText;
+
+impl TextMeasure for NoText {
+    fn the_text(&self) -> Option<String> {
+        None
+    }
+    fn text_width(&self, _text: &str) -> Option<f64> {
+        None
+    }
+    fn text_height(&self, _text: &str, _width: f64) -> Option<f64> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Tok {
     Num(f64),
@@ -65,13 +102,24 @@ fn format_num(n: f64) -> String {
 }
 
 /// Evaluate a formula. Returns `Err` for anything unsupported so callers
-/// can fall back to the cached value.
+/// can fall back to the cached value. Text functions
+/// (`TEXTWIDTH`/`TEXTHEIGHT`/`TheText`) are unsupported here — use
+/// [`eval_measured`] with a [`TextMeasure`] implementation.
 pub fn eval(expr: &str, env: &Env) -> Result<Value, String> {
+    eval_measured(expr, env, &NoText)
+}
+
+/// [`eval`] with a metrics bridge: `TheText` resolves to the sheet's
+/// text and `TEXTWIDTH`/`TEXTHEIGHT` measure through `m` (#147). Any
+/// measurement the bridge cannot supply still errors, so callers fall
+/// back to the cached `V` exactly as before.
+pub fn eval_measured(expr: &str, env: &Env, m: &dyn TextMeasure) -> Result<Value, String> {
     let toks = tokenize(expr)?;
     let mut p = Parser {
         toks: &toks,
         pos: 0,
         env,
+        measure: m,
     };
     let v = p.expr()?;
     if p.pos != toks.len() {
@@ -268,6 +316,7 @@ struct Parser<'a> {
     toks: &'a [Tok],
     pos: usize,
     env: &'a Env,
+    measure: &'a dyn TextMeasure,
 }
 
 impl<'a> Parser<'a> {
@@ -409,6 +458,17 @@ impl<'a> Parser<'a> {
                 if matches!(self.peek(), Some(Tok::LParen)) {
                     return self.call(&name);
                 }
+                // `TheText` is the sheet's composed text — a STRING,
+                // so it only resolves under a measurement bridge
+                // (#147); plain `eval` leaves it (and the text
+                // functions taking it) to the cached-V fallback.
+                if name == "TheText" {
+                    return self
+                        .measure
+                        .the_text()
+                        .map(Value::Str)
+                        .ok_or_else(|| "TheText: no text metrics bridge".to_string());
+                }
                 // Unit-suffixed idents like `0.5DL` arrive as Num + Ident;
                 // bare idents resolve from the environment.
                 self.env
@@ -452,7 +512,8 @@ impl<'a> Parser<'a> {
                 .and_then(|v| v.as_f64())
                 .ok_or_else(|| format!("{name}: arg {} not numeric", i + 1))
         };
-        match name.to_ascii_uppercase().as_str() {
+        let upper_name = name.to_ascii_uppercase();
+        match upper_name.as_str() {
             "GUARD" | "THEMEGUARD" => match args.len() {
                 1 => Ok(args.pop().unwrap()),
                 _ => Err(format!("{name} takes one argument")),
@@ -494,6 +555,51 @@ impl<'a> Parser<'a> {
                     return Err("NOT takes one argument".into());
                 }
                 Ok(Value::Num(f64::from((arg(&args, 0)? == 0.0) as i32)))
+            }
+            // MAX/MIN: the corpus's text-aware blocks compose them
+            // around the text functions (`MAX(Width,TEXTWIDTH(TheText))`,
+            // GDT's `MAX(3*Char.Size*Scratch.B1,TEXTWIDTH(TheText))`).
+            // `upper` keeps the selection case-insensitive like every
+            // other arm (CodeRabbit: comparing `name` made `max(...)`
+            // silently take the MIN branch).
+            "MAX" | "MIN" => {
+                if args.is_empty() {
+                    return Err(format!("{name} needs arguments"));
+                }
+                let is_max = upper_name == "MAX";
+                let mut best = arg(&args, 0)?;
+                for i in 1..args.len() {
+                    let v = arg(&args, i)?;
+                    let take = if is_max { v > best } else { v < best };
+                    if take {
+                        best = v;
+                    }
+                }
+                Ok(Value::Num(best))
+            }
+            // Text measurement (#147): the args are already evaluated
+            // (TheText arrives as a Str through the bridge), the
+            // measurement itself defers to the bridge.
+            "TEXTWIDTH" => {
+                if args.len() != 1 {
+                    return Err("TEXTWIDTH takes one argument".into());
+                }
+                let text = args[0].clone().coerce_str();
+                self.measure
+                    .text_width(&text)
+                    .map(Value::Num)
+                    .ok_or_else(|| "TEXTWIDTH: no text metrics bridge".to_string())
+            }
+            "TEXTHEIGHT" => {
+                if args.len() != 2 {
+                    return Err("TEXTHEIGHT takes two arguments".into());
+                }
+                let text = args[0].clone().coerce_str();
+                let width = arg(&args, 1)?;
+                self.measure
+                    .text_height(&text, width)
+                    .map(Value::Num)
+                    .ok_or_else(|| "TEXTHEIGHT: no text metrics bridge".to_string())
             }
             other => Err(format!("function '{other}' not supported")),
         }
@@ -571,6 +677,90 @@ mod tests {
     fn unsupported_falls_back_to_err() {
         assert!(eval("THEMEVAL(\"LineWeight\",0.24PT)", &env()).is_err());
         assert!(eval("Inh", &env()).is_err());
+        // Without a metrics bridge the text functions stay unsupported
+        // (the pre-#147 contract: callers fall back to the cached V).
+        assert!(eval("TEXTWIDTH(TheText)", &env()).is_err());
+        assert!(eval("TEXTHEIGHT(TheText,TxtWidth)", &env()).is_err());
+    }
+
+    /// A deterministic fake bridge: width = 0.1×chars, height = the
+    /// width passed in (so tests can see which width the function
+    /// forwarded).
+    struct FakeText;
+
+    impl TextMeasure for FakeText {
+        fn the_text(&self) -> Option<String> {
+            Some("hello\r\n".into())
+        }
+        fn text_width(&self, text: &str) -> Option<f64> {
+            Some(0.1 * text.trim_end().chars().count() as f64)
+        }
+        fn text_height(&self, _text: &str, width: f64) -> Option<f64> {
+            Some(width * 2.0)
+        }
+    }
+
+    #[test]
+    fn text_functions_evaluate_through_a_bridge() {
+        let e = env();
+        let m = FakeText;
+        // TheText arrives as the sheet's string; TEXTWIDTH measures it.
+        assert_eq!(
+            eval_measured("TEXTWIDTH(TheText)", &e, &m)
+                .unwrap()
+                .as_f64(),
+            Some(0.5)
+        );
+        // String literals measure too, and arithmetic composes — the
+        // corpus's `MAX(Width,TEXTWIDTH(TheText))` shapes evaluate
+        // end to end.
+        assert_eq!(
+            eval_measured("TEXTWIDTH(\"abc\")+1", &e, &m).unwrap().as_f64(),
+            Some(1.3)
+        );
+        let mut e2 = env();
+        e2.insert("Width".into(), 0.75);
+        assert_eq!(
+            eval_measured("MAX(Width, TEXTWIDTH(TheText))", &e2, &m)
+                .unwrap()
+                .as_f64(),
+            Some(0.75)
+        );
+        assert_eq!(
+            eval_measured("MIN(Width, TEXTWIDTH(TheText))", &e2, &m)
+                .unwrap()
+                .as_f64(),
+            Some(0.5)
+        );
+        // Case-insensitive dispatch selects the right function
+        // (CodeRabbit: `max(...)` used to take the MIN branch).
+        assert_eq!(eval("max(1, 2)", &e2).unwrap().as_f64(), Some(2.0));
+        assert_eq!(eval("Min(3, 2)", &e2).unwrap().as_f64(), Some(2.0));
+        // TEXTHEIGHT forwards the resolved width argument.
+        assert_eq!(
+            eval_measured("TEXTHEIGHT(TheText, 0.25)", &e, &m)
+                .unwrap()
+                .as_f64(),
+            Some(0.5)
+        );
+        // GUARD composes transparently over the text functions.
+        assert_eq!(
+            eval_measured("GUARD(TEXTHEIGHT(TheText, 0.25))", &e, &m)
+                .unwrap()
+                .as_f64(),
+            Some(0.5)
+        );
+        // Arity errors are real errors, not cached-V fallbacks.
+        assert!(eval_measured("TEXTHEIGHT(TheText)", &e, &m).is_err());
+        assert!(eval_measured("TEXTWIDTH()", &e, &m).is_err());
+    }
+
+    #[test]
+    fn the_text_alone_resolves_as_a_string_under_a_bridge() {
+        let e = env();
+        let m = FakeText;
+        let v = eval_measured("TheText&\"!\"", &e, &m).unwrap();
+        assert_eq!(v, Value::Str("hello\r\n!".into()));
     }
 
     #[test]

@@ -440,32 +440,40 @@ pub fn dynamic_hints(rect: (f64, f64, f64, f64), ctx: &SnapCtx) -> Vec<Hint> {
     let mut hints = Vec::new();
     let dxs = [rect.0, rect.0 + rect.2 / 2.0, rect.0 + rect.2];
     let dys = [rect.1, rect.1 + rect.3 / 2.0, rect.1 + rect.3];
-    let push_align = |vertical: bool, at: f64, hints: &mut Vec<Hint>| {
-        let dup = hints.iter().any(|h| match h {
-            Hint::Align {
-                vertical: v,
-                at: a,
-            } => *v == vertical && (*a - at).abs() < 1e-9,
-            _ => false,
-        });
-        if !dup {
+    // ONE alignment line per axis (#168): Visio's dynamic grid shows
+    // the alignment the shape is actually approaching. The previous
+    // per-pair emission drew a line for EVERY within-threshold
+    // coincidence between the dragged box's 3 positions and every
+    // target's 3 — a dense, grid-aligned page lit up with a stack of
+    // lines at neighbouring shapes' internal offsets. Keep the
+    // NEAREST coincidence per axis, over ALL drag×target coordinate
+    // pairs — not just same-index pairs (a dragged CENTER aligning to
+    // a neighbor's EDGE is as real a coincidence as edge-to-edge;
+    // CodeRabbit) — with ties breaking to the smaller coordinate so
+    // the choice is deterministic. Both sides stay top-level bboxes
+    // only (targets are the page's top-level shapes; sub-shapes never
+    // contribute).
+    for vertical in [true, false] {
+        let mut best: Option<(f64, f64)> = None; // (|delta|, at)
+        for t in ctx.targets {
+            let (drag, tgt) = if vertical {
+                (dxs, t.xs())
+            } else {
+                (dys, t.ys())
+            };
+            for &ds in drag.iter() {
+                for &ts in tgt.iter() {
+                    let d = (ds - ts).abs();
+                    if d <= ctx.threshold_in
+                        && best.is_none_or(|(bd, ba)| d < bd || (d == bd && ts < ba))
+                    {
+                        best = Some((d, ts));
+                    }
+                }
+            }
+        }
+        if let Some((_, at)) = best {
             hints.push(Hint::Align { vertical, at });
-        }
-    };
-    for t in ctx.targets {
-        for sx in dxs {
-            for tx in t.xs() {
-                if (sx - tx).abs() <= ctx.threshold_in {
-                    push_align(true, tx, &mut hints);
-                }
-            }
-        }
-        for sy in dys {
-            for ty in t.ys() {
-                if (sy - ty).abs() <= ctx.threshold_in {
-                    push_align(false, ty, &mut hints);
-                }
-            }
         }
     }
     // Equal spacing: the dragged box evenly between the nearest
@@ -959,20 +967,31 @@ mod tests {
                 ..Default::default()
             },
         ];
-        // Dragged box center y=0.5 == target 1 center y; top 2.0 ==
-        // target 2's center y... use only the center match for a clean
-        // assertion: box (1.05, 0.03, 1, 1) has bottom 0.03 ≈ 0, center
-        // 0.53 ≈ 0.5, top 1.03.
+        // #168: ONE alignment line per axis, at the NEAREST
+        // coincidence (ties break to the smaller coordinate). The
+        // dragged box (1.05, 0.03, 1, 1) has bottom 0.03, center
+        // 0.53, top 1.03 — all three within threshold of target 1's
+        // 0.0/0.5/1.0 at equal 0.03 deltas; the tie picks 0.0, and
+        // the x side has no coincidence in threshold… except the
+        // 2.0-vs-2.05 top-edge pair at 0.05 (inside the 0.1
+        // threshold), which wins its axis.
         let hints = dynamic_hints(box_at(1.05, 0.03, 1.0, 1.0), &ctx(&targets, &[]));
-        let has = |vertical: bool, at: f64| {
-            hints.iter().any(|h| match h {
-                Hint::Align { vertical: v, at: a } => *v == vertical && (*a - at).abs() < 1e-9,
-                _ => false,
+        let aligns = |vertical: bool| {
+            hints
+                .iter()
+                .filter(|h| matches!(h, Hint::Align { vertical: v, .. } if *v == vertical))
+                .count()
+        };
+        assert_eq!(aligns(true), 1, "one vertical line: {hints:?}");
+        assert_eq!(aligns(false), 1, "one horizontal line: {hints:?}");
+        let at_of = |vertical: bool| {
+            hints.iter().find_map(|h| match h {
+                Hint::Align { vertical: v, at } if *v == vertical => Some(*at),
+                _ => None,
             })
         };
-        assert!(has(false, 0.5), "center-y alignment with target 1: {hints:?}");
-        assert!(has(false, 0.0), "bottom-edge alignment: {hints:?}");
-        assert!(has(false, 1.0), "top-edge alignment: {hints:?}");
+        assert!((at_of(true).unwrap() - 2.0).abs() < 1e-9, "{hints:?}");
+        assert!((at_of(false).unwrap() - 0.0).abs() < 1e-9, "{hints:?}");
     }
 
     #[test]

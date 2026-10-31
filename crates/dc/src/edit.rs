@@ -9,7 +9,7 @@
 use anyhow::{bail, Context as _, Result};
 use dc_core::commands::{
     AddConnect, AddLayer, AddPage, AddShape, MovePage, RemoveConnect, RemoveLayer, RemovePage,
-    RemoveShape, RenameLayer, RenamePage, SetCell, SetText,
+    RemoveShape, RenameLayer, RenamePage, SetCell,
 };
 use dc_core::connects::Connect;
 use dc_core::{Editor, Scope};
@@ -102,7 +102,10 @@ fn apply_all(ed: &mut Editor, args: &EditArgs) -> Result<()> {
     }
     for (target, text) in &args.text {
         let scope = Scope::parse(target)?;
-        ed.apply(SetText::new(scope, text.clone()))?;
+        // One text edit, one undo step: the SetText plus refreshed
+        // cached Vs for text-derived block cells (#147).
+        let mac = crate::textfunc::text_edit_macro(&ed.doc, &scope, text);
+        ed.apply(mac)?;
     }
     for page in &args.add_shape {
         let shape = placeholder_shape(&ed.doc, *page)?;

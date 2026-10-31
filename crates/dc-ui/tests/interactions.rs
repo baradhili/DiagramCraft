@@ -3733,6 +3733,27 @@ fn synth_stencil_opts(
     masters: &[(&str, i64)],
     hidden: &[(&str, i64)],
 ) -> std::path::PathBuf {
+    synth_stencil_full(dir, stem, masters, hidden, &[])
+}
+
+/// [`synth_stencil_full`] with connection points on every master's
+/// shape (#177 tests): `conn` carries (row IX, local X, local Y).
+fn synth_stencil_conn(
+    dir: &std::path::Path,
+    stem: &str,
+    masters: &[(&str, i64)],
+    conn: &[(i64, f64, f64)],
+) -> std::path::PathBuf {
+    synth_stencil_full(dir, stem, masters, &[], conn)
+}
+
+fn synth_stencil_full(
+    dir: &std::path::Path,
+    stem: &str,
+    masters: &[(&str, i64)],
+    hidden: &[(&str, i64)],
+    conn: &[(i64, f64, f64)],
+) -> std::path::PathBuf {
     use vsdx::model::*;
     let xmlns = || {
         vec![
@@ -3796,6 +3817,28 @@ fn synth_stencil_opts(
                 line("LineTo", 5, "0", "0"),
             ],
         }));
+        if !conn.is_empty() {
+            let fmt = |v: f64| format!("{v}");
+            sheet.children.push(SheetChild::Section(Section {
+                name: "Connection".into(),
+                ix: 0,
+                attrs: vec![("N".into(), "Connection".into()), ("IX".into(), "0".into())],
+                cells: vec![],
+                rows: conn
+                    .iter()
+                    .map(|(ix, x, y)| Row {
+                        t: None,
+                        ix: *ix,
+                        n: None,
+                        attrs: vec![("IX".into(), ix.to_string())],
+                        cells: vec![
+                            ("X".into(), Cell::value(fmt(*x))),
+                            ("Y".into(), Cell::value(fmt(*y))),
+                        ],
+                    })
+                    .collect(),
+            }));
+        }
         let shape = Shape {
             id: 1,
             type_: Some("Shape".into()),
@@ -4936,13 +4979,17 @@ fn drag_snaps_to_neighbors_alignment_box() {
         h.hover_at(from + (target - from) * t);
         h.run();
     }
-    // Mid-drag: the dynamic grid reports alignment hints (x and y)
-    // against the neighbor.
-    assert!(
-        h.state().debug_snap_hint_count() >= 2,
-        "alignment hints live mid-drag"
-    );
     h.hover_at(target);
+    h.run();
+    // At the endpoint: the dynamic grid reports alignment hints on
+    // BOTH axes — and since #168, EXACTLY one line per axis (the
+    // nearest coincidence), not the pair-product stack.
+    assert_eq!(
+        h.state().debug_snap_hint_count(),
+        2,
+        "one alignment line per axis: {:?}",
+        h.state().debug_snap_hints_for_test()
+    );
     h.run();
     h.event(release(target));
     h.run();
@@ -6074,4 +6121,541 @@ fn second_picture_gets_a_unique_relationship() {
     let media = h.state().debug_media_parts();
     assert_eq!(media.len(), 2, "two distinct parts: {media:?}");
     assert_ne!(media[0], media[1]);
+}
+
+/// GitHub #71: 2016 dialog parity — the "Use relative paths"
+/// toggle stores an inside-the-directory Address relative (a
+/// Browse… pick lands as its relative form), the Sub-address
+/// dropdown lists the document's pages, and Apply commits without
+/// closing the draft.
+#[test]
+fn hyperlink_dialog_relative_paths_browse_and_page_picker() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("spec.pdf");
+    std::fs::write(&target, b"%PDF- stub").unwrap();
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = harness_with_blank();
+    h.run();
+    // A saved document: its directory is what relative addresses
+    // resolve against.
+    h.state_mut().debug_set_doc_path_for_test(tmp.path().join("drawing.vsdx"));
+    // A second page so the picker has a choice.
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row in the context menu")
+        .click();
+    h.run();
+
+    // The 2016 storage toggle, on.
+    h.get_by_label("Use relative paths for hyperlinks").click();
+    h.run();
+
+    // New…, then Browse… resolves with the preset sibling file and
+    // lands in the Address field as its RELATIVE form.
+    h.get_by_label("New…").click();
+    h.run();
+    h.state_mut().preset_file_dialog_for_test(Some(target.clone()));
+    h.get_by_label("Browse…").click();
+    h.run();
+
+    // Sub-address from the page dropdown: the popup option sits
+    // above the page tabs, so the topmost Page-2 is the picker's.
+    h.get_by_label("Sub-address page").click();
+    h.run();
+    h.get_all_by_label("Page-2")
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Page-2 option in the dropdown")
+        .click();
+    h.run();
+
+    // Apply commits without closing the draft (the 2016 triad).
+    h.get_by_label("Apply").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![("spec.pdf".into(), "Page-2".into())],
+        "Apply committed the relativized address and the picked page"
+    );
+    // The draft is still open (Apply semantics), and a SECOND Apply
+    // updates the row it created — never duplicates (CodeRabbit).
+    assert!(
+        h.get_all_by_label("OK").count() == 1,
+        "the draft stays open under Apply"
+    );
+    h.get_by_label("Apply").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![("spec.pdf".into(), "Page-2".into())],
+        "the second Apply edited the row, not duplicated it"
+    );
+    h.get_by_label("Cancel").click();
+    h.run();
+
+    // A hand-typed absolute inside address also stores relative at
+    // commit (the toggle governs any Address, not just picks).
+    h.get_by_label("New…").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit(tmp.path().join("notes.txt").to_str().unwrap());
+    h.run();
+    h.get_by_label("OK").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_hyperlinks_for_test(sid),
+        vec![
+            ("spec.pdf".into(), "Page-2".into()),
+            ("notes.txt".into(), String::new()),
+        ],
+        "a typed absolute inside path stored relative"
+    );
+
+    // One undo per commit: three commits happened (first Apply,
+    // the second Apply's row edit, the OK) — three undos clear all.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+        h.run();
+    }
+    assert!(
+        h.state().debug_hyperlinks_for_test(sid).is_empty(),
+        "three undos removed everything"
+    );
+}
+
+/// GitHub #105: the default stencil set auto-opens from the stencil
+/// preferences (Visio's 2016 companion set), My Shapes file names in
+/// the default list are skipped when absent, and the configured
+/// category order drives More Shapes.
+#[test]
+fn default_stencils_auto_open_and_categories_are_configurable() {
+    // The defaults: the Visio 2016 companion set, in open order
+    // (through the same disk-first path a menu toggle uses — the
+    // embedded fallback, since kittest never extracts).
+    let mut h = harness_with_blank();
+    h.state_mut().apply_stencil_defaults_for_test();
+    h.run();
+    assert_eq!(
+        h.state().debug_open_stencil_titles(),
+        [
+            "Basic Shapes",
+            "Callouts",
+            "Containers",
+            "Backgrounds Gallery",
+            "Borders & Titles Gallery",
+        ],
+        "the default companion set auto-opened"
+    );
+    // The pane lists each open stencil as its own entry.
+    assert!(
+        h.state().debug_visible_entry_ids().len() >= 5,
+        "one pane entry per default stencil"
+    );
+
+    // A custom config: one built-in default, a category SUBSET in a
+    // custom order (Engineering above General).
+    let mut h2 = harness_with_blank();
+    h2.state_mut().set_stencil_prefs_for_test(dc_ui::stencil::prefs::StencilPrefs::for_test(
+        vec!["basic".into(), "not-there.vssx".into()],
+        Some(vec!["Engineering".into(), "General".into()]),
+    ));
+    h2.state_mut().apply_stencil_defaults_for_test();
+    h2.run();
+    assert_eq!(
+        h2.state().debug_open_stencil_titles(),
+        ["Basic Shapes"],
+        "the configured default opened; the absent My Shapes file was skipped"
+    );
+    // More Shapes shows the configured categories in the configured
+    // order.
+    h2.get_by_label("More Shapes").click();
+    h2.run();
+    let eng = h2.get_by_label("Engineering").rect();
+    let gen = h2.get_by_label("General").rect();
+    assert!(
+        eng.min.y < gen.min.y,
+        "configured category order: Engineering ({}) above General ({})",
+        eng.min.y,
+        gen.min.y
+    );
+    // A hidden category is absent from the configured list (the
+    // menu renders exactly this list).
+    assert!(!h2.state().debug_builtin_categories().contains(&"Software".to_string()));
+}
+
+// ---- GitHub #172: connector selection + drags -------------------------
+
+/// A FREE connector's body drag translates it (#172): both endpoints
+/// move by the drag delta — previously the body drag was a status-note
+/// no-op ("arrives with routing UX") and master-guarded PinX writes
+/// aborted the macro outright.
+#[test]
+fn connector_body_drag_translates_free_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Connector Tool; draw on EMPTY canvas — no shapes under the ends,
+    // so both endpoints land formula-free.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let p1 = canvas.center() - egui::vec2(120.0, 0.0);
+    let p2 = canvas.center() + egui::vec2(120.0, 0.0);
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(p1);
+    h.event(btn(p1, true));
+    h.run();
+    h.hover_at(p1 + (p2 - p1) * 0.5);
+    h.run();
+    h.hover_at(p2);
+    h.run();
+    h.event(btn(p2, false));
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the connector landed");
+    let (page, conn) = h.state().debug_sel().expect("connector selected");
+    let (bx0, ex0) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+
+    // Body drag through the midpoint handle.
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("midpoint handle");
+    drag_naturally(&mut h, mid, egui::vec2(45.0, 0.0));
+    let zoom = h.state().debug_zoom();
+    let dx_in = 45.0 / (96.0 * zoom) as f64;
+    let (bx1, ex1) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        (bx1 - bx0 - dx_in).abs() < 0.05,
+        "begin translated: {bx0:.3} → {bx1:.3} (dx {dx_in:.3})"
+    );
+    assert!(
+        (ex1 - ex0 - dx_in).abs() < 0.05,
+        "end translated: {ex0:.3} → {ex1:.3} (dx {dx_in:.3})"
+    );
+    assert!(
+        !h.state().debug_status().contains("refused"),
+        "no refusal: {}",
+        h.state().debug_status()
+    );
+    // One undo puts it back.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, conn, "BeginX") - bx0).abs() < 1e-6,
+        "undo restores the translation"
+    );
+}
+
+/// A BOTH-ENDS-GLUED connector's body drag neither refuses nor breaks
+/// the glue (#172): the glue formulas re-pin the endpoints (Visio's
+/// pinned feel), and the endpoint handle still re-glues through the
+/// #108 lifecycle.
+#[test]
+fn glued_connector_body_drag_pins_and_does_not_refuse() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_page2, b) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = asr.center();
+    let release = bsr.center();
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(press);
+    h.event(btn(press, true));
+    h.run();
+    h.hover_at(press + (release - press) * 0.5);
+    h.run();
+    h.hover_at(release);
+    h.run();
+    h.event(btn(release, false));
+    h.run();
+    let (page, conn) = h.state().debug_sel().expect("connector selected");
+    let (bx0, ex0) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_some(),
+        "the end carries its glue formula"
+    );
+
+    // Body drag: applied (no refusal), the glue formulas pin the ends.
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("midpoint handle");
+    drag_naturally(&mut h, mid, egui::vec2(40.0, 30.0));
+    let status = h.state().debug_status().to_string();
+    assert!(
+        !status.contains("refused") && !status.contains("GUARD"),
+        "the body drag is not refused: {status}"
+    );
+    let (bx1, ex1) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        (bx1 - bx0).abs() < 1e-4 && (ex1 - ex0).abs() < 1e-4,
+        "glued ends stay pinned to their targets: {bx0:.3}→{bx1:.3} {ex0:.3}→{ex1:.3}"
+    );
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_some(),
+        "the glue formula survived the body drag"
+    );
+
+    // Endpoint drag far away onto empty page: the glue RELEASES and
+    // the endpoint moves (the #108 lifecycle through the same path).
+    let endh = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    drag_naturally(&mut h, endh, egui::vec2(80.0, 80.0));
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "the end formula released: {:?}",
+        h.state().debug_cell_formula(page, conn, "EndX")
+    );
+    assert!((cell_of(&h, page, conn, "EndX") - ex0).abs() > 0.3);
+}
+
+/// #177: connection-point affordances — the approached shape's
+/// points reveal during a connector gesture, the drop target gets
+/// the green-square highlight, and the selected glued connector
+/// shows its glued site(s) as circles.
+#[test]
+fn connection_points_reveal_highlight_and_show_glued_sites() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A 1×1 square master carrying connection points at its top and
+    // bottom edge midpoints (the corpus rect pattern).
+    let s = synth_stencil_conn(tmp.path(), "pts", &[("Pad", 5)], &[(2, 0.5, 1.0), (3, 0.5, 0.0)]);
+    let mut h = harness_with_blank();
+    h.run();
+    h.state_mut().open_stencil_for_test(&s);
+    h.run();
+    wait_for_stencil_entry(&mut h);
+
+    // Place the Pad through the open stencil's click-to-arm,
+    // click-to-place path (same cell-discovery loop as place_master,
+    // against the open stencil's id).
+    use dc_ui::stencil::StencilId;
+    let mut wheels = 0;
+    let from = loop {
+        let cell = h
+            .state()
+            .debug_master_cells()
+            .into_iter()
+            .find(|(id, _)| *id == (StencilId::Open(0), 5))
+            .map(|(_, r)| r)
+            .expect("the open stencil's master cell");
+        if cell.center().y < 760.0 {
+            break cell.center();
+        }
+        wheels += 1;
+        assert!(wheels < 40, "pane never scrolled into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(3);
+    };
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    let (page, pad) = h.state().debug_sel().expect("the Pad is placed");
+    let pad_rect = h.state().debug_shape_screen_rect_for_test(pad).unwrap();
+
+    // Connector Tool: press on empty page left of the Pad, then
+    // approach it — inside the reveal halo but not on a point.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let top_pt = egui::pos2(pad_rect.center().x, pad_rect.top());
+    let bot_pt = egui::pos2(pad_rect.center().x, pad_rect.bottom());
+    let press = egui::pos2(pad_rect.left() - 120.0, pad_rect.center().y);
+    h.hover_at(press);
+    h.event(egui::Event::PointerButton {
+        pos: press,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    // Far from the Pad: nothing reveals yet.
+    assert!(
+        h.state().debug_conn_fx().reveal.is_empty(),
+        "no reveal while far from the shape"
+    );
+    // Approach: both connection points reveal.
+    let near = egui::pos2(pad_rect.left() - 15.0, pad_rect.center().y);
+    h.hover_at(near);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.reveal.len(), 2, "the Pad's two points reveal: {:?}", fx.reveal);
+    assert!(fx.glue_target.is_none(), "near, but not on a point");
+    // On the top point: it becomes the green-square target.
+    h.hover_at(top_pt);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    let target = fx.glue_target.expect("the top connection point highlights");
+    let pad_page = h.state().debug_shape_page_rect(pad).unwrap();
+    let near_pt = |q: (f64, f64), x: f64, y: f64| (q.0 - x).abs() < 1e-3 && (q.1 - y).abs() < 1e-3;
+    assert!(
+        near_pt(target, pad_page.0 + 0.5, pad_page.1 + 1.0)
+            || near_pt(target, pad_page.0 + 0.5, pad_page.1),
+        "the highlight sits on one of the Pad's points: {target:?} vs rect {pad_page:?}"
+    );
+    // Release there: the connector glues statically and stays
+    // selected — its glued site shows as a circle.
+    h.event(egui::Event::PointerButton {
+        pos: top_pt,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let connects = h.state().debug_connects();
+    assert!(
+        connects.iter().any(|c| c.0 > pad && c.5 >= 100),
+        "a connector statically glued to a connection point: {connects:?}"
+    );
+    let conn_id = connects.iter().find(|c| c.0 > pad).unwrap().0;
+    assert_eq!(
+        h.state().debug_sel().map(|(_, id)| id),
+        Some(conn_id),
+        "the new connector is selected"
+    );
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.glued.len(), 1, "one glued site: {:?}", fx.glued);
+    assert!(
+        near_pt(fx.glued[0], pad_page.0 + 0.5, pad_page.1 + 1.0),
+        "the circle sits on the Pad's top point: {:?} vs rect {:?}",
+        fx.glued[0],
+        pad_page
+    );
+    assert!(fx.reveal.is_empty() && fx.glue_target.is_none(), "no drag affordances at rest");
+
+    // Endpoint-handle drag: back on the Pointer Tool (the Connector
+    // Tool would arm a NEW connector instead), grab the glued end's
+    // handle — it sits exactly on the Pad's top point — and drag it
+    // to the bottom point.
+    let _ = page;
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let end_handle = top_pt;
+    h.hover_at(end_handle);
+    h.event(egui::Event::PointerButton {
+        pos: end_handle,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.hover_at(bot_pt);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.reveal.len(), 2, "reveal during the endpoint drag");
+    let target = fx.glue_target.expect("the bottom point highlights mid-drag");
+    assert!(
+        near_pt(target, pad_page.0 + 0.5, pad_page.1),
+        "on the Pad's bottom point: {target:?}"
+    );
+    h.event(egui::Event::PointerButton {
+        pos: bot_pt,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let connects = h.state().debug_connects();
+    assert!(
+        connects.iter().any(|c| c.0 == conn_id && c.5 == 103),
+        "re-glued to the bottom point (ToPart 103): {connects:?}"
+    );
+    // #179: the drop ATTACHES — the end cell reads exactly the
+    // connection point and the frame places the ink's end there
+    // (origin + last row = the connection point), not at the raw
+    // pointer.
+    let page2 = h.state().debug_sel().map(|(p, _)| p).unwrap_or(page);
+    let (ex, ey) = (
+        cell_of(&h, page2, conn_id, "EndX"),
+        cell_of(&h, page2, conn_id, "EndY"),
+    );
+    assert!(
+        (ex - (pad_page.0 + 0.5)).abs() < 1e-6 && (ey - pad_page.1).abs() < 1e-6,
+        "the end lands exactly on the bottom connection point: ({ex}, {ey})"
+    );
+    let (pinx, lpx) = (
+        cell_of(&h, page2, conn_id, "PinX"),
+        cell_of(&h, page2, conn_id, "LocPinX"),
+    );
+    // the LAST geometry row carries the endpoint (a 4-row elbow
+    // connector: row 4).
+    let last_x = [4i64, 3, 2]
+        .iter()
+        .find_map(|ix| {
+            h.state()
+                .debug_geo_row_cell_for_test(conn_id, *ix, "X")
+                .and_then(|(v, _)| v)
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+        .unwrap_or_default();
+    assert!(
+        ((pinx - lpx + last_x) - ex).abs() < 1e-4,
+        "the rendered frame's end row reaches the connection point: {} vs {ex}",
+        pinx - lpx + last_x
+    );
 }

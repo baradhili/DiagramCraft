@@ -6,9 +6,11 @@
 //! advances from the SAME faces the rasterizer draws:
 //!
 //! - the database is **fontdb** — the same crate resvg's rasterizer
-//!   uses — loaded with the vendored metric-compatible Carlito plus
-//!   **every installed system font** (the app renders with real
-//!   Arial/Calibri/Noto where installed; owner note 2026-10-27);
+//!   uses — loaded with the vendored metric faces (Carlito,
+//!   style-complete; Liberation Sans/Serif/Mono for the Arial/Times/
+//!   Courier substitution chains — #145) plus **every installed
+//!   system font** (the app renders with real Arial/Calibri/Noto where
+//!   installed; owner note 2026-10-27);
 //! - family resolution walks the CSS chain the renderer emits
 //!   (`Calibri, Carlito, sans-serif`, …): the first INSTALLED named
 //!   family wins (case-insensitive, like `svgimg`'s raster font db),
@@ -31,18 +33,48 @@
 //! documents measure with the user's installed fonts, exactly what
 //! rasterizes.
 //!
-//! Not modeled (v1): OpenType pair kerning (resvg applies it; the
-//! sub-glyph differences rarely move a wrap decision) and complex
-//! shaping (Arabic joining changes advance sums — the wrap treats a
-//! run as the sum of isolated advances).
+//! Shaped measurement (#146): usvg 0.49 rasterizes text through
+//! harfrust (BIDI visual runs at base LTR, default features — pair
+//! kerning on, ligatures and contextual forms applied, script and
+//! language guessed). `width_in` runs the SAME pipeline over the SAME
+//! face, so the wrap decision and the raster shape identically by
+//! construction. Glyphs the resolved face lacks keep the
+//! per-character Carlito/conservative fallback advance (usvg swaps a
+//! fallback font in there — the one documented divergence, coverage
+//! gaps only).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 /// Conservative advance for a glyph no loaded face covers (wide-ish
-/// Latin; CJK full-width runs wider, but coverage gaps are rare in
-/// the corpus and never wrap-decisive at this precision).
+/// Latin; CJK full-width runs wider, but coverage gaps are rare in the
+/// corpus and never wrap-decisive at this precision).
 const UNCOVERED_EM: f64 = 0.55;
+
+/// Every vendored face (GitHub #145): the Carlito set is style-complete
+/// (Regular/Bold/Italic/BoldItalic — italic used to measure as the
+/// upright face), and the Liberation metric faces (Sans/Serif/Mono × 4
+/// styles) make the Arial/Times New Roman/Courier New substitution
+/// chains resolve the face they NAME on every machine, not only hosts
+/// with Liberation installed. Licenses live beside the files.
+const EMBEDDED_FONTS: [&[u8]; 16] = [
+    include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
+    include_bytes!("../assets/fonts/Carlito-Bold.ttf"),
+    include_bytes!("../assets/fonts/Carlito-Italic.ttf"),
+    include_bytes!("../assets/fonts/Carlito-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSans-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationSerif-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/LiberationMono-BoldItalic.ttf"),
+];
 
 /// CSS generic keywords the chain builder can emit — they resolve to
 /// the embedded default, matching the raster db's generic mappings.
@@ -53,33 +85,67 @@ fn is_generic(name: &str) -> bool {
     )
 }
 
-/// The font database: vendored Carlito + system fonts, or
-/// Carlito-only for hermetic measurement.
+/// The font database: the vendored faces plus system fonts, or
+/// vendored-only for hermetic measurement (system fonts stay the
+/// measurement source wherever installed — the vendored set is the
+/// deterministic floor, owner note 2026-10-30).
 struct MetricsDb {
     db: fontdb::Database,
-    /// The vendored fallback faces (per-character coverage + the
-    /// chain-end default).
+    /// The vendored Carlito faces (per-character coverage + the
+    /// chain-end default), one per (weight, style) corner.
     carlito: fontdb::ID,
     carlito_bold: fontdb::ID,
+    carlito_italic: fontdb::ID,
+    carlito_bold_italic: fontdb::ID,
+}
+
+/// CSS-style distance from the wanted posture (CodeRabbit, #145):
+/// an Oblique face serves an italic request ahead of Normal — the
+/// same order resvg's fontdb query uses, so measurement and raster
+/// pick the same face when a family lacks a true Italic.
+fn style_penalty(have: fontdb::Style, want_italic: bool) -> usize {
+    use fontdb::Style::{Italic, Normal, Oblique};
+    match (want_italic, have) {
+        (true, Italic) | (true, Oblique) => 0,
+        (true, Normal) => 1,
+        (false, Normal) => 0,
+        (false, Italic) | (false, Oblique) => 1,
+    }
+}
+
+/// Rank one face against the wanted (weight, style): upright faces
+/// stay preferred for upright text (v1 measured italic as upright),
+/// and a family that lacks the wanted style still resolves its
+/// nearest face instead of nothing.
+fn style_rank(f: &fontdb::FaceInfo, want_style: fontdb::Style, target: i32) -> (usize, i32) {
+    (
+        style_penalty(f.style, want_style == fontdb::Style::Italic),
+        (f.weight.0 as i32 - target).abs(),
+    )
 }
 
 fn build_db(embedded_only: bool) -> MetricsDb {
     let mut db = fontdb::Database::new();
-    db.load_font_data(include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec());
-    db.load_font_data(include_bytes!("../assets/fonts/Carlito-Bold.ttf").to_vec());
+    for bytes in EMBEDDED_FONTS {
+        db.load_font_data(bytes.to_vec());
+    }
     if !embedded_only {
         db.load_system_fonts();
     }
-    let pick = |want_bold: bool| -> Option<fontdb::ID> {
+    let pick = |bold: bool, italic: bool| -> Option<fontdb::ID> {
+        let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+        let target = if bold { 700 } else { 400 };
         db.faces()
             .filter(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case("Carlito")))
-            .filter(|f| f.style == fontdb::Style::Normal)
-            .min_by_key(|f| (f.weight.0 as i32 - if want_bold { 700 } else { 400 }).abs())
+            .filter(|f| matches!(f.style, fontdb::Style::Normal | fontdb::Style::Italic))
+            .min_by_key(|f| style_rank(f, want_style, target))
             .map(|f| f.id)
     };
     MetricsDb {
-        carlito: pick(false).expect("vendored Carlito Regular is embedded"),
-        carlito_bold: pick(true).expect("vendored Carlito Bold is embedded"),
+        carlito: pick(false, false).expect("vendored Carlito Regular is embedded"),
+        carlito_bold: pick(true, false).expect("vendored Carlito Bold is embedded"),
+        carlito_italic: pick(false, true).expect("vendored Carlito Italic is embedded"),
+        carlito_bold_italic: pick(true, true).expect("vendored Carlito BoldItalic is embedded"),
         db,
     }
 }
@@ -115,10 +181,14 @@ pub struct ResolvedFace {
 
 /// Resolve the face a shape's text measures (and rasterizes) in: the
 /// family chain the renderer emits, first installed family wins,
-/// Carlito fallback. `bold` prefers the family's bold weight.
-pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
+/// Carlito fallback. `bold`/`italic` prefer the family's matching
+/// weight/style corner (#145: the italic faces are vendored, so
+/// italic text now measures italic advances instead of the upright
+/// face's).
+pub fn resolve(font: Option<&str>, bold: bool, italic: bool) -> ResolvedFace {
     let m = metrics();
     let target = if bold { 700 } else { 400 };
+    let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
     let installed = |family: &str| -> Option<fontdb::ID> {
         m.db
             .faces()
@@ -127,9 +197,7 @@ pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
                     .iter()
                     .any(|(n, _)| n.eq_ignore_ascii_case(family))
             })
-            // Italic measures as regular (v1 — see module docs).
-            .filter(|f| f.style == fontdb::Style::Normal || f.style == fontdb::Style::Italic)
-            .min_by_key(|f| (f.weight.0 as i32 - target).abs())
+            .min_by_key(|f| style_rank(f, want_style, target))
             .map(|f| f.id)
     };
     for name in crate::svg::family_chain(font) {
@@ -140,7 +208,12 @@ pub fn resolve(font: Option<&str>, bold: bool) -> ResolvedFace {
             return ResolvedFace { id, carlito: m.carlito, is_carlito: false };
         }
     }
-    let id = if bold { m.carlito_bold } else { m.carlito };
+    let id = match (bold, italic) {
+        (false, false) => m.carlito,
+        (true, false) => m.carlito_bold,
+        (false, true) => m.carlito_italic,
+        (true, true) => m.carlito_bold_italic,
+    };
     ResolvedFace { id, carlito: m.carlito, is_carlito: true }
 }
 
@@ -191,10 +264,52 @@ impl ResolvedFace {
         out
     }
 
-    /// Width of `text` at `size_in` inches (Char.Size units): the sum
-    /// of per-glyph advances.
+    /// Width of `text` at `size_in` inches (Char.Size units): the
+    /// SHAPED advance sum (#146) — the same harfrust shaping usvg
+    /// 0.49 rasterizes with (pair kerning on, ligatures and
+    /// contextual forms applied, BIDI visual runs at base LTR,
+    /// script/language guessed), missing glyphs falling back per
+    /// character. The isolated-advance sum survives as the fallback
+    /// when the face bytes cannot be shaped.
     pub fn width_in(&self, text: &str, size_in: f64) -> f64 {
-        text.chars().map(|c| self.char_em(c)).sum::<f64>() * size_in
+        self.shaped_width_em(text) * size_in
+    }
+
+    /// Shaped width of `text` in em units, through a per-(database,
+    /// face, text) cache — the wrap loop measures growing candidate
+    /// strings repeatedly, and a shaped width is far too costly to
+    /// recompute per candidate. The cache is bounded by clearing it
+    /// wholesale past 65 536 entries (text blocks are small; this is
+    /// a recompute, not a correctness, bound).
+    fn shaped_width_em(&self, text: &str) -> f64 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        type Widths =
+            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, String), f64>>;
+        static WIDTHS: OnceLock<Widths> = OnceLock::new();
+        let m = metrics();
+        let key = (m as *const MetricsDb as usize, self.id, text.to_string());
+        let cache = WIDTHS.get_or_init(Default::default);
+        if let Some(hit) = cache.lock().unwrap().get(&key) {
+            return *hit;
+        }
+        let fallback = |c: char| self.char_em(c);
+        let db_key = m as *const MetricsDb as usize;
+        let width = m
+            .db
+            .with_face_data(self.id, |data, index| {
+                shaped_face(db_key, self.id, data, index)
+                    .map(|shaped| shape_width_em(&shaped, text, &fallback))
+            })
+            .flatten()
+            .unwrap_or_else(|| text.chars().map(fallback).sum());
+        let mut c = cache.lock().unwrap();
+        if c.len() > 65_536 {
+            c.clear();
+        }
+        c.insert(key, width);
+        width
     }
 
     /// The face's ascender in em units (hhea) — the GUI overlay places
@@ -211,6 +326,132 @@ impl ResolvedFace {
             .flatten()
             .unwrap_or(0.8)
     }
+}
+
+/// A face prepared for harfrust shaping: the face bytes and
+/// `FontRef` are leaked once per (database, face) — the process-wide
+/// database owns its data for the process lifetime, so the leak is
+/// bounded by the set of faces actually measured, and it is what
+/// makes the `&'static FontRef` (and the `ShaperData` built from it)
+/// shareable as a plain `Arc` cache entry.
+struct ShapedFace {
+    upem: f64,
+    font: &'static harfrust::FontRef<'static>,
+    shaper_data: harfrust::ShaperData,
+}
+
+/// The per-(database, face) shaped-face cache (see [`ShapedFace`]).
+/// Faces that fail to load are remembered in a negative cache so a
+/// broken font costs one parse attempt, not one per measurement, and
+/// no bytes are leaked for it (CodeRabbit: validation runs on the
+/// BORROWED data first; only a face that parses gets a leaked copy).
+fn shaped_face(
+    db_key: usize,
+    id: fontdb::ID,
+    data: &[u8],
+    index: u32,
+) -> Option<std::sync::Arc<ShapedFace>> {
+    type Faces =
+        std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID), std::sync::Arc<ShapedFace>>>;
+    static FACES: OnceLock<Faces> = OnceLock::new();
+    type Rejected = std::sync::Mutex<std::collections::HashSet<(usize, fontdb::ID)>>;
+    static REJECTED: OnceLock<Rejected> = OnceLock::new();
+    let key = (db_key, id);
+    let cache = FACES.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().unwrap().get(&key) {
+        return Some(hit.clone());
+    }
+    if REJECTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .contains(&key)
+    {
+        return None;
+    }
+    // Validate on the borrowed data before committing to a leak.
+    if harfrust::FontRef::from_index(data, index).is_err() {
+        REJECTED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(key);
+        return None;
+    }
+    let bytes: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
+    let font: &'static harfrust::FontRef<'static> =
+        Box::leak(Box::new(harfrust::FontRef::from_index(bytes, index).ok()?));
+    let shaper_data = harfrust::ShaperData::new(font);
+    let upem = ttf_parser::Face::parse(data, index)
+        .ok()
+        .map(|f| f.units_per_em() as f64)
+        .unwrap_or(1000.0);
+    let shaped = std::sync::Arc::new(ShapedFace {
+        upem,
+        font,
+        shaper_data,
+    });
+    cache.lock().unwrap().insert(key, shaped.clone());
+    Some(shaped)
+}
+
+/// The usvg-0.49 shaping pipeline, measurement-side (#146): BIDI
+/// visual runs (base LTR), each run shaped by harfrust with DEFAULT
+/// features — pair kerning on, ligatures/contextual forms applied,
+/// script and language guessed — advances summed in em units. That is
+/// verbatim what usvg does per text chunk (its `shape_text`), so a
+/// width measured here is the width the rasterizer will draw.
+fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> f64 {
+    use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
+    let shaper = face.shaper_data.shaper(face.font).build();
+    let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+    let Some(paragraph) = bidi.paragraphs.first() else {
+        return 0.0;
+    };
+    let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
+    let mut total = 0.0;
+    for run in runs.iter() {
+        let sub = &text[run.clone()];
+        if sub.is_empty() {
+            continue;
+        }
+        let direction = if levels[run.start].is_ltr() {
+            Direction::LeftToRight
+        } else {
+            Direction::RightToLeft
+        };
+        let mut buffer = UnicodeBuffer::new();
+        buffer.push_str(sub);
+        buffer.set_direction(direction);
+        buffer.guess_segment_properties();
+        let out = shaper.shape(buffer, ShapeOptions::new());
+        let infos = out.glyph_infos();
+        let positions = out.glyph_positions();
+        for i in 0..out.len() {
+            let info = &infos[i];
+            if info.glyph_id == 0 {
+                // Missing glyph: charge the cluster's characters the
+                // per-character fallback advance (usvg swaps a fallback
+                // font in here; the divergence is coverage-gap only —
+                // #146 keeps the documented per-character estimate).
+                let start = info.cluster as usize;
+                let next = infos
+                    .get(i + 1)
+                    .map_or(sub.len(), |n| n.cluster as usize);
+                let (lo, hi) = if start <= next { (start, next) } else { (next, start) };
+                let hi = hi.min(sub.len());
+                total += sub
+                    .get(lo..hi)
+                    .unwrap_or("")
+                    .chars()
+                    .map(fallback)
+                    .sum::<f64>();
+            } else {
+                total += positions[i].x_advance as f64 / face.upem;
+            }
+        }
+    }
+    total
 }
 
 /// The actual face a shape's text rasterizes in, as bytes — for
@@ -234,9 +475,9 @@ pub struct FaceData {
 /// The bytes + identity of the face `resolve` picks for `font` —
 /// reading a system font file on first use (vendored faces are
 /// embedded; callers cache what they register from this).
-pub fn face_data(font: Option<&str>, bold: bool) -> Option<FaceData> {
+pub fn face_data(font: Option<&str>, bold: bool, italic: bool) -> Option<FaceData> {
     let m = metrics();
-    let face = resolve(font, bold);
+    let face = resolve(font, bold, italic);
     let info = m.db.faces().find(|f| f.id == face.id)?;
     let family = info
         .families
@@ -270,7 +511,7 @@ mod tests {
     /// any machine); these tests only assert relationships that hold
     /// under metric-compatible substitution too.
     fn face() -> ResolvedFace {
-        resolve(None, false)
+        resolve(None, false, false)
     }
 
     #[test]
@@ -308,9 +549,91 @@ mod tests {
     #[test]
     fn resolve_pins_uninstalled_families_to_carlito() {
         let m = metrics();
-        let f = resolve(Some("Certainly-Not-Installed-21"), false);
+        let f = resolve(Some("Certainly-Not-Installed-21"), false, false);
         assert_eq!(f.id, m.carlito, "unresolved chains measure Carlito");
-        let g = resolve(Some("Certainly-Not-Installed-21"), true);
+        let g = resolve(Some("Certainly-Not-Installed-21"), true, false);
         assert_eq!(g.id, m.carlito_bold, "bold resolves the bold face");
+        let i = resolve(Some("Certainly-Not-Installed-21"), false, true);
+        assert_eq!(i.id, m.carlito_italic, "italic resolves the italic face");
+        let bi = resolve(Some("Certainly-Not-Installed-21"), true, true);
+        assert_eq!(bi.id, m.carlito_bold_italic, "bold+italic resolves its corner");
+    }
+
+    /// #146: measurement SHAPES the run the way the rasterizer draws
+    /// it. A kerned pair (AV in Liberation Serif — the vendored face
+    /// carries GPOS kerning) must measure narrower than the isolated
+    /// sum; this is exactly the gap that used to wrap kerned lines
+    /// one word early.
+    #[test]
+    fn kerned_pairs_measure_kerned() {
+        let f = resolve(Some("Liberation Serif"), false, false);
+        let pair = f.width_in("AV", 1.0);
+        let isolated = f.width_in("A", 1.0) + f.width_in("V", 1.0);
+        assert!(
+            pair < isolated,
+            "shaped {pair} must be kerned under the isolated sum {isolated}"
+        );
+        // A kern-free string still measures the plain advance sum
+        // (shaping agrees with the isolated tables when no feature
+        // applies): same string, spaced so no pair kerns.
+        let plain = f.width_in("nn", 1.0);
+        let isolated_n = 2.0 * f.width_in("n", 1.0);
+        assert!((plain - isolated_n).abs() < 1e-9);
+    }
+
+    /// Coverage gaps keep the per-character fallback under shaping
+    /// (#146): a CJK glyph Carlito lacks still contributes its
+    /// fallback advance inside a shaped run instead of vanishing.
+    #[test]
+    fn shaped_runs_fall_back_per_character_on_gaps() {
+        let f = face();
+        let latin = f.width_in("a", 1.0);
+        let mixed = f.width_in("按a", 1.0);
+        assert!(
+            mixed > latin,
+            "the missing CJK glyph must add its fallback advance: {mixed} vs {latin}"
+        );
+    }
+
+    /// The resolved (style, weight) of a face, for assertions about
+    /// WHICH face a chain picks (#145 verification).
+    fn resolved_style(font: Option<&str>, bold: bool, italic: bool) -> (fontdb::Style, u16) {
+        let m = metrics();
+        let f = resolve(font, bold, italic);
+        let info = m.db.faces().find(|x| x.id == f.id).expect("resolved id is in the db");
+        (info.style, info.weight.0)
+    }
+
+    /// #145: the Liberation faces are vendored, so the Arial chain
+    /// resolves a Liberation Sans face (the system one where
+    /// installed, the vendored copy otherwise — either way NOT the
+    /// Carlito the chain used to fall through to), and the style
+    /// corners resolve their own faces instead of measuring upright.
+    #[test]
+    fn arial_chain_measures_liberation_and_styles_resolve() {
+        let m = metrics();
+        let f = resolve(Some("Arial"), false, false);
+        assert_ne!(f.id, m.carlito, "Arial resolves Liberation Sans, not Carlito");
+        // It measures different advances than the Carlito fallback
+        // (the two designs share Arial metrics only approximately).
+        let carlito = ResolvedFace { id: m.carlito, carlito: m.carlito, is_carlito: true };
+        assert_ne!(
+            f.width_in("measurement", 1.0),
+            carlito.width_in("measurement", 1.0),
+            "Liberation advances differ from Carlito's"
+        );
+        // Style corners pick the matching (style, weight) face.
+        assert_eq!(
+            resolved_style(Some("Arial"), false, false),
+            (fontdb::Style::Normal, 400)
+        );
+        assert_eq!(
+            resolved_style(Some("Arial"), false, true),
+            (fontdb::Style::Italic, 400)
+        );
+        assert_eq!(
+            resolved_style(Some("Arial"), true, true),
+            (fontdb::Style::Italic, 700)
+        );
     }
 }

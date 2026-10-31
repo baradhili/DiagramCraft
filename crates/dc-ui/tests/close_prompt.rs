@@ -284,3 +284,42 @@ fn file_close_on_a_clean_document_is_silent() {
     assert!(!h.state().debug_doc_open());
     assert!(h.state().debug_status().contains("closed"));
 }
+
+/// GitHub #166: the "Save changes?" prompt is a MODAL — nothing
+/// behind it is interactive while it is open. A ribbon-tab click
+/// behind the modal neither lands nor dismisses the prompt; the same
+/// click after Cancel behaves normally (the control case).
+#[test]
+fn close_prompt_is_modal() {
+    let (_dir, app) = titled_doc();
+    let mut h = harness_with(app);
+    h.run();
+    h.state_mut().mark_dirty_for_test();
+    h.run();
+    h.state_mut().request_close_for_test();
+    h.run();
+    assert!(h.state().debug_close_prompt());
+    assert_eq!(h.state().debug_active_ribbon_tab(), "Home");
+
+    // A ribbon tab BEHIND the modal: blocked, prompt intact.
+    h.get_by_label("Insert").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_active_ribbon_tab(),
+        "Home",
+        "the modal blocked interaction with the ribbon behind it"
+    );
+    assert!(h.state().debug_close_prompt(), "the modal stays open");
+
+    // Cancel closes; the same click now lands.
+    click_prompt_button(&mut h, "Cancel");
+    h.run();
+    assert!(!h.state().debug_close_prompt());
+    h.get_by_label("Insert").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_active_ribbon_tab(),
+        "Insert",
+        "the control case: the tab click works once the modal is gone"
+    );
+}

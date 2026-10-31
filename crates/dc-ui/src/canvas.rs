@@ -321,6 +321,29 @@ pub struct DragFx {
 /// The dynamic-grid hint color: Visio's blue dashed alignment aid.
 const HINT: Color32 = Color32::from_rgb(0x2E, 0x75, 0xB6);
 
+/// Visio's glue green (#177): the live glue-target square and the
+/// selected connector's glued-site circles.
+const GLUE: Color32 = Color32::from_rgb(0x00, 0xB0, 0x50);
+/// The reveal symbol's gray (#177): the connection-point
+/// square-with-× on approached shapes.
+const CONN_PT: Color32 = Color32::from_rgb(0x59, 0x59, 0x59);
+
+/// Connection-point affordances to paint above the ink (#177). The
+/// app computes them (pure logic in `connectors.rs`); the argument is
+/// the LIVE endpoint position when a connector-endpoint gesture is in
+/// progress (Connector Tool draw or a LineBegin/LineEnd handle drag),
+/// None otherwise — `None` still carries the selected connector's
+/// glued sites.
+pub type ConnFxFn<'a> = &'a dyn Fn(Option<(f64, f64)>) -> crate::connectors::ConnPointFx;
+
+/// Live endpoint snapping (#179): page inches in, the snapped position
+/// out. The bool is "an endpoint handle of the SELECTED connector is
+/// the dragged thing" (the app then excludes that shape from the snap
+/// targets); the Connector Tool's fresh draw excludes nothing. Visio
+/// snaps the dragged connector end onto connection points and the
+/// other glue/snap targets while dragging.
+pub type SnapEndpointFn<'a> = &'a dyn Fn(bool, (f64, f64)) -> (f64, f64);
+
 /// A dashed segment (`on`/`off` in px), the dynamic-grid line style.
 fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
     let len = (b - a).length();
@@ -352,6 +375,12 @@ pub fn show(
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
     stencil_hover: bool,
+    // #177: connection-point reveal / glue highlight / glued sites,
+    // computed by the app for the live endpoint position (None when
+    // no endpoint gesture is live).
+    conn_fx: ConnFxFn<'_>,
+    // #179: snap the live connector endpoint (preview + drops).
+    snap_endpoint: SnapEndpointFn<'_>,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
     interaction_lock: bool, // in-place text edit (#22): clicks end it, nothing else arms
@@ -550,14 +579,17 @@ pub fn show(
                 .memory_mut(|m| m.data.remove::<(f64, f64)>(mem_connector));
             if primary_released {
                 if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-                    let to = screen_to_page(p, view, page);
+                    let to = snap_endpoint(false, screen_to_page(p, view, page));
                     if to.0 >= 0.0 && to.0 <= page.w_in && to.1 >= 0.0 && to.1 <= page.h_in {
                         out.connector_drop = Some((from, to));
                     }
                 }
             }
         } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
-            connector_live = Some((from, screen_to_page(p, view, page)));
+            // #179: the rubber end snaps like the drop will — Visio
+            // magnetizes the live endpoint to glue targets.
+            let to = snap_endpoint(false, screen_to_page(p, view, page));
+            connector_live = Some((from, to));
         }
     }
 
@@ -973,14 +1005,19 @@ pub fn show(
             }
             HandleId::LineBegin | HandleId::LineEnd => {
                 // Live line: the OTHER endpoint stays put, this one
-                // follows the cursor (Visio stretches the segment).
+                // follows the cursor (Visio stretches the segment) —
+                // SNAPPED (#179): the live end magnetizes to
+                // connection points and the other snap targets, the
+                // same point the release will commit.
                 let other = if matches!(hid, HandleId::LineBegin) {
                     HandleId::LineEnd
                 } else {
                     HandleId::LineBegin
                 };
+                let snapped = snap_endpoint(true, ptr_page);
+                let sn_screen = page_to_screen(snapped.0, snapped.1, view, page);
                 if let Some((_, o)) = handles_screen.iter().find(|(id, _)| *id == other) {
-                    lines.push((*o, ptr));
+                    lines.push((*o, sn_screen));
                 }
             }
             HandleId::GeoPoint { .. } => {
@@ -1041,6 +1078,59 @@ pub fn show(
         let b = page_to_screen(to.0, to.1, view, page);
         dashed(&p, a, b, HINT);
         p.circle_stroke(b, 4.0, Stroke::new(1.2, HINT));
+    }
+
+    // Connection-point affordances (#177): reveal symbols while a
+    // connector endpoint gesture is live, the live glue target's
+    // green square, and the selected connector's glued sites as green
+    // circles. The live endpoint is the Connector Tool's pointer end
+    // or a LineBegin/LineEnd handle-drag position.
+    let live_end = connector_live.map(|(_, to)| to).or_else(|| {
+        if matches!(
+            armed_handle,
+            Some(HandleId::LineBegin) | Some(HandleId::LineEnd)
+        ) {
+            ui.input(|i| i.pointer.interact_pos())
+                .map(|p| snap_endpoint(true, screen_to_page(p, view, page)))
+        } else {
+            None
+        }
+    });
+    let fx = conn_fx(live_end);
+    for q in &fx.reveal {
+        let c = page_to_screen(q.0, q.1, view, page);
+        // The connection-point glyph: a small square with an × inside
+        // (Visio's reveal symbol).
+        let r = Rect::from_center_size(c, Vec2::splat(7.0));
+        p.rect_stroke(r, 0.0, Stroke::new(1.0, CONN_PT), egui::StrokeKind::Middle);
+        let d = 2.0;
+        for (a, b) in [
+            (c - Vec2::new(d, d), c + Vec2::new(d, d)),
+            (c - Vec2::new(d, -d), c + Vec2::new(d, -d)),
+        ] {
+            p.line_segment([a, b], Stroke::new(1.0, CONN_PT));
+        }
+    }
+    if let Some(q) = fx.glue_target {
+        // The live glue target: Visio's filled green square.
+        let c = page_to_screen(q.0, q.1, view, page);
+        p.rect_filled(
+            Rect::from_center_size(c, Vec2::splat(9.0)),
+            1.5,
+            GLUE,
+        );
+        p.rect_stroke(
+            Rect::from_center_size(c, Vec2::splat(9.0)),
+            1.5,
+            Stroke::new(1.2, Color32::from_rgb(0x00, 0x7C, 0x38)),
+            egui::StrokeKind::Middle,
+        );
+    }
+    for q in &fx.glued {
+        // A glued attachment site of the selected connector: green
+        // circle (Visio's glue-site indicator).
+        let c = page_to_screen(q.0, q.1, view, page);
+        p.circle_stroke(c, 5.0, Stroke::new(2.0, GLUE));
     }
 
     // Dynamic-grid hints (#109): dashed full-canvas alignment lines
