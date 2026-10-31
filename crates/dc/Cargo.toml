@@ -15,7 +15,7 @@ ttf-parser = "0.25"
 # Shaped measurement (#146): the SAME crates usvg 0.49 rasterizes
 # with (matching lock entries), so the wrap decision and the raster
 # shape identically by construction.
-harfrust = "0.12"
+harfrust = "0.15"
 unicode-bidi = "0.3"
 
 [dev-dependencies]
