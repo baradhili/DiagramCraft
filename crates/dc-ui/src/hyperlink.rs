@@ -12,14 +12,33 @@
 
 use std::path::{Path, PathBuf};
 
-/// A stored address that names a scheme (`https://`, `mailto:`, …)
-/// is a URL, never a filesystem path.
+/// A stored address that names a scheme (`https://`, `mailto:`, `tel:`,
+/// …) is a URL, never a filesystem path. Scheme matching is
+/// case-insensitive (`MAILTO:` is the same link), the scheme must be a
+/// valid RFC 3986 authority-ish token followed by `://` or one of the
+/// known scheme-less prefixes, and a single-letter scheme is rejected
+/// so Windows drive paths (`C:\…`, `C:/…`) stay filesystem paths
+/// (CodeRabbit).
 fn is_url(address: &str) -> bool {
+    const SCHEME_LESS: [&str; 5] = ["mailto:", "tel:", "sms:", "callto:", "news:"];
     let a = address.trim();
-    match a.find("://") {
-        Some(i) => a[..i].chars().all(|c| c.is_ascii_alphanumeric()),
-        None => a.starts_with("mailto:"),
+    let Some(colon) = a.find(':') else {
+        return false;
+    };
+    let scheme = &a[..colon];
+    let valid_scheme = scheme.len() > 1
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '+' || c == '.');
+    if !valid_scheme {
+        return false;
     }
+    if a[colon..].starts_with("://") {
+        return true;
+    }
+    let lower = a.to_ascii_lowercase();
+    SCHEME_LESS.iter().any(|s| lower.starts_with(s))
 }
 
 /// Store `address` the way the document's toggle wants it: relative
@@ -107,10 +126,13 @@ impl RelativePaths {
                     .map(|a| {
                         a.iter()
                             .filter_map(|e| {
-                                Some((
-                                    PathBuf::from(e.get(0)?.as_str()?),
-                                    e.get(1)?.as_bool()?,
-                                ))
+                                let p = e.get(0)?.as_str()?;
+                                if p.is_empty() {
+                                    // The unsaved-document key never
+                                    // persists (session-only, below).
+                                    return None;
+                                }
+                                Some((PathBuf::from(p), e.get(1)?.as_bool()?))
                             })
                             .collect()
                     })
@@ -129,11 +151,19 @@ impl RelativePaths {
     }
 
     /// Set the toggle for `doc`; persistence is best-effort — a
-    /// read-only config dir must not break the toggle.
+    /// read-only config dir must not break the toggle. The empty path
+    /// (an unsaved document) is session-only: it is never written and
+    /// never loaded back (CodeRabbit) — nothing identifies the next
+    /// unsaved document, so persisting the entry would leak the toggle
+    /// onto every future one.
     pub fn set(&mut self, doc: &Path, value: bool) {
         self.on.insert(doc.to_path_buf(), value);
         if let Some(path) = &self.store {
-            let entries: Vec<(&PathBuf, &bool)> = self.on.iter().collect();
+            let entries: Vec<(&PathBuf, &bool)> = self
+                .on
+                .iter()
+                .filter(|(p, _)| !p.as_os_str().is_empty())
+                .collect();
             let _ = std::fs::create_dir_all(path.parent().unwrap_or(path));
             let _ = std::fs::write(
                 path,
@@ -168,6 +198,44 @@ mod tests {
             resolve_address("https://example.test/x", Some(dir)),
             "https://example.test/x"
         );
+    }
+
+    /// Scheme recognition (CodeRabbit): case-insensitive schemes, the
+    /// scheme-less prefixes (`tel:` and friends), and Windows drive
+    /// paths stay filesystem paths.
+    #[test]
+    fn url_schemes_are_case_insensitive_and_drives_are_paths() {
+        for u in [
+            "https://example.test/x",
+            "HTTPS://EXAMPLE.TEST/X",
+            "MAILTO:A@B.TEST",
+            "tel:+1-555-0100",
+            "Tel:+1 555 0100",
+            "sms:+15550100",
+            "news:comp.lang.rust",
+        ] {
+            assert!(is_url(u), "{u} is a URL");
+            assert_eq!(
+                resolve_address(u, Some(Path::new("/drawings"))),
+                u,
+                "{u} passes through"
+            );
+            assert_eq!(
+                store_address(u, Some(Path::new("/drawings")), true),
+                u,
+                "{u} never relativizes"
+            );
+        }
+        // Single-letter schemes are Windows drive letters, not URLs —
+        // a relative drive path must resolve against the doc dir, not
+        // pass through as a link.
+        for p in ["C:\\Users\\me\\notes.txt", "c:/Users/me/notes.txt", "Q:sibling.txt"] {
+            assert!(!is_url(p), "{p} is a filesystem path");
+        }
+        // Bare names and scheme-less text are paths too.
+        assert!(!is_url("spec.pdf"));
+        assert!(!is_url("sub/spec.pdf"));
+        assert!(!is_url(""));
     }
 
     // POSIX path literals: Windows `is_absolute` requires a drive
@@ -232,6 +300,52 @@ mod tests {
         p.set(a, true);
         assert!(p.get(a));
         assert!(!p.get(b), "the toggle is per document");
+    }
+
+    /// The unsaved document's empty-path key is session-only: it never
+    /// reaches the persisted file, and a hand-edited empty entry is
+    /// ignored on load (CodeRabbit).
+    #[test]
+    fn empty_path_toggle_never_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("hyperlink-relative.json");
+        let mut p = RelativePaths {
+            on: Default::default(),
+            store: Some(store.clone()),
+        };
+        p.set(Path::new(""), true);
+        p.set(Path::new("/docs/a.vsdx"), true);
+        assert!(p.get(Path::new("")), "session-only state still works");
+        let text = std::fs::read_to_string(&store).unwrap();
+        assert!(!text.contains("[\"\""), "no empty entry: {text}");
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let entries = v.get("on").unwrap().as_array().unwrap();
+        assert_eq!(entries.len(), 1, "only the real path persists: {text}");
+        // And the parse side drops an empty entry even if hand-written.
+        let poisoned = serde_json::json!({
+            "version": 1,
+            "on": [["", true], ["/docs/b.vsdx", true]]
+        });
+        let v: serde_json::Value = serde_json::from_str(
+            &serde_json::to_string(&poisoned).unwrap(),
+        )
+        .unwrap();
+        let loaded: Vec<_> = v
+            .get("on")
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|e| {
+                let p = e.get(0)?.as_str()?;
+                if p.is_empty() {
+                    None
+                } else {
+                    Some((PathBuf::from(p), e.get(1)?.as_bool()?))
+                }
+            })
+            .collect();
+        assert_eq!(loaded.len(), 1);
     }
 
     #[test]

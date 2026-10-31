@@ -446,10 +446,13 @@ pub fn dynamic_hints(rect: (f64, f64, f64, f64), ctx: &SnapCtx) -> Vec<Hint> {
     // coincidence between the dragged box's 3 positions and every
     // target's 3 — a dense, grid-aligned page lit up with a stack of
     // lines at neighbouring shapes' internal offsets. Keep the
-    // NEAREST coincidence per axis; ties break to the smaller
-    // coordinate so the choice is deterministic. Both sides stay
-    // top-level bboxes only (targets are the page's top-level
-    // shapes; sub-shapes never contribute).
+    // NEAREST coincidence per axis, over ALL drag×target coordinate
+    // pairs — not just same-index pairs (a dragged CENTER aligning to
+    // a neighbor's EDGE is as real a coincidence as edge-to-edge;
+    // CodeRabbit) — with ties breaking to the smaller coordinate so
+    // the choice is deterministic. Both sides stay top-level bboxes
+    // only (targets are the page's top-level shapes; sub-shapes never
+    // contribute).
     for vertical in [true, false] {
         let mut best: Option<(f64, f64)> = None; // (|delta|, at)
         for t in ctx.targets {
@@ -458,12 +461,14 @@ pub fn dynamic_hints(rect: (f64, f64, f64, f64), ctx: &SnapCtx) -> Vec<Hint> {
             } else {
                 (dys, t.ys())
             };
-            for (&ds, &ts) in drag.iter().zip(tgt.iter()) {
-                let d = (ds - ts).abs();
-                if d <= ctx.threshold_in
-                    && best.is_none_or(|(bd, ba)| d < bd || (d == bd && ts < ba))
-                {
-                    best = Some((d, ts));
+            for &ds in drag.iter() {
+                for &ts in tgt.iter() {
+                    let d = (ds - ts).abs();
+                    if d <= ctx.threshold_in
+                        && best.is_none_or(|(bd, ba)| d < bd || (d == bd && ts < ba))
+                    {
+                        best = Some((d, ts));
+                    }
                 }
             }
         }

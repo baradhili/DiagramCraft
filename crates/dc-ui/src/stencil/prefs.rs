@@ -70,7 +70,10 @@ impl StencilPrefs {
     /// Load from the user-config path. A missing file is CREATED with
     /// the defaults (first run — the file is the configuration
     /// surface); a corrupt or unknown-version file falls back to the
-    /// defaults without overwriting it.
+    /// defaults without overwriting it — and neither does any other
+    /// read error (permissions, I/O): only `NotFound` creates the
+    /// file, so a readable-but-unwritable existing config survives
+    /// (CodeRabbit).
     pub fn open() -> StencilPrefs {
         let Some(path) = crate::recent::config_base()
             .map(|b| b.join("diagramcraft").join("stencils.json"))
@@ -79,11 +82,14 @@ impl StencilPrefs {
         };
         match std::fs::read_to_string(&path) {
             Ok(text) => Self::parse(&text).unwrap_or_else(StencilPrefs::default),
-            Err(_) => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let defaults = StencilPrefs::default();
                 defaults.persist_to(&path);
                 defaults
             }
+            // Unreadable for another reason: fall back to defaults for
+            // this session without touching the file on disk.
+            Err(_) => StencilPrefs::default(),
         }
     }
 

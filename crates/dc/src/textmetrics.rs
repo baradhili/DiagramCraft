@@ -341,6 +341,10 @@ struct ShapedFace {
 }
 
 /// The per-(database, face) shaped-face cache (see [`ShapedFace`]).
+/// Faces that fail to load are remembered in a negative cache so a
+/// broken font costs one parse attempt, not one per measurement, and
+/// no bytes are leaked for it (CodeRabbit: validation runs on the
+/// BORROWED data first; only a face that parses gets a leaked copy).
 fn shaped_face(
     db_key: usize,
     id: fontdb::ID,
@@ -350,10 +354,29 @@ fn shaped_face(
     type Faces =
         std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID), std::sync::Arc<ShapedFace>>>;
     static FACES: OnceLock<Faces> = OnceLock::new();
+    type Rejected = std::sync::Mutex<std::collections::HashSet<(usize, fontdb::ID)>>;
+    static REJECTED: OnceLock<Rejected> = OnceLock::new();
     let key = (db_key, id);
     let cache = FACES.get_or_init(Default::default);
     if let Some(hit) = cache.lock().unwrap().get(&key) {
         return Some(hit.clone());
+    }
+    if REJECTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .contains(&key)
+    {
+        return None;
+    }
+    // Validate on the borrowed data before committing to a leak.
+    if harfrust::FontRef::from_index(data, index).is_err() {
+        REJECTED
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(key);
+        return None;
     }
     let bytes: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
     let font: &'static harfrust::FontRef<'static> =

@@ -132,6 +132,14 @@ pub fn text_edit_macro(doc: &Document, scope: &Scope, text: &str) -> Macro {
             if let Some(s) = vsdx::model::find_shape_by_id(&p.shapes, *shape) {
                 let measure = SheetTextMeasure::new(doc, s, &chain, text);
                 let mut env = crate::svg::shape_env(doc, s, &chain);
+                // `shape_env` carries Char.Size only when the chain
+                // resolves a numeric cell; rendering always has a size
+                // (resolve_text_block defaults one), so fill any gap
+                // with the SAME size measurement uses — a formula
+                // referencing Char.Size now evaluates against what
+                // will actually be drawn (CodeRabbit).
+                env.entry("Char.Size".to_string())
+                    .or_insert(measure.tb.font_size);
                 let mut refreshed: Vec<(String, f64)> = Vec::new();
                 for name in TEXT_DERIVED_CELLS {
                     let Some(f) = dc_core::effective_formula(doc, s, &chain, name) else {
