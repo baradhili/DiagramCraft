@@ -344,6 +344,14 @@ pub type ConnFxFn<'a> = &'a dyn Fn(Option<(f64, f64)>) -> crate::connectors::Con
 /// other glue/snap targets while dragging.
 pub type SnapEndpointFn<'a> = &'a dyn Fn(bool, (f64, f64)) -> (f64, f64);
 
+/// Corner-resize snapping (#160): page inches in, the per-axis snapped
+/// position out (None = no target on either axis, keep the raw
+/// pointer). The app builds this against the page minus the selected
+/// shape — its own edges must not attract its own corner. Feeds the
+/// live corner preview; the release commits through the same function
+/// on the app side, so the two agree by construction.
+pub type SnapResizeFn<'a> = &'a dyn Fn((f64, f64)) -> Option<(f64, f64)>;
+
 /// A dashed segment (`on`/`off` in px), the dynamic-grid line style.
 fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
     let len = (b - a).length();
@@ -381,6 +389,8 @@ pub fn show(
     conn_fx: ConnFxFn<'_>,
     // #179: snap the live connector endpoint (preview + drops).
     snap_endpoint: SnapEndpointFn<'_>,
+    // #160: snap the live corner-resize preview (per-axis, snap side).
+    snap_resize: SnapResizeFn<'_>,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
     interaction_lock: bool, // in-place text edit (#22): clicks end it, nothing else arms
@@ -936,7 +946,6 @@ pub fn show(
         ui.input(|i| i.pointer.interact_pos()),
     ) {
         let ptr_page = screen_to_page(ptr, view, page); // y-up inches
-        let ptr_y_down = page.h_in - ptr_page.1;
         // The primary's landed layer quad (matched by bbox center —
         // the ink bbox and the selection rect share it).
         let primary_quad = sel_rect.and_then(|sr| {
@@ -949,6 +958,12 @@ pub fn show(
         match hid {
             HandleId::Corner(c) => {
                 if let Some(sr) = sel_rect {
+                    // #160: the preview follows the SNAPPED corner —
+                    // the release commits through the app's identical
+                    // per-axis snap, so the drop lands where the
+                    // preview drew it.
+                    let ptr_page = snap_resize(ptr_page).unwrap_or(ptr_page);
+                    let ptr_y_down = page.h_in - ptr_page.1;
                     let (mut x0, mut y0, mut x1, mut y1) = (
                         sr.left() as f64,
                         sr.top() as f64,

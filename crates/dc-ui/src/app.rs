@@ -3667,6 +3667,17 @@ impl App {
         crate::snap::point_snap(p, &ctx, &self.snap, glue)
     }
 
+    /// #160: per-axis corner snap for a resize drag — the SNAP
+    /// settings (resize edges are snap targets, not glue targets),
+    /// against the page minus the resized shape.
+    fn snap_corner_for(&self, dragged: i64, p: (f64, f64)) -> Option<(f64, f64)> {
+        let page_id = self.page_id()?;
+        let targets = self.snap_targets(page_id, &[dragged]);
+        let guide_list = self.snap_guides(&[dragged]);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
+        crate::snap::corner_snap(p, &ctx, &self.snap)
+    }
+
     /// #110 (URS-1149): align every selected shape's feature to the
     /// first-selected shape (or the page while `align_to_page`): one
     /// undo Macro of plain moves.
@@ -7089,9 +7100,12 @@ impl App {
                 self.snap_guides(&[-1]),
             )
         };
+        // Both closures below share t_sel/g_sel, so they capture
+        // references, not the vectors.
+        let (t_sel_r, g_sel_r) = (&t_sel, &g_sel);
         let snap_end = move |endpoint_drag: bool, p: (f64, f64)| -> (f64, f64) {
             let (targets, guides) = if endpoint_drag {
-                (&t_sel, &g_sel)
+                (t_sel_r, g_sel_r)
             } else {
                 (&t_all, &g_all)
             };
@@ -7103,6 +7117,20 @@ impl App {
                 threshold_in: snap_thr,
             };
             crate::snap::point_snap(p, &ctx, &snap_settings, true).map_or(p, |(q, _)| q)
+        };
+        // #160: the live corner-resize preview snaps per axis under
+        // the SNAP settings against the page minus the selected shape
+        // (t_sel/g_sel exclude it) — the commit path runs the
+        // identical snap on the release pointer.
+        let snap_corner = move |p: (f64, f64)| -> Option<(f64, f64)> {
+            let ctx = crate::snap::SnapCtx {
+                targets: t_sel_r,
+                guides: g_sel_r,
+                grid_step_in: snap_grid,
+                ruler_step_in: snap_ruler,
+                threshold_in: snap_thr,
+            };
+            crate::snap::corner_snap(p, &ctx, &snap_settings)
         };
         let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
@@ -7169,6 +7197,7 @@ impl App {
             armed,
             &conn_fx,
             &snap_end,
+            &snap_corner,
             &hit,
             &mut mouse,
             // While the in-place text editor is open (#22) the canvas
@@ -7307,6 +7336,16 @@ impl App {
             if travel_px > 1.0 {
                 match id {
                     HandleId::Corner(corner) => {
+                        // #160: snap the resized edge under the snap
+                        // settings — the same per-axis snap the live
+                        // preview showed (both derive from the raw
+                        // pointer, so they agree by construction).
+                        // Applied AFTER the travel check so a no-travel
+                        // press never gains a phantom snap.
+                        let dragged = self.sel.map(|(_, s)| s);
+                        let end = dragged
+                            .and_then(|sid| self.snap_corner_for(sid, end))
+                            .unwrap_or(end);
                         // y-down screen-orientation delta, as before.
                         let dx = end.0 - start.0;
                         let dy = start.1 - end.1;

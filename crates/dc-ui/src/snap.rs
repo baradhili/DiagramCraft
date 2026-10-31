@@ -416,6 +416,22 @@ pub fn point_snap(
     best.map(|(p, hit, _)| (p, hit))
 }
 
+/// Snap a corner-resize drag point per axis (GitHub #160): Visio
+/// snaps the resized edge on each axis independently, so the best
+/// vertical target snaps x and the best horizontal target snaps y —
+/// unlike [`point_snap`], the two axes do not compete for one
+/// candidate. Implemented as the move snap on a degenerate (point)
+/// box, whose three-per-axis sources collapse to the dragged corner.
+/// Returns the snapped point (raw coordinate on an axis with no
+/// target), or None when neither axis finds one.
+pub fn corner_snap(p: (f64, f64), ctx: &SnapCtx, s: &SnapSettings) -> Option<(f64, f64)> {
+    let r = snap_translation((p.0, p.1, 0.0, 0.0), ctx, s);
+    if r.x_hit.is_none() && r.y_hit.is_none() {
+        return None;
+    }
+    Some((p.0 + r.dx, p.1 + r.dy))
+}
+
 /// A dynamic-grid hint, in page inches (y-up).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Hint {
@@ -951,6 +967,59 @@ mod tests {
         assert!((p.0 - five_mm).abs() < 1e-9, "x rounds to 5 mm");
         assert!((p.1 - 0.5).abs() < 1e-9, "y stays free");
         assert_eq!(hit, SnapHit::Grid);
+    }
+
+    #[test]
+    fn corner_snaps_both_axes_independently() {
+        // #160: unlike point_snap (one best candidate for the whole
+        // point), a corner-resize drag snaps x and y each to its own
+        // best grid line.
+        let s = SnapSettings {
+            snap_alignment_boxes: false,
+            snap_shape_extensions: false,
+            snap_connection_points: false,
+            snap_shape_intersections: false,
+            snap_ruler_subdivisions: false,
+            ..SnapSettings::default()
+        };
+        let five_mm = 5.0 / 25.4;
+        // x near the 5 mm line, y near the 10 mm line.
+        let p = corner_snap((0.199, 0.45), &ctx(&[], &[]), &s).unwrap();
+        assert!((p.0 - five_mm).abs() < 1e-9, "x rounds to 5 mm");
+        assert!((p.1 - 2.0 * five_mm).abs() < 1e-9, "y rounds to 10 mm");
+    }
+
+    #[test]
+    fn corner_snap_one_axis_at_a_time_and_off() {
+        // Grid OFF; a single alignment box supplies a finite x edge
+        // (its right edge at x=1 spanning y∈[2,3]) — a corner whose y
+        // sits inside the span but mid-way between the box's y edges
+        // snaps x only.
+        let s = SnapSettings {
+            snap_grid: false,
+            snap_alignment_boxes: true,
+            snap_shape_extensions: false,
+            snap_connection_points: false,
+            snap_shape_intersections: false,
+            snap_ruler_subdivisions: false,
+            ..SnapSettings::default()
+        };
+        let targets = [SnapTarget {
+            id: 1,
+            rect: box_at(0.0, 2.0, 1.0, 1.0),
+            ..Default::default()
+        }];
+        let p = corner_snap((0.95, 2.5), &ctx(&targets, &[]), &s).unwrap();
+        assert!((p.0 - 1.0).abs() < 1e-9, "x snaps to the box edge");
+        assert!((p.1 - 2.5).abs() < 1e-9, "y stays free");
+        // Nothing near either axis → None.
+        assert!(corner_snap((5.0, 5.0), &ctx(&targets, &[]), &s).is_none());
+        // Snap inactive → never snaps, even next to the target.
+        let off = SnapSettings {
+            snap_active: false,
+            ..s
+        };
+        assert!(corner_snap((0.95, 2.5), &ctx(&targets, &[]), &off).is_none());
     }
 
     #[test]

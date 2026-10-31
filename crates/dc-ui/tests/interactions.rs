@@ -874,6 +874,69 @@ fn all_four_corner_drags_resize() {
     }
 }
 
+/// #160: a corner-resize drag snaps the resized edge under the snap
+/// settings — dragging the bottom-right corner to just short of a grid
+/// line lands the right edge ON the line (grid-only snap, so the grid
+/// is the single target family), while the same drag with snap off
+/// lands on the raw pointer position.
+#[test]
+fn corner_resize_snaps_the_edge_to_grid() {
+    let run = |snap_on: bool| -> (f64, f64, f64) {
+        let mut h = harness_with_blank();
+        h.run();
+        let (page, shape) = place_master(&mut h, 2);
+        let mut s = h.state().debug_snap_settings();
+        s.snap_active = snap_on;
+        // Grid is the only target family left on.
+        s.snap_ruler_subdivisions = false;
+        s.snap_shape_extensions = false;
+        s.snap_connection_points = false;
+        s.snap_alignment_boxes = false;
+        s.snap_shape_intersections = false;
+        s.snap_guides = false;
+        s.dynamic_grid = false;
+        h.state_mut().debug_set_snap_for_test(s);
+        h.run();
+
+        let ppi = 96.0 * h.state().debug_zoom() as f64;
+        let step = 5.0 / 25.4; // 5 mm grid (mm display units)
+        let (w0, px0, lx0) = (
+            cell_of(&h, page, shape, "Width"),
+            cell_of(&h, page, shape, "PinX"),
+            cell_of(&h, page, shape, "LocPinX"),
+        );
+        // LocPinX is inches from the shape's left edge (Width*0.5 →
+        // half the width), so the right edge is PinX + Width − LocPin.
+        let right0 = px0 + w0 - lx0;
+        // Drag toward the second grid line right of the edge, stopping
+        // 0.03 in short of it — inside the snap strength, never on it.
+        let k = ((right0 + 1.5 * step) / step).round();
+        let target = k * step;
+        let raw = target - 0.03;
+        let br = h.state().debug_sel_br_corner().expect("selection");
+        let dx_px = (raw - right0) * ppi;
+        assert!(dx_px > 4.0, "drag is a real gesture: {dx_px:.1} px");
+        drag_naturally(&mut h, br, egui::vec2(dx_px as f32, 30.0));
+        let (w1, px1, lx1) = (
+            cell_of(&h, page, shape, "Width"),
+            cell_of(&h, page, shape, "PinX"),
+            cell_of(&h, page, shape, "LocPinX"),
+        );
+        (px1 + w1 - lx1, raw, target)
+    };
+
+    let (snapped, _raw, target) = run(true);
+    assert!(
+        (snapped - target).abs() < 1e-4,
+        "snapped run lands on the grid line: {snapped:.5} vs {target:.5}"
+    );
+    let (free, raw, _target) = run(false);
+    assert!(
+        (free - raw).abs() < 1e-4,
+        "snap-off run keeps the raw edge: {free:.5} vs {raw:.5}"
+    );
+}
+
 /// A `GUARD(...)`-driven Width is never silently overwritten: the drag
 /// refuses that axis with a status note and the cell is untouched
 /// (#59). The height axis (unguarded) still resizes.
