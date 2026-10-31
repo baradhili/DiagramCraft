@@ -2531,13 +2531,34 @@ fn style_attr(
 /// against the gold. Patterns outside this set stay solid until a corpus
 /// exercises them.
 fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
+    // #171: the table is measured from Visio 2016 itself — the
+    // owner-authored fixture `Sample/test files/lines.vsdx` (patterns
+    // 0–23, 0.02 in weight) printed at 600 dpi, run/gap sequences in
+    // stroke-width units (Analysis/line-patterns-visio2016.md). 0/1
+    // stay None (0 hides the line entirely at the call site).
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 3.0],                     // dashed (lgDash)
-        3 => &[1.0, 3.0],                     // dotted (dot)
-        4 => &[4.0, 3.0, 1.0, 3.0],           // dash-dot (dashDot)
-        5 => &[4.0, 3.0, 1.0, 3.0, 1.0, 3.0], // dash-dot-dot (dashDotDot)
-        7 => &[8.0, 3.0, 4.0, 3.0],           // long dash + normal dash
-        8 => &[8.0, 3.0, 4.0, 3.0, 4.0, 3.0], // long + 2× normal dashes
+        2 => &[8.0, 4.0], // dash
+        3 => &[1.0, 4.0], // dot
+        4 => &[8.0, 4.0, 1.0, 4.0], // dash-dot
+        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0], // dash-dot-dot
+        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0], // dash-dash-dot
+        7 => &[20.0, 4.0, 8.0, 4.0], // long + short dash
+        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0], // long + 2 short dashes
+        9 => &[4.0, 2.0], // short dash (the corpus legend "long dash" label was wrong)
+        10 => &[1.0, 2.0], // fine dot
+        11 => &[4.0, 2.0, 1.0, 2.0], // short dash-dot
+        12 => &[4.0, 2.0, 1.0, 2.0, 1.0, 2.0], // short dash-dot-dot
+        13 => &[4.0, 2.0, 4.0, 2.0, 1.0, 2.0], // short dash-dash-dot
+        14 => &[10.0, 2.0, 4.0, 2.0], // medium-short dash pair
+        15 => &[10.0, 2.0, 4.0, 2.0, 4.0, 2.0], // medium + 2 short dashes
+        16 => &[16.0, 8.0], // long dash
+        17 => &[1.0, 8.0], // sparse dot
+        18 => &[16.0, 8.0, 1.0, 8.0], // long dash-dot
+        19 => &[16.0, 8.0, 1.0, 8.0, 1.0, 8.0], // long dash-dot-dot
+        20 => &[16.0, 8.0, 16.0, 8.0, 1.0, 8.0], // long dash-dash-dot
+        21 => &[40.0, 8.0, 16.0, 8.0], // extra-long + long dash
+        22 => &[40.0, 8.0, 16.0, 8.0, 16.0, 8.0], // extra-long + 2 long
+        23 => &[2.0, 1.0], // fine dash
         _ => return None,
     };
     Some(
@@ -3160,32 +3181,75 @@ mod tests {
 
     #[test]
     fn line_pattern_dasharrays_scale_with_weight() {
-        // ECMA-376 preset primitives (issue #13): dash 4,3 · lgDash 8,3 ·
-        // dot 1,3, composed per the Visio gallery semantics.
-        let w = 0.01041666666666667; // 0.75 pt
-        assert_eq!(line_dasharray(2.0, w).as_deref(), Some("0.08333 0.03125"));
-        assert_eq!(line_dasharray(3.0, w).as_deref(), Some("0.01042 0.03125"));
+        // #171: every value measured from Visio 2016 itself (the
+        // owner-authored lines.vsdx fixture printed at 600 dpi — see
+        // Analysis/line-patterns-visio2016.md); units are stroke
+        // widths, so the numbers below are pattern × weight.
+        let w = 0.02; // the fixture's weight
+        let arr = |p: f64| line_dasharray(p, w);
+        assert_eq!(arr(2.0).as_deref(), Some("0.16000 0.08000"));
+        assert_eq!(arr(3.0).as_deref(), Some("0.02000 0.08000"));
         assert_eq!(
-            line_dasharray(4.0, w).as_deref(),
-            Some("0.04167 0.03125 0.01042 0.03125")
+            arr(4.0).as_deref(),
+            Some("0.16000 0.08000 0.02000 0.08000")
         );
         assert_eq!(
-            line_dasharray(5.0, w).as_deref(),
-            Some("0.04167 0.03125 0.01042 0.03125 0.01042 0.03125")
-        );
-        // 7/8: long dash (lgDash) + normal dash(es).
-        assert_eq!(
-            line_dasharray(7.0, w).as_deref(),
-            Some("0.08333 0.03125 0.04167 0.03125")
+            arr(5.0).as_deref(),
+            Some("0.16000 0.08000 0.02000 0.08000 0.02000 0.08000")
         );
         assert_eq!(
-            line_dasharray(8.0, w).as_deref(),
-            Some("0.08333 0.03125 0.04167 0.03125 0.04167 0.03125")
+            arr(6.0).as_deref(),
+            Some("0.16000 0.08000 0.16000 0.08000 0.02000 0.08000")
         );
-        // Solid (1), hidden (0, handled elsewhere) and uncalibrated
-        // patterns render solid — no dasharray attribute.
+        assert_eq!(arr(7.0).as_deref(), Some("0.40000 0.08000 0.16000 0.08000"));
+        assert_eq!(
+            arr(8.0).as_deref(),
+            Some("0.40000 0.08000 0.16000 0.08000 0.16000 0.08000")
+        );
+        assert_eq!(arr(9.0).as_deref(), Some("0.08000 0.04000"));
+        assert_eq!(arr(10.0).as_deref(), Some("0.02000 0.04000"));
+        assert_eq!(
+            arr(11.0).as_deref(),
+            Some("0.08000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(
+            arr(12.0).as_deref(),
+            Some("0.08000 0.04000 0.02000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(
+            arr(13.0).as_deref(),
+            Some("0.08000 0.04000 0.08000 0.04000 0.02000 0.04000")
+        );
+        assert_eq!(arr(14.0).as_deref(), Some("0.20000 0.04000 0.08000 0.04000"));
+        assert_eq!(
+            arr(15.0).as_deref(),
+            Some("0.20000 0.04000 0.08000 0.04000 0.08000 0.04000")
+        );
+        assert_eq!(arr(16.0).as_deref(), Some("0.32000 0.16000"));
+        assert_eq!(arr(17.0).as_deref(), Some("0.02000 0.16000"));
+        assert_eq!(
+            arr(18.0).as_deref(),
+            Some("0.32000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(
+            arr(19.0).as_deref(),
+            Some("0.32000 0.16000 0.02000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(
+            arr(20.0).as_deref(),
+            Some("0.32000 0.16000 0.32000 0.16000 0.02000 0.16000")
+        );
+        assert_eq!(arr(21.0).as_deref(), Some("0.80000 0.16000 0.32000 0.16000"));
+        assert_eq!(
+            arr(22.0).as_deref(),
+            Some("0.80000 0.16000 0.32000 0.16000 0.32000 0.16000")
+        );
+        assert_eq!(arr(23.0).as_deref(), Some("0.04000 0.02000"));
+        // Solid (1) and hidden (0, handled at the call site) render
+        // without a dasharray; so do out-of-gallery values.
         assert!(line_dasharray(1.0, w).is_none());
-        assert!(line_dasharray(23.0, w).is_none());
+        assert!(line_dasharray(0.0, w).is_none());
+        assert!(line_dasharray(24.0, w).is_none());
     }
 
     /// A Character row with Font/Size/Color cells for char_font tests.

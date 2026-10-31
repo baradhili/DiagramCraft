@@ -6274,13 +6274,20 @@ impl App {
                     ui,
                     &cur,
                     &|k: &str| k.to_string(),
+                    // #171: labels match Visio 2016's measured gallery
+                    // (Analysis/line-patterns-visio2016.md) — 9 is the
+                    // short 4-2 dash, 16 the long dash.
                     &[
                         ("0", "None"),
                         ("1", "Solid"),
-                        ("2", "Dotted"),
-                        ("3", "Dash-dot"),
-                        ("4", "Dashed"),
-                        ("9", "Long dash"),
+                        ("2", "Dash"),
+                        ("3", "Dot"),
+                        ("4", "Dash-dot"),
+                        ("5", "Dash-dot-dot"),
+                        ("9", "Short Dash"),
+                        ("10", "Fine Dot"),
+                        ("16", "Long Dash"),
+                        ("23", "Fine Dash"),
                     ],
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
