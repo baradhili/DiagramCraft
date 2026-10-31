@@ -6655,11 +6655,12 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
-                // Begin/End Arrow (#72, corrected #169): the gallery the
-                // renderer draws per Visio 2016's observed numbering —
-                // no value below 34 is double-headed there; 4 is the
-                // classic triangle, 6 the stealth dart, 13 a single
-                // filled head. 35 offers the double chevron.
+                // Begin/End Arrow (#72, corrected #169, completed
+                // #158): every value 0–45 now has its own glyph (the
+                // 600 dpi fixture pinned the families — doubles at
+                // 14/16–22 and 35/39, hollow diamonds 40–42/44, the
+                // double hash 27); the picker offers one entry per
+                // distinct family, Visio's named head set.
                 const ARROWS: &[(&str, &str)] = &[
                     ("0", "None"),
                     ("1", "Arrow"),
@@ -6668,11 +6669,19 @@ impl App {
                     ("4", "Classic Arrow"),
                     ("6", "Stealth"),
                     ("7", "Open Arrow"),
+                    ("8", "Small Open Arrow"),
                     ("9", "Slash"),
                     ("10", "Circle"),
                     ("11", "Diamond"),
+                    ("12", "Open Double Arrow"),
                     ("13", "Filled Arrow"),
-                    ("35", "Double Arrow"),
+                    ("14", "Double Arrow"),
+                    ("22", "Double Arrow (Long)"),
+                    ("27", "Double Slash"),
+                    ("34", "Open Double Arrow (Wide)"),
+                    ("35", "Double Arrow (Wide)"),
+                    ("41", "Open Diamond"),
+                    ("40", "Double Open Diamond"),
                 ];
                 let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
                 if let Some(v) =

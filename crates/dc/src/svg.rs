@@ -2200,20 +2200,25 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
         let mut attrs = String::new();
-        // #72/#169: per-value arrowheads — Visio 2016's Begin/EndArrow
-        // gallery, drawn from our own paths (behavior reference: the
-        // shipped Visio 2016 gallery plus a Visio-authored fixture with
-        // EndArrow 0–50 printed at 600 dpi — see
-        // Analysis/arrow-gallery-visio2016.md; artwork ours). Key
-        // facts: 13 is a single filled head (the #169 report: it drew
-        // our two chevrons); 4 — the corpus's default — is the classic
-        // filled triangle, 6 the stealth dart, 9 the slanted dimension
-        // tick; the only double forms are the chevrons (12 open, 34
-        // open, 35 filled). Unmapped gallery values fall back to the
-        // filled triangle. Sizes ride markerUnits=strokeWidth
+        // #72/#169/#158: per-value arrowheads — Visio 2016's
+        // Begin/EndArrow gallery, drawn from our own paths (behavior
+        // reference: the shipped Visio 2016 gallery plus a
+        // Visio-authored fixture with EndArrow 0–50 printed at 600 dpi
+        // — see Analysis/arrow-gallery-visio2016.md; artwork ours).
+        // Key facts: 13 is a single filled head (the #169 report: it
+        // drew our two chevrons); 4 — the corpus's default — is the
+        // classic filled triangle, 6 the stealth dart, 9 the slanted
+        // dimension tick; the doubles are the chevron family (12/23/24
+        // open, 25/34/38/45 open wide, 14/16–22/29–31/35/39 filled)
+        // plus the diamond pair 40; 41/42/44 are hollow diamonds, 27
+        // the double hash, 26 a small filled triangle, 8/28 small open
+        // chevrons. The #158 fixture pass pinned 46–50 to NO head
+        // (Visio draws bare ends past the gallery). Unmapped values
+        // fall back to the filled triangle; per-value size variants
+        // share the family glyph. Sizes ride markerUnits=strokeWidth
         // (LineWeight) times the ArrowSize factor.
         let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
-            if arrow < 0.5 {
+            if arrow < 0.5 || (46.0..=50.5).contains(&arrow) {
                 return;
             }
             let scale = 2.5 + sz.max(0.0) * 1.5;
@@ -2245,6 +2250,8 @@ fn render_geometry(
                     6 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
                     // 7 — open chevron (the open V).
                     7 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
+                    // 8/28 — small open chevron (thinner V) — #158.
+                    8 | 28 => ("M0,1.5 L8,5 L0,8.5", 8.0, 10.0, true),
                     // 9 — the slanted dimension tick.
                     9 => ("M2,-1 L6,9", 5.0, 10.0, true),
                     // 10 — the filled circle (symmetric, no mirror).
@@ -2252,16 +2259,39 @@ fn render_geometry(
                     // 11 — the filled diamond (tip at both ends; anchor
                     // the right tip on the line end).
                     11 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
-                    // 12 — open double chevron.
-                    12 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 12/23/24/32/33/36/37/43 — open double chevron
+                    // (the `>>` family's size variants share the glyph).
+                    12 | 23 | 24 | 32 | 33 | 36 | 37 | 43 => {
+                        ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true)
+                    }
                     // 13 — single filled triangle, plain base (Visio's
                     // 13 is NOT a double — #169's core fix).
                     13 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 34 — open double chevron (wide).
-                    34 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 14/16–21/29–31/39 — filled double chevron
+                    // (35's glyph; spacing/size variants).
+                    14 | 16 | 17 | 18 | 19 | 20 | 21 | 29 | 30 | 31 | 39 => {
+                        ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false)
+                    }
+                    // 15 — plain filled triangle, medium.
+                    15 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 22 — the longest filled double.
+                    22 => ("M0,0 L7,5 L0,10 z M7,0 L14,5 L7,10 z", 14.0, 14.0, false),
+                    // 25/34/38/45 — open double chevron, wide.
+                    25 | 34 | 38 | 45 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 26 — small filled triangle (a size variant of 2).
+                    26 => ("M0,1.5 L8,5 L0,8.5 z", 8.0, 10.0, false),
+                    // 27 — the double hash/tick (crow's-foot pair).
+                    27 => ("M1,-1 L5,9 M6,-1 L10,9", 10.0, 10.0, true),
                     // 35 — filled double chevron (the gallery's first
                     // filled double; the old wrong-13 glyph lives on).
                     35 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
+                    // 40 — double open (hollow) diamond.
+                    40 => (
+                        "M0,5 L4,0 L8,5 L4,10 Z M8,5 L12,0 L16,5 L12,10 Z",
+                        16.0, 16.0, true,
+                    ),
+                    // 41/42/44 — open (hollow) diamond.
+                    41 | 42 | 44 => ("M0,5 L5,0 L10,5 L5,10 Z", 10.0, 10.0, true),
                     // Unmapped gallery values: the filled triangle.
                     _ => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
                 };
@@ -3325,8 +3355,8 @@ mod tests {
         let none = line_with(&[("EndArrow", "0")]);
         assert!(!none.contains("marker"), "value 0 emits no head: {none}");
         // Each gallery value emits a marker with its own kind id and
-        // the expected body shape (#169: mapped to Visio 2016's observed
-        // gallery — no value below 34 is double-headed there).
+        // the expected body shape (#169 + the #158 fixture pass: mapped
+        // to Visio 2016's observed gallery).
         for (v, needle) in [
             (1, "M0,0 L10,5 L0,10 z"),
             (2, "M0,1.5 L8,5 L0,8.5 z"),
@@ -3335,11 +3365,19 @@ mod tests {
             (5, "M0,0 L10,5 L0,10 z"),
             (6, "L5,5 z"),
             (7, r#"fill="none""#),
+            (8, "M0,1.5 L8,5 L0,8.5"),
             (9, "M2,-1 L6,9"),
             (11, "M0,5 L5,0 L10,5 L5,10 z"),
             (12, "M6,0 L12,5 L6,10"),
             (13, "M0,0 L10,5 L0,10 z"),
+            (14, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
+            (15, "M0,0 L10,5 L0,10 z"),
+            (22, "M0,0 L7,5 L0,10 z M7,0 L14,5 L7,10 z"),
+            (26, "M0,1.5 L8,5 L0,8.5 z"),
+            (27, "M1,-1 L5,9 M6,-1 L10,9"),
             (35, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
+            (40, "M0,5 L4,0 L8,5 L4,10 Z M8,5 L12,0 L16,5 L12,10 Z"),
+            (41, "M0,5 L5,0 L10,5 L5,10 Z"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
@@ -3351,18 +3389,29 @@ mod tests {
         // The circle is a circle.
         let circle = line_with(&[("EndArrow", "10")]);
         assert!(circle.contains("<circle"), "value 10 is a circle: {circle}");
-        // #169 regression: values below 34 are all SINGLE-headed — the
-        // marker body must close at most one filled triangle, the
-        // double chevron living only at 34/35.
-        for v in 1..=33i64 {
+        // #169 regression (evidence-refined by #158): 13 is a SINGLE
+        // head — one closed triangle — while the fixture-pinned double
+        // chevrons (14 and the 16–22 family) stack two, and the plain
+        // singles (4, 13, 15) never do.
+        let singles = [4i64, 13, 15, 26];
+        for v in singles {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            if let Some(body) = out.split("<marker").nth(1) {
-                let closes = body.matches(" z").count();
-                assert!(
-                    closes <= 1,
-                    "value {v} must not stack triangles: {body}"
-                );
-            }
+            let closes = out.matches(" z").count();
+            assert!(closes <= 1, "value {v} must not stack triangles: {out}");
+        }
+        let doubles = [14i64, 16, 17, 18, 19, 20, 21, 22, 29, 30, 31, 35, 39];
+        for v in doubles {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            assert!(
+                out.matches(" z").count() >= 2,
+                "value {v} is the filled double chevron: {out}"
+            );
+        }
+        // #158: past the gallery, Visio draws a bare end (fixture
+        // values 46–50 print no head).
+        for v in 46..=50i64 {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            assert!(!out.contains("marker"), "value {v} emits no head: {out}");
         }
         let dbl = line_with(&[("EndArrow", "35")]);
         assert!(
