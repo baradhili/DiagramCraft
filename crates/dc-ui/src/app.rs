@@ -2551,9 +2551,10 @@ impl App {
         else {
             return;
         };
-        let Some((px, py)) = get("PinX").zip(get("PinY")) else {
+        // A shape without a pin is not a movable 1D frame.
+        if get("PinX").zip(get("PinY")).is_none() {
             return;
-        };
+        }
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
         let scope = Scope::Shape {
             page: page_id,
@@ -2587,42 +2588,21 @@ impl App {
             )));
         }
         if !free[0] && !free[1] {
-            self.status = "connector is glued at both ends — drag an                            endpoint or its shapes"
-                .into();
+            self.status = "connector is glued at both ends — drag an endpoint or its shapes".into();
             return;
         }
-        // Derived cells: only a formula-free cell literal-writes (an
-        // owned cell would refuse and abort the whole macro).
-        for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
-            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, name).is_none() {
-                cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
-            }
-        }
-        // The connector's INK is its route rows — rewrite them from
-        // the post-move endpoints (free ends moved, pinned ends
-        // resolve unchanged), exactly the reroute engine's plan.
-        let nb = if free[0] { (bx + dx, by + dy) } else { (bx, by) };
-        let ne = if free[1] { (ex + dx, ey + dy) } else { (ex, ey) };
-        let style = get("ShapeRouteStyle")
-            .map(|v| format!("{}", v as i64))
-            .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
-        let pts = crate::connectors::route(&style, nb, ne);
-        let rows = crate::connectors::route_rows(nb, &pts);
-        if !sh.sheet.sections_named("Geometry").is_empty() {
-            for (i, (x, y)) in rows.iter().enumerate() {
-                for (cellname, v) in [("X", *x), ("Y", *y)] {
-                    cmds.push(Box::new(dc_core::SetRowCell::new(
-                        scope.clone(),
-                        "Geometry",
-                        0,
-                        dc_core::commands::RowSel::Ix((i + 2) as i64),
-                        cellname,
-                        vsdx::Cell::value(format!("{v:.6}")),
-                    )));
-                }
-            }
-        }
-        // Glued ends re-attach in the same undo step.
+        // The frame (Pin/Width/Height/LocPin caches) and the route
+        // rows derive from the POST-MOVE endpoints — the reroute
+        // planner's own corpus rules (review pass: the hand-rolled
+        // writes here materialized missing Geometry rows on
+        // master-based connectors and skipped formula-owned Pin
+        // caches; the planner refreshes through guards and only
+        // rewrites rows the connector already has).
+        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
+            page_id, vec![shape_id],
+        )));
+        // Connectors glued TO this one re-attach in the same undo
+        // step.
         if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
             cmds.push(r);
         }
