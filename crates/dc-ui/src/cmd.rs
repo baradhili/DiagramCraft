@@ -629,15 +629,35 @@ impl Command for RerouteConnectors {
                         .then_some(f)
                 };
                 let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
+                // #176: a master-based connector whose geometry is
+                // LINE-only (MoveTo/LineTo — the corpus line master's
+                // own rows are the begin-corner frame (0,0)→(W,H))
+                // reroutes by REWRITING its frame to span the new
+                // endpoints. Its instance rows are a literal snapshot
+                // of the authoring pose (a horizontal band's midline
+                // `LineTo(Width, H/2)` with `Height = GUARD(0.2DL)`);
+                // translating those in-frame (#175) keeps the ink on
+                // the old midline, detached from the moved shape
+                // whenever the endpoints differ in y. Curves keep the
+                // #175 translation — rewriting an arc's rows to the
+                // route polyline would destroy the curve.
+                let line_frame = conn.master.is_some()
+                    && conn.sheet.sections_named("Geometry").first().is_some_and(|g| {
+                        g.rows.iter().all(|r| {
+                            matches!(r.t.as_deref(), None | Some("MoveTo") | Some("LineTo"))
+                        })
+                    });
                 // LocPin derives from the EFFECTIVE size: when Height is
                 // a constant guard the band keeps its height, so LocPinY
-                // stays half the kept height.
-                let h_eff = if formula_tracks("Height").is_some() {
+                // stays half the kept height — except a line_frame
+                // connector, whose band guard is overridden so the
+                // frame spans the endpoints.
+                let h_eff = if formula_tracks("Height").is_some() || line_frame {
                     h_new
                 } else {
                     get("Height").unwrap_or(h_new)
                 };
-                let w_eff = if formula_tracks("Width").is_some() {
+                let w_eff = if formula_tracks("Width").is_some() || line_frame {
                     w_new
                 } else {
                     get("Width").unwrap_or(w_new)
@@ -657,6 +677,14 @@ impl Command for RerouteConnectors {
                         Some(f) => {
                             cells.push((n.to_string(), v, Some(f)));
                         }
+                        // #176: a line_frame connector refreshes every
+                        // frame cell through its guard (the formula is
+                        // kept, the cached V drives the render) — a
+                        // skipped constant guard would hold the old
+                        // band pose under the new endpoints.
+                        None if line_frame => {
+                            cells.push((n.to_string(), v, eff(n)));
+                        }
                         // Constant guard or otherwise static: skip.
                         None => {}
                     }
@@ -675,17 +703,15 @@ impl Command for RerouteConnectors {
                     v.sort_unstable();
                     v
                 };
-                let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() {
-                    // #175: a MASTER-based connector's rows are its own
-                    // frame (a fixed-height band's LineTo(Width, H/2)),
-                    // NOT the synthetic begin-corner frame — writing
-                    // (endp−beg) deltas there broke the render (#175).
-                    // Translate the EXISTING literal row coordinates by
-                    // the endpoint's page delta, per axis, only where
-                    // that axis's size tracks the endpoints. Rows whose
-                    // cells carry formulas evaluate against the
-                    // refreshed caches in the renderer and are left to
-                    // it.
+                let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() && !line_frame {
+                    // #175: a MASTER-based CURVE connector's rows are
+                    // its own frame (an arc's EllipticalArcTo) —
+                    // translating the EXISTING literal coordinates by
+                    // the endpoint's page delta, per axis, keeps the
+                    // curve; only where that axis's size tracks the
+                    // endpoints. Rows whose cells carry formulas
+                    // evaluate against the refreshed caches in the
+                    // renderer and are left to it.
                     let dx = if formula_tracks("Width").is_some() {
                         endp.0 - ex
                     } else {
@@ -720,10 +746,14 @@ impl Command for RerouteConnectors {
                         })
                         .unwrap_or_default()
                 } else {
-                    // The synthetic connector's own frame: the planned
-                    // route, filtered to rows it has; a connector with
-                    // fewer rows than the route frame puts the ENDPOINT
-                    // on its LAST row.
+                    // The begin-corner corpus frame: the planned route,
+                    // filtered to rows the connector has; a connector
+                    // with fewer rows than the route frame puts the
+                    // ENDPOINT on its LAST row. Synthetic connectors
+                    // AND (#176) line-geometry master instances — whose
+                    // band snapshot rows must be rewritten to span the
+                    // new endpoints, with the MoveTo reset to (0,0) so
+                    // the frame's origin is the begin point.
                     let mut planned: Vec<(i64, f64, f64)> = rows
                         .iter()
                         .enumerate()
@@ -736,6 +766,9 @@ impl Command for RerouteConnectors {
                         if max_ix < 4 {
                             *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
                         }
+                    }
+                    if line_frame && existing.contains(&1) {
+                        planned.insert(0, (1, 0.0, 0.0));
                     }
                     planned
                 };
@@ -1257,6 +1290,97 @@ mod reroute_master_tests {
             h.numeric().unwrap().abs() - 0.2 < 1e-9,
             "the constant band height is untouched: {:?}",
             h.v
+        );
+    }
+
+    /// #176: a LINE-geometry master connector (the owner's
+    /// connector-test dynamic connector) whose target moves
+    /// DIAGONALLY must have its whole frame rewritten to span the new
+    /// endpoints — the #175 in-frame translation kept the band's
+    /// horizontal midline and the ink rendered detached from the
+    /// moved shape.
+    #[test]
+    fn reroute_line_master_spans_the_new_endpoints() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        // Move the target DOWN-RIGHT: PinX 3.0 → 3.5, PinY 5.5 → 5.0.
+        // The target's local origin is (PinX−LocPinX, PinY−LocPinY) =
+        // (2.5, 4.5), so its connection point (local (0, 0.5)) lands
+        // at (2.5, 5.0); the begin stays (1.0, 6.0) → dx = 1.5,
+        // dy = −1.
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("3.5"));
+                sh.sheet.set_cell("PinY", VCell::value("5.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let cell = |n: &str| conn.sheet.cell(n).and_then(|c| c.numeric()).unwrap();
+        // The band guard is OVERRIDDEN: Height's cached V spans the
+        // endpoints (dy = −1), the GUARD formula is kept for the file.
+        let h = conn.sheet.cell("Height").unwrap();
+        assert!(
+            (h.numeric().unwrap() - (-1.0)).abs() < 1e-6,
+            "Height spans dy: {:?}",
+            h.v
+        );
+        assert!(
+            h.f.as_deref().is_some_and(|f| f.contains("GUARD")),
+            "the band guard formula is kept: {:?}",
+            h.f
+        );
+        assert!((cell("Width") - 1.5).abs() < 1e-6, "Width spans dx");
+        assert!((cell("LocPinX") - 0.75).abs() < 1e-6, "LocPinX = dx/2");
+        assert!((cell("LocPinY") - (-0.5)).abs() < 1e-6, "LocPinY = dy/2");
+        // The rendered frame origin is the BEGIN point and the last
+        // row lands on the END point — the ink attaches to both.
+        let ox = cell("PinX") - cell("LocPinX");
+        let oy = cell("PinY") - cell("LocPinY");
+        assert!((ox - 1.0).abs() < 1e-6, "origin x = begin x: {ox}");
+        assert!((oy - 6.0).abs() < 1e-6, "origin y = begin y: {oy}");
+        let geo = conn.sheet.sections_named("Geometry").remove(0);
+        let mv = geo.rows.iter().find(|r| r.ix == 1).unwrap();
+        assert!(
+            (mv.cell("X").and_then(|c| c.numeric()).unwrap()).abs() < 1e-6
+                && (mv.cell("Y").and_then(|c| c.numeric()).unwrap()).abs() < 1e-6,
+            "MoveTo resets to (0,0): the begin-corner frame"
+        );
+        let last = geo.rows.iter().rfind(|r| r.ix > 1).unwrap();
+        let (lx, ly) = (
+            last.cell("X").and_then(|c| c.numeric()).unwrap(),
+            last.cell("Y").and_then(|c| c.numeric()).unwrap(),
+        );
+        assert!(
+            (lx - 1.5).abs() < 1e-6 && (ly - (-1.0)).abs() < 1e-6,
+            "last row = (dx, dy) = the end point: ({lx}, {ly})"
+        );
+        assert!(
+            ((ox + lx) - 2.5).abs() < 1e-6 && ((oy + ly) - 5.0).abs() < 1e-6,
+            "origin + last row = the END point on the moved target"
+        );
+        cmd.undo(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        // Full restore: the band pose AND its rows come back.
+        assert!((conn.sheet.cell("Height").unwrap().numeric().unwrap() - 0.2).abs() < 1e-9);
+        let geo = conn.sheet.sections_named("Geometry").remove(0);
+        let r2 = geo.rows.iter().find(|r| r.ix == 2).unwrap();
+        assert!(
+            (r2.cell("X").and_then(|c| c.numeric()).unwrap() - 1.0).abs() < 1e-9
+                && r2.cell("Y").and_then(|c| c.numeric()).unwrap().abs() < 1e-9,
+            "undo restores the original row snapshot (1.0, 0.0)"
         );
     }
 }
