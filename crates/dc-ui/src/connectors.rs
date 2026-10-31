@@ -414,6 +414,115 @@ pub fn glue_decision(
     None
 }
 
+/// The connection-point affordances for one frame (#177): what the
+/// canvas paints while a connector endpoint gesture is live and what
+/// it paints for a selected glued connector. All positions are page
+/// inches, y-up; nothing here persists.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConnPointFx {
+    /// Connection points of the approached shapes — the square-with-×
+    /// reveal symbols (Visio shows the shape's points as the endpoint
+    /// nears it).
+    pub reveal: Vec<(f64, f64)>,
+    /// The connection point the drop would statically glue to — the
+    /// live green-square highlight.
+    pub glue_target: Option<(f64, f64)>,
+    /// The glued attachment sites of the selected connector — green
+    /// circles.
+    pub glued: Vec<(f64, f64)>,
+}
+
+/// Reveal + glue-target highlight for a live endpoint position
+/// (#177): every candidate whose rect (inflated by `near_in`)
+/// contains the point reveals its connection points, and when the
+/// drop semantics would glue to a connection point that point is the
+/// highlight. `toward` only shapes dynamic attach points, which the
+/// overlay does not draw — pass the point itself when unknown.
+pub fn conn_point_fx(
+    cands: &[GlueCandidate],
+    p: (f64, f64),
+    toward: (f64, f64),
+    threshold: f64,
+    near_in: f64,
+    glue_active: bool,
+    glue_connection_points: bool,
+) -> ConnPointFx {
+    let mut fx = ConnPointFx::default();
+    if !glue_active {
+        return fx;
+    }
+    for c in cands {
+        let (x, y, w, h) = c.rect;
+        if p.0 >= x - near_in
+            && p.0 <= x + w + near_in
+            && p.1 >= y - near_in
+            && p.1 <= y + h + near_in
+        {
+            fx.reveal.extend(c.conn_rows.iter().map(|(_, q)| *q));
+        }
+    }
+    if glue_connection_points {
+        if let Some(t) = glue_decision(cands, p, toward, threshold, true, true) {
+            if matches!(t.kind, GlueKind::Static { .. }) {
+                fx.glue_target = Some(t.attach);
+            }
+        }
+    }
+    fx
+}
+
+/// The glued attachment sites of a connector (#177): one per
+/// `<Connect>` record — static glue (ToPart 100+row) sits on the
+/// target's connection point (looked up in the same candidates the
+/// drop path uses); dynamic glue-to-shape (ToPart 3) sits at the
+/// endpoint's resolved position.
+pub fn glued_sites(
+    doc: &vsdx::model::Document,
+    page: &vsdx::model::Page,
+    conn_id: i64,
+    cands: &[GlueCandidate],
+) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    use dc_core::connects::ConnectsHost;
+    for c in page.connects().list.iter() {
+        if c.from_sheet != conn_id {
+            continue;
+        }
+        if c.to_part >= 100 {
+            let row_ix = c.to_part - 100;
+            if let Some(q) = cands
+                .iter()
+                .find(|cand| cand.id == c.to_sheet)
+                .and_then(|cand| cand.conn_rows.iter().find(|(ix, _)| *ix == row_ix))
+            {
+                out.push(q.1);
+            }
+        } else {
+            // Dynamic: the endpoint's own resolved position.
+            let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, conn_id) else {
+                continue;
+            };
+            let Ok(chain) = dc_core::scope::shape_chain(doc, page.id, conn_id) else {
+                continue;
+            };
+            let (xn, yn) = if c.from_cell == "BeginX" {
+                ("BeginX", "BeginY")
+            } else {
+                ("EndX", "EndY")
+            };
+            if let (Some(x), Some(y)) = (
+                doc.resolve_cell(conn, &chain, xn)
+                    .and_then(|v| v.numeric()),
+                doc.resolve_cell(conn, &chain, yn)
+                    .and_then(|v| v.numeric()),
+            ) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
 /// The best dynamic attachment on a shape's border: where the segment
 /// from the rect's center toward `toward` (the connector's other
 /// endpoint) crosses it — the side facing the other shape; nearest
@@ -730,4 +839,106 @@ mod tests {
         let pts = route(ROUTE_RIGHT_ANGLE, b, (2.0, 1.0));
         assert_eq!(route_rows(b, &pts), [(1.0, 0.0), (1.0, 1.0), (2.0, 1.0)]);
     }
+    /// #177: the reveal radius shows the approached shape's points,
+    /// the glue decision drives the green-square highlight, and glue
+    /// being off hides everything.
+    #[test]
+    fn conn_point_fx_reveals_and_highlights() {
+        let cands = vec![GlueCandidate {
+            id: 7,
+            rect: (2.0, 2.0, 1.0, 1.0),
+            conn_rows: vec![(2, (2.0, 2.5)), (3, (3.0, 2.5))],
+        }];
+        let thr = 8.0 / 96.0;
+        // Far away: nothing reveals.
+        let fx = conn_point_fx(&cands, (6.0, 6.0), (6.0, 6.0), thr, 0.6, true, true);
+        assert!(fx.reveal.is_empty(), "nothing near a far shape");
+        assert!(fx.glue_target.is_none());
+        // Approaching (inside the 0.6in halo, outside the glue
+        // threshold): both points reveal, no highlight.
+        let fx = conn_point_fx(&cands, (3.0, 3.55), (3.0, 3.55), thr, 0.6, true, true);
+        assert_eq!(fx.reveal.len(), 2, "the approached shape's points reveal");
+        assert!(fx.glue_target.is_none(), "near but not gluing");
+        // At a connection point: that point becomes the highlight.
+        let fx = conn_point_fx(&cands, (2.02, 2.5), (2.02, 2.5), thr, 0.6, true, true);
+        assert_eq!(fx.glue_target, Some((2.0, 2.5)));
+        // Glue off: Visio hides the affordances entirely.
+        let fx = conn_point_fx(&cands, (2.02, 2.5), (2.02, 2.5), thr, 0.6, false, true);
+        assert!(fx.reveal.is_empty() && fx.glue_target.is_none());
+    }
+
+    /// #177: a connector's glued sites — the static Connect sits on
+    /// the target's connection point, the dynamic one on the
+    /// endpoint's own position.
+    #[test]
+    fn glued_sites_static_row_and_dynamic_endpoint() {
+        let mut target = Shape {
+            id: 5,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "3.0"),
+            ("PinY", "3.0"),
+            ("Width", "1.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, Cell::value(v));
+        }
+        let mut conn_section = Section {
+            name: "Connection".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        conn_section.rows.push(Row {
+            ix: 2,
+            cells: vec![
+                ("X".to_string(), Cell::value("0.5")),
+                ("Y".to_string(), Cell::value("1.0")),
+            ],
+            ..Row::default()
+        });
+        target.sheet.children.push(SheetChild::Section(conn_section));
+        let mut conn = Shape {
+            id: 6,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("BeginX", "1.0"),
+            ("BeginY", "1.0"),
+            ("EndX", "3.0"),
+            ("EndY", "3.5"),
+        ] {
+            conn.sheet.set_cell(n, Cell::value(v));
+        }
+        let mut page = vsdx::model::Page {
+            id: 0,
+            name: "P1".into(),
+            attrs: vec![("ID".into(), "0".into()), ("NameU".into(), "P1".into())],
+            shapes: vec![target, conn],
+            ..vsdx::model::Page::default()
+        };
+        use dc_core::connects::ConnectsHost;
+        let mut list = page.connects();
+        list.list.push(dc_core::Connect::new(6, "EndX", 12, 5, "Connections.X2", 102));
+        list.list.push(dc_core::Connect::new(6, "BeginX", 9, 5, "PinX", 3));
+        page.set_connects(&list);
+        let doc = vsdx::model::Document {
+            pages: vec![page],
+            ..vsdx::model::Document::default()
+        };
+        let cands = vec![GlueCandidate {
+            id: 5,
+            rect: (2.5, 2.5, 1.0, 1.0),
+            conn_rows: vec![(2, (3.0, 3.5))],
+        }];
+        let sites = glued_sites(&doc, &doc.pages[0], 6, &cands);
+        assert_eq!(sites.len(), 2, "one site per Connect record: {sites:?}");
+        assert!(near(sites[0], (3.0, 3.5)), "static site on the connection point");
+        assert!(near(sites[1], (1.0, 1.0)), "dynamic site on the endpoint");
+    }
+
 }

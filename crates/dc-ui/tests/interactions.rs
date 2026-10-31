@@ -3733,6 +3733,27 @@ fn synth_stencil_opts(
     masters: &[(&str, i64)],
     hidden: &[(&str, i64)],
 ) -> std::path::PathBuf {
+    synth_stencil_full(dir, stem, masters, hidden, &[])
+}
+
+/// [`synth_stencil_full`] with connection points on every master's
+/// shape (#177 tests): `conn` carries (row IX, local X, local Y).
+fn synth_stencil_conn(
+    dir: &std::path::Path,
+    stem: &str,
+    masters: &[(&str, i64)],
+    conn: &[(i64, f64, f64)],
+) -> std::path::PathBuf {
+    synth_stencil_full(dir, stem, masters, &[], conn)
+}
+
+fn synth_stencil_full(
+    dir: &std::path::Path,
+    stem: &str,
+    masters: &[(&str, i64)],
+    hidden: &[(&str, i64)],
+    conn: &[(i64, f64, f64)],
+) -> std::path::PathBuf {
     use vsdx::model::*;
     let xmlns = || {
         vec![
@@ -3796,6 +3817,28 @@ fn synth_stencil_opts(
                 line("LineTo", 5, "0", "0"),
             ],
         }));
+        if !conn.is_empty() {
+            let fmt = |v: f64| format!("{v}");
+            sheet.children.push(SheetChild::Section(Section {
+                name: "Connection".into(),
+                ix: 0,
+                attrs: vec![("N".into(), "Connection".into()), ("IX".into(), "0".into())],
+                cells: vec![],
+                rows: conn
+                    .iter()
+                    .map(|(ix, x, y)| Row {
+                        t: None,
+                        ix: *ix,
+                        n: None,
+                        attrs: vec![("IX".into(), ix.to_string())],
+                        cells: vec![
+                            ("X".into(), Cell::value(fmt(*x))),
+                            ("Y".into(), Cell::value(fmt(*y))),
+                        ],
+                    })
+                    .collect(),
+            }));
+        }
         let shape = Shape {
             id: 1,
             type_: Some("Shape".into()),
@@ -6421,4 +6464,165 @@ fn glued_connector_body_drag_pins_and_does_not_refuse() {
         h.state().debug_cell_formula(page, conn, "EndX")
     );
     assert!((cell_of(&h, page, conn, "EndX") - ex0).abs() > 0.3);
+}
+
+/// #177: connection-point affordances — the approached shape's
+/// points reveal during a connector gesture, the drop target gets
+/// the green-square highlight, and the selected glued connector
+/// shows its glued site(s) as circles.
+#[test]
+fn connection_points_reveal_highlight_and_show_glued_sites() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A 1×1 square master carrying connection points at its top and
+    // bottom edge midpoints (the corpus rect pattern).
+    let s = synth_stencil_conn(tmp.path(), "pts", &[("Pad", 5)], &[(2, 0.5, 1.0), (3, 0.5, 0.0)]);
+    let mut h = harness_with_blank();
+    h.run();
+    h.state_mut().open_stencil_for_test(&s);
+    h.run();
+    wait_for_stencil_entry(&mut h);
+
+    // Place the Pad through the open stencil's click-to-arm,
+    // click-to-place path (same cell-discovery loop as place_master,
+    // against the open stencil's id).
+    use dc_ui::stencil::StencilId;
+    let mut wheels = 0;
+    let from = loop {
+        let cell = h
+            .state()
+            .debug_master_cells()
+            .into_iter()
+            .find(|(id, _)| *id == (StencilId::Open(0), 5))
+            .map(|(_, r)| r)
+            .expect("the open stencil's master cell");
+        if cell.center().y < 760.0 {
+            break cell.center();
+        }
+        wheels += 1;
+        assert!(wheels < 40, "pane never scrolled into view");
+        h.hover_at(egui::pos2(80.0, 400.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -120.0),
+            modifiers: egui::Modifiers::NONE,
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+        });
+        h.run_steps(3);
+    };
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    h.run();
+    let (page, pad) = h.state().debug_sel().expect("the Pad is placed");
+    let pad_rect = h.state().debug_shape_screen_rect_for_test(pad).unwrap();
+
+    // Connector Tool: press on empty page left of the Pad, then
+    // approach it — inside the reveal halo but not on a point.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let top_pt = egui::pos2(pad_rect.center().x, pad_rect.top());
+    let bot_pt = egui::pos2(pad_rect.center().x, pad_rect.bottom());
+    let press = egui::pos2(pad_rect.left() - 120.0, pad_rect.center().y);
+    h.hover_at(press);
+    h.event(egui::Event::PointerButton {
+        pos: press,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    // Far from the Pad: nothing reveals yet.
+    assert!(
+        h.state().debug_conn_fx().reveal.is_empty(),
+        "no reveal while far from the shape"
+    );
+    // Approach: both connection points reveal.
+    let near = egui::pos2(pad_rect.left() - 15.0, pad_rect.center().y);
+    h.hover_at(near);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.reveal.len(), 2, "the Pad's two points reveal: {:?}", fx.reveal);
+    assert!(fx.glue_target.is_none(), "near, but not on a point");
+    // On the top point: it becomes the green-square target.
+    h.hover_at(top_pt);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    let target = fx.glue_target.expect("the top connection point highlights");
+    let pad_page = h.state().debug_shape_page_rect(pad).unwrap();
+    let near_pt = |q: (f64, f64), x: f64, y: f64| (q.0 - x).abs() < 1e-3 && (q.1 - y).abs() < 1e-3;
+    assert!(
+        near_pt(target, pad_page.0 + 0.5, pad_page.1 + 1.0)
+            || near_pt(target, pad_page.0 + 0.5, pad_page.1),
+        "the highlight sits on one of the Pad's points: {target:?} vs rect {pad_page:?}"
+    );
+    // Release there: the connector glues statically and stays
+    // selected — its glued site shows as a circle.
+    h.event(egui::Event::PointerButton {
+        pos: top_pt,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let connects = h.state().debug_connects();
+    assert!(
+        connects.iter().any(|c| c.0 > pad && c.5 >= 100),
+        "a connector statically glued to a connection point: {connects:?}"
+    );
+    let conn_id = connects.iter().find(|c| c.0 > pad).unwrap().0;
+    assert_eq!(
+        h.state().debug_sel().map(|(_, id)| id),
+        Some(conn_id),
+        "the new connector is selected"
+    );
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.glued.len(), 1, "one glued site: {:?}", fx.glued);
+    assert!(
+        near_pt(fx.glued[0], pad_page.0 + 0.5, pad_page.1 + 1.0),
+        "the circle sits on the Pad's top point: {:?} vs rect {:?}",
+        fx.glued[0],
+        pad_page
+    );
+    assert!(fx.reveal.is_empty() && fx.glue_target.is_none(), "no drag affordances at rest");
+
+    // Endpoint-handle drag: back on the Pointer Tool (the Connector
+    // Tool would arm a NEW connector instead), grab the glued end's
+    // handle — it sits exactly on the Pad's top point — and drag it
+    // to the bottom point.
+    let _ = page;
+    h.get_by_label_contains("Pointer Tool").click();
+    h.run();
+    let end_handle = top_pt;
+    h.hover_at(end_handle);
+    h.event(egui::Event::PointerButton {
+        pos: end_handle,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    h.hover_at(bot_pt);
+    h.run();
+    let fx = h.state().debug_conn_fx();
+    assert_eq!(fx.reveal.len(), 2, "reveal during the endpoint drag");
+    let target = fx.glue_target.expect("the bottom point highlights mid-drag");
+    assert!(
+        near_pt(target, pad_page.0 + 0.5, pad_page.1),
+        "on the Pad's bottom point: {target:?}"
+    );
+    h.event(egui::Event::PointerButton {
+        pos: bot_pt,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let connects = h.state().debug_connects();
+    assert!(
+        connects.iter().any(|c| c.0 == conn_id && c.5 == 103),
+        "re-glued to the bottom point (ToPart 103): {connects:?}"
+    );
 }
