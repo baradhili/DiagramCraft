@@ -439,6 +439,12 @@ pub struct RerouteConnectors {
     page: i64,
     moved: Vec<i64>,
     inner: Vec<Box<dyn dc_core::Command>>,
+    /// The apply-time touch list, merged once pass 2 finishes. `undo`
+    /// clears `inner` (its commands are spent), but the history asks
+    /// `touched()` AFTER `undo()` runs — without the cache the
+    /// connector's Ink touch would vanish and its layer texture would
+    /// stay at the dragged raster under the restored bbox (#178).
+    touched_cache: dc_core::TouchList,
 }
 
 impl RerouteConnectors {
@@ -447,15 +453,23 @@ impl RerouteConnectors {
             page,
             moved,
             inner: Vec::new(),
+            touched_cache: dc_core::TouchList::default(),
         }
     }
 }
 
 impl Command for RerouteConnectors {
-    fn touched(&self, _doc: &Document) -> dc_core::TouchList {
+    fn touched(&self, doc: &Document) -> dc_core::TouchList {
+        // #178: after undo spends `inner`, the cached apply-time list
+        // still names every connector that was rewritten — undo must
+        // re-raster them (Ink), or their textures keep the dragged
+        // raster under the restored bounding box.
+        if self.inner.is_empty() {
+            return self.touched_cache.clone();
+        }
         let mut all = dc_core::TouchList::default();
         for c in &self.inner {
-            all.merge(c.touched(_doc));
+            all.merge(c.touched(doc));
         }
         all
     }
@@ -829,6 +843,14 @@ impl Command for RerouteConnectors {
                 }
             }
         }
+        // #178: capture the merged touch list while `inner` still
+        // holds the spent commands — `undo` clears it, but the
+        // history asks `touched()` after undo.
+        let mut all = dc_core::TouchList::default();
+        for c in &self.inner {
+            all.merge(c.touched(doc));
+        }
+        self.touched_cache = all;
         Ok(())
     }
 
@@ -1290,6 +1312,39 @@ mod reroute_master_tests {
             h.numeric().unwrap().abs() - 0.2 < 1e-9,
             "the constant band height is untouched: {:?}",
             h.v
+        );
+    }
+
+    /// #178: `undo` spends `inner`, but the history asks `touched()`
+    /// AFTER undo — the apply-time cache must still name the
+    /// connector (Ink), or its layer texture keeps the dragged raster
+    /// under the restored bounding box.
+    #[test]
+    fn reroute_touched_survives_undo() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let touched = cmd.touched(&ed.doc);
+        assert!(
+            touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 11 && t.touch == dc_core::Touch::Ink),
+            "apply-time touches name the connector: {touched:?}"
+        );
+        cmd.undo(&mut ed.doc).unwrap();
+        let touched = cmd.touched(&ed.doc);
+        assert!(
+            touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 11 && t.touch == dc_core::Touch::Ink),
+            "post-undo touches still name the connector (the cache): {touched:?}"
         );
     }
 

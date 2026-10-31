@@ -162,6 +162,10 @@ pub struct App {
     /// recomputed by `update_drag` while a move drag is live and
     /// painted by the canvas from `DragFx::hints`.
     snap_live: Vec<crate::snap::Hint>,
+    /// The last frame's connection-point affordances (#177): what the
+    /// canvas painted — reveal symbols, glue-target highlight, glued
+    /// sites of the selected connector. Kept as the test seam.
+    conn_fx_last: crate::connectors::ConnPointFx,
     /// The active mouse tool (#108).
     tool: Tool,
     /// #110: align against the page instead of the first-selected
@@ -382,6 +386,10 @@ impl BackPage {
 /// like this at 100 %): converted to page inches per frame by
 /// `snap_ctx_of` (#109).
 const SNAP_STRENGTH_PX: f32 = 8.0;
+/// How close a connector endpoint must come to a shape before its
+/// connection points reveal (#177) — page inches, generous like
+/// Visio's approach affordance.
+const CONN_REVEAL_IN: f64 = 0.6;
 
 /// An OS clipboard image probe's payload: (w, h, RGBA bytes).
 type OsImage = (u32, u32, Vec<u8>);
@@ -497,6 +505,7 @@ impl App {
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
+            conn_fx_last: crate::connectors::ConnPointFx::default(),
             drag_glue: None,
             tool: Tool::Pointer,
             align_to_page: false,
@@ -7019,6 +7028,14 @@ impl App {
         // Background pages render beneath this page's ink (#113) —
         // built before the field borrows below.
         let underlays = self.build_bg_underlays(ui.ctx());
+        // #177: everything the connection-point overlay needs, built
+        // before the destructuring borrows below (the closure runs
+        // inside `canvas::show`, while `view` is borrowed).
+        let conn_cands = self.glue_candidates(&[]);
+        let conn_threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        let conn_snap = self.snap;
+        let conn_sel = self.sel;
+        let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
         let App {
             view, ed, page_idx, ..
@@ -7042,6 +7059,32 @@ impl App {
             }
             false
         };
+        // #177: connection-point affordances for the frame — the
+        // closure paints from inside `canvas::show` and its result is
+        // kept as the test seam.
+        let conn_fx = |live: Option<(f64, f64)>| -> crate::connectors::ConnPointFx {
+            let mut fx = crate::connectors::ConnPointFx::default();
+            if let (Some(ed), Some(pg)) = (ed, page) {
+                if let Some((_, cid)) = conn_sel.filter(|(p, _)| *p == pg.id) {
+                    fx.glued = crate::connectors::glued_sites(&ed.doc, pg, cid, &conn_cands);
+                }
+            }
+            if let Some(p) = live {
+                let g = crate::connectors::conn_point_fx(
+                    &conn_cands,
+                    p,
+                    p,
+                    conn_threshold,
+                    CONN_REVEAL_IN,
+                    conn_snap.glue_active,
+                    conn_snap.glue_connection_points,
+                );
+                fx.reveal = g.reveal;
+                fx.glue_target = g.glue_target;
+            }
+            *conn_fx_seen.borrow_mut() = fx.clone();
+            fx
+        };
         let out = canvas::show(
             ui,
             view,
@@ -7055,6 +7098,7 @@ impl App {
             &underlays,
             self.tool == Tool::Connector,
             armed,
+            &conn_fx,
             &hit,
             &mut mouse,
             // While the in-place text editor is open (#22) the canvas
@@ -7064,6 +7108,7 @@ impl App {
         );
         self.mouse_page = mouse;
         self.canvas_rect = out.canvas_rect;
+        self.conn_fx_last = conn_fx_seen.into_inner();
         if self.text_edit.is_some() {
             // Click anywhere on the canvas = click outside the text:
             // end the edit (commit; the editor decided Esc the same
@@ -10036,6 +10081,14 @@ impl App {
     #[doc(hidden)]
     pub fn debug_sel_set_len(&self) -> usize {
         self.sel_set.len()
+    }
+
+    /// kittest (#177): the last painted connection-point overlay —
+    /// reveal points, glue-target highlight, and the selected
+    /// connector's glued sites, all page inches y-up.
+    #[doc(hidden)]
+    pub fn debug_conn_fx(&self) -> crate::connectors::ConnPointFx {
+        self.conn_fx_last.clone()
     }
 
     /// #109 tests: the live snap & glue toggles.
