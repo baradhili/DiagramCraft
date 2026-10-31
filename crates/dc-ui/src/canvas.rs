@@ -189,6 +189,9 @@ pub struct CanvasOut {
     pub right_click_page_pos: Option<(f64, f64)>,
     /// A stencil drop happened at this pin position (inches, y-up).
     pub drop_pos: Option<(f64, f64)>,
+    /// An AutoConnect arrow was clicked (#108): the unit direction
+    /// (page-space, y-up) the new shape goes — right/left/up/down.
+    pub autoclick: Option<(f64, f64)>,
     /// A selection-handle drag finished: (handle, press position,
     /// release position), both in page inches y-up. The app applies the
     /// resize / endpoint move / line move.
@@ -251,6 +254,20 @@ pub struct GuideFx {
     pub x: f64,
     pub y: f64,
     pub selected: bool,
+}
+
+/// One line-jump hop to paint above the ink (#108): page inches
+/// y-up, the jumping line's direction, both strokes and colors (the
+/// under line is redrawn through the gap so only the JUMPER breaks).
+#[derive(Debug, Clone, Copy)]
+pub struct JumpFx {
+    pub at: (f64, f64),
+    pub dir: (f64, f64),
+    pub under: (f64, f64),
+    pub weight: f64,
+    pub under_weight: f64,
+    pub color: Color32,
+    pub under_color: Color32,
 }
 
 /// The guide color: Visio's teal guide lines.
@@ -459,6 +476,7 @@ pub fn show(
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
     guides: &[GuideFx],      // #113: guide overlay, above ink
+    jumps: &[JumpFx],        // #108: line-jump hops, above ink
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
     lasso_tool: bool, // #110: the Lasso Select tool is active
@@ -483,6 +501,7 @@ pub fn show(
         dbl_click_page_pos: None,
         right_click_page_pos: None,
         drop_pos: None,
+        autoclick: None,
         handle_drag_done: None,
         press_page_pos: None,
         marquee_done: None,
@@ -548,6 +567,45 @@ pub fn show(
             .find(|(_, p)| pos.distance(*p) <= HANDLE_GRAB)
             .map(|(id, _)| *id)
     };
+    // #108 AutoConnect arrows: one triangle at each mid-edge of the
+    // primary selection while the pointer hovers the shape (Visio's
+    // blue AutoConnect tags). Returns (screen rect, page-space unit
+    // direction) per edge; the app draws the duplicate+connector on a
+    // click.
+    // sel_rect is page-inches (y-down viewBox); the arrows live in
+    // screen px — map the box the way `to_screen` (below) does.
+    let sel_screen = sel_rect.map(|sr| {
+        let tl = Pos2::new(
+            view.pan.x + sr.left() * view.px_per_in(),
+            view.pan.y + sr.top() * view.px_per_in(),
+        );
+        Rect::from_min_size(
+            tl,
+            Vec2::new(sr.width() * view.px_per_in(), sr.height() * view.px_per_in()),
+        )
+    });
+    let autoc_arrows: Option<Vec<(Rect, (f64, f64))>> = sel_screen.map(|sr| {
+        let c = sr.center();
+        [
+            (Pos2::new(sr.right() + 9.0, c.y), (1.0, 0.0)),
+            (Pos2::new(sr.left() - 9.0, c.y), (-1.0, 0.0)),
+            (Pos2::new(c.x, sr.top() - 9.0), (0.0, 1.0)),
+            (Pos2::new(c.x, sr.bottom() + 9.0), (0.0, -1.0)),
+        ]
+        .into_iter()
+        .map(|(pos, dir)| (Rect::from_center_size(pos, Vec2::splat(18.0)), dir))
+        .collect()
+    });
+    let arrow_at = |pos: Pos2| -> Option<(f64, f64)> {
+        autoc_arrows
+            .as_ref()?
+            .iter()
+            .find(|(r, _)| r.contains(pos))
+            .map(|(_, d)| *d)
+    };
+    let hover_in_sel = resp.hover_pos().is_some_and(|p| {
+        sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some()
+    });
 
     // Stable literal ids are intended for the drag-state memory keys.
     let mem_handle = egui::Id::unique("dc-handle-drag");
@@ -556,6 +614,7 @@ pub fn show(
     let mem_lasso = egui::Id::unique("dc-lasso");
     let mem_guide = egui::Id::unique("dc-guide-drag");
     let mem_connector = egui::Id::unique("dc-connector-drag");
+    let mem_autoc = egui::Id::unique("dc-autoclick");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -574,6 +633,9 @@ pub fn show(
             // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else if let Some(dir) = arrow_at(p) {
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
             } else if connector_tool {
                 // The Connector Tool (#108) owns the gesture: press
                 // anywhere (on a shape = glue start), release on the
@@ -618,6 +680,22 @@ pub fn show(
     // drag_stopped() needs the drag to have "officially" started (>6 px
     // of travel or >0.8 s hold), which tiny precise drags never reach —
     // so the arm/commit pair is tracked here instead (#59).
+    // AutoConnect arrow click (#108): the arm commits when the
+    // release stays inside the arrow.
+    let armed_autoc = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<(f64, f64)>(mem_autoc));
+    if primary_released || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.ctx()
+            .memory_mut(|m| m.data.remove::<(f64, f64)>(mem_autoc));
+        if let (Some(dir), true) = (armed_autoc, primary_released) {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                if arrow_at(p) == Some(dir) {
+                    out.autoclick = Some(dir);
+                }
+            }
+        }
+    }
     let armed_handle = ui.ctx().memory(|m| m.data.get_temp::<HandleId>(mem_handle));
     if primary_released || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.ctx()
@@ -759,6 +837,12 @@ pub fn show(
     // trails freehand, also a crosshair.
     if connector_tool || lasso_tool {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+    }
+    // AutoConnect arrow cursor.
+    if let Some(hp) = resp.hover_pos() {
+        if arrow_at(hp).is_some() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+        }
     }
     // Handle cursors.
     if let Some(hp) = resp.hover_pos() {
@@ -1270,6 +1354,20 @@ pub fn show(
         let c = page_to_screen(q.0, q.1, view, page);
         p.circle_stroke(c, 5.0, Stroke::new(2.0, GLUE));
     }
+    if let Some(q) = fx.tool_selected {
+        // The Connection Point tool's selection (#108): the point's
+        // square ring in the selection color — Delete removes it.
+        let c = page_to_screen(q.0, q.1, view, page);
+        let r = Rect::from_center_size(c, Vec2::splat(10.0));
+        p.rect_stroke(r, 0.0, Stroke::new(2.0, t.selection), egui::StrokeKind::Middle);
+        let d = 2.5;
+        for (a, b) in [
+            (c - Vec2::new(d, d), c + Vec2::new(d, d)),
+            (c - Vec2::new(d, -d), c + Vec2::new(d, -d)),
+        ] {
+            p.line_segment([a, b], Stroke::new(1.6, t.selection));
+        }
+    }
 
     // Dynamic-grid hints (#109): dashed full-canvas alignment lines
     // and labeled equal-spacing gaps, Visio's drag-time feedback.
@@ -1326,6 +1424,75 @@ pub fn show(
                 4.0,
             ));
         }
+    }
+
+    // AutoConnect arrows (#108): Visio's blue tags at the selection's
+    // mid-edges while hovering; the hovered arrow fills.
+    if let Some(arrows) = &autoc_arrows {
+        if hover_in_sel && !interaction_lock {
+            let hovered = resp.hover_pos();
+            for (r, dir) in arrows {
+                let h = hovered.is_some_and(|h| r.contains(h));
+                let c = r.center();
+                // The triangle points AWAY from the shape, along dir
+                // (screen: y-down, so page-up flips).
+                let (ax, ay) = (dir.0 as f32, -dir.1 as f32);
+                let tip = c + Vec2::new(ax, ay) * 7.0;
+                let b1 = c + Vec2::new(-ay, ax) * 5.0;
+                let b2 = c - Vec2::new(-ay, ax) * 5.0;
+                let (fill, stroke) = if h {
+                    (
+                        Color32::from_rgb(0x2e, 0x75, 0xb6),
+                        Stroke::new(1.0, Color32::from_rgb(0x1f, 0x4e, 0x79)),
+                    )
+                } else {
+                    (
+                        Color32::from_rgba_premultiplied(50, 117, 182, 110),
+                        Stroke::new(1.0, Color32::from_rgb(0x2e, 0x75, 0xb6)),
+                    )
+                };
+                p.add(egui::Shape::convex_polygon(
+                    vec![tip, b1, b2],
+                    fill,
+                    stroke,
+                ));
+            }
+        }
+    }
+
+    // Line jumps (#108): each hop breaks the JUMPING line with a
+    // paper-colored gap, redraws the under line through it, and arcs
+    // the jumper over the crossing (Visio's default arc style).
+    for j in jumps {
+        let ppi = view.px_per_in();
+        let r = crate::connectors::JUMP_RADIUS_IN as f32 * ppi;
+        let at = page_to_screen(j.at.0, j.at.1, view, page);
+        let dir = Vec2::new(j.dir.0 as f32, -(j.dir.1 as f32)); // y flip
+        let under = Vec2::new(j.under.0 as f32, -(j.under.1 as f32));
+        let w = (j.weight * ppi as f64) as f32;
+        let uw = (j.under_weight * ppi as f64) as f32;
+        // 1. the gap — paper-colored, slightly wider than the jumper.
+        let g1 = at - dir * r;
+        let g2 = at + dir * r;
+        p.line_segment([g1, g2], Stroke::new(w + 2.0, Color32::WHITE));
+        // 2. the under line passes straight through the gap.
+        let ext = r + uw + 1.0;
+        p.line_segment(
+            [at - under * ext, at + under * ext],
+            Stroke::new(uw, j.under_color),
+        );
+        // 3. the hop arc, bulging up on screen.
+        let n = Vec2::new(-dir.y, dir.x);
+        let n = if n.y > 0.0 { -n } else { n };
+        let mut pts = Vec::with_capacity(9);
+        for k in 0..=8 {
+            let t = k as f32 / 8.0;
+            let ang = std::f32::consts::PI * t;
+            // local frame: from g1 around to g2 through at + n*r.
+            let local = -dir * r * ang.cos() + n * r * ang.sin();
+            pts.push(at + local);
+        }
+        p.add(egui::Shape::line(pts, Stroke::new(w, j.color)));
     }
 
     // Rulers.

@@ -1348,6 +1348,112 @@ impl crate::Command for RemoveSectionRow {
     }
 }
 
+/// Change one section row's TYPE (`Row.t`), keeping its cells —
+/// #108's curved routing turns a route's `LineTo` row into a
+/// `CubicBezTo` (and back). Undo restores the prior type.
+#[derive(Debug, Clone)]
+pub struct SetSectionRowType {
+    pub scope: Scope,
+    pub section: String,
+    pub section_ix: i64,
+    pub row: RowSel,
+    pub t: Option<String>,
+    old: Option<Option<String>>,
+}
+
+impl SetSectionRowType {
+    pub fn new(
+        scope: Scope,
+        section: impl Into<String>,
+        section_ix: i64,
+        row: RowSel,
+        t: Option<String>,
+    ) -> SetSectionRowType {
+        SetSectionRowType {
+            scope,
+            section: section.into(),
+            section_ix,
+            row,
+            t,
+            old: None,
+        }
+    }
+}
+
+impl crate::Command for SetSectionRowType {
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        match &self.scope {
+            Scope::Shape { page, shape } => {
+                match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                    Some(root) => crate::TouchList {
+                        pages: vec![],
+                        shapes: vec![crate::Touched {
+                            page: *page,
+                            shape: root,
+                            touch: crate::Touch::Ink,
+                        }],
+                    },
+                    None => crate::TouchList::page(*page),
+                }
+            }
+            Scope::PageSheet { page } => crate::TouchList::page(*page),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
+
+    fn label(&self) -> String {
+        format!(
+            "set {} row {:?} type to {:?} on {}",
+            self.section, self.row, self.t, self.scope
+        )
+    }
+    fn apply(&mut self, doc: &mut Document) -> Result<()> {
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("section {}:{} not found", self.section, self.section_ix)
+            })?;
+        let ri = row_index(&sec.rows, &self.row)
+            .with_context(|| format!("row {:?} not found", self.row))?;
+        self.old = Some(sec.rows[ri].t.clone());
+        sec.rows[ri].t = self.t.clone();
+        Ok(())
+    }
+    fn undo(&mut self, doc: &mut Document) -> Result<()> {
+        let old = self
+            .old
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("not yet applied"))?;
+        let s = sheet_mut(doc, &self.scope)?;
+        let sec = s
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                vsdx::model::SheetChild::Section(sec)
+                    if sec.name == self.section && sec.ix == self.section_ix =>
+                {
+                    Some(sec)
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("section vanished before undo"))?;
+        let ri = row_index(&sec.rows, &self.row)
+            .with_context(|| format!("row {:?} vanished before undo", self.row))?;
+        sec.rows[ri].t = old;
+        Ok(())
+    }
+}
+
 /// Remove a shape (any depth), storing it with its position for undo.
 #[derive(Debug, Clone)]
 pub struct RemoveShape {

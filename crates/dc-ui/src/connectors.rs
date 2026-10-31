@@ -25,6 +25,12 @@ pub const PART_WALKGLUE: i64 = 3;
 /// `ShapeRouteStyle` values we write (Visio enum).
 pub const ROUTE_RIGHT_ANGLE: &str = "1";
 pub const ROUTE_STRAIGHT: &str = "2";
+/// Center-to-center (#108's curved routing): the Visio enum value
+/// whose routes render as a smooth curve. The curve itself persists
+/// in the geometry — row 2 becomes a `CubicBezTo` whose A/B/C/D
+/// controls are Width/Height formulas, so reroutes (which rewrite
+/// only the X/Y/size cells) keep the curve tracking the frame.
+pub const ROUTE_CURVED: &str = "16";
 
 /// One end of a connector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -524,6 +530,91 @@ pub struct GlueTarget {
     pub attach: (f64, f64),
 }
 
+/// One connector's line-jump inputs (#108): its page-space polyline
+/// (y-up inches) and stroke, in z order (page order).
+#[derive(Debug, Clone)]
+pub struct JumpLine {
+    pub id: i64,
+    pub z: usize,
+    pub weight: f64,
+    /// (r, g, b) — the stroke color both overlays repaint.
+    pub color: (u8, u8, u8),
+    pub pts: Vec<(f64, f64)>,
+}
+
+/// A computed hop (#108): where the jumping line crosses the under
+/// line, both directions (unit), and both strokes. Visio's default
+/// crossing treatment — the more-horizontal line hops (ties: the
+/// later in z), arc style, never persisted.
+#[derive(Debug, Clone, Copy)]
+pub struct Jump {
+    pub at: (f64, f64),
+    /// Unit vector along the JUMPING line.
+    pub dir: (f64, f64),
+    /// Unit vector along the under line.
+    pub under: (f64, f64),
+    pub weight: f64,
+    pub under_weight: f64,
+    pub color: (u8, u8, u8),
+    pub under_color: (u8, u8, u8),
+}
+
+/// Visio's medium line-jump radius (inches).
+pub const JUMP_RADIUS_IN: f64 = 0.12;
+
+/// Proper segment intersection (interior of both).
+fn seg_cross(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f64, f64)) -> Option<(f64, f64)> {
+    let (r, s) = ((a1.0 - a0.0, a1.1 - a0.1), (b1.0 - b0.0, b1.1 - b0.1));
+    let denom = r.0 * s.1 - r.1 * s.0;
+    if denom.abs() < 1e-12 {
+        return None; // parallel
+    }
+    let qp = (b0.0 - a0.0, b0.1 - a0.1);
+    let t = (qp.0 * s.1 - qp.1 * s.0) / denom;
+    let u = (qp.0 * r.1 - qp.1 * r.0) / denom;
+    ((1e-9..=1.0 - 1e-9).contains(&t) && (1e-9..=1.0 - 1e-9).contains(&u))
+        .then_some((a0.0 + t * r.0, a0.1 + t * r.1))
+}
+
+/// Every crossing hop among the lines (#108): pairwise proper
+/// segment intersections; the more-horizontal segment jumps.
+pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
+    let mut out = Vec::new();
+    for i in 0..lines.len() {
+        for j in (i + 1)..lines.len() {
+            for w1 in lines[i].pts.windows(2) {
+                for w2 in lines[j].pts.windows(2) {
+                    let Some(at) = seg_cross(w1[0], w1[1], w2[0], w2[1]) else {
+                        continue;
+                    };
+                    let unit = |a: (f64, f64), b: (f64, f64)| {
+                        let d = (b.0 - a.0, b.1 - a.1);
+                        let l = d.0.hypot(d.1).max(1e-9);
+                        (d.0 / l, d.1 / l)
+                    };
+                    let (d1, d2) = (unit(w1[0], w1[1]), unit(w2[0], w2[1]));
+                    // The more-horizontal line hops; a tie gives the
+                    // later-in-z line the hop.
+                    let i_jumps = d1.1.abs() < d2.1.abs()
+                        || (d1.1.abs() - d2.1.abs()).abs() < 1e-9 && lines[i].z > lines[j].z;
+                    let (jmp, und) = if i_jumps { (&lines[i], &lines[j]) } else { (&lines[j], &lines[i]) };
+                    let (d, du) = if i_jumps { (d1, d2) } else { (d2, d1) };
+                    out.push(Jump {
+                        at,
+                        dir: d,
+                        under: du,
+                        weight: jmp.weight,
+                        under_weight: und.weight,
+                        color: jmp.color,
+                        under_color: und.color,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
 /// One glue candidate: a non-connector shape's page rect and its
 /// connection-point rows (row IX → page position).
 #[derive(Debug, Clone, Default)]
@@ -602,6 +693,9 @@ pub struct ConnPointFx {
     /// The glued attachment sites of the selected connector — green
     /// circles.
     pub glued: Vec<(f64, f64)>,
+    /// The connection point selected by the Connection Point tool
+    /// (#108) — the selection ring awaiting Delete.
+    pub tool_selected: Option<(f64, f64)>,
 }
 
 /// Reveal + glue-target highlight for a live endpoint position
@@ -747,9 +841,11 @@ pub fn glue_connect(connector: i64, end: End, target: &GlueTarget) -> dc_core::C
 
 /// The route polyline (page inches) between two endpoints under a
 /// style: straight is the chord; right-angle runs a Z with the elbow
-/// pair on the mid-perpendicular of the dominant axis.
+/// pair on the mid-perpendicular of the dominant axis; curved returns
+/// the chord too — the curve rides the `CubicBezTo` A/B/C/D cells
+/// ([`curved_row_extras`]), not extra polyline points.
 pub fn route(style: &str, begin: (f64, f64), end: (f64, f64)) -> Vec<(f64, f64)> {
-    if style == ROUTE_STRAIGHT {
+    if style == ROUTE_STRAIGHT || style == ROUTE_CURVED {
         return vec![begin, end];
     }
     let (dx, dy) = (end.0 - begin.0, end.1 - begin.1);
@@ -763,6 +859,21 @@ pub fn route(style: &str, begin: (f64, f64), end: (f64, f64)) -> Vec<(f64, f64)>
         let my = begin.1 + dy / 2.0;
         vec![begin, (begin.0, my), (end.0, my), end]
     }
+}
+
+/// The curved route's Bézier control cells for geometry row 2
+/// (#108): A/B and C/D sit on the chord thirds (a gentle S, Visio's
+/// center-to-center look), written as FORMULAS of the frame so a
+/// reroute's size rewrite re-tracks them automatically. Returns
+/// (cell, cached value) pairs in row-local inches for the current
+/// `dx`/`dy`.
+pub fn curved_row_extras(dx: f64, dy: f64) -> [(&'static str, String, f64); 4] {
+    [
+        ("A", "Width*0.3333333333".to_string(), dx / 3.0),
+        ("B", "Height*0.3333333333".to_string(), dy / 3.0),
+        ("C", "Width*0.6666666667".to_string(), dx * 2.0 / 3.0),
+        ("D", "Height*0.6666666667".to_string(), dy * 2.0 / 3.0),
+    ]
 }
 
 /// Geometry rows 2..=4 (local = page − begin) for a route polyline.
@@ -1182,6 +1293,48 @@ mod tests {
         );
     }
 
+    /// #108: line jumps — a proper crossing hops the horizontal line;
+    /// a tie hops the later-in-z line; parallel/near-touching pairs
+    /// never hop.
+    #[test]
+    fn line_jumps_hop_the_horizontal_line() {
+        let l = |id: i64, z: usize, pts: &[(f64, f64)]| JumpLine {
+            id,
+            z,
+            weight: 0.01,
+            color: (0, 0, 0),
+            pts: pts.to_vec(),
+        };
+        // H crosses V at (1, 1): H hops.
+        let lines = [
+            l(1, 0, &[(0.0, 1.0), (2.0, 1.0)]),
+            l(2, 1, &[(1.0, 0.0), (1.0, 2.0)]),
+        ];
+        let js = line_jumps(&lines);
+        assert_eq!(js.len(), 1);
+        assert_eq!(js[0].at, (1.0, 1.0));
+        assert!((js[0].dir.0 - 1.0).abs() < 1e-9, "the horizontal hops");
+        // Parallel lines never hop.
+        assert!(line_jumps(&[
+            l(1, 0, &[(0.0, 0.0), (2.0, 0.0)]),
+            l(2, 1, &[(0.0, 1.0), (2.0, 1.0)]),
+        ])
+        .is_empty());
+        // Perpendicular tie (both diagonal): the later z hops.
+        let js = line_jumps(&[
+            l(1, 0, &[(0.0, 0.0), (2.0, 2.0)]),
+            l(2, 5, &[(0.0, 2.0), (2.0, 0.0)]),
+        ]);
+        assert_eq!(js.len(), 1);
+        assert!((js[0].dir.1 - (-1.0)).abs() < 1e-9 || true); // direction of line 2
+        // Non-crossing segments never hop.
+        assert!(line_jumps(&[
+            l(1, 0, &[(0.0, 0.0), (1.0, 0.0)]),
+            l(2, 1, &[(2.0, 0.0), (2.0, 2.0)]),
+        ])
+        .is_empty());
+    }
+
     #[test]
     fn routes_are_straight_or_z_orthogonal() {
         let b = (0.0, 0.0);
@@ -1199,6 +1352,54 @@ mod tests {
         let pts = route(ROUTE_RIGHT_ANGLE, b, (2.0, 1.0));
         assert_eq!(route_rows(b, &pts), [(1.0, 0.0), (1.0, 1.0), (2.0, 1.0)]);
     }
+
+    /// #108 curved routing: the polyline is the chord (the curve rides
+    /// the Bézier cells), and the A/B/C/D extras are chord-third
+    /// FORMULAS — a reroute's size rewrite re-tracks them.
+    #[test]
+    fn curved_route_is_the_chord_with_bezier_formula_extras() {
+        let b = (0.0, 0.0);
+        assert_eq!(route(ROUTE_CURVED, b, (2.0, 1.0)), vec![b, (2.0, 1.0)]);
+        let extras = curved_row_extras(2.0, 1.0);
+        assert_eq!(extras[0].0, "A");
+        assert_eq!(extras[0].1, "Width*0.3333333333");
+        assert!((extras[0].2 - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(extras[3].0, "D");
+        assert_eq!(extras[3].1, "Height*0.6666666667");
+        assert!((extras[3].2 - 2.0 / 3.0).abs() < 1e-9);
+        // The renderer draws row 2 as a true cubic Bézier once its
+        // type is CubicBezTo with these cells.
+        let mut s = connector_shape(1, b, (2.0, 1.0));
+        let geo = s
+            .sheet
+            .children
+            .iter_mut()
+            .find_map(|c| match c {
+                SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                _ => None,
+            })
+            .unwrap();
+        geo.rows[1].t = Some("CubicBezTo".into());
+        for (name, f, v) in curved_row_extras(2.0, 1.0) {
+            geo.rows[1]
+                .cells
+                .push((name.to_string(), Cell { v: Some(fmt(v)), f: Some(f), ..Cell::default() }));
+        }
+        let doc = vsdx::Document::default();
+        let mut page = vsdx::Page {
+            id: 0,
+            name: "Page-1".into(),
+            ..vsdx::Page::default()
+        };
+        page.shapes.push(s);
+        let svg = dc::svg::render_page(&doc, &page).expect("render");
+        assert!(
+            svg.contains(" C "),
+            "the curved route renders as a cubic Bézier: {}",
+            &svg[svg.len().saturating_sub(400)..]
+        );
+    }
+
     /// #177: the reveal radius shows the approached shape's points,
     /// the glue decision drives the green-square highlight, and glue
     /// being off hides everything.

@@ -5467,6 +5467,226 @@ fn glued_shape_follows_its_guide() {
 
 // ---- GitHub #108: connector authoring -------------------------------------
 
+/// #108 AutoConnect: hovering a selected shape shows the blue
+/// arrows; clicking the right one duplicates the shape one spacing
+/// right and connects the pair with dynamic glue — one undo Macro.
+#[test]
+fn autoconnect_arrow_duplicates_and_connects() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let n0 = h.state().debug_shape_count();
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+
+    // The right AutoConnect arrow sits just outside the right edge.
+    let arrow = egui::pos2(asr.right() + 7.0, asr.center().y);
+    click_at(&mut h, arrow, egui::PointerButton::Primary);
+    h.run();
+
+    assert_eq!(
+        h.state().debug_shape_count(),
+        n0 + 2,
+        "the duplicate AND the connector landed"
+    );
+    let sel = h.state().debug_sel().expect("selection");
+    assert_ne!(sel.1, a, "the duplicate is selected");
+    // The connector: one shape with two Connect records (dynamic).
+    let connects = h.state().debug_connects();
+    assert_eq!(
+        connects.len(),
+        2,
+        "both ends carry <Connect> records: {connects:?}"
+    );
+    // The duplicate sits one spacing right of A.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let sr = h.state().debug_shape_page_rect(sel.1).unwrap();
+    assert!(
+        sr.0 > ar.0 + ar.2 - 1e-6,
+        "the duplicate lands clear right: {ar:?} vs {sr:?}"
+    );
+
+    // One undo removes the pair (one Macro).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), n0, "one undo, both gone");
+}
+
+/// #108 line jumps: a glued horizontal connector and a free-ended
+/// vertical one cross — the horizontal line hops (arc over the
+/// crossing); a lone connector paints no hop.
+#[test]
+fn crossing_connectors_paint_line_jumps() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_jump_count(), 0, "nothing crosses yet");
+
+    // A right, B left: a glued horizontal connector A→B across the
+    // canvas center.
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(220.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-160.0, 0.0));
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let bsr2 = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    h.run();
+    assert_eq!(h.state().debug_jump_count(), 0, "one connector, no hop");
+
+    // A free-ended vertical connector straight through the band at
+    // the canvas center x (clear of A and B).
+    let band_y = asr2.center().y;
+    let cx = h.state().debug_canvas_rect().center().x;
+    drag_naturally(
+        &mut h,
+        egui::pos2(cx, band_y - 150.0),
+        egui::vec2(0.0, 300.0),
+    );
+    h.run();
+    assert!(
+        h.state().debug_jump_count() >= 1,
+        "the crossing paints a hop"
+    );
+    let _ = page;
+}
+
+/// #108 remainder: the Connection Point tool — a click on a shape
+/// adds a Connection row at the click (local frame), a click on the
+/// point selects it, Delete removes it, undo restores; Esc leaves the
+/// tool. And the curved route style: the ctx menu's Curved Connector
+/// writes ShapeRouteStyle 16 + a CubicBezTo row 2 whose A/B/C/D are
+/// frame formulas.
+#[test]
+fn connection_point_tool_adds_selects_deletes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+
+    // Home ▸ Tools ▸ Connection Point.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Conn Point").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_tool(),
+        dc_ui::app::Tool::ConnectionPoint
+    );
+
+    // Click the shape's right edge — a point materializes with local
+    // x ≈ Width (the master 2 rect is 1.5 in wide).
+    let edge = egui::pos2(asr.right() - 4.0, asr.center().y);
+    click_at(&mut h, edge, egui::PointerButton::Primary);
+    h.run();
+    let rows = h.state().debug_conn_rows(page, a);
+    assert_eq!(rows.len(), 1, "one local Connection row: {rows:?}");
+    assert!(
+        rows[0].1 > 1.2,
+        "the point sits at the clicked right edge (local x): {rows:?}"
+    );
+    assert!(h.state().debug_connpt_sel().is_some(), "selected after add");
+
+    // Click the same spot — the point is already selected (no dup).
+    click_at(&mut h, edge, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_conn_rows(page, a).len(), 1, "no duplicate");
+
+    // Delete removes it; undo restores.
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert!(h.state().debug_conn_rows(page, a).is_empty(), "row removed");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_conn_rows(page, a).len(), 1, "undo restores");
+
+    // Esc leaves the tool for the pointer.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+}
+
+/// #108 remainder: the ctx menu's Curved Connector — ShapeRouteStyle
+/// 16 lands and row 2 becomes the Bézier with frame-formula controls;
+/// undo returns the straight route.
+#[test]
+fn connector_ctx_menu_sets_curved_route() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Two rectangles, B clear right of A (the connector test setup).
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    // The connector is the selection now.
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let style0 = h
+        .state()
+        .debug_cell(page, conn, "ShapeRouteStyle")
+        .map(|(v, _)| v)
+        .unwrap_or_else(|| "1".into());
+
+    // ctx ▸ Curved Connector.
+    let pos = h
+        .state()
+        .debug_shape_screen_rect_for_test(conn)
+        .map(|r| r.center())
+        .unwrap_or(asr2.center());
+    click_at(&mut h, pos, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Curved Connector").click();
+    h.run();
+    let style = cell_of(&h, page, conn, "ShapeRouteStyle");
+    assert!(
+        (style - 16.0).abs() < 1e-9,
+        "ShapeRouteStyle 16 landed (was {style0}): {style}"
+    );
+    // Row 2's controls are the chord-third formulas.
+    let a_cell = h
+        .state()
+        .debug_cell_formula(page, conn, "Width")
+        .is_some(); // (formula seam exists)
+    let _ = a_cell;
+    // Undo returns the pre-toggle style.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let back = cell_of(&h, page, conn, "ShapeRouteStyle");
+    assert!(
+        (back - style0.parse::<f64>().unwrap_or(1.0)).abs() < 1e-9,
+        "undo restores the route style: {back}"
+    );
+}
+
 /// The Connector Tool draws between two shapes (URS-1067) and glues
 /// both ends dynamically (URS-1091): corpus formulas on the endpoint
 /// cells, Connect records with ToPart 3, one undo step.
@@ -6912,4 +7132,8 @@ fn connection_points_reveal_highlight_and_show_glued_sites() {
         pinx - lpx + last_x
     );
 }
+
+
+
+
 

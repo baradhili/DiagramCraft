@@ -42,6 +42,7 @@ pub enum Action {
     SelectAll,
     SelectByType,
     LassoTool,
+    ConnPointTool,
     FormatPainter,
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.
@@ -157,6 +158,7 @@ pub enum Icon {
     Magnet,
     Connector,
     Lasso,
+    ConnPoint,
     AlignTop,
     AlignMiddle,
     AlignBottom,
@@ -234,6 +236,7 @@ impl Icon {
             Icon::Magnet => "magnet",
             Icon::Connector => "connector",
             Icon::Lasso => "selection-ellipse",
+            Icon::ConnPoint => "vector-point",
             Icon::AlignTop => "format-vertical-align-top",
             Icon::AlignMiddle => "format-vertical-align-center",
             Icon::AlignBottom => "format-vertical-align-bottom",
@@ -1170,6 +1173,18 @@ impl Icon {
                     let a1 = (i as f32 + 0.55) * std::f32::consts::TAU / n as f32;
                     let pt = |a: f32| c + Vec2::new(a.cos() * rx, a.sin() * ry);
                     p.line_segment([pt(a0), pt(a1)], Stroke::new(1.6, blue));
+                }
+            }
+            Icon::ConnPoint => {
+                // square with an × — the connection-point glyph
+                let r = Rect::from_center_size(c, Vec2::splat(12.0));
+                p.rect_stroke(r, 0.0, Stroke::new(1.6, blue), egui::StrokeKind::Middle);
+                let d = 3.0;
+                for (a, b) in [
+                    (c - Vec2::new(d, d), c + Vec2::new(d, d)),
+                    (c - Vec2::new(d, -d), c + Vec2::new(d, -d)),
+                ] {
+                    p.line_segment([a, b], Stroke::new(1.6, blue));
                 }
             }
             Icon::Magnet => {

@@ -203,6 +203,11 @@ pub struct App {
     /// #110 remainder: the painter stays armed across applications
     /// (Visio's double-click Format Painter) until Esc or a cancel.
     painter_sticky: bool,
+    /// #108: the Connection Point tool's selected point — (shape, row
+    /// ix); Delete removes the row.
+    connpt_sel: Option<(i64, i64)>,
+    /// #108: the line-jump hops painted on the last frame (test seam).
+    jumps_last: usize,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
@@ -407,6 +412,10 @@ pub enum Tool {
     Pointer,
     Connector,
     Lasso,
+    /// #108: the Connection Point tool — click a shape to add a
+    /// connection point, click an existing one to select it (Delete
+    /// removes).
+    ConnectionPoint,
 }
 
 struct DragState {
@@ -527,6 +536,8 @@ impl App {
             last_picture: None,
             painter_armed: None,
             painter_sticky: false,
+            connpt_sel: None,
+            jumps_last: 0,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1965,8 +1976,12 @@ impl App {
             if ctrl && i.key_pressed(egui::Key::Y) {
                 self.do_redo();
             }
-            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
-                self.delete_selection();
+            if i.key_pressed(egui::Key::Delete) && !kb_owned {
+                if self.connpt_sel.is_some() {
+                    self.delete_selected_conn_point();
+                } else if self.sel.is_some() {
+                    self.delete_selection();
+                }
             }
             // Esc closes the frontmost open dialog first (#110
             // tab-order audit: Visio dismisses a dialog on Esc);
@@ -1974,9 +1989,13 @@ impl App {
             if i.key_pressed(egui::Key::Escape) && !kb_owned {
                 let consumed = self.close_front_dialog();
                 if !consumed {
-                    if self.tool == Tool::Connector || self.tool == Tool::Lasso {
+                    if matches!(
+                        self.tool,
+                        Tool::Connector | Tool::Lasso | Tool::ConnectionPoint
+                    ) {
                         self.tool = Tool::Pointer;
                     }
+                    self.connpt_sel = None;
                     if self.painter_armed.is_some() {
                         self.painter_armed = None;
                         self.painter_sticky = false;
@@ -3374,6 +3393,236 @@ impl App {
         self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
     }
 
+    /// #108 AutoConnect: an arrow click duplicates the selected shape
+    /// one spacing unit in the arrow's direction and connects the pair
+    /// (dynamic glue both ends) — one undo Macro, Visio's
+    /// click-the-blue-arrow flow.
+    fn autoconnect(&mut self, dir: (f64, f64)) {
+        use crate::connectors::{
+            attach_point, bake_end, bake_trigger, glue_connect, connector_shape,
+            rewrite_route_rows, route, route_rows, walkglue_formula, End, GlueKind, GlueTarget,
+            ROUTE_RIGHT_ANGLE,
+        };
+        let Some((page_id, sid)) = self.sel else {
+            return;
+        };
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return;
+        };
+        if crate::connectors::is_connector(sh) || crate::guides::is_guide(sh) {
+            self.status = "AutoConnect needs a 2D shape".into();
+            return;
+        }
+        let Some(rect) = self.shape_rect(&ed.doc, page_id, sh) else {
+            return;
+        };
+        // Visio's spacing: one shape-size plus a gap, along the arrow.
+        let gap = 0.4;
+        let offset = (
+            dir.0 * (rect.2 + gap) * dir.0.abs(),
+            dir.1 * (rect.3 + gap) * dir.1.abs(),
+        );
+        let dup_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let conn_id = dup_id + 1;
+        let src_c = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        let dup_rect = (rect.0 + offset.0, rect.1 + offset.1, rect.2, rect.3);
+        let dup_c = (dup_rect.0 + rect.2 / 2.0, dup_rect.1 + rect.3 / 2.0);
+        let beg_attach = attach_point(rect, dup_c);
+        let end_attach = attach_point(dup_rect, src_c);
+        let mut conn = connector_shape(conn_id, beg_attach, end_attach);
+        let pts = route(ROUTE_RIGHT_ANGLE, beg_attach, end_attach);
+        rewrite_route_rows(&mut conn, &route_rows(beg_attach, &pts));
+        let beg_t = GlueTarget {
+            shape_id: sid,
+            kind: GlueKind::Dynamic,
+            attach: beg_attach,
+        };
+        let end_t = GlueTarget {
+            shape_id: dup_id,
+            kind: GlueKind::Dynamic,
+            attach: end_attach,
+        };
+        bake_end(
+            &mut conn,
+            End::Begin,
+            beg_attach,
+            &walkglue_formula(End::Begin),
+        );
+        bake_trigger(&mut conn, End::Begin, sid);
+        bake_end(
+            &mut conn,
+            End::End,
+            end_attach,
+            &walkglue_formula(End::End),
+        );
+        bake_trigger(&mut conn, End::End, dup_id);
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::commands::DuplicateShape::new(
+                page_id,
+                sid,
+                offset,
+            )),
+            Box::new(dc_core::AddShape {
+                page: page_id,
+                parent: None,
+                shape: conn,
+            }),
+            Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: glue_connect(conn_id, End::Begin, &beg_t),
+            }),
+            Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: glue_connect(conn_id, End::End, &end_t),
+            }),
+        ];
+        self.apply(Macro::new(format!("AutoConnect shape {sid}"), cmds));
+        self.set_selection(Some((page_id, dup_id)));
+        self.sel_set = vec![(page_id, dup_id)];
+        self.status = format!("shape {dup_id} connected to {sid} (AutoConnect)");
+    }
+
+    /// #108: the Connection Point tool's click — near an existing
+    /// point of the hit shape selects it (a second click elsewhere
+    /// re-selects), on the body adds a fresh row at the click, both in
+    /// the shape's local frame.
+    fn handle_conn_point_click(&mut self, page_pos: (f64, f64)) {
+        let Some(hit) = self.shape_hit(page_pos) else {
+            self.connpt_sel = None;
+            self.status = "click a shape to add a connection point".into();
+            return;
+        };
+        let Some(page_id) = self.page_id() else { return };
+        // Existing (effective) points as page positions — the same
+        // resolution the glue engine uses.
+        let near = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        if let Some(cand) = self
+            .glue_candidates(&[])
+            .iter()
+            .find(|c| c.id == hit && !c.conn_rows.is_empty())
+        {
+            if let Some((ix, _)) = cand
+                .conn_rows
+                .iter()
+                .min_by_key(|(_, p)| {
+                    ((p.0 - page_pos.0).hypot(p.1 - page_pos.1) * 1e6) as i64
+                })
+                .filter(|(_, p)| (p.0 - page_pos.0).hypot(p.1 - page_pos.1) <= near)
+            {
+                self.connpt_sel = Some((hit, *ix));
+                self.status = format!(
+                    "connection point {ix} selected (Delete removes it)"
+                );
+                return;
+            }
+        }
+        // Add: the local frame of the (top-level) hit shape — the
+        // glue engine's rect convention (Pin − LocPin origin).
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, hit) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, hit) else {
+            return;
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (Some(px), Some(py), Some(lx), Some(ly)) =
+            (get("PinX"), get("PinY"), get("LocPinX"), get("LocPinY"))
+        else {
+            return;
+        };
+        let local = (page_pos.0 - (px - lx), page_pos.1 - (py - ly));
+        // The next row IX: max across the EFFECTIVE section (a
+        // collision would shadow a master row).
+        let eff = ed.doc.effective_sheet(sh, &chain);
+        let next_ix = eff
+            .sections_named("Connection")
+            .first()
+            .map(|sec| sec.rows.iter().map(|r| r.ix).max().unwrap_or(1) + 1)
+            .unwrap_or(2);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: hit,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(next_ix),
+                "X",
+                cell(local.0),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope,
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(next_ix),
+                "Y",
+                cell(local.1),
+            )),
+        ];
+        self.apply(Macro::new(
+            format!("add connection point {next_ix} on shape {hit}"),
+            cmds,
+        ));
+        self.connpt_sel = Some((hit, next_ix));
+        self.status = format!("connection point {next_ix} added to shape {hit}");
+    }
+
+    /// #108: Delete on the Connection Point tool's selection — the
+    /// LOCAL row goes; a master-inherited point explains instead
+    /// (Visio edits those on the master).
+    fn delete_selected_conn_point(&mut self) {
+        let Some((shape, ix)) = self.connpt_sel else {
+            return;
+        };
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let local = ed
+            .doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape))
+            .map(|sh| {
+                sh.sheet
+                    .sections_named("Connection")
+                    .iter()
+                    .any(|sec| sec.rows.iter().any(|r| r.ix == ix))
+            })
+            .unwrap_or(false);
+        if !local {
+            self.status = format!(
+                "connection point {ix} is inherited from the master — edit it there"
+            );
+            return;
+        }
+        self.apply(Macro::new(
+            format!("remove connection point {ix}"),
+            vec![Box::new(dc_core::commands::RemoveSectionRow::new(
+                Scope::Shape { page: page_id, shape },
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(ix),
+            ))],
+        ));
+        self.connpt_sel = None;
+        self.status = format!("connection point {ix} removed");
+    }
+
     /// #108/URS-1114: set a connector's route style and re-route its
     /// geometry immediately — one undo step.
     fn apply_connector_route_style(&mut self, page_id: i64, sid: i64, style: &str) {
@@ -3418,6 +3667,41 @@ impl App {
                     dc_core::commands::RowSel::Ix(ix),
                     cell,
                     vsdx::Cell::value(format!("{v:.6}")),
+                )));
+            }
+        }
+        // Curved (#108): row 2 becomes a CubicBezTo whose A/B/C/D
+        // controls sit on the chord thirds as Width/Height formulas
+        // (a reroute's size rewrite re-tracks them automatically);
+        // every other style keeps the rows plain LineTo.
+        let curved = style == crate::connectors::ROUTE_CURVED;
+        for ix in 2i64..=4 {
+            let t = if ix == 2 && curved {
+                Some("CubicBezTo".to_string())
+            } else {
+                Some("LineTo".to_string())
+            };
+            cmds.push(Box::new(dc_core::commands::SetSectionRowType::new(
+                scope.clone(),
+                "Geometry",
+                0,
+                dc_core::commands::RowSel::Ix(ix),
+                t,
+            )));
+        }
+        if curved {
+            for (name, f, v) in crate::connectors::curved_row_extras(ex - bx, ey - by) {
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    0,
+                    dc_core::commands::RowSel::Ix(2),
+                    name,
+                    vsdx::Cell {
+                        v: Some(format!("{v:.6}")),
+                        f: Some(f),
+                        ..vsdx::Cell::default()
+                    },
                 )));
             }
         }
@@ -3505,6 +3789,83 @@ impl App {
     /// page rect with its connection-point rows (IX → page position —
     /// own rows first, the master's for instances, like #109's
     /// snap-target collection).
+    /// #108 line jumps: every top-level connector's page polyline
+    /// (unrotated, instance- or master-geometry through the hit
+    /// frame) with its stroke, in z order — the input to
+    /// [`crate::connectors::line_jumps`].
+    fn jump_lines(&self) -> Vec<crate::connectors::JumpLine> {
+        let mut out = Vec::new();
+        let Some(ed) = self.ed() else {
+            return out;
+        };
+        let Some(page_id) = self.page_id() else {
+            return out;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return out;
+        };
+        for (z, sh) in page.shapes.iter().enumerate() {
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sh.id) else {
+                continue;
+            };
+            if !crate::connectors::is_connector_in(&ed.doc, &chain, sh) {
+                continue;
+            }
+            // Rotated connectors keep a straight crossing (Visio hops
+            // rotated lines too; v1 keeps to the unrotated frame).
+            let angle = ed
+                .doc
+                .resolve_cell(sh, &chain, "Angle")
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0);
+            if angle.abs() > 1e-6 {
+                continue;
+            }
+            let (root, msize) = sh
+                .master
+                .and_then(|mid| ed.doc.master(mid))
+                .and_then(|m| m.shapes.first())
+                .map(|r| {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(r, &[r], n)
+                            .and_then(|c| c.numeric())
+                            .unwrap_or(1.0)
+                    };
+                    (Some(r), (g("Width"), g("Height")))
+                })
+                .unwrap_or((None, (1.0, 1.0)));
+            let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
+            let segs = crate::connectors::geometry_hit_segments(sh, root, &frame);
+            let mut pts = Vec::with_capacity(segs.len() + 1);
+            if let Some((a, _)) = segs.first() {
+                pts.push(*a);
+            }
+            for (_, b) in &segs {
+                pts.push(*b);
+            }
+            let weight = ed
+                .doc
+                .resolve_cell(sh, &chain, "LineWeight")
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.01);
+            let color = ed
+                .doc
+                .resolve_cell(sh, &chain, "LineColor")
+                .and_then(|c| c.v.clone())
+                .and_then(|v| parse_hex_rgb(&v))
+                .unwrap_or((0x42, 0x42, 0x42));
+            out.push(crate::connectors::JumpLine {
+                id: sh.id,
+                z,
+                weight,
+                color,
+                pts,
+            });
+        }
+        out
+    }
+
     fn glue_candidates(&self, excluding: &[i64]) -> Vec<crate::connectors::GlueCandidate> {
         let Some(ed) = self.ed() else {
             return Vec::new();
@@ -5086,6 +5447,13 @@ impl App {
 
     fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool, ctrl: bool) {
         self.placed_last_click = false;
+        // The Connection Point tool owns clicks on shapes (#108):
+        // near an existing point selects it (Delete removes); on the
+        // body adds one at the click.
+        if self.tool == Tool::ConnectionPoint && !ctrl {
+            self.handle_conn_point_click(page_pos);
+            return;
+        }
         // Ctrl/Cmd+click follows the hit shape's first hyperlink
         // (Visio, #28) before any selection semantics.
         if ctrl {
@@ -5400,6 +5768,19 @@ impl App {
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
                     .into();
             }
+            Action::ConnPointTool => {
+                if self.tool == Tool::ConnectionPoint {
+                    self.tool = Tool::Pointer;
+                    self.connpt_sel = None;
+                    self.status = "connection point tool off".into();
+                } else {
+                    self.tool = Tool::ConnectionPoint;
+                    self.connpt_sel = None;
+                    self.status =
+                        "Connection Point tool: click a shape to add a connection point"
+                            .into();
+                }
+            }
             Action::LassoTool => {
                 // Toggle like Visio's Select ▸ Lasso Select menu item;
                 // the Pointer Tool (or Esc) is Select Area.
@@ -5625,6 +6006,13 @@ impl App {
                         RibbonButton::new(Icon::Connector, "Connector", Action::ConnectorTool)
                             .selected(self.tool == Tool::Connector)
                             .tip("Draw a connector between shapes or points (Esc to finish)"),
+                        RibbonButton::new(Icon::ConnPoint, "Conn Point", Action::ConnPointTool)
+                            .width(90.0)
+                            .selected(self.tool == Tool::ConnectionPoint)
+                            .tip(
+                                "Connection Point tool: click a shape to add a connection \
+                                 point; click one to select it (Delete removes)",
+                            ),
                     ])],
                 ),
                 crate::ribbon::Group::new(
@@ -7219,6 +7607,20 @@ impl App {
         // Background pages render beneath this page's ink (#113) —
         // built before the field borrows below.
         let underlays = self.build_bg_underlays(ui.ctx());
+        // #108: line-jump hops for the frame's connector crossings.
+        let jump_fx: Vec<canvas::JumpFx> = crate::connectors::line_jumps(&self.jump_lines())
+            .into_iter()
+            .map(|j| canvas::JumpFx {
+                at: j.at,
+                dir: j.dir,
+                under: j.under,
+                weight: j.weight,
+                under_weight: j.under_weight,
+                color: Color32::from_rgb(j.color.0, j.color.1, j.color.2),
+                under_color: Color32::from_rgb(j.under_color.0, j.under_color.1, j.under_color.2),
+            })
+            .collect();
+        self.jumps_last = jump_fx.len();
         // #177: everything the connection-point overlay needs, built
         // before the destructuring borrows below (the closure runs
         // inside `canvas::show`, while `view` is borrowed).
@@ -7226,6 +7628,18 @@ impl App {
         let conn_threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
         let conn_snap = self.snap;
         let conn_sel = self.sel;
+        // #108: the Connection Point tool's state, precomputed (the
+        // fx closure below cannot borrow self).
+        let conn_tool = self.tool == Tool::ConnectionPoint;
+        let connpt_sel_pos = self.connpt_sel.and_then(|(sid, ix)| {
+            self.glue_candidates(&[])
+                .into_iter()
+                .find(|c| c.id == sid)?
+                .conn_rows
+                .into_iter()
+                .find(|(rix, _)| *rix == ix)
+                .map(|(_, p)| p)
+        });
         // #179: live endpoint snapping — two target sets: one
         // excluding the selected connector (its own endpoint handle
         // is the dragged thing) and one excluding nothing (the
@@ -7326,6 +7740,13 @@ impl App {
                 fx.reveal = g.reveal;
                 fx.glue_target = g.glue_target;
             }
+            // #108: the Connection Point tool's selection ring — the
+            // selected row's page position.
+            if conn_tool {
+                if let Some(q) = connpt_sel_pos {
+                    fx.tool_selected = Some(q);
+                }
+            }
             *conn_fx_seen.borrow_mut() = fx.clone();
             fx
         };
@@ -7339,6 +7760,7 @@ impl App {
             &handles,
             &drag_fx,
             &guide_fx,
+            &jump_fx,
             &underlays,
             self.tool == Tool::Connector,
             self.tool == Tool::Lasso,
@@ -7364,13 +7786,22 @@ impl App {
                 self.end_text_edit(true);
             }
         } else {
+            // An AutoConnect arrow click (#108) consumes the gesture
+            // BEFORE the empty-page click semantics run — the arrow
+            // sits outside the shape, and a plain click there would
+            // clear the selection the AutoConnect needs.
+            if let Some(dir) = out.autoclick {
+                self.autoconnect(dir);
+            }
             if let Some(pos) = out.dbl_click_page_pos {
                 // The second click of the pair completes a double-click
                 // instead of a plain click: the first click already ran its
                 // select (and possible drag-start) semantics on its frame.
                 self.on_canvas_dbl_click(pos);
-            } else if let Some(pos) = out.click_page_pos {
-                self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+            } else if out.autoclick.is_none() {
+                if let Some(pos) = out.click_page_pos {
+                    self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+                }
             }
             if let Some(pos) = out.press_page_pos {
                 self.on_canvas_press(pos);
@@ -9651,6 +10082,7 @@ impl App {
             /// #108: per-connector route style (URS-1114).
             RouteStraight,
             RouteRightAngle,
+            RouteCurved,
             /// #113/URS-1200: render the selection to a picture.
             CopyAsPicture,
         }
@@ -9969,6 +10401,9 @@ impl App {
                     if ctx_item(ui, None, "Right-Angle Connector", "", true) {
                         act = Some(Act::RouteRightAngle);
                     }
+                    if ctx_item(ui, None, "Curved Connector", "", true) {
+                        act = Some(Act::RouteCurved);
+                    }
                     ui.separator();
                 }
             }
@@ -10162,6 +10597,11 @@ impl App {
                 page_id,
                 shape_id,
                 crate::connectors::ROUTE_RIGHT_ANGLE,
+            ),
+            Act::RouteCurved => self.apply_connector_route_style(
+                page_id,
+                shape_id,
+                crate::connectors::ROUTE_CURVED,
             ),
             Act::CopyAsPicture => {
                 self.copypic_open = true;
@@ -10498,6 +10938,44 @@ impl App {
     /// #108 tests: the active mouse tool.
     pub fn debug_tool(&self) -> Tool {
         self.tool
+    }
+
+    /// #108 tests: the shape's LOCAL Connection-section rows as
+    /// (row ix, X, Y) — empty until a point is materialized onto the
+    /// instance.
+    pub fn debug_conn_rows(&self, page: i64, shape: i64) -> Vec<(i64, f64, f64)> {
+        let Some(ed) = self.ed.as_ref() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape) else {
+            return Vec::new();
+        };
+        sh.sheet
+            .sections_named("Connection")
+            .into_iter()
+            .flat_map(|sec| {
+                sec.rows.iter().map(|r| {
+                    (
+                        r.ix,
+                        r.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                        r.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// #108 tests: the Connection Point tool's selection.
+    pub fn debug_connpt_sel(&self) -> Option<(i64, i64)> {
+        self.connpt_sel
+    }
+
+    /// #108 tests: the line-jump hops painted on the last frame.
+    pub fn debug_jump_count(&self) -> usize {
+        self.jumps_last
     }
 
     /// #113 tests: the last copy-as-picture PNG's byte length.
@@ -12929,4 +13407,16 @@ fn section_display_name(n: &str) -> String {
         "PagesXForm" => "Page Properties".into(),
         other => other.into(),
     }
+}
+
+/// "#rrggbb" → rgb triple (the renderer's resolved color form);
+/// None on malformed values (#108 line jumps).
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            return Some((((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8));
+        }
+    }
+    None
 }

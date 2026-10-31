@@ -59,6 +59,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | magnet | magnet (Snap & Glue, 2026-10-29) |
 | connector | vector-line (Connector Tool, 2026-10-29) |
 | selection-ellipse | selection-ellipse (Lasso Select, #110, 2026-10-31) |
+| vector-point | vector-point (Connection Point tool, #108, 2026-10-31) |
 | format-vertical-align-top | format-vertical-align-top (#110, 2026-10-29) |
 | format-vertical-align-center | format-vertical-align-center (#110, 2026-10-29) |
 | format-vertical-align-bottom | format-vertical-align-bottom (#110, 2026-10-29) |
