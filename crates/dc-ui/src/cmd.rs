@@ -608,31 +608,63 @@ impl Command for RerouteConnectors {
                 let pts = crate::connectors::route(&style, beg, endp);
                 let rows = crate::connectors::route_rows(beg, &pts);
                 let mut cells = end_cells;
+                // #175: a derived cell whose effective formula
+                // REFERENCES the endpoints/sizes must have its cached V
+                // refreshed — the renderer reads the cache, and skipping
+                // it (the #174 rule) left the XForm of the OLD geometry
+                // under moved endpoints. The write goes through
+                // SetGluedCell (GUARD-waived, formula kept); a
+                // formula-free cell stays a plain SetCell; a CONSTANT
+                // guard (Height=GUARD(0.19685DL), Angle=GUARD(0DA))
+                // does not depend on the endpoints and is skipped.
+                let eff = |n: &str| {
+                    dc_core::commands::effective_formula(doc, conn, &chain, n)
+                };
+                let formula_tracks = |n: &str| -> Option<String> {
+                    let f = eff(n)?;
+                    let u = f.to_uppercase();
+                    ["BEGINX", "ENDX", "BEGINY", "ENDY", "WIDTH", "HEIGHT"]
+                        .iter()
+                        .any(|k| u.contains(k))
+                        .then_some(f)
+                };
+                let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
+                // LocPin derives from the EFFECTIVE size: when Height is
+                // a constant guard the band keeps its height, so LocPinY
+                // stays half the kept height.
+                let h_eff = if formula_tracks("Height").is_some() {
+                    h_new
+                } else {
+                    get("Height").unwrap_or(h_new)
+                };
+                let w_eff = if formula_tracks("Width").is_some() {
+                    w_new
+                } else {
+                    get("Width").unwrap_or(w_new)
+                };
                 for (n, v) in [
                     ("PinX", (beg.0 + endp.0) / 2.0),
                     ("PinY", (beg.1 + endp.1) / 2.0),
-                    ("Width", endp.0 - beg.0),
-                    ("Height", endp.1 - beg.1),
-                    ("LocPinX", (endp.0 - beg.0) / 2.0),
-                    ("LocPinY", (endp.1 - beg.1) / 2.0),
+                    ("Width", w_new),
+                    ("Height", h_new),
+                    ("LocPinX", w_eff / 2.0),
+                    ("LocPinY", h_eff / 2.0),
                 ] {
-                    // A formula-driven derived cell never literal-writes
-                    // (the endpoint carries the glue formula instead).
-                    // #174: EFFECTIVE formula — an 'Inh' instance cell
-                    // over a master's GUARD((BeginX+EndX)/2) is driven
-                    // to the command layer; a plain SetCell there would
-                    // refuse and abort the whole move macro.
-                    if dc_core::commands::effective_formula(doc, conn, &chain, n).is_none() {
-                        cells.push((n.to_string(), v, None));
+                    match formula_tracks(n) {
+                        None if eff(n).is_none() => {
+                            cells.push((n.to_string(), v, None));
+                        }
+                        Some(f) => {
+                            cells.push((n.to_string(), v, Some(f)));
+                        }
+                        // Constant guard or otherwise static: skip.
+                        None => {}
                     }
                 }
-                // #174: only rewrite route rows the connector ALREADY
-                // has — SetRowCell materializes missing rows, which
-                // would grow a 2-row arc master (MoveTo +
+                // #174/#175: only rewrite route rows the connector
+                // ALREADY has — SetRowCell materializes missing rows,
+                // which would grow a 2-row arc master (MoveTo +
                 // EllipticalArcTo) into a 4-row elbow polyline.
-                // Master-only-geometry connectors keep their rows
-                // (their masters derive geometry from Width/Height
-                // formulas where they follow the endpoints anyway).
                 let existing: Vec<i64> = {
                     let mut v: Vec<i64> = conn
                         .sheet
@@ -643,23 +675,70 @@ impl Command for RerouteConnectors {
                     v.sort_unstable();
                     v
                 };
-                let mut planned_rows: Vec<(i64, f64, f64)> = rows
-                    .iter()
-                    .enumerate()
-                    .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
-                    .filter(|(ix, _, _)| existing.contains(ix))
-                    .collect();
-                // A connector with fewer rows than the route frame
-                // (a 2-row arc master, a 3-row elbow instance) puts
-                // the ENDPOINT on its LAST row — writing the first
-                // elbow there would bend the shape short of its
-                // target.
-                let max_ix = existing.iter().copied().filter(|ix| (2..=4).contains(ix)).max();
-                if let (Some(last), Some(max_ix)) = (planned_rows.last_mut(), max_ix) {
-                    if max_ix < 4 {
-                        *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
+                let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() {
+                    // #175: a MASTER-based connector's rows are its own
+                    // frame (a fixed-height band's LineTo(Width, H/2)),
+                    // NOT the synthetic begin-corner frame — writing
+                    // (endp−beg) deltas there broke the render (#175).
+                    // Translate the EXISTING literal row coordinates by
+                    // the endpoint's page delta, per axis, only where
+                    // that axis's size tracks the endpoints. Rows whose
+                    // cells carry formulas evaluate against the
+                    // refreshed caches in the renderer and are left to
+                    // it.
+                    let dx = if formula_tracks("Width").is_some() {
+                        endp.0 - ex
+                    } else {
+                        0.0
+                    };
+                    let dy = if formula_tracks("Height").is_some() {
+                        endp.1 - ey
+                    } else {
+                        0.0
+                    };
+                    let literal = |c: Option<&vsdx::Cell>| -> Option<f64> {
+                        let c = c?;
+                        let literal = c
+                            .f
+                            .as_deref()
+                            .is_none_or(|f| f == "Inh" || f == "No Formula");
+                        literal.then(|| c.numeric())?
+                    };
+                    conn.sheet
+                        .sections_named("Geometry")
+                        .first()
+                        .map(|g| {
+                            g.rows
+                                .iter()
+                                .filter(|r| (2..=4).contains(&r.ix))
+                                .filter_map(|r| {
+                                    let x = literal(r.cell("X"))?;
+                                    let y = literal(r.cell("Y"))?;
+                                    Some((r.ix, x + dx, y + dy))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                } else {
+                    // The synthetic connector's own frame: the planned
+                    // route, filtered to rows it has; a connector with
+                    // fewer rows than the route frame puts the ENDPOINT
+                    // on its LAST row.
+                    let mut planned: Vec<(i64, f64, f64)> = rows
+                        .iter()
+                        .enumerate()
+                        .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
+                        .filter(|(ix, _, _)| existing.contains(ix))
+                        .collect();
+                    let max_ix =
+                        existing.iter().copied().filter(|ix| (2..=4).contains(ix)).max();
+                    if let (Some(last), Some(max_ix)) = (planned.last_mut(), max_ix) {
+                        if max_ix < 4 {
+                            *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
+                        }
                     }
-                }
+                    planned
+                };
                 plans.push(Plan {
                     conn_id: conn.id,
                     cells,
@@ -948,9 +1027,9 @@ mod reroute_master_tests {
                 ix: 2,
                 cells: vec![
                     vc("X", "1.0"),
-                    vc("Y", "0.0"),
+                    vc("Y", "0.1"),
                     vc("A", "0.5"),
-                    vc("B", "0.25"),
+                    vc("B", "0.35"),
                 ],
                 ..Row::default()
             });
@@ -982,20 +1061,24 @@ mod reroute_master_tests {
             ..Shape::default()
         };
         root.sheet.set_cell("ObjType", VCell::value("2"));
-        root.sheet.set_cell(
-            "PinX",
-            VCell {
-                f: Some("GUARD((BeginX+EndX)/2)".into()),
-                ..VCell::default()
-            },
-        );
-        root.sheet.set_cell(
-            "Width",
-            VCell {
-                f: Some("GUARD(EndX-BeginX)".into()),
-                ..VCell::default()
-            },
-        );
+        // The corpus dynamic-connector master pattern (#175): every
+        // XForm cell derives from the endpoints through GUARDs.
+        for (n, f) in [
+            ("PinX", "GUARD((BeginX+EndX)/2)"),
+            ("PinY", "GUARD((BeginY+EndY)/2)"),
+            ("Width", "GUARD(EndX-BeginX)"),
+            ("Height", "GUARD(EndY-BeginY)"),
+            ("LocPinX", "GUARD(Width*0.5)"),
+            ("LocPinY", "GUARD(Height*0.5)"),
+        ] {
+            root.sheet.set_cell(
+                n,
+                VCell {
+                    f: Some(f.into()),
+                    ..VCell::default()
+                },
+            );
+        }
         let mut m = vsdx::Master::default();
         m.shapes.push(root);
         ed.doc.masters.push(m);
@@ -1013,12 +1096,21 @@ mod reroute_master_tests {
             ("PinX", "1.5"),
             ("PinY", "6.0"),
             ("Width", "1.0"),
-            ("Height", "0.0"),
             ("LocPinX", "0.5"),
             ("LocPinY", "0.0"),
         ] {
             conn.sheet.set_cell(n, VCell::value(v));
         }
+        // A fixed-height band master (the #175 file's convention): the
+        // instance overrides Height with a CONSTANT guard.
+        conn.sheet.set_cell(
+            "Height",
+            VCell {
+                v: Some("0.2".into()),
+                f: Some("GUARD(0.2DL)".into()),
+                ..VCell::default()
+            },
+        );
         let mut geo = Section {
             name: "Geometry".into(),
             ix: 0,
@@ -1136,11 +1228,35 @@ mod reroute_master_tests {
             geo.rows.iter().map(|r| r.t.clone()).collect::<Vec<_>>()
         );
         assert_eq!(geo.rows[1].t.as_deref(), Some("EllipticalArcTo"));
-        // Its endpoint row followed the target.
+        // #175: its endpoint row TRANSLATED IN ITS OWN FRAME — X by
+        // the endpoint's x delta, Y unchanged (the constant-height
+        // band does not track dy).
         let x = geo.rows[1].cell("X").and_then(|c| c.numeric()).unwrap();
         assert!(
             (x - 2.0).abs() < 1e-3,
             "the arc's end row tracks the new endpoint: X {x}"
+        );
+        let y = geo.rows[1].cell("Y").and_then(|c| c.numeric()).unwrap();
+        assert!((y - 0.1).abs() < 1e-6, "the band's row Y is kept: {y}");
+        // The guarded caches refreshed through their guards; the
+        // constant band guard untouched.
+        let (pinx_v, pinx_f) = {
+            let c = conn.sheet.cell("PinX").unwrap();
+            (c.v.clone(), c.f.clone())
+        };
+        assert!(
+            pinx_v.as_deref().is_some_and(|v| (v.parse::<f64>().unwrap() - 2.0).abs() < 1e-6),
+            "PinX cache = (B+E)/2 = 2.0: {pinx_v:?}"
+        );
+        assert!(
+            pinx_f.as_deref().is_some_and(|f| f.contains("GUARD")),
+            "the guard stays on the refreshed cell: {pinx_f:?}"
+        );
+        let h = conn.sheet.cell("Height").unwrap();
+        assert!(
+            h.numeric().unwrap().abs() - 0.2 < 1e-9,
+            "the constant band height is untouched: {:?}",
+            h.v
         );
     }
 }
