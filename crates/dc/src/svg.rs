@@ -2200,10 +2200,17 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
         let mut attrs = String::new();
-        // #72: per-value arrowheads — Visio's named gallery subset,
-        // drawn from our own paths (behavior reference: observed Visio
-        // 2016; artwork ours). Unmapped gallery values fall back to
-        // the filled triangle. Sizes ride markerUnits=strokeWidth
+        // #72/#169: per-value arrowheads — Visio 2016's Begin/EndArrow
+        // gallery, drawn from our own paths (behavior reference: the
+        // shipped Visio 2016 gallery plus a Visio-authored fixture with
+        // EndArrow 0–50 printed at 600 dpi — see
+        // Analysis/arrow-gallery-visio2016.md; artwork ours). Key
+        // facts: 13 is a single filled head (the #169 report: it drew
+        // our two chevrons); 4 — the corpus's default — is the classic
+        // filled triangle, 6 the stealth dart, 9 the slanted dimension
+        // tick; the only double forms are the chevrons (12 open, 34
+        // open, 35 filled). Unmapped gallery values fall back to the
+        // filled triangle. Sizes ride markerUnits=strokeWidth
         // (LineWeight) times the ArrowSize factor.
         let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
             if arrow < 0.5 {
@@ -2220,24 +2227,41 @@ fn render_geometry(
                 // Paths point ALONG +x (end markers, tip at x=10/12);
                 // begin markers mirror around the viewBox center, which
                 // orients the tip at the path start (orient=auto).
-                // (path body, tip_x, box_w, stroke_only); the oval is
+                // (path body, tip_x, box_w, stroke_only); the circle is
                 // a circle element, handled separately.
                 let spec: (&str, f64, f64, bool) = match kind {
-                    // 1 Arrow — the filled triangle.
+                    // 1 — narrow filled triangle.
                     1 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 2 Open Arrow — the open V.
-                    2 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
-                    // 3 Concave — filled with a dipped base.
+                    // 2 — small filled triangle.
+                    2 => ("M0,1.5 L8,5 L0,8.5 z", 8.0, 10.0, false),
+                    // 3 — filled, concave (dipped) base.
                     3 => ("M0,0 L10,5 L0,10 Q3.5,5 0,0 z", 10.0, 10.0, false),
-                    // 4 Stealth — the dart.
-                    4 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
-                    // 5 Diamond (tip at both ends; anchor the right
-                    // tip on the line end).
-                    5 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
-                    // 6 Oval — the circle (symmetric, no mirror).
-                    6 => ("", 12.0, 12.0, false),
-                    // 13 Double Arrow — two chevrons.
-                    13 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
+                    // 4 — the classic filled triangle (the corpus
+                    // default; was wrongly the stealth dart pre-#169).
+                    4 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 5 — filled triangle, wide.
+                    5 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 6 — the stealth dart (was wrongly the circle).
+                    6 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
+                    // 7 — open chevron (the open V).
+                    7 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
+                    // 9 — the slanted dimension tick.
+                    9 => ("M2,-1 L6,9", 5.0, 10.0, true),
+                    // 10 — the filled circle (symmetric, no mirror).
+                    10 => ("", 12.0, 12.0, false),
+                    // 11 — the filled diamond (tip at both ends; anchor
+                    // the right tip on the line end).
+                    11 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
+                    // 12 — open double chevron.
+                    12 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 13 — single filled triangle, plain base (Visio's
+                    // 13 is NOT a double — #169's core fix).
+                    13 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                    // 34 — open double chevron (wide).
+                    34 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
+                    // 35 — filled double chevron (the gallery's first
+                    // filled double; the old wrong-13 glyph lives on).
+                    35 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
                     // Unmapped gallery values: the filled triangle.
                     _ => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
                 };
@@ -2275,12 +2299,12 @@ fn render_geometry(
                 };
                 // Begin markers mirror horizontally so the tip faces
                 // the path start (orient=auto supplies direction).
-                let d = if begin && kind != 6 {
+                let d = if begin && kind != 10 {
                     mirror_x(d)
                 } else {
                     d.to_string()
                 };
-                let body = if kind == 6 {
+                let body = if kind == 10 {
                     format!(
                         r#"<circle cx="6" cy="5" r="5" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
                         c = line_color,
@@ -3237,14 +3261,21 @@ mod tests {
         let none = line_with(&[("EndArrow", "0")]);
         assert!(!none.contains("marker"), "value 0 emits no head: {none}");
         // Each gallery value emits a marker with its own kind id and
-        // the expected body shape.
+        // the expected body shape (#169: mapped to Visio 2016's observed
+        // gallery — no value below 34 is double-headed there).
         for (v, needle) in [
             (1, "M0,0 L10,5 L0,10 z"),
-            (2, r#"fill="none""#),
+            (2, "M0,1.5 L8,5 L0,8.5 z"),
             (3, "Q3.5,5"),
-            (4, "L5,5 z"),
-            (5, "M0,5 L5,0 L10,5 L5,10 z"),
-            (13, "M6,0 L12,5 L6,10 z"),
+            (4, "M0,0 L10,5 L0,10 z"),
+            (5, "M0,0 L10,5 L0,10 z"),
+            (6, "L5,5 z"),
+            (7, r#"fill="none""#),
+            (9, "M2,-1 L6,9"),
+            (11, "M0,5 L5,0 L10,5 L5,10 z"),
+            (12, "M6,0 L12,5 L6,10"),
+            (13, "M0,0 L10,5 L0,10 z"),
+            (35, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
@@ -3253,9 +3284,27 @@ mod tests {
             );
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
-        // The oval is a circle.
-        let oval = line_with(&[("EndArrow", "6")]);
-        assert!(oval.contains("<circle"), "value 6 is a circle: {oval}");
+        // The circle is a circle.
+        let circle = line_with(&[("EndArrow", "10")]);
+        assert!(circle.contains("<circle"), "value 10 is a circle: {circle}");
+        // #169 regression: values below 34 are all SINGLE-headed — the
+        // marker body must close at most one filled triangle, the
+        // double chevron living only at 34/35.
+        for v in 1..=33i64 {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            if let Some(body) = out.split("<marker").nth(1) {
+                let closes = body.matches(" z").count();
+                assert!(
+                    closes <= 1,
+                    "value {v} must not stack triangles: {body}"
+                );
+            }
+        }
+        let dbl = line_with(&[("EndArrow", "35")]);
+        assert!(
+            dbl.matches(" z").count() >= 2,
+            "value 35 is the double chevron: {dbl}"
+        );
         // Weight scaling: the head rides stroke width.
         let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
         assert!(

@@ -6285,17 +6285,24 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
-                // Begin/End Arrow (#72): the named gallery the renderer
-                // draws — value 0 none, 1-6 the classic set, 13 double.
+                // Begin/End Arrow (#72, corrected #169): the gallery the
+                // renderer draws per Visio 2016's observed numbering —
+                // no value below 34 is double-headed there; 4 is the
+                // classic triangle, 6 the stealth dart, 13 a single
+                // filled head. 35 offers the double chevron.
                 const ARROWS: &[(&str, &str)] = &[
                     ("0", "None"),
                     ("1", "Arrow"),
-                    ("2", "Open Arrow"),
-                    ("3", "Concave"),
-                    ("4", "Stealth"),
-                    ("5", "Diamond"),
-                    ("6", "Oval"),
-                    ("13", "Double Arrow"),
+                    ("2", "Small Arrow"),
+                    ("3", "Concave Arrow"),
+                    ("4", "Classic Arrow"),
+                    ("6", "Stealth"),
+                    ("7", "Open Arrow"),
+                    ("9", "Slash"),
+                    ("10", "Circle"),
+                    ("11", "Diamond"),
+                    ("13", "Filled Arrow"),
+                    ("35", "Double Arrow"),
                 ];
                 let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
                 if let Some(v) =
