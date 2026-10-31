@@ -6262,3 +6262,163 @@ fn default_stencils_auto_open_and_categories_are_configurable() {
     // menu renders exactly this list).
     assert!(!h2.state().debug_builtin_categories().contains(&"Software".to_string()));
 }
+
+// ---- GitHub #172: connector selection + drags -------------------------
+
+/// A FREE connector's body drag translates it (#172): both endpoints
+/// move by the drag delta — previously the body drag was a status-note
+/// no-op ("arrives with routing UX") and master-guarded PinX writes
+/// aborted the macro outright.
+#[test]
+fn connector_body_drag_translates_free_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Connector Tool; draw on EMPTY canvas — no shapes under the ends,
+    // so both endpoints land formula-free.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let canvas = h.state().debug_canvas_rect();
+    let p1 = canvas.center() - egui::vec2(120.0, 0.0);
+    let p2 = canvas.center() + egui::vec2(120.0, 0.0);
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(p1);
+    h.event(btn(p1, true));
+    h.run();
+    h.hover_at(p1 + (p2 - p1) * 0.5);
+    h.run();
+    h.hover_at(p2);
+    h.run();
+    h.event(btn(p2, false));
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 1, "the connector landed");
+    let (page, conn) = h.state().debug_sel().expect("connector selected");
+    let (bx0, ex0) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+
+    // Body drag through the midpoint handle.
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("midpoint handle");
+    drag_naturally(&mut h, mid, egui::vec2(45.0, 0.0));
+    let zoom = h.state().debug_zoom();
+    let dx_in = 45.0 / (96.0 * zoom) as f64;
+    let (bx1, ex1) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        (bx1 - bx0 - dx_in).abs() < 0.05,
+        "begin translated: {bx0:.3} → {bx1:.3} (dx {dx_in:.3})"
+    );
+    assert!(
+        (ex1 - ex0 - dx_in).abs() < 0.05,
+        "end translated: {ex0:.3} → {ex1:.3} (dx {dx_in:.3})"
+    );
+    assert!(
+        !h.state().debug_status().contains("refused"),
+        "no refusal: {}",
+        h.state().debug_status()
+    );
+    // One undo puts it back.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (cell_of(&h, page, conn, "BeginX") - bx0).abs() < 1e-6,
+        "undo restores the translation"
+    );
+}
+
+/// A BOTH-ENDS-GLUED connector's body drag neither refuses nor breaks
+/// the glue (#172): the glue formulas re-pin the endpoints (Visio's
+/// pinned feel), and the endpoint handle still re-glues through the
+/// #108 lifecycle.
+#[test]
+fn glued_connector_body_drag_pins_and_does_not_refuse() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_page2, b) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let press = asr.center();
+    let release = bsr.center();
+    let btn = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(press);
+    h.event(btn(press, true));
+    h.run();
+    h.hover_at(press + (release - press) * 0.5);
+    h.run();
+    h.hover_at(release);
+    h.run();
+    h.event(btn(release, false));
+    h.run();
+    let (page, conn) = h.state().debug_sel().expect("connector selected");
+    let (bx0, ex0) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_some(),
+        "the end carries its glue formula"
+    );
+
+    // Body drag: applied (no refusal), the glue formulas pin the ends.
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("midpoint handle");
+    drag_naturally(&mut h, mid, egui::vec2(40.0, 30.0));
+    let status = h.state().debug_status().to_string();
+    assert!(
+        !status.contains("refused") && !status.contains("GUARD"),
+        "the body drag is not refused: {status}"
+    );
+    let (bx1, ex1) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
+    assert!(
+        (bx1 - bx0).abs() < 1e-4 && (ex1 - ex0).abs() < 1e-4,
+        "glued ends stay pinned to their targets: {bx0:.3}→{bx1:.3} {ex0:.3}→{ex1:.3}"
+    );
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_some(),
+        "the glue formula survived the body drag"
+    );
+
+    // Endpoint drag far away onto empty page: the glue RELEASES and
+    // the endpoint moves (the #108 lifecycle through the same path).
+    let endh = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    drag_naturally(&mut h, endh, egui::vec2(80.0, 80.0));
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "the end formula released: {:?}",
+        h.state().debug_cell_formula(page, conn, "EndX")
+    );
+    assert!((cell_of(&h, page, conn, "EndX") - ex0).abs() > 0.3);
+}

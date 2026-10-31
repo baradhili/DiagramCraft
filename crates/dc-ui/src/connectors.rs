@@ -130,6 +130,142 @@ pub fn is_connector(s: &Shape) -> bool {
         .is_some_and(|v| v == 2.0)
 }
 
+/// The chain-aware form (#172): a master-based connector instance
+/// carries `ObjType=2` on its MASTER, not locally — the local-only
+/// check missed every Visio-authored connector (endpoint drags fell
+/// to the plain-1D path and were refused by the glue formulas).
+pub fn is_connector_in(doc: &vsdx::Document, chain: &[&Shape], s: &Shape) -> bool {
+    is_connector(s)
+        || doc
+            .resolve_cell(s, chain, "ObjType")
+            .and_then(|c| c.numeric())
+            .is_some_and(|v| v == 2.0)
+}
+
+/// The connector's ink as page-space segments for hit-testing (#172):
+/// the rendered line follows the GEOMETRY rows — an arc or elbow
+/// leaves the Begin→End chord, so chord-only hit-testing made curved
+/// connectors unselectable where another shape's bbox overlaps the
+/// belly. Rows are shape-local (0..w × 0..h, y-up) and map onto
+/// `rect` (the #137 vertex-handle convention); relative rows carry
+/// fractions of the owning size; arcs are sampled by the quadratic
+/// through their on-curve control (the renderer's own degenerate-arc
+/// fallback), 3 interior samples per curve. When the instance has no
+/// local Geometry the master root's first section stands in, scaled
+/// from the master's size to the instance's.
+pub fn geometry_hit_segments(
+    s: &Shape,
+    master_root: Option<&Shape>,
+    origin: (f64, f64),
+    size: (f64, f64),
+    master_size: (f64, f64),
+) -> Vec<((f64, f64), (f64, f64))> {
+    // (rows, owning width/height for Rel rows, x/y scale onto the
+    // instance). `origin` is the LOCAL frame's page origin
+    // (PinX-LocPinX, PinY-LocPinY) — NOT the normalized bbox corner:
+    // the corpus connector's Width is SIGNED (EndX-BeginX), so the
+    // begin corner can be the max-x corner and a bbox-corner mapping
+    // mirrors the route onto whatever sits left of it (#173).
+    let mut sections: Vec<&Section> = s.sheet.sections_named("Geometry");
+    let (own, scale) = if sections.is_empty() {
+        let Some(root) = master_root else {
+            return Vec::new();
+        };
+        sections = root.sheet.sections_named("Geometry");
+        if sections.is_empty() {
+            return Vec::new();
+        }
+        (
+            master_size,
+            if master_size.0.abs() > 1e-6 && master_size.1.abs() > 1e-6 {
+                (size.0 / master_size.0, size.1 / master_size.1)
+            } else {
+                (1.0, 1.0)
+            },
+        )
+    } else {
+        (size, (1.0, 1.0))
+    };
+    // Row-local → shape-local: relative rows are fractions of the
+    // owning size; then scale (master → instance) onto the page rect.
+    let local = |t: &str, x: f64, y: f64| -> (f64, f64) {
+        if t.starts_with("Rel") {
+            (x * own.0, y * own.1)
+        } else {
+            (x, y)
+        }
+    };
+    let to_page = |p: (f64, f64)| (origin.0 + p.0 * scale.0, origin.1 + p.1 * scale.1);
+    let quad = |c0: (f64, f64), ctrl: (f64, f64), c1: (f64, f64), u: f64| -> (f64, f64) {
+        (
+            (1.0 - u).powi(2) * c0.0 + 2.0 * u * (1.0 - u) * ctrl.0 + u * u * c1.0,
+            (1.0 - u).powi(2) * c0.1 + 2.0 * u * (1.0 - u) * ctrl.1 + u * u * c1.1,
+        )
+    };
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    let mut cur: Option<(f64, f64)> = None; // shape-local
+    const MAX_ROWS: usize = 64;
+    for geo in &sections {
+        for row in geo.rows.iter().take(MAX_ROWS) {
+            let t = row.t.as_deref().unwrap_or("");
+            let (Some(x), Some(y)) = (
+                row.cell("X").and_then(|c| c.numeric()),
+                row.cell("Y").and_then(|c| c.numeric()),
+            ) else {
+                continue;
+            };
+            let end = local(t, x, y);
+            match t {
+                "MoveTo" | "RelMoveTo" => {
+                    cur = Some(end);
+                    pts.push(to_page(end));
+                }
+                "ArcTo" | "RelArcTo" => {
+                    // |A| = sagitta, bulging right of travel; the
+                    // quadratic control that reproduces the apex.
+                    let a = row.cell("A").and_then(|c| c.numeric()).unwrap_or(0.0);
+                    if let Some(c0) = cur {
+                        let d = (end.0 - c0.0, end.1 - c0.1);
+                        let len = d.0.hypot(d.1).max(1e-9);
+                        let mid = (
+                            (c0.0 + end.0) / 2.0 + d.1 / len * a,
+                            (c0.1 + end.1) / 2.0 - d.0 / len * a,
+                        );
+                        let ctrl = (2.0 * mid.0 - (c0.0 + end.0) / 2.0, 2.0 * mid.1 - (c0.1 + end.1) / 2.0);
+                        for u in [0.25, 0.5, 0.75] {
+                            pts.push(to_page(quad(c0, ctrl, end, u)));
+                        }
+                    }
+                    pts.push(to_page(end));
+                    cur = Some(end);
+                }
+                "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                    // (A,B) is an ON-curve point → quadratic control.
+                    match (row.cell("A").and_then(|c| c.numeric()), row.cell("B").and_then(|c| c.numeric())) {
+                        (Some(a), Some(b)) if cur.is_some() => {
+                            let c0 = cur.unwrap();
+                            let ctrl = (2.0 * a - (c0.0 + end.0) / 2.0, 2.0 * b - (c0.1 + end.1) / 2.0);
+                            for u in [0.25, 0.5, 0.75] {
+                                pts.push(to_page(quad(c0, ctrl, end, u)));
+                            }
+                        }
+                        _ => {}
+                    }
+                    pts.push(to_page(end));
+                    cur = Some(end);
+                }
+                _ if t.ends_with("To") || t.contains("Spline") || t == "InfiniteLine" => {
+                    // LineTo plus the v0.2 chord approximations.
+                    pts.push(to_page(end));
+                    cur = Some(end);
+                }
+                _ => {}
+            }
+        }
+    }
+    pts.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
 fn set(cells: &mut Vec<SheetChild>, n: &str, v: f64) {
     cells.push(SheetChild::Cell(n.to_string(), Cell::value(fmt(v))));
 }
@@ -364,6 +500,115 @@ mod tests {
 
     fn near(a: (f64, f64), b: (f64, f64)) -> bool {
         (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9
+    }
+
+    /// #172: a master-based connector carries `ObjType=2` on its
+    /// master root — the chain-aware check must see it.
+    #[test]
+    fn is_connector_in_resolves_the_master() {
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("ObjType", Cell::value("2"));
+        let mut m = vsdx::Master::default();
+        m.shapes.push(root);
+        let mut doc = vsdx::Document::default();
+        doc.masters.push(m);
+        let inst = Shape {
+            id: 5,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            ..Shape::default()
+        };
+        assert!(!is_connector(&inst), "locally it is not marked");
+        let chain: Vec<&Shape> = vec![&inst];
+        assert!(
+            is_connector_in(&doc, &chain, &inst),
+            "the master's ObjType=2 resolves through the chain"
+        );
+    }
+
+    /// #172: the hit segments follow the geometry rows — an arc's
+    /// belly gets sampled points OFF the chord, so a click there can
+    /// hit the connector instead of a neighbor's bbox.
+    #[test]
+    fn hit_segments_sample_the_arc_belly() {
+        let mut s = Shape::default();
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        let row = |ix: i64, t: &str, cells: &[(&str, &str)]| Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .iter()
+                .map(|(n, v)| (n.to_string(), Cell::value(v.to_string())))
+                .collect(),
+            ..Row::default()
+        };
+        // 0..4 wide, arc from (0,0) to (4,0) bulging up through (2,2).
+        geo.rows.push(row(1, "MoveTo", &[("X", "0"), ("Y", "0")]));
+        geo.rows.push(row(
+            2,
+            "EllipticalArcTo",
+            &[("X", "4"), ("Y", "0"), ("A", "2"), ("B", "2")],
+        ));
+        s.sheet.children.push(SheetChild::Section(geo));
+        let segs = geometry_hit_segments(&s, None, (10.0, 10.0), (4.0, 4.0), (1.0, 1.0));
+        assert!(!segs.is_empty(), "the arc produced segments");
+        // The sampled interior sits above the chord (y > 10 in page
+        // space, y-up): the belly is covered.
+        let belly = segs
+            .iter()
+            .any(|(a, b)| a.1 > 10.05 || b.1 > 10.05);
+        assert!(belly, "interior samples leave the chord: {segs:?}");
+    }
+
+    /// #172: with no local rows the MASTER root's geometry stands in,
+    /// scaled from the master's size to the instance rect.
+    #[test]
+    fn hit_segments_fall_back_to_master_rows_scaled() {
+        let inst = Shape {
+            id: 2,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("Width", Cell::value("2"));
+        root.sheet.set_cell("Height", Cell::value("2"));
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        let row = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), Cell::value(x.to_string())),
+                ("Y".to_string(), Cell::value(y.to_string())),
+            ],
+            ..Row::default()
+        };
+        geo.rows.push(row(1, "MoveTo", "0", "0"));
+        geo.rows.push(row(2, "LineTo", "2", "2"));
+        root.sheet.children.push(SheetChild::Section(geo));
+        // Instance rect is 2x the master: local (2,2) → page (10+4,
+        // 10+4).
+        let segs = geometry_hit_segments(&inst, Some(&root), (10.0, 10.0), (4.0, 4.0), (2.0, 2.0));
+        assert_eq!(
+            segs,
+            vec![((10.0, 10.0), (14.0, 14.0))],
+            "master rows scale onto the instance rect"
+        );
     }
 
     #[test]

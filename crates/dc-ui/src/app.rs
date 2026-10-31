@@ -1507,15 +1507,20 @@ impl App {
             }
         }
         let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
-        // Connectors hit by their LINE, not a degenerate bbox (#108 —
-        // the corpus model's bbox can be a zero-height band).
+        // Connectors hit by their INK, not a degenerate bbox (#108 —
+        // the corpus model's bbox can be a zero-height band). #172: the
+        // ink follows the GEOMETRY rows — the Begin→End chord first
+        // (the common straight route), then the row walk (arcs leave
+        // the chord; a belly click would otherwise land on whatever
+        // shape's bbox overlaps it). Master instances count (#172):
+        // `ObjType=2` often lives on the master.
         if self.group_edit.is_empty() {
             let threshold = 5.0 / self.view.px_per_in() as f64;
             for shape in page.shapes.iter().rev() {
-                if !crate::connectors::is_connector(shape) {
-                    continue;
-                }
                 if let Ok(chain) = shape_chain(&ed.doc, page.id, shape.id) {
+                    if !crate::connectors::is_connector_in(&ed.doc, &chain, shape) {
+                        continue;
+                    }
                     let g = |n: &str| {
                         ed.doc
                             .resolve_cell(shape, &chain, n)
@@ -1526,6 +1531,43 @@ impl App {
                     {
                         if segment_hit((bx, by), (ex, ey), page_pos, threshold) {
                             return Some(shape.id);
+                        }
+                    }
+                    // The geometry walk (master root rows when the
+                    // instance carries none), mapped through the
+                    // chain-resolved bbox.
+                    let (root, msize) = shape
+                        .master
+                        .and_then(|mid| {
+                            ed.doc.master(mid).and_then(|m| m.shapes.first().map(|root| {
+                                let size = (
+                                    root.sheet
+                                        .cell("Width")
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(1.0),
+                                    root.sheet
+                                        .cell("Height")
+                                        .and_then(|c| c.numeric())
+                                        .unwrap_or(1.0),
+                                );
+                                (root, size)
+                            }))
+                        })
+                        .map(|(r, s)| (Some(r), s))
+                        .unwrap_or((None, (1.0, 1.0)));
+                    if let Some(rect) = Self::shape_rect_static(&ed.doc, page.id, shape) {
+                        let segs = crate::connectors::geometry_hit_segments(
+                            shape,
+                            root,
+                            (g("PinX").unwrap_or(rect.0) - g("LocPinX").unwrap_or(0.0),
+                             g("PinY").unwrap_or(rect.1) - g("LocPinY").unwrap_or(0.0)),
+                            (g("Width").unwrap_or(rect.2), g("Height").unwrap_or(rect.3)),
+                            msize,
+                        );
+                        for (a, b) in segs {
+                            if segment_hit(a, b, page_pos, threshold) {
+                                return Some(shape.id);
+                            }
                         }
                     }
                 }
@@ -2304,11 +2346,12 @@ impl App {
             ("LocPinX", w / 2.0),
             ("LocPinY", 0.0),
         ] {
-            let formula = ed
-                .doc
-                .resolve_cell(sh, &chain, name)
-                .and_then(|c| c.f.clone())
-                .filter(|f| f != "Inh");
+            // effective_formula, not the instance cell's own F — an
+            // 'Inh' PinX over a master's GUARD((BeginX+EndX)/2) is
+            // still formula-driven to the command layer, and a refused
+            // write aborts the whole macro (#172).
+            let formula =
+                dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
                 kept_note = Some(format!(
                     "endpoint moved, but {name} is formula-driven and kept"
@@ -2398,11 +2441,10 @@ impl App {
             ("EndY", ey + dy),
         ];
         for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
-            let formula = ed
-                .doc
-                .resolve_cell(sh, &chain, name)
-                .and_then(|c| c.f.clone())
-                .filter(|f| f != "Inh");
+            // effective_formula (#172): an 'Inh' instance cell over a
+            // master's GUARD would otherwise refuse and abort the move.
+            let formula =
+                dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
                 kept_note = Some(format!("line moved, but {name} is formula-driven and kept"));
             } else {
@@ -2419,6 +2461,136 @@ impl App {
         if let Some(note) = kept_note {
             self.status = note;
         }
+    }
+
+    /// #172: translate a CONNECTOR by dragging its body. Free endpoints
+    /// move as plain values; glued endpoints carry their glue formula
+    /// (`PAR(PNT(...))`/`_WALKGLUE`) and move through [`SetGluedCell`]
+    /// — the GUARD-waived write that keeps the formula — exactly the
+    /// reroute engine's own cache-update pattern, so the glue survives
+    /// and the reroute tail re-attaches the moved ends (a both-ends
+    /// glued connector pins back to its targets, like Visio). Derived
+    /// XForm cells a formula owns are kept, never literal-written (an
+    /// aborted macro was the #172 "drag does nothing").
+    fn apply_connector_body_move(&mut self, from: (f64, f64), to: (f64, f64)) {
+        let Some((page_id, shape_id)) = self.sel else {
+            return;
+        };
+        // Locks refuse; formulas do not (they ride SetGluedCell).
+        if let Some(reason) = self.line_lock_guard(&["LockBegin", "LockEnd"]) {
+            self.status = format!("connector move refused: {reason}");
+            return;
+        }
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return;
+        };
+        let get = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+        let Some(((bx, by), (ex, ey))) = get("BeginX")
+            .zip(get("BeginY"))
+            .zip(get("EndX").zip(get("EndY")))
+        else {
+            return;
+        };
+        let Some((px, py)) = get("PinX").zip(get("PinY")) else {
+            return;
+        };
+        let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: shape_id,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        // Endpoints: a formula-owned end (glue: PAR(PNT(...)) /
+        // _WALKGLUE) is NOT written — the formula owns its value too,
+        // and a moved cache would desync render from evaluation. It
+        // stays pinned to its target (Visio's feel). A free end moves
+        // as a plain value through the GUARD-waived write.
+        let mut free: [bool; 2] = [true, true];
+        for (i, (name, v)) in [
+            ("BeginX", bx + dx),
+            ("BeginY", by + dy),
+            ("EndX", ex + dx),
+            ("EndY", ey + dy),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, name).is_some() {
+                free[i / 2] = false;
+                continue;
+            }
+            cmds.push(Box::new(dc_core::SetGluedCell::new(
+                scope.clone(),
+                name,
+                cell(v),
+            )));
+        }
+        if !free[0] && !free[1] {
+            self.status = "connector is glued at both ends — drag an                            endpoint or its shapes"
+                .into();
+            return;
+        }
+        // Derived cells: only a formula-free cell literal-writes (an
+        // owned cell would refuse and abort the whole macro).
+        for (name, v) in [("PinX", px + dx), ("PinY", py + dy)] {
+            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, name).is_none() {
+                cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
+            }
+        }
+        // The connector's INK is its route rows — rewrite them from
+        // the post-move endpoints (free ends moved, pinned ends
+        // resolve unchanged), exactly the reroute engine's plan.
+        let nb = if free[0] { (bx + dx, by + dy) } else { (bx, by) };
+        let ne = if free[1] { (ex + dx, ey + dy) } else { (ex, ey) };
+        let style = get("ShapeRouteStyle")
+            .map(|v| format!("{}", v as i64))
+            .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+        let pts = crate::connectors::route(&style, nb, ne);
+        let rows = crate::connectors::route_rows(nb, &pts);
+        if !sh.sheet.sections_named("Geometry").is_empty() {
+            for (i, (x, y)) in rows.iter().enumerate() {
+                for (cellname, v) in [("X", *x), ("Y", *y)] {
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        0,
+                        dc_core::commands::RowSel::Ix((i + 2) as i64),
+                        cellname,
+                        vsdx::Cell::value(format!("{v:.6}")),
+                    )));
+                }
+            }
+        }
+        // Glued ends re-attach in the same undo step.
+        if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
+            cmds.push(r);
+        }
+        self.apply(Macro::new(format!("move connector {shape_id}"), cmds));
+    }
+
+    /// The Protection locks of the selected 1D shape, without the
+    /// formula half of [`Self::line_drag_guard`] (glue formulas are
+    /// expected on connectors and ride [`dc_core::SetGluedCell`]).
+    fn line_lock_guard(&self, locks: &[&str]) -> Option<String> {
+        let ed = self.ed()?;
+        let (page_id, shape_id) = self.sel?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape_id)?;
+        let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
+        for lock in locks {
+            if protection_flag(&ed.doc, sh, &chain, lock) {
+                return Some(format!("{lock} is set (Protection section)"));
+            }
+        }
+        None
     }
 
     /// Apply a pre-boxed command (the multi-shape move paths build
@@ -7045,7 +7217,14 @@ impl App {
                                     let page =
                                         &ed.doc.pages[self.page_idx];
                                     vsdx::model::find_shape_by_id(&page.shapes, sid)
-                                        .is_some_and(crate::connectors::is_connector)
+                                        .and_then(|sh| {
+                                            shape_chain(&ed.doc, page.id, sid)
+                                                .ok()
+                                                .map(|ch| (sh, ch))
+                                        })
+                                        .is_some_and(|(sh, ch)| {
+                                            crate::connectors::is_connector_in(&ed.doc, &ch, sh)
+                                        })
                                 })
                             });
                             if is_conn {
@@ -7067,21 +7246,28 @@ impl App {
                         }
                     }
                     HandleId::LineMid => {
-                        // #108: dragging a glued connector's body
-                        // would rewrite its formula-driven endpoints
-                        // as plain values (dropping the glue); body
-                        // drag arrives with the connector routing UX.
+                        // #172: connectors translate like any shape —
+                        // free ends move plainly, glued ends move through
+                        // the GUARD-waived write that KEEPS the glue
+                        // formula (the reroute tail then re-attaches
+                        // them, Visio's pinned feel). Master instances
+                        // count as connectors (ObjType on the master).
                         let is_conn = self.sel.is_some_and(|(_, sid)| {
                             self.ed.as_ref().is_some_and(|ed| {
                                 let page = &ed.doc.pages[self.page_idx];
                                 vsdx::model::find_shape_by_id(&page.shapes, sid)
-                                    .is_some_and(crate::connectors::is_connector)
+                                    .and_then(|sh| {
+                                        shape_chain(&ed.doc, page.id, sid)
+                                            .ok()
+                                            .map(|ch| (sh, ch))
+                                    })
+                                    .is_some_and(|(sh, ch)| {
+                                        crate::connectors::is_connector_in(&ed.doc, &ch, sh)
+                                    })
                             })
                         });
                         if is_conn {
-                            self.status =
-                                "drag the connector's endpoints — body drag arrives with routing UX"
-                                    .into();
+                            self.apply_connector_body_move(start, end);
                         } else {
                             self.apply_line_move(start, end);
                         }
