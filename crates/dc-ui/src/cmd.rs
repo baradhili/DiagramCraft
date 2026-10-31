@@ -512,7 +512,15 @@ impl Command for RerouteConnectors {
                 else {
                     continue;
                 };
-                if !crate::connectors::is_connector(conn) {
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id)
+                else {
+                    continue;
+                };
+                // #174: chain-aware — master-based connectors (every
+                // Visio-authored one) carry ObjType=2 on the MASTER;
+                // the local-only check skipped them, so moving a shape
+                // never moved its glued connectors.
+                if !crate::connectors::is_connector_in(doc, &chain, conn) {
                     continue;
                 }
                 if conn
@@ -523,10 +531,6 @@ impl Command for RerouteConnectors {
                 {
                     continue;
                 }
-                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id)
-                else {
-                    continue;
-                };
                 let get = |n: &str| {
                     doc.resolve_cell(conn, &chain, n)
                         .and_then(|v| v.numeric())
@@ -614,23 +618,52 @@ impl Command for RerouteConnectors {
                 ] {
                     // A formula-driven derived cell never literal-writes
                     // (the endpoint carries the glue formula instead).
-                    let formula_free = conn
-                        .sheet
-                        .cell(n)
-                        .and_then(|v| v.f.as_deref())
-                        .is_none_or(|f| f == "Inh");
-                    if formula_free {
+                    // #174: EFFECTIVE formula — an 'Inh' instance cell
+                    // over a master's GUARD((BeginX+EndX)/2) is driven
+                    // to the command layer; a plain SetCell there would
+                    // refuse and abort the whole move macro.
+                    if dc_core::commands::effective_formula(doc, conn, &chain, n).is_none() {
                         cells.push((n.to_string(), v, None));
+                    }
+                }
+                // #174: only rewrite route rows the connector ALREADY
+                // has — SetRowCell materializes missing rows, which
+                // would grow a 2-row arc master (MoveTo +
+                // EllipticalArcTo) into a 4-row elbow polyline.
+                // Master-only-geometry connectors keep their rows
+                // (their masters derive geometry from Width/Height
+                // formulas where they follow the endpoints anyway).
+                let existing: Vec<i64> = {
+                    let mut v: Vec<i64> = conn
+                        .sheet
+                        .sections_named("Geometry")
+                        .first()
+                        .map(|g| g.rows.iter().map(|r| r.ix).collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    v.sort_unstable();
+                    v
+                };
+                let mut planned_rows: Vec<(i64, f64, f64)> = rows
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
+                    .filter(|(ix, _, _)| existing.contains(ix))
+                    .collect();
+                // A connector with fewer rows than the route frame
+                // (a 2-row arc master, a 3-row elbow instance) puts
+                // the ENDPOINT on its LAST row — writing the first
+                // elbow there would bend the shape short of its
+                // target.
+                let max_ix = existing.iter().copied().filter(|ix| (2..=4).contains(ix)).max();
+                if let (Some(last), Some(max_ix)) = (planned_rows.last_mut(), max_ix) {
+                    if max_ix < 4 {
+                        *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
                     }
                 }
                 plans.push(Plan {
                     conn_id: conn.id,
                     cells,
-                    rows: rows
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
-                        .collect(),
+                    rows: planned_rows,
                 });
             }
         }
@@ -847,5 +880,267 @@ mod tests {
         assert!((num(&ed, sub, "Width") - 1.0).abs() < 1e-6, "undo restored sub cache");
         assert!((num(&ed, root, "TxtPinX") - 0.5).abs() < 1e-6, "undo restored TxtPinX");
         assert!((num(&ed, icon, "PinY") - 0.4).abs() < 1e-6, "undo restored icon PinY");
+    }
+}
+
+#[cfg(test)]
+mod reroute_master_tests {
+    use super::*;
+
+    // ---- #174: reroute must move MASTER-based connectors ----------------
+
+    use dc_core::connects::ConnectsHost;
+    use vsdx::model::{Cell as VCell, Row, Section, SheetChild};
+
+    fn vc(n: &str, v: &str) -> (String, VCell) {
+        (n.to_string(), VCell::value(v.to_string()))
+    }
+
+    /// A document like the owner's connector-test.vsdx: a rectangle,
+    /// a MASTER-based Dynamic connector (ObjType=2 lives on the
+    /// master root; the instance carries only placement cells + local
+    /// geometry rows), and a Connect gluing the connector's EndX to
+    /// the rectangle (static, ToPart 100+row on Connection row 0).
+    fn doc_with_master_connector(to_part: i64, arc: bool) -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        // The target rectangle at (2..4, 5..6) with connection row 0
+        // at its top-left (2, 6).
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "3.0"),
+            ("PinY", "5.5"),
+            ("Width", "2.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "1.0"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        // Connection row 0 at the rect's left edge mid-height (local
+        // (0, 0.5) → page (2, 5.5)): the static-glue anchor.
+        let mut connections = Section {
+            name: "Connection".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        connections.rows.push(Row {
+            ix: 0,
+            cells: vec![vc("X", "0"), vc("Y", "0.5")],
+            ..Row::default()
+        });
+        target.sheet.children.push(SheetChild::Section(connections));
+        let mut conn_rows = vec![
+            Row {
+                t: Some("MoveTo".into()),
+                ix: 1,
+                cells: vec![vc("X", "0"), vc("Y", "0")],
+                ..Row::default()
+            },
+        ];
+        if arc {
+            conn_rows.push(Row {
+                t: Some("EllipticalArcTo".into()),
+                ix: 2,
+                cells: vec![
+                    vc("X", "1.0"),
+                    vc("Y", "0.0"),
+                    vc("A", "0.5"),
+                    vc("B", "0.25"),
+                ],
+                ..Row::default()
+            });
+        } else {
+            conn_rows.push(Row {
+                t: Some("LineTo".into()),
+                ix: 2,
+                cells: vec![vc("X", "1.0"), vc("Y", "0.0")],
+                ..Row::default()
+            });
+            conn_rows.push(Row {
+                t: Some("LineTo".into()),
+                ix: 3,
+                cells: vec![vc("X", "1.0"), vc("Y", "0.0")],
+                ..Row::default()
+            });
+            conn_rows.push(Row {
+                t: Some("LineTo".into()),
+                ix: 4,
+                cells: vec![vc("X", "1.0"), vc("Y", "0.0")],
+                ..Row::default()
+            });
+        }
+        // The connector: master carries ObjType=2 + GUARDed derived
+        // cells (the corpus pattern the old checks missed).
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("ObjType", VCell::value("2"));
+        root.sheet.set_cell(
+            "PinX",
+            VCell {
+                f: Some("GUARD((BeginX+EndX)/2)".into()),
+                ..VCell::default()
+            },
+        );
+        root.sheet.set_cell(
+            "Width",
+            VCell {
+                f: Some("GUARD(EndX-BeginX)".into()),
+                ..VCell::default()
+            },
+        );
+        let mut m = vsdx::Master::default();
+        m.shapes.push(root);
+        ed.doc.masters.push(m);
+        let mut conn = Shape {
+            id: 11,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("BeginX", "1.0"),
+            ("BeginY", "6.0"),
+            ("EndX", "2.0"),
+            ("EndY", "6.0"),
+            ("PinX", "1.5"),
+            ("PinY", "6.0"),
+            ("Width", "1.0"),
+            ("Height", "0.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.0"),
+        ] {
+            conn.sheet.set_cell(n, VCell::value(v));
+        }
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        geo.rows = conn_rows;
+        conn.sheet.children.push(SheetChild::Section(geo));
+        ed.doc.pages[0].shapes.push(target);
+        ed.doc.pages[0].shapes.push(conn);
+        let mut list = ed.doc.pages[0].connects();
+        list.list.push(dc_core::connects::Connect::new(
+            11,
+            "EndX",
+            12,
+            10,
+            "Connections.X1",
+            to_part,
+        ));
+        ed.doc.pages[0].set_connects(&list);
+        (ed, page_id)
+    }
+
+    /// #174: a master-based connector's glued endpoint follows its
+    /// target after RerouteConnectors — the local-only ObjType check
+    /// used to skip it entirely.
+    #[test]
+    fn reroute_moves_master_based_connector_static_glue() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        // Move the target right by 1in (PinX 3.0 → 4.0).
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let ex = conn.sheet.cell("EndX").and_then(|c| c.numeric()).unwrap();
+        assert!(
+            (ex - 3.0).abs() < 1e-6,
+            "static glue follows the connection point: EndX {ex} (want 3.0)"
+        );
+        cmd.undo(&mut ed.doc).unwrap();
+        let ex = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap()
+            .sheet
+            .cell("EndX")
+            .and_then(|c| c.numeric())
+            .unwrap();
+        assert!((ex - 2.0).abs() < 1e-6, "undo restores EndX to 2.0: {ex}");
+    }
+
+    /// Dynamic glue (ToPart 3): the endpoint walks to the target's
+    /// facing edge after the move.
+    #[test]
+    fn reroute_moves_master_based_connector_dynamic_glue() {
+        let (mut ed, page_id) = doc_with_master_connector(3, false);
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let ex = conn.sheet.cell("EndX").and_then(|c| c.numeric()).unwrap();
+        assert!(
+            (ex - 3.0).abs() < 1e-6,
+            "dynamic glue walks to the facing (left) edge: EndX {ex} (want 3.0)"
+        );
+    }
+
+    /// An ARC connector keeps its 2-row geometry — the reroute must
+    /// not materialize the tool connector's 4-row route frame onto a
+    /// master whose rows are MoveTo + EllipticalArcTo.
+    #[test]
+    fn reroute_never_grows_an_arc_connectors_rows() {
+        let (mut ed, page_id) = doc_with_master_connector(100, true);
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.0"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let geo = conn.sheet.sections_named("Geometry").remove(0);
+        assert_eq!(
+            geo.rows.len(),
+            2,
+            "the arc keeps its MoveTo + EllipticalArcTo rows: {:?}",
+            geo.rows.iter().map(|r| r.t.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(geo.rows[1].t.as_deref(), Some("EllipticalArcTo"));
+        // Its endpoint row followed the target.
+        let x = geo.rows[1].cell("X").and_then(|c| c.numeric()).unwrap();
+        assert!(
+            (x - 2.0).abs() < 1e-3,
+            "the arc's end row tracks the new endpoint: X {x}"
+        );
     }
 }
