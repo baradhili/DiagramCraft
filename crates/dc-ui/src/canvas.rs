@@ -200,6 +200,10 @@ pub struct CanvasOut {
     /// Marquee (empty-area drag) finished: rect in page inches, y-up,
     /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
+    /// Lasso drag finished (#110, Visio's Lasso Select): the freehand
+    /// trail in page inches, y-up. The app selects every shape the
+    /// trail touches or encloses.
+    pub lasso_done: Option<Vec<(f64, f64)>>,
     /// A ruler drag released over the page (#113 guides slice): the
     /// guide kind and its page position (inches, y-up).
     pub guide_drop: Option<(GuideSource, (f64, f64))>,
@@ -209,6 +213,8 @@ pub struct CanvasOut {
     pub connector_drop: Option<((f64, f64), (f64, f64))>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,
+    /// Lasso trail this frame while dragging (screen px).
+    pub lasso_live: Option<Vec<Pos2>>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
     /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
@@ -297,6 +303,79 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
     )
 }
 
+/// Does a lasso trail (page inches, y-up) touch or enclose an
+/// axis-aligned rect (#110, Visio's Lasso Select)? True when any
+/// segment crosses the rect, any sample lies inside it, or the trail
+/// loops around it (the rect's center inside the trail's polygon) —
+/// the trail needs only to TOUCH a shape, unlike the marquee's
+/// contained/intersect band.
+pub fn lasso_hits_rect(trail: &[(f64, f64)], x: f64, y: f64, w: f64, h: f64) -> bool {
+    let inside = |p: (f64, f64)| p.0 >= x && p.0 <= x + w && p.1 >= y && p.1 <= y + h;
+    let mut prev: Option<(f64, f64)> = None;
+    for &p in trail {
+        if inside(p) {
+            return true;
+        }
+        if let Some(a) = prev {
+            if seg_crosses(a, p, x, y, w, h) {
+                return true;
+            }
+        }
+        prev = Some(p);
+    }
+    // Enclosed: the rect's center inside the trail polygon (ray cast —
+    // a loop that surrounds the shape without touching it still
+    // selects it, Visio's lasso semantics).
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let mut winding = 0i32;
+    for w2 in trail.windows(2) {
+        let (a, b) = (w2[0], w2[1]);
+        if (a.1 <= cy) != (b.1 <= cy) {
+            let t = (cy - a.1) / (b.1 - a.1);
+            if a.0 + t * (b.0 - a.0) > cx {
+                winding += if b.1 > a.1 { 1 } else { -1 };
+            }
+        }
+    }
+    winding != 0
+}
+
+/// Liang-Barsky: does segment a→b cross or touch the rect?
+fn seg_crosses(a: (f64, f64), b: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-dx, a.0 - x),
+        (dx, x + w - a.0),
+        (-dy, a.1 - y),
+        (dy, y + h - a.1),
+    ] {
+        if p.abs() < 1e-12 {
+            if q < 0.0 {
+                return false; // parallel and outside this boundary
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return false;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return false;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// Live drag feedback (#96) — drawn above the layers, under nothing:
 /// ghost layer quads (moved/stretched textures; a move preview is a
 /// quad translation, never a re-raster), dashed screen-space outline
@@ -382,6 +461,7 @@ pub fn show(
     guides: &[GuideFx],      // #113: guide overlay, above ink
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
+    lasso_tool: bool, // #110: the Lasso Select tool is active
     stencil_hover: bool,
     // #177: connection-point reveal / glue highlight / glued sites,
     // computed by the app for the live endpoint position (None when
@@ -406,9 +486,11 @@ pub fn show(
         handle_drag_done: None,
         press_page_pos: None,
         marquee_done: None,
+        lasso_done: None,
         guide_drop: None,
         connector_drop: None,
         marquee_live: None,
+        lasso_live: None,
         shift_click: false,
         ctrl_click: false,
         zoom_changed: false,
@@ -471,6 +553,7 @@ pub fn show(
     let mem_handle = egui::Id::unique("dc-handle-drag");
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
+    let mem_lasso = egui::Id::unique("dc-lasso");
     let mem_guide = egui::Id::unique("dc-guide-drag");
     let mem_connector = egui::Id::unique("dc-connector-drag");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
@@ -517,6 +600,11 @@ pub fn show(
                 if hit_shape(page_pos) {
                     // The app arms its move-drag from the press.
                     out.press_page_pos = Some(page_pos);
+                } else if lasso_tool {
+                    // Empty page with the Lasso Select tool (#110):
+                    // the press starts a freehand trail.
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(mem_lasso, vec![p]));
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()
@@ -603,6 +691,40 @@ pub fn show(
         }
     }
 
+    // Lasso (#110, Visio's Lasso Select): armed on an empty-page press
+    // while the tool is active; the freehand trail follows the pointer;
+    // release selects every shape the trail touches or encloses. A
+    // near-zero-length trail is just a click on empty page — the click
+    // path handles selection.
+    let lasso_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
+    if let Some(mut trail) = lasso_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<Vec<Pos2>>(mem_lasso));
+            if primary_released {
+                let len_px: f32 = trail.windows(2).map(|w| w[0].distance(w[1])).sum();
+                if len_px > 2.0 && trail.len() >= 2 {
+                    out.lasso_done = Some(
+                        trail
+                            .iter()
+                            .map(|p| screen_to_page(*p, view, page))
+                            .collect(),
+                    );
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            // Extend the trail; near-duplicate samples only bloat it.
+            if trail.last().is_none_or(|l| l.distance(p) > 0.75) {
+                trail.push(p);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_lasso, trail.clone()));
+            }
+            out.lasso_live = Some(trail);
+        }
+    }
+
     // Marquee: armed on an empty-page press above; live band while the
     // button is held, committed on release. A degenerate (zero-area)
     // band is just a click on empty page — the click path already
@@ -633,8 +755,9 @@ pub fn show(
         }
     }
 
-    // The Connector Tool draws with a crosshair (Visio).
-    if connector_tool {
+    // The Connector Tool draws with a crosshair (Visio); the Lasso
+    // trails freehand, also a crosshair.
+    if connector_tool || lasso_tool {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
     }
     // Handle cursors.
@@ -1192,6 +1315,19 @@ pub fn show(
         p.rect_filled(mr, 0.0, Color32::from_rgba_premultiplied(30, 120, 200, 24));
     }
 
+    // Lasso trail (live freehand line, #110) — dashed to read as a
+    // selection aid, never page ink.
+    if let Some(trail) = &out.lasso_live {
+        if trail.len() >= 2 {
+            p.add(egui::Shape::dashed_line(
+                trail,
+                Stroke::new(1.0, t.selection),
+                6.0,
+                4.0,
+            ));
+        }
+    }
+
     // Rulers.
     if view.show_rulers {
         draw_rulers(&p, canvas_r, view, page, out.page_rect, &t);
@@ -1377,6 +1513,41 @@ fn format_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lasso_trail_selects_by_touch() {
+        // Rect [1,3]×[1,2]; a trail passing THROUGH it (both samples
+        // outside) selects — touch, not containment (#110).
+        let trail = [(0.0, 1.5), (4.0, 1.5)];
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0));
+        // A trail far away does not.
+        assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0));
+        // A sample inside selects.
+        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0));
+    }
+
+    #[test]
+    fn lasso_loop_selects_the_enclosed() {
+        // A loop around the rect without any sample inside or segment
+        // crossing: the enclosed center (2, 1.5) selects.
+        let loop_trail = [
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 4.0),
+            (0.0, 4.0),
+            (0.0, 0.0),
+        ];
+        assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0));
+        // The same loop does not select a shape outside it.
+        assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0));
+    }
+
+    #[test]
+    fn lasso_diagonal_cross_counts() {
+        // The trail crosses only the rect's corner region diagonally.
+        let trail = [(0.5, 0.5), (1.5, 1.5)];
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0));
+    }
 
     #[test]
     fn screen_to_page_flips_y() {

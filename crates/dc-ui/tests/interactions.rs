@@ -3673,6 +3673,56 @@ fn hyperlink_dialog_close_dismisses_and_discards_draft() {
     );
 }
 
+/// #110 keytips/tab-order audit: Esc layers — with a hyperlink DRAFT
+/// open the first Esc discards only the draft (window stays), the
+/// second closes the window; Enter commits the draft like OK.
+#[test]
+fn hyperlink_dialog_esc_layers_and_enter_commits() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row")
+        .click();
+    h.run();
+
+    // Draft + text: Enter commits like OK (the default button).
+    h.get_by_label("New…").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://example.test/enter");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let links = h.state().debug_hyperlinks_for_test(sid);
+    assert_eq!(links.len(), 1, "Enter committed the draft: {links:?}");
+    assert_eq!(links[0].0, "https://example.test/enter");
+
+    // Esc with no draft closes the window.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("New…").count(),
+        0,
+        "Esc closed the Hyperlinks window"
+    );
+}
+
 /// Live report on #30: the Shape Data window must be closable — Close
 /// (always visible) and the title-bar X dismiss it.
 #[test]
@@ -5942,6 +5992,146 @@ fn arrow_keys_nudge_the_selection() {
     assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
 }
 
+/// #110 remainder: a DOUBLE-clicked Format Painter stays armed across
+/// applications — two shapes painted from one arming, then Esc
+/// finishes. (The 0.05 s-step harness groups the click pair; see the
+/// `dblclick_harness_with_blank` note.)
+#[test]
+fn format_painter_double_click_stays_armed() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(160.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(0.0, 120.0));
+    let (_, c) = place_master(&mut h, 2);
+    // A distinct source format: A's line weight, resolved and painted.
+    h.state_mut()
+        .set_cell_for_test(page, a, "LineWeight", "0.0555", None);
+    h.run();
+
+    // Select A, then double-click the Format Painter.
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr2.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label_contains("Home").click();
+    h.run();
+    let fp = h.get_by_label_contains("Format Painter").rect().center();
+    dbl_click_at(&mut h, fp);
+    h.run();
+
+    // Paint onto B, then onto C: the painter stays armed after B.
+    let bsr2 = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, bsr2.center(), egui::PointerButton::Primary);
+    h.run();
+    let bv = cell_of(&h, page, b, "LineWeight");
+    assert!(
+        (bv - 0.0555).abs() < 1e-6,
+        "B painted from the sticky painter: {bv}"
+    );
+    let csr = h.state().debug_shape_screen_rect_for_test(c).unwrap();
+    click_at(&mut h, csr.center(), egui::PointerButton::Primary);
+    h.run();
+    let cv = cell_of(&h, page, c, "LineWeight");
+    assert!(
+        (cv - 0.0555).abs() < 1e-6,
+        "C painted too — the painter stayed armed: {cv}"
+    );
+    assert!(
+        h.state().debug_status().contains("Esc to finish"),
+        "status says the painter is still live: {}",
+        h.state().debug_status()
+    );
+    // Esc finishes.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(
+        h.state().debug_status().contains("cancelled"),
+        "Esc disarmed the painter: {}",
+        h.state().debug_status()
+    );
+}
+
+/// #110 remainder: the Lasso Select tool — a freehand trail selects
+/// the shapes it passes through (touch, not containment); a shape the
+/// trail never meets stays unselected.
+#[test]
+fn lasso_select_trail_picks_touched_shapes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let ar = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let br = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    assert!(ar.left() > br.right(), "A sits clear right of B");
+
+    // Home ▸ Editing ▸ Lasso Select (Visio's Select menu entry).
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Lasso Select").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Lasso);
+
+    // Freehand from the empty gap between the shapes, through A, past
+    // its right edge — every point of the trail clears B.
+    let start = egui::pos2((br.right() + ar.left()) / 2.0, ar.center().y);
+    drag_naturally(
+        &mut h,
+        start,
+        egui::vec2(ar.right() - start.x + 40.0, 8.0),
+    );
+    assert_eq!(
+        h.state().debug_sel_set_len(),
+        1,
+        "only the touched shape is selected"
+    );
+    assert_eq!(h.state().debug_sel(), Some((page, a)));
+    assert!(
+        h.state().debug_status().contains("lasso selected 1"),
+        "status notes the lasso pick: {}",
+        h.state().debug_status()
+    );
+
+    // Esc returns to the pointer (Select Area), and the next empty
+    // drag is a marquee again — touching A's row selects by band.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+}
+
+/// #110 keytips/tab-order audit: Esc dismisses an open dialog (Visio)
+/// instead of falling through to the tool/painter shortcuts.
+#[test]
+fn esc_closes_an_open_dialog() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, _a) = place_master(&mut h, 2);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Select by Type…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label("Select").count() > 0,
+        "the Select by Type dialog is up"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(
+        h.query_all_by_label("Select").count(),
+        0,
+        "Esc dismissed the dialog"
+    );
+}
+
 // ---- GitHub #113: the remaining slices -------------------------------------
 
 /// A picture inserts as a Foreign shape carrying real media: a PNG in,
@@ -6722,3 +6912,4 @@ fn connection_points_reveal_highlight_and_show_glued_sites() {
         pinx - lpx + last_x
     );
 }
+

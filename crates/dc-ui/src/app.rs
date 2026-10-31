@@ -200,6 +200,9 @@ pub struct App {
     /// the source shape whose resolved formatting the next shape
     /// click receives.
     painter_armed: Option<i64>,
+    /// #110 remainder: the painter stays armed across applications
+    /// (Visio's double-click Format Painter) until Esc or a cancel.
+    painter_sticky: bool,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
@@ -395,13 +398,15 @@ const CONN_REVEAL_IN: f64 = 0.6;
 type OsImage = (u32, u32, Vec<u8>);
 
 /// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
-/// and drags; the Connector Tool (#108) draws connectors. Esc returns
-/// to the pointer, like Visio.
+/// and drags; the Connector Tool (#108) draws connectors; the Lasso
+/// (#110, Visio's Lasso Select) trails a freehand selection. Esc
+/// returns to the pointer, like Visio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
     #[default]
     Pointer,
     Connector,
+    Lasso,
 }
 
 struct DragState {
@@ -521,6 +526,7 @@ impl App {
             bg_underlays: Vec::new(),
             last_picture: None,
             painter_armed: None,
+            painter_sticky: false,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1962,15 +1968,20 @@ impl App {
             if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
                 self.delete_selection();
             }
-            // Esc leaves the Connector Tool for the pointer (Visio),
-            // and disarms the Format Painter (#110).
+            // Esc closes the frontmost open dialog first (#110
+            // tab-order audit: Visio dismisses a dialog on Esc);
+            // only with none open do the tool/painter shortcuts run.
             if i.key_pressed(egui::Key::Escape) && !kb_owned {
-                if self.tool == Tool::Connector {
-                    self.tool = Tool::Pointer;
-                }
-                if self.painter_armed.is_some() {
-                    self.painter_armed = None;
-                    self.status = "format painter cancelled".into();
+                let consumed = self.close_front_dialog();
+                if !consumed {
+                    if self.tool == Tool::Connector || self.tool == Tool::Lasso {
+                        self.tool = Tool::Pointer;
+                    }
+                    if self.painter_armed.is_some() {
+                        self.painter_armed = None;
+                        self.painter_sticky = false;
+                        self.status = "format painter cancelled".into();
+                    }
                 }
             }
             // Ctrl+A selects the page (#110, URS-1160).
@@ -2121,6 +2132,79 @@ impl App {
         }
         self.sel_set = picked;
         self.sel = self.sel_set.last().copied();
+    }
+
+    /// #110 (Visio's Lasso Select): the freehand trail (page inches,
+    /// y-up) selects every shape it touches or encloses — the marquee's
+    /// group-edit semantics, the lasso's touch geometry.
+    fn apply_lasso(&mut self, trail: &[(f64, f64)]) {
+        let Some(ed) = self.ed() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        let mut picked = Vec::new();
+        // Group-edit mode (#78): the lasso selects among the open
+        // group's members only, like the marquee.
+        let mut members = Vec::new();
+        if let Some(g) = self.group_edit.last().copied() {
+            if let Some(group) = vsdx::model::find_shape_by_id(&page.shapes, g) {
+                collect_members(&group.sub_shapes, &mut members);
+            }
+        } else {
+            members.extend(page.shapes.iter());
+        }
+        for shape in members {
+            if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
+                if canvas::lasso_hits_rect(trail, sx, sy, w, h) {
+                    picked.push((page_id, shape.id));
+                }
+            }
+        }
+        let n = picked.len();
+        self.sel_set = picked;
+        self.sel = self.sel_set.last().copied();
+        self.status = format!("lasso selected {n} shape{}", if n == 1 { "" } else { "s" });
+    }
+
+    /// #110 tab-order audit: Esc dismisses the frontmost open dialog
+    /// (Visio behavior) before the tool/painter shortcuts see the key.
+    /// Only one dialog is realistically open at a time; with several,
+    /// each Esc closes the next in a fixed order. The Hyperlinks
+    /// window manages its OWN Esc (a draft discards first — closing
+    /// the window on the same key would lose the layering), and the
+    /// confirm-close/new modals handle theirs. Returns true when one
+    /// closed.
+    fn close_front_dialog(&mut self) -> bool {
+        if self.selby_open {
+            self.selby_open = false;
+            return true;
+        }
+        if self.snap_dlg_open {
+            self.snap_dlg_open = false;
+            return true;
+        }
+        if self.pagesetup_open {
+            self.pagesetup_open = false;
+            return true;
+        }
+        if self.copypic_open {
+            self.copypic_open = false;
+            return true;
+        }
+        if self.backgrounds_open {
+            self.backgrounds_open = false;
+            return true;
+        }
+        if self.reorder_open {
+            self.reorder_open = false;
+            return true;
+        }
+        if self.color_pick.is_some() {
+            self.color_pick = None;
+            return true;
+        }
+        false
     }
 
     /// The resize/lock guard for one axis of a 2D resize (GitHub #59):
@@ -4560,15 +4644,27 @@ impl App {
     /// #110 (URS-1053): arm the Format Painter on the primary
     /// selection — the next shape click receives its resolved
     /// formatting (single-shot, Visio's click mode).
-    fn arm_format_painter(&mut self) {
+    fn arm_format_painter(&mut self, sticky: bool) {
+        // A second click while armed disarms (Visio's toggle).
+        if self.painter_armed.is_some() && !sticky {
+            self.painter_armed = None;
+            self.painter_sticky = false;
+            self.status = "format painter cancelled".into();
+            return;
+        }
         let Some((_, sid)) = self.sel else {
             self.status = "select a shape to copy formatting from first".into();
             return;
         };
         self.painter_armed = Some(sid);
-        self.status = format!(
-            "format painter: click a shape to apply shape {sid}'s formatting"
-        );
+        self.painter_sticky = sticky;
+        self.status = if sticky {
+            format!(
+                "format painter: click shapes to apply shape {sid}'s formatting (Esc to finish)"
+            )
+        } else {
+            format!("format painter: click a shape to apply shape {sid}'s formatting")
+        };
     }
 
     /// The painter's application: copy the resolved FORMAT_CELLS from
@@ -4604,8 +4700,16 @@ impl App {
         }
         let n = cmds.len();
         self.apply(Macro::new(format!("paint formatting onto shape {to}"), cmds));
-        self.status = format!("{n} formatting cells copied to shape {to}");
-        self.painter_armed = None;
+        // #110: the sticky (double-clicked) painter stays armed for
+        // the next click; the single-shot one is spent.
+        if self.painter_sticky {
+            self.status = format!(
+                "{n} formatting cells copied to shape {to} (click more shapes, Esc to finish)"
+            );
+        } else {
+            self.status = format!("{n} formatting cells copied to shape {to}");
+            self.painter_armed = None;
+        }
     }
 
     /// The page's guides as UI info (#113), resolved through the
@@ -5005,9 +5109,10 @@ impl App {
             return;
         }
         // The armed Format Painter consumes the click (#110): the hit
-        // shape receives the source's resolved formatting.
+        // shape receives the source's resolved formatting. The sticky
+        // (double-clicked) painter stays armed; empty-page or
+        // on-the-source clicks cancel either way.
         if let Some(src) = self.painter_armed {
-            self.painter_armed = None;
             if let Some(hit) = self.shape_hit(page_pos) {
                 if hit != src {
                     self.apply_format_painter(src, hit);
@@ -5017,6 +5122,8 @@ impl App {
                     return;
                 }
             }
+            self.painter_armed = None;
+            self.painter_sticky = false;
             self.status = "format painter cancelled".into();
             return;
         }
@@ -5281,7 +5388,8 @@ impl App {
                     self.status = "select by type: pick a criterion and value".into();
                 }
             }
-            Action::FormatPainter => self.arm_format_painter(),
+            Action::FormatPainter => self.arm_format_painter(false),
+            Action::FormatPainterSticky => self.arm_format_painter(true),
             Action::PageOrientation => self.toggle_page_orientation(),
             Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
             Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
@@ -5291,6 +5399,19 @@ impl App {
                 self.tool = Tool::Connector;
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
                     .into();
+            }
+            Action::LassoTool => {
+                // Toggle like Visio's Select ▸ Lasso Select menu item;
+                // the Pointer Tool (or Esc) is Select Area.
+                if self.tool == Tool::Lasso {
+                    self.tool = Tool::Pointer;
+                    self.status = "lasso select off".into();
+                } else {
+                    self.tool = Tool::Lasso;
+                    self.status =
+                        "Lasso Select: drag a freehand trail around shapes (Esc to finish)"
+                            .into();
+                }
             }
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
@@ -5529,21 +5650,38 @@ impl App {
                             )
                             .enabled(has_sel)
                             .selected(self.painter_armed.is_some())
-                            .tip("Copy the selection's formatting to the next shape you click")],
+                            .tip(
+                                "Copy the selection's formatting to the next shape you click; \
+                                 double-click to keep painting until Esc",
+                            )],
                         ]),
                         // Visio's Editing group rides beside Clipboard:
-                        // Select All + Select by Type (#110, URS-1160).
-                        grid(vec![vec![
-                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
-                                .tip("Select every shape on the page (Ctrl+A)"),
-                            RibbonButton::new(
-                                Icon::Shapes,
-                                "Select by Type…",
-                                Action::SelectByType,
+                        // Select All + Select by Type (#110, URS-1160),
+                        // plus the Select menu's Lasso Select (#110
+                        // remainder: the freehand trail).
+                        grid(vec![
+                            vec![
+                                RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
+                                    .tip("Select every shape on the page (Ctrl+A)"),
+                                RibbonButton::new(
+                                    Icon::Shapes,
+                                    "Select by Type…",
+                                    Action::SelectByType,
+                                )
+                                .selected(self.selby_open)
+                                .tip("Select shapes by type, master, or layer"),
+                            ],
+                            vec![RibbonButton::new(
+                                Icon::Lasso,
+                                "Lasso Select",
+                                Action::LassoTool,
                             )
-                            .selected(self.selby_open)
-                            .tip("Select shapes by type, master, or layer"),
-                        ]]),
+                            .selected(self.tool == Tool::Lasso)
+                            .tip(
+                                "Draw a freehand trail; shapes the trail touches or encloses \
+                                 are selected (Esc to finish)",
+                            )],
+                        ]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -7194,6 +7332,7 @@ impl App {
             &guide_fx,
             &underlays,
             self.tool == Tool::Connector,
+            self.tool == Tool::Lasso,
             armed,
             &conn_fx,
             &snap_end,
@@ -7229,6 +7368,10 @@ impl App {
             }
             if let Some((x0, y0, x1, y1)) = out.marquee_done {
                 self.apply_marquee(x0, y0, x1, y1);
+            }
+            // The Lasso trail finished (#110): touch/enclose selection.
+            if let Some(trail) = out.lasso_done {
+                self.apply_lasso(&trail);
             }
             // A ruler drag released over the page drops a guide
             // (#113, URS-1076).
@@ -8752,14 +8895,30 @@ impl App {
         // any draft and dismiss the window.
         let mut open = true;
         // The Close BUTTON flips this (the X writes `open` via the
-        // builder; the two can't share a borrow).
+        // builder; the two can't share a borrow). Esc-no-draft does
+        // too (#110 audit).
         let mut close_btn = false;
+        let mut esc_close = false;
         egui::Window::new("Hyperlinks")
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(380.0)
             .show(ctx, |ui| {
+                // #110 audit: this window manages its own Esc — a
+                // draft discards first (a window close on the same key
+                // would lose the layering); Enter commits the draft
+                // (the dialog's default OK button). Skipped while the
+                // in-place text editor owns the keyboard (#22).
+                if self.text_edit.is_none()
+                    && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    if draft.is_some() {
+                        draft = None;
+                    } else {
+                        esc_close = true;
+                    }
+                }
                 // The 2016 storage toggle (#71) sits above the list.
                 if ui
                     .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
@@ -8963,6 +9122,14 @@ impl App {
                             close_draft = true;
                         }
                     });
+                    // #110 audit: Enter is the dialog's OK (Visio's
+                    // default button) — commits and closes the draft.
+                    if ui.input(|i| {
+                        i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                    }) {
+                        commit(self);
+                        close_draft = true;
+                    }
                     if close_draft {
                         draft = None;
                     }
@@ -8989,7 +9156,7 @@ impl App {
                     });
                 });
             });
-        if open && !close_btn {
+        if open && !close_btn && !esc_close {
             self.hyperlink_draft = draft;
         } else {
             // Cancelled: discard the draft and close.
@@ -9006,7 +9173,13 @@ impl App {
             return;
         }
         let mut close = false;
+        let mut open = true;
         egui::Window::new("Reorder Pages")
+            // #110 tab-order audit: the title-bar close X — the window
+            // was the one dialog without a keyboard-reachable dismiss
+            // besides tabbing to Close (Esc arrives through
+            // `close_front_dialog`).
+            .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(280.0)
@@ -9042,7 +9215,7 @@ impl App {
                     close = true;
                 }
             });
-        if close {
+        if close || !open {
             self.reorder_open = false;
         }
     }

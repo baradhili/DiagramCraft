@@ -41,7 +41,11 @@ pub enum Action {
     DistributeV,
     SelectAll,
     SelectByType,
+    LassoTool,
     FormatPainter,
+    /// Double-clicked Format Painter (#110): stay armed across
+    /// applications until Esc or a cancel click.
+    FormatPainterSticky,
     PageOrientation,
     PageSizeDialog,
     CopyAsPicture,
@@ -152,6 +156,7 @@ pub enum Icon {
     TellMe,
     Magnet,
     Connector,
+    Lasso,
     AlignTop,
     AlignMiddle,
     AlignBottom,
@@ -228,6 +233,7 @@ impl Icon {
             Icon::TellMe => "lightbulb",
             Icon::Magnet => "magnet",
             Icon::Connector => "connector",
+            Icon::Lasso => "selection-ellipse",
             Icon::AlignTop => "format-vertical-align-top",
             Icon::AlignMiddle => "format-vertical-align-center",
             Icon::AlignBottom => "format-vertical-align-bottom",
@@ -1155,6 +1161,17 @@ impl Icon {
                     Stroke::new(2.0, blue),
                 );
             }
+            Icon::Lasso => {
+                // dashed ellipse loop (fallback; the MDI glyph ships)
+                let n = 14;
+                let (rx, ry) = (7.0f32, 5.5f32);
+                for i in 0..n {
+                    let a0 = i as f32 * std::f32::consts::TAU / n as f32;
+                    let a1 = (i as f32 + 0.55) * std::f32::consts::TAU / n as f32;
+                    let pt = |a: f32| c + Vec2::new(a.cos() * rx, a.sin() * ry);
+                    p.line_segment([pt(a0), pt(a1)], Stroke::new(1.6, blue));
+                }
+            }
             Icon::Magnet => {
                 // horseshoe magnet (fallback; the MDI glyph is shipped):
                 // two prongs over a bezier heel, blue pole tips.
@@ -1280,7 +1297,7 @@ impl RibbonButton {
     }
 
     /// Visio "hero" button: large icon above the label.
-    pub fn show_big(self, ui: &mut Ui) -> bool {
+    pub fn show_big(self, ui: &mut Ui) -> ButtonClick {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
         // The caption is a painted galley — attach its text for
@@ -1309,12 +1326,12 @@ impl RibbonButton {
             gal,
             egui::Color32::WHITE,
         );
-        self.enabled && resp.clicked()
+        click_kind(&resp, self.enabled)
     }
 
     /// Compact button: small icon beside the label (stacked in a
     /// narrow column, Visio small-button style).
-    pub fn show_small(self, ui: &mut Ui) -> bool {
+    pub fn show_small(self, ui: &mut Ui) -> ButtonClick {
         let h = 22.0;
         let gal = ui.painter().layout_no_wrap(
             self.label.to_string(),
@@ -1370,7 +1387,24 @@ impl RibbonButton {
                 ui.weak("Text formatting arrives with a later milestone");
             });
         }
-        self.enabled && resp.clicked()
+        click_kind(&resp, self.enabled)
+    }
+}
+
+/// Classify a button response (#110): a multi-click (double or triple
+/// — egui fires `clicked()` on the second click of the pair too, and
+/// a same-frame click pair counts the second as a triple) beats the
+/// single.
+fn click_kind(resp: &egui::Response, enabled: bool) -> ButtonClick {
+    if !enabled {
+        return ButtonClick::None;
+    }
+    if resp.double_clicked() || resp.triple_clicked() {
+        ButtonClick::Double
+    } else if resp.clicked() {
+        ButtonClick::Single
+    } else {
+        ButtonClick::None
     }
 }
 
@@ -1384,6 +1418,27 @@ pub enum Col {
 
 pub fn big(b: RibbonButton) -> Col {
     Col::Big(b)
+}
+
+/// A ribbon button's click outcome (#110): none, a single click, or a
+/// double click (Visio's Format Painter stays armed on a double).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ButtonClick {
+    None,
+    Single,
+    Double,
+}
+
+impl Action {
+    /// The action a DOUBLE click on this button fires (#110): the same
+    /// as a single click, except where Visio gives the double its own
+    /// behavior (the Format Painter's persistent mode).
+    pub fn double_click_action(self) -> Self {
+        match self {
+            Action::FormatPainter => Action::FormatPainterSticky,
+            other => other,
+        }
+    }
 }
 
 pub fn stack(v: Vec<RibbonButton>) -> Col {
@@ -1425,20 +1480,25 @@ const CONTENT_H: f32 = 74.0;
 const LABEL_H: f32 = 18.0;
 
 fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
+    let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| {
+        match c {
+            ButtonClick::None => {}
+            ButtonClick::Single => on_action(b.action),
+            ButtonClick::Double => on_action(b.action.double_click_action()),
+        }
+    };
     match col {
         Col::Big(b) => {
-            if (*b).show_big(ui) {
-                on_action(b.action);
-            }
+            let c = (*b).show_big(ui);
+            fire(on_action, b, c);
         }
         Col::Stack(v) => {
             ui.scope(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.vertical(|ui| {
                     for b in v {
-                        if (*b).show_small(ui) {
-                            on_action(b.action);
-                        }
+                        let c = (*b).show_small(ui);
+                        fire(on_action, b, c);
                     }
                 });
             });
@@ -1450,9 +1510,8 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                     for row in rows {
                         ui.horizontal(|ui| {
                             for b in row {
-                                if (*b).show_small(ui) {
-                                    on_action(b.action);
-                                }
+                                let c = (*b).show_small(ui);
+                                fire(on_action, b, c);
                             }
                         });
                     }
