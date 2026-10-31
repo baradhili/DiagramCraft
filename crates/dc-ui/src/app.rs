@@ -181,6 +181,8 @@ pub struct App {
     pagesetup_open: bool,
     /// The Copy as Picture dialog is open (#113, URS-1200).
     copypic_open: bool,
+    /// #113 remainder: the vector (SVG) flavor for copy-as-picture.
+    copypic_svg: bool,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
     /// Text waiting for the OS clipboard (#113, URS-1113): copied on
@@ -529,6 +531,7 @@ impl App {
             pagesetup_open: false,
             copypic_open: false,
             copypic_factor: 2,
+            copypic_svg: false,
             os_clipboard_text: None,
             os_image_rx: None,
             backgrounds_open: false,
@@ -4424,11 +4427,13 @@ impl App {
         let mut pick: Option<Option<i64>> = None; // Some(None) = clear
         let Some(page_id) = self.page_id() else { return };
         let Some(ed) = self.ed.as_ref() else { return };
+        // Visio's gallery lists BACKGROUND pages (the #113 mark makes
+        // one); a plain page never shows as a background choice.
         let entries: Vec<(i64, String)> = ed
             .doc
             .pages
             .iter()
-            .filter(|p| p.id != page_id)
+            .filter(|p| p.id != page_id && self.is_background_page(p.id))
             .map(|p| (p.id, p.name.clone()))
             .collect();
         let current = self.back_page_of(page_id);
@@ -4446,6 +4451,11 @@ impl App {
                 ui.separator();
                 if ui.radio(current.is_none(), "No background").clicked() {
                     pick = Some(None);
+                }
+                if entries.is_empty() {
+                    ui.weak(
+                        "No background pages. Right-click a page tab and pick \"Set as Background\".",
+                    );
                 }
                 for (id, name) in &entries {
                     if ui
@@ -4834,21 +4844,45 @@ impl App {
             .default_width(280.0)
             .show(ctx, |ui| {
                 ui.strong("Resolution");
+                if ui
+                    .radio(self.copypic_svg, "Vector (SVG)")
+                    .clicked()
+                {
+                    self.copypic_svg = true;
+                }
                 for (f, label) in [(1u32, "Screen (96 dpi)"), (2, "High (192 dpi)"), (4, "Print (384 dpi)")] {
                     if ui
-                        .radio(self.copypic_factor == f, label)
+                        .radio(!self.copypic_svg && self.copypic_factor == f, label)
                         .clicked()
                     {
                         self.copypic_factor = f;
+                        self.copypic_svg = false;
                     }
                 }
                 ui.add_space(6.0);
                 if ui.button("Copy Picture").clicked() {
                     copy = true;
                 }
-                ui.weak("The picture lands on the clipboard as a PNG bitmap.");
+                ui.weak(if self.copypic_svg {
+                    "The SVG markup lands on the clipboard as vector text."
+                } else {
+                    "The picture lands on the clipboard as a PNG bitmap."
+                });
             });
-        if copy {
+        if copy && self.copypic_svg {
+            match self.picture_svg() {
+                Some(svg) => {
+                    let n = svg.len();
+                    self.last_picture = Some(svg.clone().into_bytes());
+                    ctx.copy_text(svg);
+                    self.status = format!(
+                        "SVG copied ({n} bytes, vector — paste into editors that accept SVG text)"
+                    );
+                }
+                None => self.status = "nothing selected to copy".into(),
+            }
+        }
+        if copy && !self.copypic_svg {
             match self.picture_png(self.copypic_factor) {
                 Some(bytes) => {
                     self.last_picture = Some(bytes.clone());
@@ -4875,6 +4909,83 @@ impl App {
         if !open {
             self.copypic_open = false;
         }
+    }
+
+    /// #113 remainder: the vector copy — the page rendered with every
+    /// non-selected shape hidden, the viewBox retargeted to the
+    /// selection bounds, as SVG markup for the text clipboard (the
+    /// interchange egui can carry; raster flavors stay on the image
+    /// clipboard).
+    fn picture_svg(&self) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sel: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if sel.is_empty() {
+            return None;
+        }
+        let geom = self.page_geom();
+        let mut b: Option<(f64, f64, f64, f64)> = None;
+        for sid in &sel {
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
+            let r = self.shape_rect(&ed.doc, page_id, sh)?;
+            let corners = (r.0, r.1, r.0 + r.2, r.1 + r.3);
+            b = Some(match b {
+                None => corners,
+                Some((x0, y0, x1, y1)) => (
+                    x0.min(corners.0),
+                    y0.min(corners.1),
+                    x1.max(corners.2),
+                    y1.max(corners.3),
+                ),
+            });
+        }
+        let (bx0, by0, bx1, by1) = b?;
+        let hidden: Vec<i64> = page
+            .shapes
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !sel.contains(id))
+            .collect();
+        let svg = dc::svg::render_page_with(&ed.doc, page, &hidden).ok()?;
+        // Retarget the root viewBox to the selection (page y-up → the
+        // svg's y-down frame), padding a hair to keep strokes intact.
+        let pad = 0.06;
+        let (vx, vy, vw, vh) = (
+            (bx0 - pad).max(0.0),
+            (geom.h_in - by1 - pad).max(0.0),
+            (bx1 - bx0 + 2.0 * pad).min(geom.w_in),
+            (by1 - by0 + 2.0 * pad).min(geom.h_in),
+        );
+        let root_end = svg.find('>').map(|i| i + 1)?;
+        let (head, body) = svg.split_at(root_end);
+        let strip = |h: &str, attr: &str| -> String {
+            h.split_whitespace()
+                .filter(|tok| !tok.starts_with(attr))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let head = strip(&strip(head, "viewBox="), "width=");
+        let head = {
+            // drop the trailing height="…" too
+            let mut h = head;
+            if let Some(pos) = h.rfind("height=") {
+                h = h[..pos].trim_end().to_string();
+            }
+            h
+        };
+        let mut out = format!(
+            "{head} viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\" width=\"{pw:.0}\" height=\"{ph:.0}\">",
+            pw = vw * 96.0,
+            ph = vh * 96.0,
+        );
+        out.push_str(body);
+        Some(out)
     }
 
     /// The Page Setup dialog (#113, URS-1122): ISO/ANSI presets plus
@@ -8139,6 +8250,7 @@ impl App {
             Delete,
             Rename,
             Duplicate,
+            MarkBg,
             Reorder,
         }
         let mut act: Option<Act> = None;
@@ -8175,6 +8287,26 @@ impl App {
             if ctx_item(ui, None, "Duplicate Page", "", true) {
                 act = Some(Act::Duplicate);
             }
+            // #113 remainder: mark a page AS a background (Visio's Page
+            // Setup ▸ Page Properties ▸ Type: Background, surfaced on
+            // the tab the way Visio surfaces page commands).
+            let marked = self
+                .ed()
+                .and_then(|e| e.doc.pages.get(idx))
+                .is_some_and(|p| self.is_background_page(p.id));
+            if ctx_item(
+                ui,
+                None,
+                if marked {
+                    "Remove Background Mark"
+                } else {
+                    "Set as Background"
+                },
+                "",
+                true,
+            ) {
+                act = Some(Act::MarkBg);
+            }
             ui.separator();
             ctx_item(ui, None, "Page Setup…", "(later milestone)", false);
             if ctx_item(ui, None, "Reorder Pages…", "", true) {
@@ -8209,8 +8341,41 @@ impl App {
                 }
             }
             Act::Duplicate => self.tab_cmd_duplicate(idx),
+            Act::MarkBg => self.toggle_background_mark(idx),
             Act::Reorder => self.reorder_open = true,
         }
+    }
+
+    /// #113 remainder: the page-tab menu's background mark — the
+    /// `Background="1"` page attribute (the same attribute the
+    /// underlay chain and the Backgrounds gallery read), assigned the
+    /// same direct-mutation way `set_back_page` works.
+    fn toggle_background_mark(&mut self, idx: usize) {
+        let Some(page_id) = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id)
+        else {
+            return;
+        };
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page_id) else {
+            return;
+        };
+        let marked = page
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "Background" && v == "1");
+        page.attrs.retain(|(k, _)| k != "Background");
+        let name = page.name.clone();
+        if !marked {
+            page.attrs
+                .push(("Background".to_string(), "1".to_string()));
+        }
+        self.dirty = true;
+        self.version += 1;
+        self.status = if marked {
+            format!("page {name} is a foreground page again")
+        } else {
+            format!("page {name} marked as a background")
+        };
     }
 
     /// The shape's hyperlink rows (#28): instance rows first, then the
@@ -10976,6 +11141,27 @@ impl App {
     /// #108 tests: the line-jump hops painted on the last frame.
     pub fn debug_jump_count(&self) -> usize {
         self.jumps_last
+    }
+
+    /// #113 tests: the last copy-as-picture payload as text (the SVG
+    /// vector flavor); None for the PNG flavor.
+    pub fn debug_last_picture_text(&self) -> Option<String> {
+        self.last_picture
+            .as_ref()
+            .and_then(|b| String::from_utf8(b.clone()).ok())
+            .filter(|t| t.starts_with("<svg"))
+    }
+
+    /// #113 tests: whether the page carries the background mark.
+    pub fn debug_page_is_bg(&self, page: i64) -> bool {
+        self.is_background_page(page)
+    }
+
+    /// #113 tests: the page ids in order.
+    pub fn debug_page_ids(&self) -> Vec<i64> {
+        self.ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.id).collect())
+            .unwrap_or_default()
     }
 
     /// #113 tests: the last copy-as-picture PNG's byte length.

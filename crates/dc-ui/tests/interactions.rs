@@ -6353,6 +6353,100 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #113 remainder: the page-tab menu's background mark — Set as
+/// Background writes the mark (the Backgrounds gallery then lists the
+/// page; an unmarked page never shows as a choice), Remove clears it.
+#[test]
+fn page_tab_menu_marks_a_background() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two pages.
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+    let pages: Vec<i64> = h.state().debug_page_ids();
+    assert_eq!(pages.len(), 2);
+
+    // Mark Page-2 as a background from ITS tab.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Set as Background").click();
+    h.run();
+    assert!(
+        h.state().debug_page_is_bg(pages[1]),
+        "Page-2 carries the mark"
+    );
+    assert!(
+        !h.state().debug_page_is_bg(pages[0]),
+        "Page-1 stays foreground"
+    );
+
+    // The Backgrounds gallery (on Page-1) now lists Page-2 only.
+    h.get_by_label("Page-1").click();
+    h.run();
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Backgrounds").click();
+    h.run();
+    let listed = h.query_all_by_label_contains("(page 2)").count();
+    assert_eq!(listed, 1, "the marked page is the gallery entry");
+    assert_eq!(
+        h.query_all_by_label_contains("(page 1)").count(),
+        0,
+        "a foreground page never lists as a background"
+    );
+
+    // Remove the mark; the gallery is empty again.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Remove Background Mark").click();
+    h.run();
+    assert!(!h.state().debug_page_is_bg(pages[1]), "mark removed");
+}
+
+/// #113 remainder: Copy as Picture's vector flavor — the SVG markup
+/// (selection-only viewBox) lands for the clipboard.
+#[test]
+fn copy_as_picture_svg_vector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let _ = a;
+
+    // Right-click ▸ Copy as Picture… ▸ Vector (SVG) ▸ Copy Picture.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Copy as Picture")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Copy as Picture… row")
+        .click();
+    h.run();
+    h.get_by_label_contains("Vector (SVG)").click();
+    h.run();
+    h.get_by_label("Copy Picture").click();
+    h.run();
+    let svg = h.state().debug_last_picture_text().expect("SVG copied");
+    assert!(svg.starts_with("<svg"), "an SVG document: {}", &svg[..40]);
+    assert!(
+        svg.contains("viewBox=\""),
+        "the viewBox is retargeted to the selection"
+    );
+}
+
+
 
 /// A picture inserts as a Foreign shape carrying real media: a PNG in,
 /// a media part + rel recorded, and the render path sees it.
@@ -6467,6 +6561,13 @@ fn background_page_assignment_and_underlay() {
     assert_eq!(h.state().debug_shape_count(), 0, "fresh page is empty");
     let (p2, b) = place_master(&mut h, 2);
     let _ = (p2, b);
+    // #113 remainder: the gallery lists MARKED pages only — mark
+    // page 2 as a background from its tab before assigning.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Set as Background").click();
+    h.run();
     // Switch back to page 1 and assign page 2 as its background.
     h.get_by_label_contains("Page-1").click();
     h.run();
