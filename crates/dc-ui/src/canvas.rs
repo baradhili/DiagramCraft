@@ -1219,8 +1219,28 @@ pub fn show(
                     // #160: the preview follows the SNAPPED corner —
                     // the release commits through the app's identical
                     // per-axis snap, so the drop lands where the
-                    // preview drew it.
-                    let ptr_page = snap_resize(ptr_page).unwrap_or(ptr_page);
+                    // preview drew it. The snap runs on the CORNER
+                    // position (handle origin + drag delta), not the
+                    // raw pointer — a grab up to HANDLE_GRAB off the
+                    // corner must not leave the edge at grid + offset
+                    // (CodeRabbit; matches the commit's math).
+                    let corner_page = handles
+                        .iter()
+                        .find(|h| h.id == hid)
+                        .map(|h| h.pos)
+                        .and_then(|o| {
+                            ui.ctx()
+                                .memory(|m| m.data.get_temp::<Pos2>(mem_start))
+                                .map(|st| screen_to_page(st, view, page))
+                                .map(|st| {
+                                    (
+                                        o.0 + ptr_page.0 - st.0,
+                                        o.1 + ptr_page.1 - st.1,
+                                    )
+                                })
+                        })
+                        .unwrap_or(ptr_page);
+                    let ptr_page = snap_resize(corner_page).unwrap_or(ptr_page);
                     let ptr_y_down = page.h_in - ptr_page.1;
                     let (mut x0, mut y0, mut x1, mut y1) = (
                         sr.left() as f64,

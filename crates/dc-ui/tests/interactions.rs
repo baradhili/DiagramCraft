@@ -881,7 +881,7 @@ fn all_four_corner_drags_resize() {
 /// lands on the raw pointer position.
 #[test]
 fn corner_resize_snaps_the_edge_to_grid() {
-    let run = |snap_on: bool| -> (f64, f64, f64) {
+    let run = |snap_on: bool| -> (f64, f64, f64, f64) {
         let mut h = harness_with_blank();
         h.run();
         let (page, shape) = place_master(&mut h, 2);
@@ -916,24 +916,33 @@ fn corner_resize_snaps_the_edge_to_grid() {
         let br = h.state().debug_sel_br_corner().expect("selection");
         let dx_px = (raw - right0) * ppi;
         assert!(dx_px > 4.0, "drag is a real gesture: {dx_px:.1} px");
-        drag_naturally(&mut h, br, egui::vec2(dx_px as f32, 30.0));
+        // Grab 6 px UP-LEFT of the corner — inside HANDLE_GRAB but
+        // off the corner itself: the snap must land the EDGE on the
+        // grid, not the pointer (grid + grab-offset).
+        let grab = br + egui::vec2(-6.0, -6.0);
+        let by = (dx_px + 6.0) as f32; // same raw target from the offset grab
+        drag_naturally(&mut h, grab, egui::vec2(by, 30.0));
         let (w1, px1, lx1) = (
             cell_of(&h, page, shape, "Width"),
             cell_of(&h, page, shape, "PinX"),
             cell_of(&h, page, shape, "LocPinX"),
         );
-        (px1 + w1 - lx1, raw, target)
+        (px1 + w1 - lx1, raw, target, ppi)
     };
 
-    let (snapped, _raw, target) = run(true);
+    let (snapped, _raw, target, _ppi) = run(true);
     assert!(
         (snapped - target).abs() < 1e-4,
         "snapped run lands on the grid line: {snapped:.5} vs {target:.5}"
     );
-    let (free, raw, _target) = run(false);
+    let (free, raw, _target, ppi) = run(false);
+    // Snap off: no snap at all — the edge follows the raw drag DELTA,
+    // which from the 6 px-offset grab lands at the pointer target
+    // (raw + the grab offset), NOT on any grid line.
+    let grab_off = 6.0 / ppi;
     assert!(
-        (free - raw).abs() < 1e-4,
-        "snap-off run keeps the raw edge: {free:.5} vs {raw:.5}"
+        (free - (raw + grab_off)).abs() < 1e-4,
+        "snap-off run keeps the raw edge: {free:.5} vs {raw:.5}+{grab_off:.4}"
     );
 }
 
@@ -6631,6 +6640,13 @@ fn copy_as_picture_svg_vector() {
     assert!(
         svg.contains("viewBox=\""),
         "the viewBox is retargeted to the selection"
+    );
+    // The rebuilt root is well-formed: the whole document parses
+    // (token-stripping the emitted root left orphan viewBox tokens).
+    assert!(
+        dc_ui::svgimg::parse_svg(&svg, dc_ui::perf::Kind::Thumb).is_ok(),
+        "the copied SVG parses: {}",
+        &svg[..svg.len().min(160)]
     );
 }
 

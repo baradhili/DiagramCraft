@@ -28,8 +28,10 @@ pub const ROUTE_STRAIGHT: &str = "2";
 /// Center-to-center (#108's curved routing): the Visio enum value
 /// whose routes render as a smooth curve. The curve itself persists
 /// in the geometry — row 2 becomes a `CubicBezTo` whose A/B/C/D
-/// controls are Width/Height formulas, so reroutes (which rewrite
-/// only the X/Y/size cells) keep the curve tracking the frame.
+/// controls are Width/Height formulas (mid-x, the endpoints' own
+/// heights — an S, never the chord-collinear straight), so reroutes
+/// (which rewrite only the X/Y/size cells) keep the curve tracking
+/// the frame.
 pub const ROUTE_CURVED: &str = "16";
 
 /// One end of a connector.
@@ -862,17 +864,19 @@ pub fn route(style: &str, begin: (f64, f64), end: (f64, f64)) -> Vec<(f64, f64)>
 }
 
 /// The curved route's Bézier control cells for geometry row 2
-/// (#108): A/B and C/D sit on the chord thirds (a gentle S, Visio's
-/// center-to-center look), written as FORMULAS of the frame so a
-/// reroute's size rewrite re-tracks them automatically. Returns
-/// (cell, cached value) pairs in row-local inches for the current
-/// `dx`/`dy`.
+/// (#108): both controls sit at the frame's mid-x with the BEGIN's
+/// and END's own heights — horizontal end tangents, the smooth S of
+/// Visio's center-to-center look. Chord-THIRD controls would be
+/// collinear with the endpoints and render as a straight segment
+/// (CodeRabbit). Written as FORMULAS of the frame so a reroute's
+/// size rewrite re-tracks them automatically. Returns (cell, cached
+/// value) pairs in row-local inches for the current `dx`/`dy`.
 pub fn curved_row_extras(dx: f64, dy: f64) -> [(&'static str, String, f64); 4] {
     [
-        ("A", "Width*0.3333333333".to_string(), dx / 3.0),
-        ("B", "Height*0.3333333333".to_string(), dy / 3.0),
-        ("C", "Width*0.6666666667".to_string(), dx * 2.0 / 3.0),
-        ("D", "Height*0.6666666667".to_string(), dy * 2.0 / 3.0),
+        ("A", "Width*0.5".to_string(), dx / 2.0),
+        ("B", "Height*0".to_string(), 0.0),
+        ("C", "Width*0.5".to_string(), dx / 2.0),
+        ("D", "Height*1".to_string(), dy),
     ]
 }
 
@@ -1354,19 +1358,27 @@ mod tests {
     }
 
     /// #108 curved routing: the polyline is the chord (the curve rides
-    /// the Bézier cells), and the A/B/C/D extras are chord-third
-    /// FORMULAS — a reroute's size rewrite re-tracks them.
+    /// the Bézier cells), and the A/B/C/D extras are mid-x FORMULAS —
+    /// an S with horizontal end tangents, never chord-collinear
+    /// (collinear controls render straight — CodeRabbit), and a
+    /// reroute's size rewrite re-tracks them.
     #[test]
     fn curved_route_is_the_chord_with_bezier_formula_extras() {
         let b = (0.0, 0.0);
         assert_eq!(route(ROUTE_CURVED, b, (2.0, 1.0)), vec![b, (2.0, 1.0)]);
         let extras = curved_row_extras(2.0, 1.0);
         assert_eq!(extras[0].0, "A");
-        assert_eq!(extras[0].1, "Width*0.3333333333");
-        assert!((extras[0].2 - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(extras[0].1, "Width*0.5");
+        assert!((extras[0].2 - 1.0).abs() < 1e-9);
         assert_eq!(extras[3].0, "D");
-        assert_eq!(extras[3].1, "Height*0.6666666667");
-        assert!((extras[3].2 - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(extras[3].1, "Height*1");
+        assert!((extras[3].2 - 1.0).abs() < 1e-9);
+        // Off the chord: (1,0) and (1,1) leave the (0,0)→(2,1) line.
+        let (dx, dy) = (2.0, 1.0);
+        for (x, y) in [(extras[0].2, extras[1].2), (extras[2].2, extras[3].2)] {
+            let cross = dx * y - dy * x; // zero on the chord
+            assert!(cross.abs() > 1e-9, "control ({x},{y}) is ON the chord");
+        }
         // The renderer draws row 2 as a true cubic Bézier once its
         // type is CubicBezTo with these cells.
         let mut s = connector_shape(1, b, (2.0, 1.0));

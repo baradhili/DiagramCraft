@@ -2141,7 +2141,10 @@ impl App {
                 self.do_redo();
             }
             if i.key_pressed(egui::Key::Delete) && !kb_owned {
-                if self.connpt_sel.is_some() {
+                // #108: the connection-point selection only owns
+                // Delete while its tool is active — a stale selection
+                // must never shadow shape deletion (CodeRabbit).
+                if self.tool == Tool::ConnectionPoint && self.connpt_sel.is_some() {
                     self.delete_selected_conn_point();
                 } else if self.sel.is_some() {
                     self.delete_selection();
@@ -2373,6 +2376,10 @@ impl App {
         }
         if self.copypic_open {
             self.copypic_open = false;
+            return true;
+        }
+        if self.contgal_open {
+            self.contgal_open = false;
             return true;
         }
         if self.backgrounds_open {
@@ -4103,9 +4110,11 @@ impl App {
             }
         }
         // Curved (#108): row 2 becomes a CubicBezTo whose A/B/C/D
-        // controls sit on the chord thirds as Width/Height formulas
-        // (a reroute's size rewrite re-tracks them automatically);
-        // every other style keeps the rows plain LineTo.
+        // controls sit at mid-x/the endpoints' heights as Width/Height
+        // formulas (an S — chord-collinear controls would render
+        // straight; a reroute's size rewrite re-tracks them
+        // automatically); every other style keeps the rows plain
+        // LineTo.
         let curved = style == crate::connectors::ROUTE_CURVED;
         for ix in 2i64..=4 {
             let t = if ix == 2 && curved {
@@ -5419,8 +5428,11 @@ impl App {
             .filter(|id| !sel.contains(id))
             .collect();
         let svg = dc::svg::render_page_with(&ed.doc, page, &hidden).ok()?;
-        // Retarget the root viewBox to the selection (page y-up → the
-        // svg's y-down frame), padding a hair to keep strokes intact.
+        // Rebuild the ROOT element around the selection's box (page
+        // y-up → the svg's y-down frame), padding a hair to keep
+        // strokes intact. The root is written fresh — token-stripping
+        // the emitted one would split its space-bearing viewBox value
+        // and leave orphan tokens (invalid XML; CodeRabbit).
         let pad = 0.06;
         let (vx, vy, vw, vh) = (
             (bx0 - pad).max(0.0),
@@ -5429,28 +5441,12 @@ impl App {
             (by1 - by0 + 2.0 * pad).min(geom.h_in),
         );
         let root_end = svg.find('>').map(|i| i + 1)?;
-        let (head, body) = svg.split_at(root_end);
-        let strip = |h: &str, attr: &str| -> String {
-            h.split_whitespace()
-                .filter(|tok| !tok.starts_with(attr))
-                .collect::<Vec<_>>()
-                .join(" ")
-        };
-        let head = strip(&strip(head, "viewBox="), "width=");
-        let head = {
-            // drop the trailing height="…" too
-            let mut h = head;
-            if let Some(pos) = h.rfind("height=") {
-                h = h[..pos].trim_end().to_string();
-            }
-            h
-        };
         let mut out = format!(
-            "{head} viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\" width=\"{pw:.0}\" height=\"{ph:.0}\">",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\" width=\"{pw:.0}\" height=\"{ph:.0}\">",
             pw = vw * 96.0,
             ph = vh * 96.0,
         );
-        out.push_str(body);
+        out.push_str(&svg[root_end..]);
         Some(out)
     }
 
@@ -6314,7 +6310,10 @@ impl App {
                 self.apply_snap_settings();
             }
             Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
-            Action::PointerTool => self.tool = Tool::Pointer,
+            Action::PointerTool => {
+                self.tool = Tool::Pointer;
+                self.connpt_sel = None;
+            }
             Action::AlignLeft => self.align_selection(crate::align::AlignKind::Left),
             Action::AlignHCenter => self.align_selection(crate::align::AlignKind::HCenter),
             Action::AlignRight => self.align_selection(crate::align::AlignKind::Right),
@@ -8603,14 +8602,25 @@ impl App {
                     HandleId::Corner(corner) => {
                         // #160: snap the resized edge under the snap
                         // settings — the same per-axis snap the live
-                        // preview showed (both derive from the raw
-                        // pointer, so they agree by construction).
-                        // Applied AFTER the travel check so a no-travel
-                        // press never gains a phantom snap.
+                        // preview showed. Snap the CORNER position
+                        // (handle origin + drag delta), not the raw
+                        // pointer: the grab may start up to
+                        // HANDLE_GRAB away from the corner, and
+                        // snapping the pointer would leave the edge
+                        // at grid + grab-offset (CodeRabbit). Applied
+                        // AFTER the travel check so a no-travel press
+                        // never gains a phantom snap.
                         let dragged = self.sel.map(|(_, s)| s);
-                        let end = dragged
-                            .and_then(|sid| self.snap_corner_for(sid, end))
-                            .unwrap_or(end);
+                        let origin = handles.iter().find(|h| h.id == id).map(|h| h.pos);
+                        let end = match (dragged, origin) {
+                            (Some(sid), Some(o)) => {
+                                let raw = (o.0 + end.0 - start.0, o.1 + end.1 - start.1);
+                                self.snap_corner_for(sid, raw)
+                                    .map(|sn| (start.0 + sn.0 - o.0, start.1 + sn.1 - o.1))
+                                    .unwrap_or(end)
+                            }
+                            _ => end,
+                        };
                         // y-down screen-orientation delta, as before.
                         let dx = end.0 - start.0;
                         let dy = start.1 - end.1;
