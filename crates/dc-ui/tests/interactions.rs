@@ -6353,6 +6353,99 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #157: curve control handles and relative-row editing on the
+/// geometry handles — an ArcTo row exposes an APEX circle (the drag
+/// recomputes the sagitta from the pointer), and RelLineTo rows
+/// (fractions of Width/Height — the #137 refusal) drag to new
+/// fractions, the row staying relative.
+#[test]
+fn curve_controls_and_relative_rows_edit() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, rect) = place_master(&mut h, 2);
+
+    // Local geometry materializes on the master-based rect: an ArcTo
+    // row (A bulging right of travel).
+    h.state_mut()
+        .debug_set_geo_row_for_test(page, rect, 0, 3, "ArcTo", &[("A", 0.15)]);
+    h.run();
+    let a0 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("the arc row seeded");
+    assert!((a0 - 0.15).abs() < 1e-9);
+
+    // The APEX control handle exists; dragging it ACROSS the chord
+    // flips the sagitta's sign.
+    let apex = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::GeoPoint {
+            section_ix: 0,
+            row_ix: 3,
+            cell: dc_ui::canvas::GeoCell::Apex,
+        })
+        .expect("the apex control handle");
+    drag_naturally(&mut h, apex, egui::vec2(0.0, -160.0));
+    h.run();
+    let a1 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("A rewritten");
+    assert!(
+        a1.signum() != a0.signum() && a1.abs() > a0.abs(),
+        "the apex drag re-bends the arc: {a0} -> {a1}"
+    );
+
+    // One undo restores the sagitta.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let a2 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap();
+    assert!((a2 - a0).abs() < 1e-6, "undo restored the arc: {a2}");
+
+    // A REL row: the old refusal. Row 4 becomes RelLineTo (fraction
+    // 0.5/0.5); its vertex handle drags to a NEW fraction.
+    h.state_mut()
+        .debug_set_geo_row_for_test(page, rect, 0, 4, "RelLineTo", &[("X", 0.5), ("Y", 0.5)]);
+    h.run();
+    let rel = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::GeoPoint {
+            section_ix: 0,
+            row_ix: 4,
+            cell: dc_ui::canvas::GeoCell::X,
+        })
+        .expect("the relative row's vertex handle");
+    drag_naturally(&mut h, rel, egui::vec2(60.0, 0.0));
+    h.run();
+    let fx = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 4, "X")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("fraction written");
+    assert!(
+        (fx - 0.5).abs() > 1e-3 && fx.abs() < 3.0,
+        "the Rel row moved to a new fraction (a fraction, not page inches): {fx}"
+    );
+    // The row is STILL relative — the write kept the row type.
+    assert_eq!(
+        h.state().debug_geo_row_type_for_test(rect, 4).as_deref(),
+        Some("RelLineTo")
+    );
+}
+
+
+
 /// #156: the Container Styles gallery — Design ▸ Containers… wraps a
 /// two-shape selection in a master-based Classic container (members
 /// re-pointed, one undo); the contextual Container Tools tab raises,

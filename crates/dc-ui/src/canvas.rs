@@ -285,7 +285,50 @@ pub enum HandleId {
     /// A geometry row's defining point (#137): the row's X/Y pair,
     /// addressed by Geometry section index and row index on the
     /// SELECTED shape's own sheet.
-    GeoPoint { section_ix: i64, row_ix: i64 },
+    /// #157: a row can expose more than its X/Y — curve controls.
+    GeoPoint {
+        section_ix: i64,
+        row_ix: i64,
+        cell: GeoCell,
+    },
+}
+
+/// Which defining value of a geometry row a GeoPoint handle drags
+/// (#157): the X/Y end point (a square vertex, #137), an ArcTo's
+/// sagitta (a circle control at the arc's apex — the drag recomputes
+/// the bulge from the pointer), or an EllipticalArcTo's on-curve
+/// control point (a circle control at A/B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoCell {
+    X,
+    Y,
+    Apex,
+    OnCurve,
+}
+
+/// The ArcTo sagitta implied by a pointer position (#157): |A| is the
+/// arc's height over the chord, positive bulging RIGHT of travel
+/// (the renderer's own convention). Pure page/local-agnostic math.
+pub fn arc_sagitta_from_pointer(
+    cur: (f64, f64),
+    end: (f64, f64),
+    p: (f64, f64),
+) -> f64 {
+    let d = (end.0 - cur.0, end.1 - cur.1);
+    let len = d.0.hypot(d.1).max(1e-9);
+    let right = (d.1 / len, -d.0 / len); // rot90 CW: right of travel
+    let mid = ((cur.0 + end.0) / 2.0, (cur.1 + end.1) / 2.0);
+    (p.0 - mid.0) * right.0 + (p.1 - mid.1) * right.1
+}
+
+/// The ArcTo apex point (where the sagitta handle sits): mid-chord
+/// offset by A along the right-of-travel normal.
+pub fn arc_apex(cur: (f64, f64), end: (f64, f64), a: f64) -> (f64, f64) {
+    let d = (end.0 - cur.0, end.1 - cur.1);
+    let len = d.0.hypot(d.1).max(1e-9);
+    let right = (d.1 / len, -d.0 / len);
+    let mid = ((cur.0 + end.0) / 2.0, (cur.1 + end.1) / 2.0);
+    (mid.0 + a * right.0, mid.1 + a * right.1)
 }
 
 /// A finished handle drag (GitHub #59): (handle, press position,
@@ -1077,14 +1120,21 @@ pub fn show(
     for (id, pos) in &handles_screen {
         match id {
             // Geometry vertex handles (#137): Visio's small filled
-            // vertex squares.
-            HandleId::GeoPoint { .. } => {
-                p.rect_filled(
-                    Rect::from_center_size(*pos, Vec2::splat(5.0)),
-                    1.0,
-                    t.selection,
-                );
-            }
+            // vertex squares; #157's curve CONTROLS are circles (Visio
+            // draws control handles round).
+            HandleId::GeoPoint { cell, .. } => match cell {
+                GeoCell::X | GeoCell::Y => {
+                    p.rect_filled(
+                        Rect::from_center_size(*pos, Vec2::splat(5.0)),
+                        1.0,
+                        t.selection,
+                    );
+                }
+                GeoCell::Apex | GeoCell::OnCurve => {
+                    p.circle_filled(*pos, 4.0, t.selection);
+                    p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
+                }
+            },
             HandleId::Corner(_) => {
                 p.rect_filled(
                     Rect::from_center_size(*pos, Vec2::splat(7.0)),
@@ -1699,6 +1749,23 @@ fn format_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arc_sagitta_round_trips_through_the_apex() {
+        let (cur, end) = ((0.0, 0.0), (2.0, 0.0));
+        // A pointer 0.3 above the chord midpoint: positive A bulges
+        // RIGHT of travel (travel is +x, so right is -y in y-up).
+        let a = arc_sagitta_from_pointer(cur, end, (1.0, -0.3));
+        assert!((a - 0.3).abs() < 1e-9, "bulge right of travel: {a}");
+        // The apex handle sits mid-chord offset by A to the right.
+        let apex = arc_apex(cur, end, a);
+        assert!((apex.0 - 1.0).abs() < 1e-9 && (apex.1 + 0.3).abs() < 1e-9);
+        // Below the chord inverts the sagitta.
+        let a2 = arc_sagitta_from_pointer(cur, end, (1.0, 0.3));
+        assert!((a2 + 0.3).abs() < 1e-9, "signed: {a2}");
+        // Degenerate chord: safe.
+        assert!(arc_sagitta_from_pointer(cur, cur, (0.0, 1.0)).abs() < 1e-6);
+    }
 
     #[test]
     fn lasso_trail_selects_by_touch() {

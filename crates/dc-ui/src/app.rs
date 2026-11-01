@@ -1816,45 +1816,107 @@ impl App {
         // Geometry vertex handles (#137): one per point row of the
         // shape's OWN Geometry sections (master-inherited geometry has
         // no local rows to drag — its handles arrive with master
-        // editing). Appended after the corners, so corner handles win
-        // overlaps.
-        for geo in sh.sheet.sections_named("Geometry") {
-            for row in &geo.rows {
-                let t = row.t.as_deref().unwrap_or("");
-                if !matches!(t, "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo" | "SplineKnot") {
-                    continue;
-                }
-                let (Some(x), Some(y)) = (
-                    row.cell("X").and_then(|c| c.numeric()),
-                    row.cell("Y").and_then(|c| c.numeric()),
-                ) else {
-                    continue;
-                };
-                // Shape-local (0..w, 0..h, y-up) → page y-up through
-                // the chain-mapped bbox (v1 unrotated: the local frame
-                // maps linearly onto the bbox).
-                if let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) {
-                    out.push(Handle {
-                        id: HandleId::GeoPoint {
-                            section_ix: geo.ix,
-                            row_ix: row.ix,
-                        },
-                        pos: (bx + x, by + y),
-                    });
+        // editing, #122). Appended after the corners, so corner
+        // handles win overlaps. #157: RELATIVE rows join (their X/Y
+        // are fractions of Width/Height), and curve rows expose their
+        // CONTROLS — an ArcTo's sagitta (a circle at the apex) and an
+        // EllipticalArcTo's on-curve A/B point (NURBS/spline controls
+        // stay unhanded: the renderer draws them as chords, so a
+        // control drag would show no feedback).
+        if let Some((bx, by, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) {
+            let (w, h) = (bw.max(1e-6), bh.max(1e-6));
+            for geo in sh.sheet.sections_named("Geometry") {
+                let mut cur: Option<(f64, f64)> = None; // local end of the previous row
+                for row in &geo.rows {
+                    let t = row.t.as_deref().unwrap_or("");
+                    let rel = t.starts_with("Rel");
+                    let (Some(x), Some(y)) = (
+                        row.cell("X").and_then(|c| c.numeric()),
+                        row.cell("Y").and_then(|c| c.numeric()),
+                    ) else {
+                        continue;
+                    };
+                    let (lx, ly) = if rel { (x * w, y * h) } else { (x, y) };
+                    let point = matches!(
+                        t,
+                        "MoveTo"
+                            | "RelMoveTo"
+                            | "LineTo"
+                            | "RelLineTo"
+                            | "ArcTo"
+                            | "RelArcTo"
+                            | "EllipticalArcTo"
+                            | "RelEllipticalArcTo"
+                            | "NURBSTo"
+                            | "SplineKnot"
+                            | "SplineStart"
+                    );
+                    if point {
+                        for cell in [canvas::GeoCell::X, canvas::GeoCell::Y] {
+                            out.push(Handle {
+                                id: HandleId::GeoPoint {
+                                    section_ix: geo.ix,
+                                    row_ix: row.ix,
+                                    cell,
+                                },
+                                pos: (bx + lx, by + ly),
+                            });
+                        }
+                    }
+                    // #157 curve controls.
+                    match t {
+                        "ArcTo" | "RelArcTo" => {
+                            if let (Some(a), Some(c0)) =
+                                (row.cell("A").and_then(|c| c.numeric()), cur)
+                            {
+                                let apex = canvas::arc_apex(c0, (lx, ly), a);
+                                out.push(Handle {
+                                    id: HandleId::GeoPoint {
+                                        section_ix: geo.ix,
+                                        row_ix: row.ix,
+                                        cell: canvas::GeoCell::Apex,
+                                    },
+                                    pos: (bx + apex.0, by + apex.1),
+                                });
+                            }
+                        }
+                        "EllipticalArcTo" => {
+                            if let (Some(a), Some(b)) = (
+                                row.cell("A").and_then(|c| c.numeric()),
+                                row.cell("B").and_then(|c| c.numeric()),
+                            ) {
+                                out.push(Handle {
+                                    id: HandleId::GeoPoint {
+                                        section_ix: geo.ix,
+                                        row_ix: row.ix,
+                                        cell: canvas::GeoCell::OnCurve,
+                                    },
+                                    pos: (bx + a, by + b),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                    cur = Some((lx, ly));
                 }
             }
         }
         out
     }
 
-    /// #137: commit a geometry-vertex drag — rewrite the row's X/Y
-    /// (shape-local, y-up) through one `SetRowCell` Macro. The #59
-    /// guard policy: a row cell that resolves to a formula refuses
-    /// with a status note and is never written; relative rows
-    /// (`RelMoveTo`/`RelLineTo`) resolve against their PRECEDING row —
-    /// not modeled here, so they refuse with a note rather than
-    /// writing a wrong absolute value.
-    fn apply_geo_vertex(&mut self, section_ix: i64, row_ix: i64, to_page: (f64, f64)) {
+    /// #137/#157: commit a geometry-handle drag — rewrite the row's
+    /// X/Y (shape-local, y-up; RELATIVE rows keep their fractions,
+    /// resolved ×Width/Height), an ArcTo's sagitta from the pointer,
+    /// or an EllipticalArcTo's on-curve A/B — through one `SetRowCell`
+    /// Macro. The #59 guard policy: a written cell that resolves to a
+    /// formula refuses with a status note and is never written.
+    fn apply_geo_vertex(
+        &mut self,
+        section_ix: i64,
+        row_ix: i64,
+        cell: canvas::GeoCell,
+        to_page: (f64, f64),
+    ) {
         let Some((page_id, shape_id)) = self.sel else {
             return;
         };
@@ -1883,14 +1945,17 @@ impl App {
             return;
         };
         let t = row.t.as_deref().unwrap_or("");
-        if matches!(t, "RelMoveTo" | "RelLineTo") {
-            self.status = format!(
-                "vertex drag refused: row {row_ix} is relative ({t}) — \
-                 relative geometry editing arrives separately"
-            );
-            return;
-        }
-        for name in ["X", "Y"] {
+        // #157: RELATIVE rows resolve their X/Y as fractions of the
+        // shape's Width/Height (the hit walk's convention) — the drag
+        // writes the fraction, keeping the row relative.
+        let rel = t.starts_with("Rel");
+        // The cells this drag writes (guards check each).
+        let cells: &[&'static str] = match cell {
+            canvas::GeoCell::X | canvas::GeoCell::Y => &["X", "Y"],
+            canvas::GeoCell::Apex => &["A"],
+            canvas::GeoCell::OnCurve => &["A", "B"],
+        };
+        for name in cells {
             if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
                 .is_some()
             {
@@ -1917,26 +1982,99 @@ impl App {
             page: page_id,
             shape: shape_id,
         };
-        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
-        let (lx, ly) = (to_page.0 - bx, to_page.1 - by);
-        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
-            Box::new(dc_core::SetRowCell::new(
-                scope.clone(),
-                "Geometry",
-                section_ix,
-                dc_core::commands::RowSel::Ix(row_ix),
-                "X",
-                cell(lx),
-            )),
-            Box::new(dc_core::SetRowCell::new(
-                scope,
-                "Geometry",
-                section_ix,
-                dc_core::commands::RowSel::Ix(row_ix),
-                "Y",
-                cell(ly),
-            )),
-        ];
+        let cellv = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let (px, py) = (to_page.0 - bx, to_page.1 - by); // shape-local
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        match cell {
+            canvas::GeoCell::X | canvas::GeoCell::Y => {
+                let (lx, ly) = if rel {
+                    let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                        return;
+                    };
+                    (
+                        px / bw.max(1e-6),
+                        py / bh.max(1e-6),
+                    )
+                } else {
+                    (px, py)
+                };
+                for (name, v) in [("X", lx), ("Y", ly)] {
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        section_ix,
+                        dc_core::commands::RowSel::Ix(row_ix),
+                        name,
+                        cellv(v),
+                    )));
+                }
+            }
+            canvas::GeoCell::Apex => {
+                // The row's chord: its own end and the previous row's.
+                let (ex, ey) = (
+                    row.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                    row.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                );
+                let (ex, ey) = if rel {
+                    let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                        return;
+                    };
+                    (ex * bw, ey * bh)
+                } else {
+                    (ex, ey)
+                };
+                // The chord's start: the PREVIOUS row's local end
+                // (Rel rows resolve ×Width/Height).
+                let size = self
+                    .shape_rect(&ed.doc, page_id, sh)
+                    .map(|r| (r.2.max(1e-6), r.3.max(1e-6)))
+                    .unwrap_or((1.0, 1.0));
+                let prev: (f64, f64) = {
+                    let secs = sh.sheet.sections_named("Geometry");
+                    let sec = secs.iter().find(|s| s.ix == section_ix);
+                    let mut p = (0.0, 0.0);
+                    if let Some(sec) = sec {
+                        for r in &sec.rows {
+                            if r.ix == row_ix {
+                                break;
+                            }
+                            let t = r.t.as_deref().unwrap_or("");
+                            let (x, y) = (
+                                r.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                                r.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                            );
+                            if t.starts_with("Rel") {
+                                p = (x * size.0, y * size.1);
+                            } else {
+                                p = (x, y);
+                            }
+                        }
+                    }
+                    p
+                };
+                let a = canvas::arc_sagitta_from_pointer(prev, (ex, ey), (px, py));
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope,
+                    "Geometry",
+                    section_ix,
+                    dc_core::commands::RowSel::Ix(row_ix),
+                    "A",
+                    cellv(a),
+                )));
+            }
+            canvas::GeoCell::OnCurve => {
+                for (name, v) in [("A", px), ("B", py)] {
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        section_ix,
+                        dc_core::commands::RowSel::Ix(row_ix),
+                        name,
+                        cellv(v),
+                    )));
+                }
+            }
+        }
         self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
     }
 
@@ -8560,7 +8698,11 @@ impl App {
                             self.apply_line_move(start, end);
                         }
                     }
-                    HandleId::GeoPoint { section_ix, row_ix } => {
+                    HandleId::GeoPoint {
+                        section_ix,
+                        row_ix,
+                        cell,
+                    } => {
                         // The DELTA from the handle's own position (the
                         // grab may start inside the grab radius).
                         // #109: a vertex drag runs through the snap
@@ -8574,7 +8716,7 @@ impl App {
                                 .sel
                                 .and_then(|(_, sid)| self.snap_point_for(sid, raw, false))
                                 .map_or(raw, |(p, _)| p);
-                            self.apply_geo_vertex(section_ix, row_ix, target);
+                            self.apply_geo_vertex(section_ix, row_ix, cell, target);
                         }
                     }
                 }
@@ -11607,6 +11749,115 @@ impl App {
     /// #156 tests: whether the Container Tools contextual tab is up.
     pub fn debug_tab_is_container_tools(&self) -> bool {
         self.tab == Tab::ContainerTools
+    }
+
+    /// #157 tests: a geometry row's type.
+    pub fn debug_geo_row_type_for_test(&self, shape: i64, row_ix: i64) -> Option<String> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet
+            .sections_named("Geometry")
+            .first()?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?
+            .t
+            .clone()
+    }
+
+    /// #157 tests: replace one of the shape's OWN geometry rows (the
+    /// section must exist) — sets the row type and cell values.
+    pub fn debug_set_geo_row_for_test(
+        &mut self,
+        page: i64,
+        shape: i64,
+        sec_ix: i64,
+        row_ix: i64,
+        t: &str,
+        cells: &[(&str, f64)],
+    ) {
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id_mut(&mut page.shapes, shape) else {
+            return;
+        };
+        let mut row_cells: Vec<(String, vsdx::Cell)> = vec![
+            ("X".into(), vsdx::Cell::value("0.5")),
+            ("Y".into(), vsdx::Cell::value("0.5")),
+        ];
+        for (n, v) in cells {
+            row_cells.retain(|(k, _)| k != n);
+            row_cells.push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+        }
+        let mut hit = false;
+        for sec in sh.sheet.children.iter_mut() {
+            if let vsdx::model::SheetChild::Section(sec) = sec {
+                if sec.name == "Geometry" && sec.ix == sec_ix {
+                    match sec.rows.iter_mut().find(|r| r.ix == row_ix) {
+                        Some(row) => {
+                            row.t = Some(t.to_string());
+                            row.cells.retain(|(n, _)| !cells.iter().any(|(c, _)| c == n));
+                            for (n, v) in cells {
+                                row.cells
+                                    .push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+                            }
+                        }
+                        None => {
+                            // The section exists, the row does not —
+                            // append it.
+                            sec.rows.push(vsdx::model::Row {
+                                ix: row_ix,
+                                t: Some(t.to_string()),
+                                cells: row_cells,
+                                ..vsdx::model::Row::default()
+                            });
+                        }
+                    }
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if !hit {
+            // Materialize the section (a master-based shape has none
+            // locally): a MoveTo at the origin + the requested row.
+            let mut row = vsdx::model::Row {
+                ix: row_ix,
+                t: Some(t.to_string()),
+                ..vsdx::model::Row::default()
+            };
+            let mut all: Vec<(String, vsdx::Cell)> = vec![
+                ("X".into(), vsdx::Cell::value("0.5")),
+                ("Y".into(), vsdx::Cell::value("0.5")),
+            ];
+            for (n, v) in cells {
+                all.retain(|(k, _)| k != n);
+                all.push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+            }
+            row.cells = all;
+            sh.sheet
+                .children
+                .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+                    name: "Geometry".into(),
+                    ix: sec_ix,
+                    rows: vec![
+                        vsdx::model::Row {
+                            ix: 1,
+                            t: Some("MoveTo".into()),
+                            cells: vec![
+                                ("X".into(), vsdx::Cell::value("0")),
+                                ("Y".into(), vsdx::Cell::value("0")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                        row,
+                    ],
+                    ..vsdx::model::Section::default()
+                }));
+        }
     }
 
     /// #113 tests: the page ids in order.
