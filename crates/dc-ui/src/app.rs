@@ -189,6 +189,18 @@ pub struct App {
     /// after the docked panels) — the region child windows constrain
     /// to. Captured every frame in `central`.
     mdi_client: egui::Rect,
+    /// #192 spec: the child-window count last frame — any change
+    /// re-fires the automatic arrangement (children tile to fit the
+    /// client). While exactly ONE child exists it is decorator-free
+    /// and pinned full-bleed ("treated as it is now").
+    mdi_last_count: usize,
+    mdi_arranging: bool,
+    /// #192: the decorator/arrangement decisions for the drawing
+    /// window, computed in `draw` AFTER central ran — central applies
+    /// them on the frame after the count changes (one frame of lag,
+    /// invisible: the count is stable by then).
+    mdi_decorated: bool,
+    mdi_drawing_tile: egui::Rect,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
     /// Text waiting for the OS clipboard (#113, URS-1113): copied on
@@ -560,6 +572,10 @@ impl App {
             copypic_svg: false,
             contgal_open: false,
             mdi_client: egui::Rect::NOTHING,
+            mdi_last_count: 0,
+            mdi_arranging: false,
+            mdi_decorated: false,
+            mdi_drawing_tile: egui::Rect::NOTHING,
             os_clipboard_text: None,
             os_image_rx: None,
             backgrounds_open: false,
@@ -8049,17 +8065,29 @@ impl App {
         if self.dirty {
             title.push_str(" •");
         }
-        let client = self.mdi_client;
-        egui::Window::new(title)
+        let client = self.mdi_drawing_tile;
+        let mut win = egui::Window::new(title)
             .id(egui::Id::unique("dc-drawing-window"))
-            .title_bar(true)
+            .title_bar(self.mdi_decorated)
             .resizable(true)
             .collapsible(false)
-            .default_pos(client.left_top())
-            .default_size(client.size())
-            .min_size(egui::vec2(240.0, 180.0))
-            .constrain_to(client)
-            .show(ui.ctx(), |ui| self.central_inner(ui));
+            .min_size(egui::vec2(240.0, 180.0));
+        if (!self.mdi_decorated || self.mdi_arranging) && client.is_finite() && client.width() > 0.0
+        {
+            // Undecorated single child: pinned full-bleed; arranging:
+            // pinned to the tile for the transition frame(s). (Frame 0
+            // carries no tile yet — the window seeds from its
+            // defaults and the pin takes over the frame after.)
+            win = win.current_pos(client.left_top()).fixed_size(client.size());
+        }
+        if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+            win = win.constrain_to(self.mdi_client);
+        }
+        win.show(ui.ctx(), |ui| self.central_inner(ui));
+        // The arrangement pin is consumed HERE (the drawing window
+        // builds in this fn, one frame after `draw` computed it on
+        // the count change); the sheets consumed it in `draw`.
+        self.mdi_arranging = false;
     }
 
     fn central_inner(&mut self, ui: &mut Ui) {
@@ -13092,27 +13120,87 @@ impl App {
                 .resizable(true)
                 .show(ui, |ui| self.format_pane(ui));
         }
-        // #192 MDI: `central` hosts the drawing as a titled CHILD
-        // WINDOW inside the client area (its own ui — the region the
-        // docked panels left), and publishes that rect for the other
-        // child windows.
+        // #192 MDI: `central` hosts the drawing as a CHILD WINDOW
+        // inside the client area (its own ui — the region the docked
+        // panels left), and publishes that rect. SPEC: with exactly
+        // ONE child window there are NO decorators and it fills the
+        // client ("treated as it is now"); once more than one child
+        // exists, every child gets its decorators and the children
+        // AUTOMATICALLY ARRANGE (equal tiles) to fit — any change of
+        // the child count re-fires the arrangement.
         self.central(ui);
+        let drawing_open = self.ed.is_some();
+        let n_children =
+            drawing_open as usize + self.show_shapesheet as usize;
+        if n_children != self.mdi_last_count {
+            self.mdi_last_count = n_children;
+            self.mdi_arranging = true;
+        }
+        // The per-child tiles: an equal-width column each (the
+        // drawing first/left, sheets after), inside the client.
+        let client_ok = self.mdi_client.is_finite()
+            && self.mdi_client.width() > 24.0
+            && self.mdi_client.height() > 24.0;
+        let tiles: Vec<egui::Rect> = if n_children == 0 || !client_ok {
+            Vec::new()
+        } else {
+            let c = self.mdi_client;
+            let gutter = 8.0;
+            let n = n_children as f32;
+            let w = (c.width() - gutter * 2.0 - gutter * (n - 1.0)) / n;
+            (0..n_children)
+                .map(|i| {
+                    egui::Rect::from_min_size(
+                        egui::pos2(
+                            c.left() + gutter + i as f32 * (w + gutter),
+                            c.top() + gutter,
+                        ),
+                        egui::vec2(w, c.height() - 2.0 * gutter),
+                    )
+                })
+                .collect()
+        };
+        let decorated = n_children >= 2;
+        // Drawing window: created inside `central` (it needs the
+        // client ui), but its decorators/arrangement are decided
+        // here — central reads these fields the frame before... no:
+        // central runs first and builds the window, so the flags it
+        // reads were set by THIS block last frame. One frame of lag
+        // on transitions is invisible (the count itself is stable).
+        self.mdi_decorated = decorated;
+        self.mdi_drawing_tile = if n_children == 1 && drawing_open {
+            // Single child: pinned full-bleed, decorator-free.
+            self.mdi_client
+        } else {
+            tiles.first().copied().unwrap_or(self.mdi_client)
+        };
         // #190/#192: the ShapeSheet as a floating child window — the
-        // native title bar carries the close (before, the pane had
-        // none). Painted after the drawing window so it stacks above;
-        // constrained to the client area so children overlap only
-        // each other, never the ribbon/status/docked panes.
-        if self.show_shapesheet {
+        // native title bar carries the close. Painted after the
+        // drawing window so it stacks above; constrained to the
+        // client area so children overlap only each other, never the
+        // ribbon/status/docked panes.
+        if self.show_shapesheet && client_ok {
             let mut open = true;
+            let sheet_tile = if n_children == 1 {
+                // Sheets-only child (no drawing open): full-bleed,
+                // decorator-free per the spec.
+                self.mdi_client
+            } else {
+                tiles.get(drawing_open as usize).copied().unwrap_or(self.mdi_client)
+            };
             let mut win = egui::Window::new("ShapeSheet")
                 .open(&mut open)
+                .title_bar(n_children >= 2 || !drawing_open)
                 .resizable(true)
                 .collapsible(false)
                 .default_size([320.0, 460.0]);
-            if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+            if self.mdi_arranging || n_children == 1 {
                 win = win
-                    .default_pos(self.mdi_client.right_top() + egui::vec2(-340.0, 8.0))
-                    .constrain_to(self.mdi_client);
+                    .current_pos(sheet_tile.left_top())
+                    .fixed_size(sheet_tile.size());
+            }
+            if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+                win = win.constrain_to(self.mdi_client);
             }
             win.show(ui.ctx(), |ui| self.shapesheet_panel(ui));
             if !open {
