@@ -473,6 +473,7 @@ pub fn show(
     layers: &[crate::layers::ShapeQuad],
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
+    member_hl: &[Rect], // #156: selected container's members (page-inches, y-down)
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
     guides: &[GuideFx],      // #113: guide overlay, above ink
@@ -1424,6 +1425,24 @@ pub fn show(
                 4.0,
             ));
         }
+    }
+
+    // Container member highlight (#156): Visio tints the selected
+    // container's members — a translucent accent fill + thin stroke
+    // above the ink, never exported.
+    for r in member_hl {
+        let sr = to_screen(*r);
+        p.rect_filled(
+            sr,
+            1.0,
+            Color32::from_rgba_premultiplied(46, 117, 182, 36),
+        );
+        p.rect_stroke(
+            sr,
+            1.0,
+            Stroke::new(1.0, Color32::from_rgba_premultiplied(46, 117, 182, 130)),
+            egui::StrokeKind::Middle,
+        );
     }
 
     // AutoConnect arrows (#108): Visio's blue tags at the selection's

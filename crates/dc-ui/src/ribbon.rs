@@ -47,6 +47,13 @@ pub enum Action {
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.
     FormatPainterSticky,
+    /// #156: apply the SDCONT style (master NameU) — wraps the
+    /// selection, or re-wraps the selected container's members.
+    ContainerStyle(&'static str),
+    /// #156: open the Container Styles gallery (Design ▸ Containers…).
+    ContainerGallery,
+    /// #156: the Container Tools member-highlight toggle.
+    ContainerHighlight,
     PageOrientation,
     PageSizeDialog,
     CopyAsPicture,
@@ -73,6 +80,9 @@ pub enum Tab {
     Review,
     View,
     Developer,
+    /// #156: Visio's contextual tab — drawn after the strip's fixed
+    /// tabs while a container is selected (never in [`TABS`]).
+    ContainerTools,
 }
 
 /// Visio 2016 order (Layout is not a Visio tab; Data precedes Process).

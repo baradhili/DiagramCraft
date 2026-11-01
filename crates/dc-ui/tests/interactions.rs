@@ -6353,6 +6353,101 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #156: the Container Styles gallery — Design ▸ Containers… wraps a
+/// two-shape selection in a master-based Classic container (members
+/// re-pointed, one undo); the contextual Container Tools tab raises,
+/// restyles via Belt (old container replaced), and the member
+/// highlight toggle writes the container's msvSDContainerNoHighlight.
+#[test]
+fn container_styles_gallery_tab_and_highlight() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let n0 = h.state().debug_shape_count();
+
+    // Select both (click A, shift-click B).
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, asr2.center(), egui::PointerButton::Primary);
+    h.run();
+    h.hover_at(bsr.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: bsr.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+    }
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both selected");
+
+    // Design ▸ Containers… ▸ Classic.
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Containers…").click();
+    h.run();
+    h.get_by_label("Classic").click();
+    h.run();
+
+    // A master-based container wrapped the pair: +1 shape, members
+    // re-pointed at it, it is the selection, the contextual tab is up.
+    assert_eq!(h.state().debug_shape_count(), n0 + 1, "the container landed");
+    let (_, c) = h.state().debug_sel().expect("container selected");
+    for m in [a, b] {
+        assert_eq!(
+            h.state().debug_user_row(page, m, "msvSDContainerShape").as_deref(),
+            Some(c.to_string().as_str()),
+            "member {m} points at the new container"
+        );
+    }
+    assert!(
+        h.state().debug_tab_is_container_tools(),
+        "the Container Tools tab raised"
+    );
+
+    // Restyle to Belt: the OLD container goes, members re-point at a
+    // new one — still n0+1 shapes, still members of a container.
+    h.get_by_label_contains("Belt").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), n0 + 1, "one swap, no leak");
+    let (_, c2) = h.state().debug_sel().expect("new container selected");
+    assert_ne!(c, c2, "the restyle replaced the container");
+    for m in [a, b] {
+        assert_eq!(
+            h.state().debug_user_row(page, m, "msvSDContainerShape").as_deref(),
+            Some(c2.to_string().as_str()),
+            "member {m} re-pointed at the restyled container"
+        );
+    }
+
+    // The member-highlight toggle writes the container's
+    // msvSDContainerNoHighlight row (1 = off).
+    h.get_by_label_contains("Highlight Members").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_user_row(page, c2, "msvSDContainerNoHighlight").as_deref(),
+        Some("1".to_string().into_boxed_str().as_ref()),
+        "highlight off lands on the container"
+    );
+
+    // One undo per action: back through the toggle, the restyle, the
+    // first wrap.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+        h.run();
+    }
+    assert_eq!(h.state().debug_shape_count(), n0, "undo unwinds everything");
+}
+
+
 /// #113 remainder: the page-tab menu's background mark — Set as
 /// Background writes the mark (the Backgrounds gallery then lists the
 /// page; an unmarked page never shows as a choice), Remove clears it.

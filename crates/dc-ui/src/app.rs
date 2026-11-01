@@ -183,6 +183,8 @@ pub struct App {
     copypic_open: bool,
     /// #113 remainder: the vector (SVG) flavor for copy-as-picture.
     copypic_svg: bool,
+    /// #156: the Container Styles gallery dialog (Design ▸ Containers…).
+    contgal_open: bool,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
     /// Text waiting for the OS clipboard (#113, URS-1113): copied on
@@ -404,6 +406,26 @@ const CONN_REVEAL_IN: f64 = 0.6;
 /// An OS clipboard image probe's payload: (w, h, RGBA bytes).
 type OsImage = (u32, u32, Vec<u8>);
 
+/// #156: the SDCONT container style gallery — the shipped Visio 2016
+/// set, in gallery order (Analysis/container-stencil-sdcont.md; the
+/// masters live in the embedded `sdcont` stencil).
+const CONTAINER_STYLES: [&str; 14] = [
+    "Plain",
+    "Notch",
+    "Waves",
+    "Wire",
+    "Belt",
+    "Classic",
+    "Full sail",
+    "Corners",
+    "Alternating",
+    "Banner",
+    "Picture Frame",
+    "Snapshot",
+    "Intersection",
+    "Translucent",
+];
+
 /// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
 /// and drags; the Connector Tool (#108) draws connectors; the Lasso
 /// (#110, Visio's Lasso Select) trails a freehand selection. Esc
@@ -532,6 +554,7 @@ impl App {
             copypic_open: false,
             copypic_factor: 2,
             copypic_svg: false,
+            contgal_open: false,
             os_clipboard_text: None,
             os_image_rx: None,
             backgrounds_open: false,
@@ -3489,6 +3512,274 @@ impl App {
         self.status = format!("shape {dup_id} connected to {sid} (AutoConnect)");
     }
 
+    /// #156: is the primary selection a container — the target of a
+    /// member-side `msvSDContainerShape` reference, a `Container.`
+    /// synthetic (#138), or an effective `msvStructureType=Container`
+    /// root (the master-based SDCONT family)?
+    fn sel_is_container(&self) -> bool {
+        let Some((page_id, sid)) = self.sel else {
+            return false;
+        };
+        let Some(ed) = self.ed() else {
+            return false;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return false;
+        };
+        if !self.container_member_ids(page_id, sid).is_empty() {
+            return true;
+        }
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return false;
+        };
+        if sh.name_u.as_deref().is_some_and(|n| n.starts_with("Container.")) {
+            return true;
+        }
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return false;
+        };
+        let eff = ed.doc.effective_sheet(sh, &chain);
+        eff.sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row("msvStructureType"))
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.v.clone())
+            .is_some_and(|v| v == "Container")
+    }
+
+    /// #156: member highlight reads the container's effective
+    /// `msvSDContainerNoHighlight` row (Visio's switch); default on.
+    fn container_highlight_on(&self) -> bool {
+        let Some((page_id, sid)) = self.sel else {
+            return true;
+        };
+        let Some(ed) = self.ed() else {
+            return true;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return true;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return true;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return true;
+        };
+        let eff = ed.doc.effective_sheet(sh, &chain);
+        eff.sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row("msvSDContainerNoHighlight"))
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.numeric())
+            .map(|v| v == 0.0)
+            .unwrap_or(true)
+    }
+
+    /// #156: the Container Tools toggle — writes the
+    /// `msvSDContainerNoHighlight` User row onto the container
+    /// (materialized like Visio's first edit of an inherited row).
+    fn toggle_container_highlight(&mut self) {
+        let Some((page_id, sid)) = self.sel else {
+            return;
+        };
+        let on = self.container_highlight_on();
+        self.apply(Macro::new(
+            "toggle member highlight",
+            vec![Box::new(dc_core::SetRowCell::new(
+                Scope::Shape { page: page_id, shape: sid },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named("msvSDContainerNoHighlight".into()),
+                "Value",
+                vsdx::Cell::value(if on { "1" } else { "0" }),
+            ))],
+        ));
+        self.status = if on {
+            "member highlight off".into()
+        } else {
+            "member highlight on".into()
+        };
+    }
+
+    /// #156 (owner note 2026-11-01): which stencil variant matches the
+    /// PAPER — an ISO A-size page is metric (the `-m` masters), an
+    /// ANSI/Letter page is US units; a custom size falls back to the
+    /// pane's "Metric Stencils" preference. The preset pairs mirror
+    /// page_setup_window's SIZES table.
+    fn paper_is_metric(&self) -> bool {
+        let geom = self.page_geom();
+        let (lo, hi) = (geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in));
+        const ISO: &[(f64, f64)] = &[
+            (5.83, 8.27),  // A5
+            (8.27, 11.69), // A4
+            (11.69, 16.54),// A3
+            (16.54, 23.39),// A2
+            (23.39, 33.11),// A1
+            (33.11, 46.81),// A0
+        ];
+        const ANSI: &[(f64, f64)] = &[
+            (8.5, 11.0),  // Letter (ANSI A)
+            (8.5, 14.0),  // Legal
+            (11.0, 17.0), // Tabloid (ANSI B)
+            (17.0, 22.0), // ANSI C
+            (22.0, 34.0), // ANSI D
+            (34.0, 44.0), // ANSI E
+        ];
+        let near = |t: &(f64, f64)| (lo - t.0).abs() < 0.02 && (hi - t.1).abs() < 0.02;
+        if ISO.iter().any(near) {
+            return true;
+        }
+        if ANSI.iter().any(near) {
+            return false;
+        }
+        self.stencil.metric_units
+    }
+
+    /// #156: apply an SDCONT style — the selection (or the selected
+    /// container's members, a restyle) wraps in a master-based
+    /// container of that style, one undo Macro.
+    fn apply_container_style(&mut self, style: &str) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        // The sdcont source: an open stencil (the session's explicit
+        // variant choice), else the embedded catalog parsed in the
+        // variant that matches the PAPER (owner note 2026-11-01: ISO
+        // A-size → the metric twin sdcont-m, ANSI/Letter → US).
+        let src_master: Option<vsdx::Master> = self
+            .stencils
+            .iter()
+            .filter(|(_, st)| st.source.to_string_lossy().contains("sdcont"))
+            .find_map(|(_, st)| find_master_by_name(&st.doc, style).cloned())
+            .or_else(|| {
+                let b = crate::stencil::builtin::by_slug("sdcont")?;
+                let doc = vsdx::parse::parse_bytes(b.bytes_for(self.paper_is_metric())).ok()?;
+                find_master_by_name(&doc, style).cloned()
+            });
+        let Some(src) = src_master else {
+            self.status = format!("container style {style} not found");
+            return;
+        };
+        // Members: the selected container re-wraps (a restyle);
+        // anything else wraps the selection itself.
+        let (members, old_container) = if self.sel_is_container() {
+            let (_, sid) = self.sel.unwrap();
+            (self.container_member_ids(page_id, sid), Some(sid))
+        } else {
+            (
+                self.sel_set
+                    .iter()
+                    .filter(|(p, _)| *p == page_id)
+                    .map(|(_, s)| *s)
+                    .collect(),
+                None,
+            )
+        };
+        if members.is_empty() {
+            self.status = "select the shapes to contain first".into();
+            return;
+        }
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for sid in &members {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0)
+            };
+            let (px, py) = (g("PinX"), g("PinY"));
+            let (w, h) = (g("Width"), g("Height"));
+            let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        if x0 > x1 {
+            return;
+        }
+        // The style's own member margin (the master's
+        // msvSDContainerMargin; SDCONT runs 0.125–0.375).
+        let margin = src
+            .shapes
+            .first()
+            .and_then(|root| {
+                root.sheet
+                    .sections_named("User")
+                    .iter()
+                    .find_map(|sec| sec.named_row("msvSDContainerMargin"))
+            })
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(0.25);
+        let rect = (
+            x0 - margin,
+            y0 - margin,
+            x1 - x0 + 2.0 * margin,
+            y1 - y0 + 2.0 * margin,
+        );
+        // Place + size the instance, then move the members over.
+        let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut place = dc_core::place_master_from_stencil(
+            &ed.doc,
+            page_id,
+            &src,
+            (rect.0, rect.1),
+        );
+        let mut cmds = std::mem::take(&mut place.cmds);
+        for (n, v) in [
+            ("PinX", rect.0),
+            ("PinY", rect.1),
+            ("Width", rect.2),
+            ("Height", rect.3),
+            ("LocPinX", 0.0),
+            ("LocPinY", 0.0),
+        ] {
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape { page: page_id, shape: new_id },
+                n,
+                vsdx::Cell::value(format!("{v:.6}")),
+            )));
+        }
+        for m in &members {
+            cmds.push(Box::new(dc_core::SetRowCell::new(
+                Scope::Shape { page: page_id, shape: *m },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
+                "Value",
+                vsdx::Cell::value(new_id.to_string()),
+            )));
+        }
+        cmds.push(Box::new(dc_core::commands::ReorderShape::new(
+            page_id, new_id, false,
+        )));
+        if let Some(old) = old_container {
+            cmds.push(Box::new(dc_core::commands::RemoveShape::new(
+                page_id, old,
+            )));
+        }
+        self.apply(Macro::new(
+            format!("apply container style {style}"),
+            cmds,
+        ));
+        self.set_selection(Some((page_id, new_id)));
+        self.sel_set = vec![(page_id, new_id)];
+        self.tab = Tab::ContainerTools;
+        self.status = format!("container style {style} applied");
+    }
+
     /// #108: the Connection Point tool's click — near an existing
     /// point of the hit shape selects it (a second click elsewhere
     /// re-selects), on the body adds a fresh row at the click, both in
@@ -4831,6 +5122,43 @@ impl App {
     }
 
     /// The Copy as Picture dialog (#113, URS-1200).
+    /// #156: the Container Styles gallery (Design ▸ Containers…) —
+    /// the 14 SDCONT styles; a click wraps the selection (Visio's
+    /// gallery-with-a-selection flow) and selects the new container.
+    fn container_gallery_window(&mut self, ctx: &egui::Context) {
+        if !self.contgal_open {
+            return;
+        }
+        let mut open = true;
+        let mut pick: Option<&'static str> = None;
+        egui::Window::new("Container Styles")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(260.0)
+            .show(ctx, |ui| {
+                ui.weak("Wrap the selection in a container style:");
+                ui.add_space(4.0);
+                egui::Grid::new("dc-contgal")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for name in CONTAINER_STYLES {
+                            if ui.button(name).clicked() {
+                                pick = Some(name);
+                            }
+                        }
+                    });
+            });
+        if let Some(name) = pick {
+            self.contgal_open = false;
+            self.apply_container_style(name);
+        }
+        if !open {
+            self.contgal_open = false;
+        }
+    }
+
     fn copy_picture_window(&mut self, ctx: &egui::Context) {
         if !self.copypic_open {
             return;
@@ -5634,6 +5962,11 @@ impl App {
                 }
                 self.set_selection(Some((page_id, shape_id)));
                 self.status = format!("selected shape {shape_id}");
+                // #156: selecting a container raises the contextual
+                // Container Tools tab (Visio 2016).
+                if self.sel_is_container() {
+                    self.tab = Tab::ContainerTools;
+                }
             }
             None => {
                 self.set_selection(None);
@@ -5879,6 +6212,9 @@ impl App {
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
                     .into();
             }
+            Action::ContainerStyle(name) => self.apply_container_style(name),
+            Action::ContainerGallery => self.contgal_open = !self.contgal_open,
+            Action::ContainerHighlight => self.toggle_container_highlight(),
             Action::ConnPointTool => {
                 if self.tool == Tool::ConnectionPoint {
                     self.tool = Tool::Pointer;
@@ -6008,7 +6344,13 @@ impl App {
                         };
                     }
                     ui.add_space(8.0);
-                    for t in TABS {
+                    // #156: the contextual Container Tools tab rides
+                    // after the fixed strip while a container is the
+                    // primary selection (Visio 2016).
+                    let sel_is_container = self.sel_is_container();
+                    for t in TABS.iter().chain(
+                        sel_is_container.then_some(&Tab::ContainerTools),
+                    ) {
                         if *t == Tab::File {
                             continue;
                         }
@@ -6096,6 +6438,10 @@ impl App {
         let dispatch = |a: Action, act: &mut Option<Action>| {
             *act = Some(a);
         };
+        // The contextual tab leaves when its context does (#156).
+        if self.tab == Tab::ContainerTools && !self.sel_is_container() {
+            self.tab = Tab::Home;
+        }
         let groups: Vec<crate::ribbon::Group> = match self.tab {
             // File opens the backstage view instead of ribbon content.
             Tab::File => vec![],
@@ -6447,6 +6793,19 @@ impl App {
                         ],
                     ])],
                 ),
+                // #156: the Container Styles gallery — the SDCONT
+                // masters (also on the Container Tools contextual
+                // tab once a container exists).
+                crate::ribbon::Group::new(
+                    "Containers",
+                    vec![stack(vec![RibbonButton::new(
+                        Icon::Container,
+                        "Containers…",
+                        Action::ContainerGallery,
+                    )
+                    .selected(self.contgal_open)
+                    .tip("Wrap the selection in a container style")])],
+                ),
             ],
             Tab::Data => vec![
                 crate::ribbon::Group::new(
@@ -6626,6 +6985,50 @@ impl App {
                         "Macros",
                         Action::Macros,
                     ))],
+                ),
+            ],
+            // #156: the Container Tools contextual tab — the SDCONT
+            // style gallery (each click wraps the selection, or
+            // re-wraps the selected container's members, in a
+            // master-based container of that style) plus the member
+            // highlight toggle.
+            Tab::ContainerTools => vec![
+                crate::ribbon::Group::new(
+                    "Container Styles",
+                    vec![grid(vec![
+                        CONTAINER_STYLES[..7]
+                            .iter()
+                            .map(|n| {
+                                RibbonButton::new(
+                                    Icon::Container,
+                                    n,
+                                    Action::ContainerStyle(n),
+                                )
+                                .tip("Wrap the selection in this container style")
+                            })
+                            .collect::<Vec<_>>(),
+                        CONTAINER_STYLES[7..]
+                            .iter()
+                            .map(|n| {
+                                RibbonButton::new(
+                                    Icon::Container,
+                                    n,
+                                    Action::ContainerStyle(n),
+                                )
+                                .tip("Wrap the selection in this container style")
+                            })
+                            .collect::<Vec<_>>(),
+                    ])],
+                ),
+                crate::ribbon::Group::new(
+                    "Members",
+                    vec![stack(vec![RibbonButton::new(
+                        Icon::Container,
+                        "Highlight Members",
+                        Action::ContainerHighlight,
+                    )
+                    .selected(self.container_highlight_on())
+                    .tip("Tint the container's members while it is selected")])],
                 ),
             ],
             Tab::Developer => vec![
@@ -7558,6 +7961,35 @@ impl App {
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
+        // #156: the selected container's member rects — the highlight
+        // overlay (default on; the Container Tools toggle writes the
+        // container's msvSDContainerNoHighlight row).
+        let member_hl: Vec<Rect> = if self.sel_is_container() && self.container_highlight_on() {
+            let (page_id, sid) = self.sel.unwrap();
+            self.ed()
+                .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == page_id))
+                .map(|page| {
+                    self.container_member_ids(page_id, sid)
+                        .iter()
+                        .filter_map(|m| {
+                            let doc = &self.ed().unwrap().doc;
+                            vsdx::model::find_shape_by_id(&page.shapes, *m)
+                                .and_then(|sh| self.shape_rect(doc, page_id, sh))
+                        })
+                        .map(|(x, y, w, h)| {
+                            // page y-up → the canvas's y-down rect frame
+                            let geom = self.page_geom();
+                            Rect::from_min_max(
+                                egui::pos2(x as f32, (geom.h_in - y - h) as f32),
+                                egui::pos2((x + w) as f32, (geom.h_in - y) as f32),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // The page's guides (#113): collected before the borrows below
         // (the marquee-gating hit closure and the overlay both use
         // them).
@@ -7868,6 +8300,7 @@ impl App {
             &quads,
             sel_rect,
             &extra_rects,
+            &member_hl,
             &handles,
             &drag_fx,
             &guide_fx,
@@ -11157,6 +11590,25 @@ impl App {
         self.is_background_page(page)
     }
 
+    /// #156 tests: a shape's effective User-row value by name.
+    pub fn debug_user_row(&self, page: i64, shape: i64, row: &str) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        let chain = shape_chain(&ed.doc, page.id, shape).ok()?;
+        let eff = ed.doc.effective_sheet(sh, &chain);
+        eff.sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row(row))?
+            .cell("Value")
+            .and_then(|c| c.v.clone())
+    }
+
+    /// #156 tests: whether the Container Tools contextual tab is up.
+    pub fn debug_tab_is_container_tools(&self) -> bool {
+        self.tab == Tab::ContainerTools
+    }
+
     /// #113 tests: the page ids in order.
     pub fn debug_page_ids(&self) -> Vec<i64> {
         self.ed()
@@ -12165,6 +12617,7 @@ impl App {
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
         self.copy_picture_window(&ctx);
+        self.container_gallery_window(&ctx);
         self.backgrounds_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
@@ -13127,6 +13580,7 @@ fn t_title(t: Tab) -> &'static str {
         Tab::Review => "Review",
         Tab::View => "View",
         Tab::Developer => "Developer",
+        Tab::ContainerTools => "Container Tools",
     }
 }
 
@@ -13605,4 +14059,11 @@ fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
         }
     }
     None
+}
+
+/// #156: a stencil's master by NameU (SDCONT's gallery names).
+fn find_master_by_name<'a>(doc: &'a Document, name: &str) -> Option<&'a vsdx::Master> {
+    doc.masters
+        .iter()
+        .find(|m| m.name_u.as_deref() == Some(name))
 }
