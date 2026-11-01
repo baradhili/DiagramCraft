@@ -185,6 +185,10 @@ pub struct App {
     copypic_svg: bool,
     /// #156: the Container Styles gallery dialog (Design ▸ Containers…).
     contgal_open: bool,
+    /// #192 MDI: the central client rect (what `central`'s ui sees
+    /// after the docked panels) — the region child windows constrain
+    /// to. Captured every frame in `central`.
+    mdi_client: egui::Rect,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
     /// Text waiting for the OS clipboard (#113, URS-1113): copied on
@@ -555,6 +559,7 @@ impl App {
             copypic_factor: 2,
             copypic_svg: false,
             contgal_open: false,
+            mdi_client: egui::Rect::NOTHING,
             os_clipboard_text: None,
             os_image_rx: None,
             backgrounds_open: false,
@@ -2392,6 +2397,12 @@ impl App {
         }
         if self.color_pick.is_some() {
             self.color_pick = None;
+            return true;
+        }
+        // The ShapeSheet PANE (#190): a persistent surface like the
+        // dialogs — Esc dismisses it after they do.
+        if self.show_shapesheet {
+            self.show_shapesheet = false;
             return true;
         }
         false
@@ -7859,8 +7870,9 @@ impl App {
     }
 
     fn shapesheet_panel(&mut self, ui: &mut Ui) {
+        // #190/#192: the panel body — the window's title bar carries
+        // the close; this is pure content.
         ui.vertical(|ui| {
-            ui.strong("ShapeSheet");
             ui.separator();
             let Some((page_id, shape_id)) = self.sel else {
                 ui.label("Select a shape to inspect its cells.");
@@ -7997,7 +8009,60 @@ impl App {
         clicked
     }
 
+    /// #192 MDI: with a document open, the drawing is a titled child
+    /// window (document name + page, movable/resizable, no close —
+    /// documents close through File) constrained to the client area
+    /// this ui already is. The id is pinned: the TITLE changes with
+    /// page/dirty flips, and an id-from-title window would lose its
+    /// placement on every one of them. Without a document the start
+    /// screen fills the frame unwrapped.
     fn central(&mut self, ui: &mut Ui) {
+        // The client area is what the docked panels LEFT — the
+        // available rect, not max_rect (the ui's full allocation):
+        // egui's inside-panels shrink the former, and a window
+        // constrained to max_rect would float over the stencil pane.
+        // An 8 px gutter insets the child windows inside it: the
+        // workspace reads as an MDI client region, and the windows'
+        // resize-border sense zones never cover a docked panel's own
+        // resize handle at the shared edge.
+        let avail = ui.available_rect_before_wrap();
+        self.mdi_client = if avail.is_finite() && avail.width() > 24.0 && avail.height() > 24.0 {
+            avail.shrink(8.0)
+        } else {
+            avail
+        };
+        if self.ed.is_none() {
+            self.central_inner(ui);
+            return;
+        }
+        let doc_name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".to_string());
+        let page_name = self
+            .ed()
+            .and_then(|e| e.doc.pages.get(self.page_idx))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let mut title = format!("{doc_name} — {page_name}");
+        if self.dirty {
+            title.push_str(" •");
+        }
+        let client = self.mdi_client;
+        egui::Window::new(title)
+            .id(egui::Id::unique("dc-drawing-window"))
+            .title_bar(true)
+            .resizable(true)
+            .collapsible(false)
+            .default_pos(client.left_top())
+            .default_size(client.size())
+            .min_size(egui::vec2(240.0, 180.0))
+            .constrain_to(client)
+            .show(ui.ctx(), |ui| self.central_inner(ui));
+    }
+
+    fn central_inner(&mut self, ui: &mut Ui) {
         if self.ed.is_none() {
             // Visio 2016 start screen shape: Recent on the left,
             // template choices on the right.
@@ -11339,7 +11404,9 @@ impl App {
                 self.begin_text_edit(shape_id, draft);
                 self.status = format!("editing text of shape {shape_id}");
             }
-            Act::ShapeSheet => self.show_shapesheet = true,
+            // #190: a toggle, like the Developer tab's button — the
+            // one-way open left no reachable close.
+            Act::ShapeSheet => self.show_shapesheet = !self.show_shapesheet,
             Act::RouteStraight => {
                 self.apply_connector_route_style(page_id, shape_id, crate::connectors::ROUTE_STRAIGHT)
             }
@@ -11759,6 +11826,11 @@ impl App {
     /// #156 tests: whether the Container Tools contextual tab is up.
     pub fn debug_tab_is_container_tools(&self) -> bool {
         self.tab == Tab::ContainerTools
+    }
+
+    /// #190 tests: whether the ShapeSheet pane is open.
+    pub fn debug_shapesheet_open(&self) -> bool {
+        self.show_shapesheet
     }
 
     /// #157 tests: a geometry row's type.
@@ -13014,19 +13086,39 @@ impl App {
                     });
                 });
         }
-        if self.show_shapesheet {
-            egui::Panel::right("shapesheet")
-                .default_size(260.0)
-                .resizable(true)
-                .show(ui, |ui| self.shapesheet_panel(ui));
-        }
         if self.format_pane_open && self.sel.is_some() {
             egui::Panel::right("format_pane")
                 .default_size(240.0)
                 .resizable(true)
                 .show(ui, |ui| self.format_pane(ui));
         }
+        // #192 MDI: `central` hosts the drawing as a titled CHILD
+        // WINDOW inside the client area (its own ui — the region the
+        // docked panels left), and publishes that rect for the other
+        // child windows.
         self.central(ui);
+        // #190/#192: the ShapeSheet as a floating child window — the
+        // native title bar carries the close (before, the pane had
+        // none). Painted after the drawing window so it stacks above;
+        // constrained to the client area so children overlap only
+        // each other, never the ribbon/status/docked panes.
+        if self.show_shapesheet {
+            let mut open = true;
+            let mut win = egui::Window::new("ShapeSheet")
+                .open(&mut open)
+                .resizable(true)
+                .collapsible(false)
+                .default_size([320.0, 460.0]);
+            if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+                win = win
+                    .default_pos(self.mdi_client.right_top() + egui::vec2(-340.0, 8.0))
+                    .constrain_to(self.mdi_client);
+            }
+            win.show(ui.ctx(), |ui| self.shapesheet_panel(ui));
+            if !open {
+                self.show_shapesheet = false;
+            }
+        }
         self.stencil_carry(&ctx);
 
         // Automated visual smoke: DC_UI_SCREENSHOT=path.png captures the

@@ -383,9 +383,20 @@ pub fn lasso_hits_rect(trail: &[(f64, f64)], x: f64, y: f64, w: f64, h: f64) -> 
         }
         prev = Some(p);
     }
-    // Enclosed: the rect's center inside the trail polygon (ray cast —
-    // a loop that surrounds the shape without touching it still
-    // selects it, Visio's lasso semantics).
+    // Enclosed: the rect's center inside the trail polygon (ray cast).
+    // ENCLOSURE NEEDS A CLOSED LOOP — the trail's ends meeting. An
+    // OPEN wavy trail crosses a center's y-level an odd number of
+    // times with every crossing to one side, which the winding sums
+    // to ±1 and would misread as "surrounded" (found by the MDI
+    // re-run of the lasso kittest; the trail's touch points were
+    // always right, the loop test was run on a non-loop).
+    let closed = trail
+        .first()
+        .zip(trail.last())
+        .is_some_and(|(f, l)| (f.0 - l.0).hypot(f.1 - l.1) < 1e-6);
+    if !closed {
+        return false;
+    }
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
     let mut winding = 0i32;
     for w2 in trail.windows(2) {
