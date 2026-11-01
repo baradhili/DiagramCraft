@@ -6389,6 +6389,101 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #192 slice 2b: a CLEAN document's drawing-window X closes
+/// straight away — no save prompt (the sheet rides along).
+#[test]
+fn drawing_window_close_x_clean_closes() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_shape_screen_rect_for_test(a)
+            .unwrap()
+            .center()
+    };
+    let c = center(&h);
+    click_at(&mut h, c, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Show ShapeSheet")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Show ShapeSheet row")
+        .click();
+    h.run();
+    // The saved state (undo alone keeps the document dirty).
+    h.state_mut().mark_clean_for_test();
+    h.run();
+    let sheet_title = h.get_by_label("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("two close buttons")
+        .click();
+    h.run();
+    assert!(!h.state().debug_close_prompt(), "clean close asks nothing");
+    assert_eq!(h.state().debug_shape_count(), 0, "closed clean");
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "the sheet closed with it"
+    );
+}
+
+
+/// #192 slice 2: the drawing window's title-bar close (decorated
+/// mode only) runs the File > Close flow — a dirty document asks
+/// first, Don't Save closes it (and its sheet with it); a clean one
+/// closes straight away.
+#[test]
+fn drawing_window_close_x_runs_doc_close() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_shape_screen_rect_for_test(a)
+            .unwrap()
+            .center()
+    };
+    let open_sheet = |h: &mut Harness<'_, App>| {
+        click_at(h, center(h), egui::PointerButton::Secondary);
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+        h.get_all_by_label_contains("Show ShapeSheet")
+            .into_iter()
+            .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+            .expect("Show ShapeSheet row")
+            .click();
+        h.run();
+    };
+
+    // Two children -> the drawing is decorated; its X is the close
+    // button far from the ShapeSheet title (the sheet's own X sits
+    // beside that title). The placed shape already made the document
+    // dirty (placement is an undoable edit), so the X must ASK first.
+    open_sheet(&mut h);
+    let sheet_title = h.get_by_label("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("two close buttons when decorated")
+        .click();
+    h.run();
+    assert!(h.state().debug_close_prompt(), "dirty close asks");
+    h.get_by_label_contains("Don't Save").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "document closed");
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "closing the document closed its sheet"
+    );
+
+}
+
+
 /// #190/#192: the ShapeSheet is a closable MDI-style child window —
 /// the native title-bar close dismisses it, Esc dismisses it, and the
 /// context-menu entry toggles it.
@@ -6427,13 +6522,14 @@ fn shapesheet_window_closes() {
         "the window title renders"
     );
 
-    // The native title-bar close dismisses it.
-    h.get(
-        egui_kittest::kittest::By::default()
-            .role(egui::Role::Button)
-            .label("Close window"),
-    )
-    .click();
+    // The SHEET's native title-bar close dismisses it (decorated
+    // mode gives the drawing window a close button too — take the one
+    // beside the ShapeSheet title).
+    let title = h.get_by_label("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .min_by_key(|n| (n.rect().center().distance(title.center())) as i64)
+        .expect("the sheet's close button")
+        .click();
     h.run();
     assert!(
         !h.state().debug_shapesheet_open(),

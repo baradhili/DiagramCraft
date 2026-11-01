@@ -646,6 +646,11 @@ impl App {
     pub fn mark_dirty_for_test(&mut self) {
         self.dirty = true;
     }
+    /// kittest: the saved state (a Save leaves the document clean).
+    #[doc(hidden)]
+    pub fn mark_clean_for_test(&mut self) {
+        self.dirty = false;
+    }
     /// kittest: what every editing command does — dirty + version bump
     /// (the Info thumbnail's cache key, #58).
     #[doc(hidden)]
@@ -8066,12 +8071,20 @@ impl App {
             title.push_str(" •");
         }
         let client = self.mdi_drawing_tile;
+        // #192 spec: the drawing's title-bar close (decorated mode
+        // only — the single undecorated child has no X) runs the
+        // SAME flow as File > Close: dirty asks first, clean closes.
+        let mut doc_close = false;
         let mut win = egui::Window::new(title)
             .id(egui::Id::unique("dc-drawing-window"))
             .title_bar(self.mdi_decorated)
             .resizable(true)
             .collapsible(false)
             .min_size(egui::vec2(240.0, 180.0));
+        let mut open = true;
+        if self.mdi_decorated {
+            win = win.open(&mut open);
+        }
         if (!self.mdi_decorated || self.mdi_arranging) && client.is_finite() && client.width() > 0.0
         {
             // Undecorated single child: pinned full-bleed; arranging:
@@ -8084,6 +8097,18 @@ impl App {
             win = win.constrain_to(self.mdi_client);
         }
         win.show(ui.ctx(), |ui| self.central_inner(ui));
+        if !open {
+            doc_close = true;
+        }
+        if doc_close {
+            // Identical to BackAction::CloseDoc: a dirty document
+            // asks (the modal), a clean one closes now.
+            if self.dirty {
+                self.confirm_close = Some(CloseTarget::Doc);
+            } else {
+                self.close_doc();
+            }
+        }
         // The arrangement pin is consumed HERE (the drawing window
         // builds in this fn, one frame after `draw` computed it on
         // the count change); the sheets consumed it in `draw`.
@@ -13353,6 +13378,8 @@ impl App {
         self.ed = None;
         self.path = PathBuf::new();
         self.dirty = false;
+        // #192 spec: closing the document closes its ShapeSheet(s).
+        self.show_shapesheet = false;
         self.set_selection(None);
         self.stencil = Stencil::default();
         // The reset pane drops the configured category order (#105,
