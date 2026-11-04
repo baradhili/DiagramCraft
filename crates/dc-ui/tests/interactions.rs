@@ -6389,6 +6389,80 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #192 slice 3: per-shape ShapeSheet windows — two shapes carry
+/// two SIMULTANEOUS sheets (titled per shape), the ctx entry toggles
+/// each independently, Esc closes the most recent, and closing the
+/// document closes them all.
+#[test]
+fn per_shape_shapesheets_open_simultaneously() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    // A SHORT separation drag: the shape must stay ON the page — with
+    // several MDI tiles the canvas can be narrower than the page, and
+    // an off-page shape is clipped out of every tile (a 220px push
+    // sent it past the 8.5in page edge).
+    drag_naturally(&mut h, asr.center(), egui::vec2(110.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let rect = |h: &Harness<'_, App>, id| {
+        h.state().debug_shape_screen_rect_for_test(id).unwrap()
+    };
+    let toggle_sheet = |h: &mut Harness<'_, App>, id| {
+        let c = rect(h, id).center();
+        click_at(h, c, egui::PointerButton::Secondary);
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+        h.get_all_by_label_contains("Show ShapeSheet")
+            .into_iter()
+            .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+            .expect("Show ShapeSheet row")
+            .click();
+        h.run();
+    };
+
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![a]);
+    toggle_sheet(&mut h, b);
+    assert_eq!(h.state().debug_shapesheets(), vec![a, b], "both open");
+    // Both windows are up, titled per shape.
+    assert_eq!(
+        h.query_all_by_label_contains("ShapeSheet —").count(),
+        2,
+        "two per-shape windows"
+    );
+
+    // The ctx entry toggles EACH independently.
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![b]);
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![b, a]);
+
+    // Esc closes the most recently opened (a), b survives.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_shapesheets(), vec![b]);
+
+    // Closing the document (clean here — nothing was edited after the
+    // placements, but dirty asks; save-state both) closes the rest.
+    h.state_mut().mark_clean_for_test();
+    h.run();
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("the drawing's close")
+        .click();
+    h.run();
+    assert!(
+        h.state().debug_shapesheets().is_empty(),
+        "doc close cleared the sheets"
+    );
+    let _ = page;
+}
+
+
 /// #192 slice 2b: a CLEAN document's drawing-window X closes
 /// straight away — no save prompt (the sheet rides along).
 #[test]
@@ -6417,7 +6491,7 @@ fn drawing_window_close_x_clean_closes() {
     // The saved state (undo alone keeps the document dirty).
     h.state_mut().mark_clean_for_test();
     h.run();
-    let sheet_title = h.get_by_label("ShapeSheet").rect();
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
     h.get_all_by_label("Close window")
         .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
         .expect("two close buttons")
@@ -6466,7 +6540,7 @@ fn drawing_window_close_x_runs_doc_close() {
     // beside that title). The placed shape already made the document
     // dirty (placement is an undoable edit), so the X must ASK first.
     open_sheet(&mut h);
-    let sheet_title = h.get_by_label("ShapeSheet").rect();
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
     h.get_all_by_label("Close window")
         .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
         .expect("two close buttons when decorated")
@@ -6525,7 +6599,7 @@ fn shapesheet_window_closes() {
     // The SHEET's native title-bar close dismisses it (decorated
     // mode gives the drawing window a close button too — take the one
     // beside the ShapeSheet title).
-    let title = h.get_by_label("ShapeSheet").rect();
+    let title = h.get_by_label_contains("ShapeSheet").rect();
     h.get_all_by_label("Close window")
         .min_by_key(|n| (n.rect().center().distance(title.center())) as i64)
         .expect("the sheet's close button")
@@ -7684,4 +7758,5 @@ fn dbg_corner_nums() {
     let lx1 = cell_of(&h, page, shape, "LocPinX");
     eprintln!("landed={}", px1 + w1 - lx1);
 }
+
 

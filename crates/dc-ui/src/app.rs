@@ -152,7 +152,9 @@ pub struct App {
     last_drag_ghosts: usize,
     mouse_page: Option<(f64, f64)>,
     status: String,
-    show_shapesheet: bool,
+    /// #192 spec: the open ShapeSheet windows, one PER SHAPE (each
+    /// its own child window; a shape appears at most once).
+    shapesheets: Vec<i64>,
     /// Snap & glue settings (#109): the document's DocumentSettings,
     /// mirrored in UI state; every toggle writes through to the doc.
     snap: crate::snap::SnapSettings,
@@ -555,7 +557,7 @@ impl App {
             last_drag_ghosts: 0,
             mouse_page: None,
             status: String::new(),
-            show_shapesheet: false,
+            shapesheets: Vec::new(),
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
@@ -2420,10 +2422,10 @@ impl App {
             self.color_pick = None;
             return true;
         }
-        // The ShapeSheet PANE (#190): a persistent surface like the
-        // dialogs — Esc dismisses it after they do.
-        if self.show_shapesheet {
-            self.show_shapesheet = false;
+        // The ShapeSheet WINDOWS (#190/#192): persistent surfaces like
+        // the dialogs — Esc dismisses the most recently opened one
+        // after the dialogs.
+        if self.shapesheets.pop().is_some() {
             return true;
         }
         false
@@ -6417,7 +6419,16 @@ impl App {
                     crate::units::Unit::Mm
                 };
             }
-            Action::ShowShapeSheet => self.show_shapesheet = !self.show_shapesheet,
+            Action::ShowShapeSheet => {
+                // #192 spec: per-shape sheets — the button targets the
+                // selection's sheet (toggling); without a selection it
+                // closes every open sheet.
+                if let Some((_, sid)) = self.sel {
+                    self.toggle_shapesheet(sid);
+                } else {
+                    self.shapesheets.clear();
+                }
+            }
             Action::Macros => self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into(),
             Action::FillMenu | Action::LineMenu => {
                 self.color_pick = Some(if a == Action::FillMenu {
@@ -7210,7 +7221,9 @@ impl App {
                                 "ShapeSheet",
                                 Action::ShowShapeSheet,
                             )
-                            .selected(self.show_shapesheet)
+                            .selected(self.sel.is_some_and(|(_, sid)| {
+                                self.shapesheets.contains(&sid)
+                            }))
                             .tip("Inspect the selected shape's cells"),
                             RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
                                 .tip("Toggle display units (model stays inches)"),
@@ -7890,15 +7903,23 @@ impl App {
         }
     }
 
-    fn shapesheet_panel(&mut self, ui: &mut Ui) {
+    /// #192 spec: toggle one shape's ShapeSheet window (open order
+    /// kept; re-toggling removes).
+    fn toggle_shapesheet(&mut self, shape: i64) {
+        if let Some(i) = self.shapesheets.iter().position(|sid| *sid == shape) {
+            self.shapesheets.remove(i);
+        } else {
+            self.shapesheets.push(shape);
+        }
+    }
+
+    fn shapesheet_panel(&mut self, ui: &mut Ui, shape_id: i64) {
         // #190/#192: the panel body — the window's title bar carries
-        // the close; this is pure content.
+        // the close; this is pure content, bound to the sheet's OWN
+        // shape (not the live selection).
         ui.vertical(|ui| {
             ui.separator();
-            let Some((page_id, shape_id)) = self.sel else {
-                ui.label("Select a shape to inspect its cells.");
-                return;
-            };
+            let Some(page_id) = self.page_id() else { return };
             let Some(ed) = self.ed() else { return };
             let Ok(sheet) = scope_sheet(
                 &ed.doc,
@@ -11457,9 +11478,10 @@ impl App {
                 self.begin_text_edit(shape_id, draft);
                 self.status = format!("editing text of shape {shape_id}");
             }
-            // #190: a toggle, like the Developer tab's button — the
-            // one-way open left no reachable close.
-            Act::ShapeSheet => self.show_shapesheet = !self.show_shapesheet,
+            // #190/#192: a per-shape toggle for the CLICKED shape —
+            // the one-way open left no reachable close; the spec made
+            // sheets per-shape.
+            Act::ShapeSheet => self.toggle_shapesheet(shape_id),
             Act::RouteStraight => {
                 self.apply_connector_route_style(page_id, shape_id, crate::connectors::ROUTE_STRAIGHT)
             }
@@ -11881,9 +11903,14 @@ impl App {
         self.tab == Tab::ContainerTools
     }
 
-    /// #190 tests: whether the ShapeSheet pane is open.
+    /// #190/#192 tests: whether any ShapeSheet window is open.
     pub fn debug_shapesheet_open(&self) -> bool {
-        self.show_shapesheet
+        !self.shapesheets.is_empty()
+    }
+
+    /// #192 tests: the open sheets' shape ids, in open order.
+    pub fn debug_shapesheets(&self) -> Vec<i64> {
+        self.shapesheets.clone()
     }
 
     /// #157 tests: a geometry row's type.
@@ -13155,8 +13182,7 @@ impl App {
         // the child count re-fires the arrangement.
         self.central(ui);
         let drawing_open = self.ed.is_some();
-        let n_children =
-            drawing_open as usize + self.show_shapesheet as usize;
+        let n_children = drawing_open as usize + self.shapesheets.len();
         if n_children != self.mdi_last_count {
             self.mdi_last_count = n_children;
             self.mdi_arranging = true;
@@ -13204,32 +13230,51 @@ impl App {
         // drawing window so it stacks above; constrained to the
         // client area so children overlap only each other, never the
         // ribbon/status/docked panes.
-        if self.show_shapesheet && client_ok {
-            let mut open = true;
-            let sheet_tile = if n_children == 1 {
-                // Sheets-only child (no drawing open): full-bleed,
-                // decorator-free per the spec.
-                self.mdi_client
-            } else {
-                tiles.get(drawing_open as usize).copied().unwrap_or(self.mdi_client)
-            };
-            let mut win = egui::Window::new("ShapeSheet")
-                .open(&mut open)
-                .title_bar(n_children >= 2 || !drawing_open)
-                .resizable(true)
-                .collapsible(false)
-                .default_size([320.0, 460.0]);
-            if self.mdi_arranging || n_children == 1 {
-                win = win
-                    .current_pos(sheet_tile.left_top())
-                    .fixed_size(sheet_tile.size());
+        if !self.shapesheets.is_empty() && client_ok {
+            // One window per open sheet (#192 spec), in open order;
+            // the tiles follow the drawing (first) then the sheets.
+            let mut close_ix: Option<usize> = None;
+            for (i, &sid) in self.shapesheets.clone().iter().enumerate() {
+                let mut open = true;
+                let sheet_tile = if n_children == 1 {
+                    // Sheets-only child (no drawing open): full-bleed,
+                    // decorator-free per the spec.
+                    self.mdi_client
+                } else {
+                    tiles
+                        .get(drawing_open as usize + i)
+                        .copied()
+                        .unwrap_or(self.mdi_client)
+                };
+                let name = self
+                    .ed()
+                    .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                    .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sid))
+                    .and_then(|sh| sh.name_u.clone())
+                    .unwrap_or_else(|| format!("shape {sid}"));
+                let title = format!("ShapeSheet — {name}");
+                let mut win = egui::Window::new(title)
+                    .id(egui::Id::unique(("dc-shapesheet", sid)))
+                    .open(&mut open)
+                    .title_bar(n_children >= 2 || !drawing_open)
+                    .resizable(true)
+                    .collapsible(false)
+                    .default_size([320.0, 460.0]);
+                if self.mdi_arranging || n_children == 1 {
+                    win = win
+                        .current_pos(sheet_tile.left_top())
+                        .fixed_size(sheet_tile.size());
+                }
+                if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+                    win = win.constrain_to(self.mdi_client);
+                }
+                win.show(ui.ctx(), |ui| self.shapesheet_panel(ui, sid));
+                if !open {
+                    close_ix = Some(i);
+                }
             }
-            if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
-                win = win.constrain_to(self.mdi_client);
-            }
-            win.show(ui.ctx(), |ui| self.shapesheet_panel(ui));
-            if !open {
-                self.show_shapesheet = false;
+            if let Some(i) = close_ix {
+                self.shapesheets.remove(i);
             }
         }
         self.stencil_carry(&ctx);
@@ -13379,7 +13424,7 @@ impl App {
         self.path = PathBuf::new();
         self.dirty = false;
         // #192 spec: closing the document closes its ShapeSheet(s).
-        self.show_shapesheet = false;
+        self.shapesheets.clear();
         self.set_selection(None);
         self.stencil = Stencil::default();
         // The reset pane drops the configured category order (#105,
