@@ -155,6 +155,14 @@ pub struct App {
     /// #192 spec: the open ShapeSheet windows, one PER SHAPE (each
     /// its own child window; a shape appears at most once).
     shapesheets: Vec<i64>,
+    /// #192 spec: the INACTIVE open documents — File > Open ADDS a
+    /// document now; the Window switcher activates one.
+    docs: Vec<DocSession>,
+    /// #192: the Window switcher popup on the tab strip.
+    winmenu_open: bool,
+    /// #192 4a: a Window-menu pick to activate after the strip's
+    /// borrow ends (the popup closure borrows self immutably).
+    pending_activate: Option<usize>,
     /// Snap & glue settings (#109): the document's DocumentSettings,
     /// mirrored in UI state; every toggle writes through to the doc.
     snap: crate::snap::SnapSettings,
@@ -384,6 +392,17 @@ enum CloseTarget {
     Doc,
 }
 
+/// #192 spec: one INACTIVE open document (multi-document sessions).
+/// The active document lives in the App's own fields; switching swaps
+/// the session in. View/scroll state resets on switch (4a) — the
+/// per-document view state is slice 4b.
+struct DocSession {
+    ed: Editor,
+    path: PathBuf,
+    dirty: bool,
+    shapesheets: Vec<i64>,
+}
+
 /// Backstage content page (GitHub #55: 2010 three-band rail — commands
 /// above, destinations Info/Recent/New/Print/Share/Export, Options
 /// pinned below; 2016 functions folded in).
@@ -558,6 +577,9 @@ impl App {
             mouse_page: None,
             status: String::new(),
             shapesheets: Vec::new(),
+            docs: Vec::new(),
+            winmenu_open: false,
+            pending_activate: None,
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
@@ -652,6 +674,33 @@ impl App {
     #[doc(hidden)]
     pub fn mark_clean_for_test(&mut self) {
         self.dirty = false;
+    }
+    /// #192 4a tests: File > Open ADDS a document — parse the file
+    /// and activate it, stashing the current one (the real load()
+    /// path minus the file-dialog worker).
+    #[doc(hidden)]
+    pub fn debug_load_adds_for_test(&mut self, path: &std::path::Path) {
+        self.load(path.to_path_buf());
+    }
+
+    /// #192 4a tests: the open documents' file names (active first,
+    /// then the inactive sessions).
+    #[doc(hidden)]
+    pub fn debug_open_doc_names(&self) -> Vec<String> {
+        let title = |p: &std::path::Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled".into())
+        };
+        let mut names = vec![title(&self.path)];
+        names.extend(self.docs.iter().map(|d| title(&d.path)));
+        names
+    }
+
+    /// #192 4a tests: how many documents are open.
+    #[doc(hidden)]
+    pub fn debug_open_doc_count(&self) -> usize {
+        self.docs.len() + self.ed.is_some() as usize
     }
     /// kittest: what every editing command does — dirty + version bump
     /// (the Info thumbnail's cache key, #58).
@@ -758,6 +807,9 @@ impl App {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
+                // #192 spec: opening ADDS a document — the active one
+                // (if any) becomes an inactive session first.
+                self.stash_active_doc();
                 self.ed = Some(ed);
                 self.reload_snap_settings();
                 self.path = path;
@@ -6557,7 +6609,65 @@ impl App {
                         }
                         ui.add_space(6.0);
                     }
-                    // Office's "Tell me what you want to do" search box.
+                    // #192 4a: the Window switcher (classic MDI
+                    // position) — every open document, the active one
+                    // marked; clicking activates.
+                    let n_docs = self.docs.len() + self.ed.is_some() as usize;
+                    if n_docs > 0 {
+                        ui.add_space(8.0);
+                        let label = format!("Window {}", n_docs);
+                        // (no widget_info override — the Button's own
+                        // text is the accessible label, #56's concern is
+                        // painted text only)
+                        let wresp = ui.add(egui::Button::new(
+                            egui::RichText::new(label).size(12.0),
+                        ).frame(false));
+                        if wresp.clicked() {
+                            self.winmenu_open = !self.winmenu_open;
+                        }
+                        if self.winmenu_open {
+                            let mut close_menu = false;
+                            egui::Popup::menu(&wresp).show(|ui| {
+                                ui.set_min_width(220.0);
+                                // The ACTIVE document first (marked).
+                                if self.ed.is_some() {
+                                    let name = self
+                                        .path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "Untitled".into());
+                                    let mark = if self.dirty { " •" } else { "" };
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Label::new(
+                                            // (› — Carlito has no ✓ glyph;
+                                            // the breadcrumb's arrow)
+                                            egui::RichText::new(format!("› {name}{mark}")).strong(),
+                                        ),
+                                    );
+                                }
+                                for (ix, d) in self.docs.iter().enumerate() {
+                                    let name = d
+                                        .path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "Untitled".into());
+                                    let mark = if d.dirty { " •" } else { "" };
+                                    if ui
+                                        .button(format!("  {name}{mark}"))
+                                        .clicked()
+                                    {
+                                        self.pending_activate = Some(ix);
+                                        close_menu = true;
+                                    }
+                                }
+                            });
+                            if close_menu {
+                                self.winmenu_open = false;
+                            }
+                        }
+                    }
+                    // Office's "Tell me what you want to do" search box.                    // Office's "Tell me what you want to do" search box.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(6.0);
                         let (pr, presp) =
@@ -6608,6 +6718,11 @@ impl App {
                     });
                 });
             });
+        // #192 4a: a Window-menu pick activates after the strip's
+        // mutable borrows end.
+        if let Some(ix) = self.pending_activate.take() {
+            self.activate_doc(ix);
+        }
     }
 
     fn ribbon_content(&mut self, ui: &mut Ui) {
@@ -13419,6 +13534,44 @@ impl App {
     }
 
     /// File → Close teardown: back to the start screen, nothing dirty.
+    /// #192 4a: move the active document into the inactive set
+    /// (capture its session fields; the per-doc UI state resets on
+    /// the way back — view/selection state is slice 4b).
+    fn stash_active_doc(&mut self) {
+        if self.ed.is_none() {
+            return;
+        }
+        let ed = self.ed.take().unwrap();
+        self.docs.push(DocSession {
+            ed,
+            path: std::mem::take(&mut self.path),
+            dirty: std::mem::replace(&mut self.dirty, false),
+            shapesheets: std::mem::take(&mut self.shapesheets),
+        });
+        // The load() path re-initializes the per-doc UI state right
+        // after the stash (its existing reset block).
+    }
+
+    /// #192 4a: activate an inactive document — the active one swaps
+    /// into its slot (nothing is lost).
+    fn activate_doc(&mut self, ix: usize) {
+        if ix >= self.docs.len() {
+            return;
+        }
+        let mut incoming = self.docs.swap_remove(ix);
+        self.stash_active_doc();
+        self.ed = Some(incoming.ed);
+        self.path = incoming.path;
+        self.dirty = incoming.dirty;
+        self.shapesheets = std::mem::take(&mut incoming.shapesheets);
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".into());
+        self.status = format!("switched to {name}");
+    }
+
     fn close_doc(&mut self) {
         self.ed = None;
         self.path = PathBuf::new();
@@ -13438,7 +13591,22 @@ impl App {
         self.reorder_open = false;
         self.comment_target = None;
         self.comment_edit = None;
-        self.status = "document closed".into();
+        // #192 4a: another open document promotes to active.
+        if !self.docs.is_empty() {
+            let next = self.docs.remove(0);
+            self.ed = Some(next.ed);
+            self.path = next.path;
+            self.dirty = next.dirty;
+            self.shapesheets = next.shapesheets;
+            let name = self
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled".into());
+            self.status = format!("closed; switched to {name}");
+        } else {
+            self.status = "document closed".into();
+        }
     }
 
     /// Unsaved-changes prompt before File → New discards work.

@@ -6389,6 +6389,73 @@ fn esc_closes_an_open_dialog() {
 }
 
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #192 slice 4a: multi-document sessions — File > Open ADDS a
+/// document (the previous one stays open as an inactive session, the
+/// Window switcher lists both), closing the active promotes the next,
+/// and each document's ShapeSheets survive the round trip.
+#[test]
+fn multi_document_open_adds_and_switches() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    // Two small documents: fixture + a saved copy of the blank one.
+    let doc_a = hyperlink_master_fixture(tmp.path());
+    let doc_b = tmp.path().join("second.vsdx");
+    {
+        // Save the fresh blank editor as the second document.
+        let pkg = vsdx::Package::open(&doc_a).unwrap();
+        let file = std::fs::File::create(&doc_b).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for name in pkg.part_names() {
+            w.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut w, pkg.part(name).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    h.run();
+
+    // Open A, then B: open ADDS (spec). The harness starts with an
+    // active untitled blank, so A stashes it: 2 docs; B: 3.
+    h.state_mut().debug_load_adds_for_test(&doc_a);
+    h.run();
+    assert_eq!(h.state().debug_open_doc_count(), 2, "A added");
+    h.state_mut().debug_load_adds_for_test(&doc_b);
+    h.run();
+    assert_eq!(h.state().debug_open_doc_count(), 3, "open ADDS a document");
+    assert_eq!(
+        h.state().debug_open_doc_names(),
+        vec!["second.vsdx", "Untitled", "hyperlink-master.vsdx"],
+    );
+
+    // The Window switcher lists all three (active marked).
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("› second.vsdx").count() == 1,
+        "the active document is marked"
+    );
+    h.get_by_label_contains("hyperlink-master.vsdx").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_open_doc_names().first().map(String::as_str),
+        Some("hyperlink-master.vsdx"),
+        "the pick activated the stashed document"
+    );
+
+}
+
+
 /// #192 slice 3: per-shape ShapeSheet windows — two shapes carry
 /// two SIMULTANEOUS sheets (titled per shape), the ctx entry toggles
 /// each independently, Esc closes the most recent, and closing the
@@ -7758,5 +7825,6 @@ fn dbg_corner_nums() {
     let lx1 = cell_of(&h, page, shape, "LocPinX");
     eprintln!("landed={}", px1 + w1 - lx1);
 }
+
 
 
