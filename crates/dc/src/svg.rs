@@ -4771,9 +4771,12 @@ mod tests {
         }
         let golden = std::fs::read_to_string(&golden_path)
             .expect("the spline/NURBS golden exists (regenerate with UPDATE_SPLINE_GOLDENS=1)");
+        // Git's autocrlf normalizes text files to CRLF on Windows
+        // checkouts; the renderer emits LF. Compare newline-normalized.
+        let norm = |s: &str| s.replace('\r', "");
         assert_eq!(
-            svg.trim(),
-            golden.trim(),
+            norm(&svg).trim(),
+            norm(&golden).trim(),
             "the spline/NURBS golden drifted — if the change is intended, \
              regenerate with UPDATE_SPLINE_GOLDENS=1 and review the diff"
         );
