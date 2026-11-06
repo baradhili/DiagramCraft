@@ -504,9 +504,12 @@ fn num_trim(v: f64) -> String {
     }
 }
 
-/// The unit'd display of a value cell: lengths in U="MM" convert from
-/// internal inches to mm; point/degree values carry their magnitudes
-/// as-is. `cell` names the cell for its default-unit fallback.
+/// The unit'd display of a value cell: the `V` attribute carries the
+/// cell's magnitude in Visio's *internal* units — inches for lengths,
+/// radians for angles — so MM converts ×25.4, PT ×72 (the corpus's
+/// style sheets store the 4 pt Normal margin as 0.0555) and degrees
+/// convert from radians (FillGradientAngle's 4.7124 = 270°).
+/// `cell` names the cell for its default-unit fallback.
 fn fmt_value(v: &str, u: Option<&str>, cell: &str) -> String {
     let unit = u.unwrap_or_else(|| {
         if LENGTH_CELLS.contains(&cell) {
@@ -522,8 +525,14 @@ fn fmt_value(v: &str, u: Option<&str>, cell: &str) -> String {
             Ok(n) => format!("{} mm", num_trim(n * 25.4)),
             Err(_) => v.to_string(),
         },
-        "PT" | "DP" => format!("{v} pt"),
-        "DEG" | "DA" | "AD" => format!("{v} deg"),
+        "PT" | "DP" => match v.trim().parse::<f64>() {
+            Ok(n) => format!("{} pt", num_trim(n * 72.0)),
+            Err(_) => format!("{v} pt"),
+        },
+        "DEG" | "DA" | "AD" => match v.trim().parse::<f64>() {
+            Ok(n) => format!("{} deg", num_trim(n.to_degrees())),
+            Err(_) => format!("{v} deg"),
+        },
         "PERCENT" | "%" => match v.trim().parse::<f64>() {
             Ok(n) => format!("{}%", num_trim(n * 100.0)),
             Err(_) => v.to_string(),
@@ -1609,6 +1618,29 @@ mod tests {
             ..Cell::default()
         };
         assert_eq!(cell_text(&mm, "ShapeShdwOffsetX"), "0.5 mm");
+        // Points convert from internal inches (the corpus's 4 pt
+        // Normal margin is stored as 0.0555).
+        let pt = Cell {
+            v: Some("0.05555555555555555".into()),
+            u: Some("PT".into()),
+            ..Cell::default()
+        };
+        assert_eq!(cell_text(&pt, "LeftMargin"), "4 pt");
+        // Degrees convert from internal radians (FillGradientAngle's
+        // 4.7124 is 270°).
+        let deg = Cell {
+            v: Some("4.7123889803847".into()),
+            u: Some("DEG".into()),
+            ..Cell::default()
+        };
+        assert_eq!(cell_text(&deg, "FillGradientAngle"), "270 deg");
+        // Unparseable values fall back to the raw text.
+        let raw = Cell {
+            v: Some("THEME".into()),
+            u: Some("PT".into()),
+            ..Cell::default()
+        };
+        assert_eq!(cell_text(&raw, "LeftMargin"), "THEME pt");
         assert_eq!(num_trim(147.53575), "147.5358");
         assert_eq!(num_trim(0.0), "0");
     }
