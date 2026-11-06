@@ -573,18 +573,23 @@ pub struct MergedCell {
 }
 
 impl MergedCell {
+    /// The shape's own cell, shown undimmed.
     fn local(c: &Cell, cell: &str) -> MergedCell {
         MergedCell {
             text: cell_text(c, cell),
             inherited: false,
         }
     }
+    /// A cell sourced from deeper in the chain (master, style, or
+    /// document sheet), shown inherited.
     fn deep(c: &Cell, cell: &str) -> MergedCell {
         MergedCell {
             text: cell_text(c, cell),
             inherited: true,
         }
     }
+    /// A synthesized display (Visio's observed default or "No
+    /// Formula") for a cell that resolves nowhere.
     fn fallback(text: String) -> MergedCell {
         MergedCell {
             text,
@@ -1146,6 +1151,7 @@ fn name_color(dark: bool) -> Color32 {
     }
 }
 
+/// The gray row-label column fill.
 fn row_label_fill(dark: bool) -> Color32 {
     if dark {
         Color32::from_gray(58)
@@ -1462,6 +1468,8 @@ mod tests {
         doc
     }
 
+    /// The fixture page's PageSheet, for tests that prove page-scope
+    /// sheets never leak into a shape sheet's view.
     fn page_sheet_mut(doc: &mut Document) -> &mut Sheet {
         match doc.pages[0].children.first_mut().unwrap() {
             IndexChild::Sheet { sheet, .. } => sheet,
@@ -1469,6 +1477,8 @@ mod tests {
         }
     }
 
+    /// The rendered pairs of one fixed section, failing the test when
+    /// that section is absent.
     fn pairs_of(views: &[SectionView], title: &str) -> Vec<(String, MergedCell)> {
         views
             .iter()
