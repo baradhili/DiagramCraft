@@ -207,6 +207,9 @@ pub struct CanvasOut {
     /// trail in page inches, y-up. The app selects every shape the
     /// trail touches or encloses.
     pub lasso_done: Option<Vec<(f64, f64)>>,
+    /// Freeform drag finished (#132, URS-1225): the sampled pen
+    /// stroke in page inches, y-up. The app builds the geometry shape.
+    pub freeform_done: Option<Vec<(f64, f64)>>,
     /// A ruler drag released over the page (#113 guides slice): the
     /// guide kind and its page position (inches, y-up).
     pub guide_drop: Option<(GuideSource, (f64, f64))>,
@@ -218,6 +221,8 @@ pub struct CanvasOut {
     pub marquee_live: Option<Rect>,
     /// Lasso trail this frame while dragging (screen px).
     pub lasso_live: Option<Vec<Pos2>>,
+    /// The Freeform tool's live pen trail (screen px, #132).
+    pub freeform_live: Option<Vec<Pos2>>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
     /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
@@ -560,6 +565,7 @@ pub fn show(
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
     lasso_tool: bool, // #110: the Lasso Select tool is active
+    freeform_tool: bool, // #132: the Freeform tool is active
     stencil_hover: bool,
     // #202: the selected 1D shape's geometry carries a curve row —
     // the selection layer then skips its begin→end chord stroke (the
@@ -590,10 +596,12 @@ pub fn show(
         press_page_pos: None,
         marquee_done: None,
         lasso_done: None,
+        freeform_done: None,
         guide_drop: None,
         connector_drop: None,
         marquee_live: None,
         lasso_live: None,
+        freeform_live: None,
         shift_click: false,
         ctrl_click: false,
         zoom_changed: false,
@@ -696,6 +704,7 @@ pub fn show(
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
     let mem_lasso = egui::Id::unique("dc-lasso");
+    let mem_freeform = egui::Id::unique("dc-freeform");
     let mem_guide = egui::Id::unique("dc-guide-drag");
     let mem_connector = egui::Id::unique("dc-connector-drag");
     let mem_autoc = egui::Id::unique("dc-autoclick");
@@ -751,6 +760,11 @@ pub fn show(
                     // the press starts a freehand trail.
                     ui.ctx()
                         .memory_mut(|m| m.data.insert_temp(mem_lasso, vec![p]));
+                } else if freeform_tool {
+                    // Empty page with the Freeform tool (#132): the
+                    // press starts the pen stroke.
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()
@@ -884,6 +898,37 @@ pub fn show(
                     .memory_mut(|m| m.data.insert_temp(mem_lasso, trail.clone()));
             }
             out.lasso_live = Some(trail);
+        }
+    }
+
+    // Freeform (#132, URS-1225): armed on an empty-page press while
+    // the tool is active; the pen trail samples the pointer; release
+    // hands the stroke to the app, which builds the geometry shape.
+    let freeform_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_freeform));
+    if let Some(mut trail) = freeform_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<Vec<Pos2>>(mem_freeform));
+            if primary_released {
+                let len_px: f32 = trail.windows(2).map(|w| w[0].distance(w[1])).sum();
+                if len_px > 2.0 && trail.len() >= 2 {
+                    out.freeform_done = Some(
+                        trail
+                            .iter()
+                            .map(|p| screen_to_page(*p, view, page))
+                            .collect(),
+                    );
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            if trail.last().is_none_or(|l| l.distance(p) > 0.75) {
+                trail.push(p);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_freeform, trail.clone()));
+            }
+            out.freeform_live = Some(trail);
         }
     }
 
@@ -1539,6 +1584,17 @@ pub fn show(
                 Stroke::new(1.0, t.selection),
                 6.0,
                 4.0,
+            ));
+        }
+    }
+
+    // Freeform pen trail (#132) — SOLID: it previews the shape's
+    // future ink, not a selection aid.
+    if let Some(trail) = &out.freeform_live {
+        if trail.len() >= 2 {
+            p.add(egui::Shape::line(
+                trail.clone(),
+                Stroke::new(1.5, t.selection),
             ));
         }
     }

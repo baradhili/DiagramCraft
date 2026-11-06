@@ -10,6 +10,7 @@ pub mod cmd;
 pub mod group_fixture;
 pub mod align;
 pub mod connectors;
+pub mod freeform;
 pub mod guides;
 pub mod hyperlink;
 pub mod icontex;

@@ -485,6 +485,9 @@ pub enum Tool {
     /// connection point, click an existing one to select it (Delete
     /// removes).
     ConnectionPoint,
+    /// #132 (URS-1225): the Freeform tool — a sampled pen stroke
+    /// becomes a new shape's editable Geometry rows.
+    Freeform,
 }
 
 struct DragState {
@@ -2458,7 +2461,7 @@ impl App {
                 if !consumed {
                     if matches!(
                         self.tool,
-                        Tool::Connector | Tool::Lasso | Tool::ConnectionPoint
+                        Tool::Connector | Tool::Lasso | Tool::ConnectionPoint | Tool::Freeform
                     ) {
                         self.tool = Tool::Pointer;
                     }
@@ -4803,6 +4806,41 @@ impl App {
         };
     }
 
+    /// #132 (URS-1225): a sampled pen stroke becomes a new shape —
+    /// [`crate::freeform`] fits LineTo/ArcTo rows into the bbox
+    /// frame; ordinary editable geometry through the add-shape path,
+    /// one undo step, selected on landing.
+    fn create_freeform(&mut self, stroke: Vec<(f64, f64)>) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let Some(ed) = self.ed.as_ref() else {
+            return;
+        };
+        let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let shape = crate::freeform::build_shape(id, &stroke);
+        let segs = shape
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| g.rows.len().saturating_sub(1))
+            .unwrap_or(0);
+        self.apply(Macro::new(
+            format!("freeform shape {id}"),
+            vec![Box::new(dc_core::AddShape {
+                page: page_id,
+                parent: None,
+                shape,
+            })],
+        ));
+        self.set_selection(Some((page_id, id)));
+        self.sel_set = vec![(page_id, id)];
+        self.status = format!(
+            "freeform shape created ({segs} segment{} — drag the vertex handles to edit)",
+            if segs == 1 { "" } else { "s" }
+        );
+    }
+
     /// #108 reroute: a deferred [`crate::cmd::RerouteConnectors`]
     /// riding at the tail of the move/resize Macro — it evaluates
     /// against the post-move document (an eager build would read
@@ -6728,6 +6766,19 @@ impl App {
                             .into();
                 }
             }
+            Action::FreeformTool => {
+                // Toggle like the other tools; the gesture arms on an
+                // empty-page press and the release builds the shape.
+                if self.tool == Tool::Freeform {
+                    self.tool = Tool::Pointer;
+                    self.status = "freeform off".into();
+                } else {
+                    self.tool = Tool::Freeform;
+                    self.status =
+                        "Freeform: drag on the page to draw freehand geometry (Esc to finish)"
+                            .into();
+                }
+            }
             Action::LassoTool => {
                 // Toggle like Visio's Select ▸ Lasso Select menu item;
                 // the Pointer Tool (or Esc) is Select Area.
@@ -7041,6 +7092,12 @@ impl App {
                             .tip(
                                 "Connection Point tool: click a shape to add a connection \
                                  point; click one to select it (Delete removes)",
+                            ),
+                        RibbonButton::new(Icon::Pen, "Freeform", Action::FreeformTool)
+                            .selected(self.tool == Tool::Freeform)
+                            .tip(
+                                "Freeform tool (#132): drag on the page to draw freehand \
+                                 geometry — the stroke becomes an editable shape (Esc finishes)",
                             ),
                     ])],
                 ),
@@ -8927,6 +8984,7 @@ impl App {
             &underlays,
             self.tool == Tool::Connector,
             self.tool == Tool::Lasso,
+            self.tool == Tool::Freeform,
             armed,
             sel_line_curved,
             &conn_fx,
@@ -8976,6 +9034,10 @@ impl App {
             // The Lasso trail finished (#110): touch/enclose selection.
             if let Some(trail) = out.lasso_done {
                 self.apply_lasso(&trail);
+            }
+            // The Freeform stroke finished (#132): build the shape.
+            if let Some(stroke) = out.freeform_done {
+                self.create_freeform(stroke);
             }
             // A ruler drag released over the page drops a guide
             // (#113, URS-1076).
@@ -14783,6 +14845,52 @@ mod tests {
 
     // Dialogs must never block the UI thread; these tests drive the
     // polling half directly (no real native dialog is ever spawned).
+
+    /// #132 (URS-1225): a sampled stroke becomes an editable shape —
+    /// the geometry rows land, the selection carries #137 vertex
+    /// handles for them, undo removes the shape.
+    #[test]
+    fn freeform_stroke_becomes_editable_geometry() {
+        let ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut app = App::with_doc_opt(None);
+        app.ed = Some(ed);
+        app.page_idx = 0;
+        let stroke: Vec<(f64, f64)> = (0..=20)
+            .map(|i| {
+                let t = i as f64 / 20.0;
+                (1.0 + t * 2.0, 2.0 + (t * std::f64::consts::PI).sin())
+            })
+            .collect();
+        app.create_freeform(stroke);
+        let page = &app.ed.as_ref().unwrap().doc.pages[0];
+        assert_eq!(page.shapes.len(), 1, "the freeform shape exists");
+        let s = &page.shapes[0];
+        let geo = s.sheet.sections_named("Geometry");
+        assert_eq!(geo.len(), 1, "one Geometry section");
+        assert_eq!(geo[0].rows[0].t.as_deref(), Some("MoveTo"));
+        assert!(geo[0].rows.len() >= 2, "at least one segment row");
+        assert_eq!(app.debug_sel(), Some((page_id, s.id)), "selected");
+        // Vertex handles for the point rows (#137) — editable.
+        let handles = app.selection_handles();
+        let vertex = handles
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.id,
+                    HandleId::GeoPoint {
+                        cell: canvas::GeoCell::X | canvas::GeoCell::Y,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(vertex >= 4, "vertex handles on the freeform rows: {vertex}");
+        // Undo removes the shape (one add-shape step).
+        app.do_undo();
+        let page = &app.ed.as_ref().unwrap().doc.pages[0];
+        assert_eq!(page.shapes.len(), 0, "undo removes the shape");
+    }
 
     /// #187 slice 2: a ROTATED connector joins the jump lines — the
     /// Angle gate is gone; the HitFrame polyline carries the rotated

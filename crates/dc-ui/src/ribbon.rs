@@ -43,6 +43,7 @@ pub enum Action {
     SelectByType,
     LassoTool,
     ConnPointTool,
+    FreeformTool,
     FormatPainter,
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.

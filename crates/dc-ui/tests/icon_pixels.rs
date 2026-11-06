@@ -105,11 +105,13 @@ fn icon_paints_in_full_shell() {
         });
     h.run();
     let img = h.render().unwrap();
-    // scan the ribbon band (y 90..160) for icon ink left of the stencil pane
+    // scan the ribbon band (y 90..180) for icon ink left of the
+    // stencil pane — the band grew with the Tools stack's fourth row
+    // (the #132 Freeform button).
     let (w, _h) = img.dims();
     let mut n = 0;
     for x in 0..w.min(600) {
-        for y in 90..160.min(_h) {
+        for y in 90..180.min(_h) {
             let p = img.px(x, y);
             if p[0] < 235 || p[1] < 235 || p[2] < 235 {
                 n += 1;

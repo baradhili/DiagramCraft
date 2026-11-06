@@ -1245,10 +1245,15 @@ fn ribbon_zoom_buttons_zoom_and_refit() {
     let mut h = harness_with_blank();
     h.run();
     h.run(); // fit settles
-    let z_fit = h.state().debug_zoom();
 
     h.get_by_label_contains("View").click();
     h.run();
+    h.run();
+    // The fit captures ON the View tab: the tab's ribbon height
+    // differs from Home's, and the resize-follows refit re-fits the
+    // canvas on the switch (the fit-state machine's own behavior).
+    let z_fit = h.state().debug_zoom();
+
     h.get_by_label_contains("Zoom In").click();
     h.run();
     let z_manual = h.state().debug_zoom();
@@ -5722,6 +5727,48 @@ fn connector_ctx_menu_sets_curved_route() {
         (back - style0.parse::<f64>().unwrap_or(1.0)).abs() < 1e-9,
         "undo restores the route style: {back}"
     );
+}
+
+/// #132 (URS-1225): the Freeform tool — Home ▸ Tools ▸ Freeform arms
+/// the pen; a drag over empty page builds an editable shape (selected,
+/// vertex handles); Esc leaves the tool; undo removes the shape.
+#[test]
+fn freeform_tool_draws_an_editable_shape() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let before = h.state().debug_shape_count();
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Freeform").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_tool(),
+        dc_ui::app::Tool::Freeform,
+        "the Freeform tool is armed"
+    );
+    let canvas = h.state().debug_canvas_rect();
+    drag_naturally(&mut h, canvas.center() - egui::vec2(60.0, 30.0), egui::vec2(120.0, 60.0));
+    h.run();
+    assert_eq!(
+        h.state().debug_shape_count(),
+        before + 1,
+        "the stroke built a shape"
+    );
+    assert!(h.state().debug_sel().is_some(), "the new shape is selected");
+    assert!(
+        h.state().debug_status().contains("freeform shape created"),
+        "status notes the creation: {}",
+        h.state().debug_status()
+    );
+    // Undo removes it.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), before, "undo removes it");
+    // Esc leaves the tool.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
 }
 
 /// #202: a curved connector's selection carries the two Bézier
