@@ -2430,7 +2430,11 @@ impl App {
         }
         for shape in members {
             if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
-                if canvas::lasso_hits_rect(trail, sx, sy, w, h) {
+                // Closure tolerance from the view scale: the pointer's
+                // return to the start reads as a closed loop within a
+                // few SCREEN pixels, whatever the zoom (inches/px).
+                let tol = 4.0 / self.view.px_per_in() as f64;
+                if canvas::lasso_hits_rect(trail, sx, sy, w, h, tol) {
                     picked.push((page_id, shape.id));
                 }
             }

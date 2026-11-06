@@ -369,7 +369,21 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
 /// loops around it (the rect's center inside the trail's polygon) —
 /// the trail needs only to TOUCH a shape, unlike the marquee's
 /// contained/intersect band.
-pub fn lasso_hits_rect(trail: &[(f64, f64)], x: f64, y: f64, w: f64, h: f64) -> bool {
+///
+/// `closure_tol` (page inches) decides when the trail's ends count as
+/// meeting for the enclosure test. The CALLER derives it from the view
+/// scale — a hand-drawn loop ends within a few screen pixels of its
+/// start, which is a meaningful inch distance only at the current
+/// zoom; a fixed inch epsilon would read every human-drawn lasso as
+/// open and never enclose.
+pub fn lasso_hits_rect(
+    trail: &[(f64, f64)],
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    closure_tol: f64,
+) -> bool {
     let inside = |p: (f64, f64)| p.0 >= x && p.0 <= x + w && p.1 >= y && p.1 <= y + h;
     let mut prev: Option<(f64, f64)> = None;
     for &p in trail {
@@ -393,14 +407,18 @@ pub fn lasso_hits_rect(trail: &[(f64, f64)], x: f64, y: f64, w: f64, h: f64) -> 
     let closed = trail
         .first()
         .zip(trail.last())
-        .is_some_and(|(f, l)| (f.0 - l.0).hypot(f.1 - l.1) < 1e-6);
+        .is_some_and(|(f, l)| (f.0 - l.0).hypot(f.1 - l.1) <= closure_tol);
     if !closed {
         return false;
     }
     let (cx, cy) = (x + w / 2.0, y + h / 2.0);
     let mut winding = 0i32;
-    for w2 in trail.windows(2) {
-        let (a, b) = (w2[0], w2[1]);
+    // Consecutive segments plus the closing last-to-first edge: with a
+    // tolerance closure the ends differ, so the edge that completes the
+    // loop can itself cross the center's y-level. For an exactly closed
+    // trail that edge is degenerate (equal points never cross).
+    for i in 0..trail.len() {
+        let (a, b) = (trail[i], trail[(i + 1) % trail.len()]);
         if (a.1 <= cy) != (b.1 <= cy) {
             let t = (cy - a.1) / (b.1 - a.1);
             if a.0 + t * (b.0 - a.0) > cx {
@@ -1803,11 +1821,11 @@ mod tests {
         // Rect [1,3]×[1,2]; a trail passing THROUGH it (both samples
         // outside) selects — touch, not containment (#110).
         let trail = [(0.0, 1.5), (4.0, 1.5)];
-        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0));
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
         // A trail far away does not.
-        assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0));
+        assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0, 1e-6));
         // A sample inside selects.
-        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0));
+        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0, 1e-6));
     }
 
     #[test]
@@ -1821,16 +1839,58 @@ mod tests {
             (0.0, 4.0),
             (0.0, 0.0),
         ];
-        assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0));
+        assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
         // The same loop does not select a shape outside it.
-        assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0));
+        assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0, 1e-6));
     }
 
     #[test]
     fn lasso_diagonal_cross_counts() {
         // The trail crosses only the rect's corner region diagonally.
         let trail = [(0.5, 0.5), (1.5, 1.5)];
-        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0));
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn lasso_closure_follows_the_caller_tolerance() {
+        // A hand-drawn loop: the ends land near — not exactly on —
+        // each other. Within the caller's (screen-derived) tolerance
+        // the trail reads as closed and ENCLOSES the rect, whose
+        // center the winding counts across the closing edge.
+        let near_closed = [
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 4.0),
+            (0.0, 4.0),
+            (0.02, -0.015), // ≈ 0.025 in from the start
+        ];
+        assert!(
+            lasso_hits_rect(&near_closed, 1.0, 1.0, 2.0, 1.0, 0.05),
+            "a near-closed loop encloses within tolerance"
+        );
+        // The same trail at a tight tolerance is OPEN: no enclosure —
+        // only the touch/inside paths could still select, and this
+        // trail neither touches nor enters the rect.
+        assert!(
+            !lasso_hits_rect(&near_closed, 1.0, 1.0, 2.0, 1.0, 1e-6),
+            "an open trail does not enclose"
+        );
+        // The closing edge is decisive here: the loop's ends straddle
+        // the rect center's y-level (1.5) and only the last-to-first
+        // edge crosses it right of the center — without it the winding
+        // sums to zero and the loop would not enclose.
+        let straddle = [
+            (6.0, 1.49),
+            (6.0, -1.0),
+            (-1.0, -1.0),
+            (-1.0, 4.0),
+            (6.0, 4.0),
+            (6.02, 1.51),
+        ];
+        assert!(
+            lasso_hits_rect(&straddle, 1.0, 1.0, 2.0, 1.0, 0.05),
+            "the closing edge completes the winding"
+        );
     }
 
     #[test]
