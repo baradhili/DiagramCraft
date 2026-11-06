@@ -401,6 +401,14 @@ struct DocSession {
     path: PathBuf,
     dirty: bool,
     shapesheets: Vec<i64>,
+    /// #192 4b: the document's view (zoom/pan/unit/toggles), page
+    /// selection, shape selection, and group-edit stack — switching
+    /// loses nothing.
+    view: View,
+    page_idx: usize,
+    sel: Option<(i64, i64)>,
+    sel_set: Vec<(i64, i64)>,
+    group_edit: Vec<i64>,
 }
 
 /// Backstage content page (GitHub #55: 2010 three-band rail — commands
@@ -13547,9 +13555,12 @@ impl App {
             path: std::mem::take(&mut self.path),
             dirty: std::mem::replace(&mut self.dirty, false),
             shapesheets: std::mem::take(&mut self.shapesheets),
+            view: std::mem::take(&mut self.view),
+            page_idx: self.page_idx,
+            sel: self.sel,
+            sel_set: std::mem::take(&mut self.sel_set),
+            group_edit: std::mem::take(&mut self.group_edit),
         });
-        // The load() path re-initializes the per-doc UI state right
-        // after the stash (its existing reset block).
     }
 
     /// #192 4a: activate an inactive document — the active one swaps
@@ -13564,6 +13575,19 @@ impl App {
         self.path = incoming.path;
         self.dirty = incoming.dirty;
         self.shapesheets = std::mem::take(&mut incoming.shapesheets);
+        self.view = incoming.view;
+        // A stored fit-MODE view re-fits to the (possibly changed)
+        // client; a manual zoom/pan view restores exactly.
+        if self.view.fit_mode {
+            self.view.fit_pending = true;
+        }
+        self.page_idx = incoming.page_idx;
+        self.sel = incoming.sel;
+        self.sel_set = incoming.sel_set;
+        self.group_edit = incoming.group_edit;
+        self.tex.clear();
+        self.layers.clear();
+        self.page_states.clear();
         let name = self
             .path
             .file_name()

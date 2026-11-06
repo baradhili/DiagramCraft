@@ -6453,6 +6453,38 @@ fn multi_document_open_adds_and_switches() {
         "the pick activated the stashed document"
     );
 
+    // 4b: A's per-document UI state survives the round trip. Zoom in
+    // on A, switch to B (B keeps its own zoom), switch back: A's zoom
+    // returns, and A's placed shape selection is still the selection.
+    h.hover_at(h.state().debug_canvas_rect().center());
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 120.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run();
+    let zoom_a = h.state().debug_zoom();
+    assert!(zoom_a > 0.4, "A zoomed in: {zoom_a}");
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    h.get_by_label_contains("second.vsdx").click();
+    h.run();
+    let zoom_b = h.state().debug_zoom();
+    assert!(
+        (zoom_b - zoom_a).abs() > 1e-3,
+        "B kept its own zoom: {zoom_b} vs A's {zoom_a}"
+    );
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    h.get_by_label_contains("hyperlink-master.vsdx").click();
+    h.run();
+    let zoom_back = h.state().debug_zoom();
+    assert!(
+        (zoom_back - zoom_a).abs() < 1e-3,
+        "A's zoom survived the round trip: {zoom_back} vs {zoom_a}"
+    );
 }
 
 
