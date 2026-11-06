@@ -2027,6 +2027,30 @@ impl App {
                                 });
                             }
                         }
+                        "NURBSTo" => {
+                            // #188: the E formula's interior control
+                            // points (fractions of Width/Height when
+                            // the x/y types are 0) join the row's own
+                            // X/Y vertex handles as circles.
+                            let e_text = row
+                                .cell("E")
+                                .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                                .unwrap_or_default();
+                            if let Some(f) = dc::curve::parse_nurbs(&e_text) {
+                                let (fx, fy) =
+                                    if f.x_type == 0.0 { (w, h) } else { (1.0, 1.0) };
+                                for (i, (gx, gy, _, _)) in f.points.iter().enumerate() {
+                                    out.push(Handle {
+                                        id: HandleId::GeoPoint {
+                                            section_ix: geo.ix,
+                                            row_ix: row.ix,
+                                            cell: canvas::GeoCell::NurbsPt(i),
+                                        },
+                                        pos: (bx + gx * fx, by + gy * fy),
+                                    });
+                                }
+                            }
+                        }
                         _ => {}
                     }
                     cur = Some((lx, ly));
@@ -2131,14 +2155,21 @@ impl App {
             // #202: a CubicBezTo row's two Bézier controls.
             canvas::GeoCell::Ctrl => &["A", "B"],
             canvas::GeoCell::Ctrl2 => &["C", "D"],
+            // #188: the NURBSTo row's E formula (all controls live in
+            // it); the drag re-emits it with the moved group point.
+            canvas::GeoCell::NurbsPt(_) => &["E"],
         };
-        // #202: curve-control drags CUSTOMIZE the route — the controls
-        // are route formulas by default (`Width*0.5`…), and keeping
-        // the formula would make the renderer ignore the dragged
-        // value (it prefers evaluable formulas). So these cells are
-        // exempt from the #157 formula refusal: the drag replaces the
-        // formula with the dragged literal (a status note says so).
-        let customizes = matches!(cell, canvas::GeoCell::Ctrl | canvas::GeoCell::Ctrl2);
+        // #202/#188: curve-control drags CUSTOMIZE the route — the
+        // controls are route formulas by default (`Width*0.5`…, the
+        // NURBS() E text), and keeping the formula would make the
+        // renderer ignore the dragged value (it prefers evaluable
+        // formulas). So these cells are exempt from the #157 formula
+        // refusal: the drag replaces the formula with the dragged
+        // value (a status note says so).
+        let customizes = matches!(
+            cell,
+            canvas::GeoCell::Ctrl | canvas::GeoCell::Ctrl2 | canvas::GeoCell::NurbsPt(_)
+        );
         if !customizes {
             for name in cells {
                 if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
@@ -2294,12 +2325,56 @@ impl App {
                     )));
                 }
             }
+            canvas::GeoCell::NurbsPt(idx) => {
+                // #188: the E formula IS the data — parse it, move the
+                // group's point to the drag (fractions of the bbox
+                // extents when xType/yType are 0), re-emit, write the
+                // cell with the formula text kept.
+                let e_text = row
+                    .cell("E")
+                    .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                    .unwrap_or_default();
+                let Some(mut f) = dc::curve::parse_nurbs(&e_text) else {
+                    return;
+                };
+                if idx >= f.points.len() {
+                    return;
+                }
+                let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                    return;
+                };
+                let (fx, fy) = if f.x_type == 0.0 {
+                    (bw.max(1e-6), bh.max(1e-6))
+                } else {
+                    (1.0, 1.0)
+                };
+                f.points[idx].0 = px / fx;
+                f.points[idx].1 = py / fy;
+                let text = dc::curve::render_nurbs(&f);
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope,
+                    "Geometry",
+                    section_ix,
+                    dc_core::commands::RowSel::Ix(row_ix),
+                    "E",
+                    vsdx::Cell {
+                        v: Some(text.clone()),
+                        f: Some(text),
+                        ..vsdx::Cell::default()
+                    },
+                )));
+            }
         }
         self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
         if customizes {
-            self.status = format!(
-                "curve control customized — row {row_ix}'s route formula replaced with the dragged value"
-            );
+            if let canvas::GeoCell::NurbsPt(_) = cell {
+                self.status =
+                    "NURBS control customized — the E formula's control point moved".into();
+            } else {
+                self.status = format!(
+                    "curve control customized — row {row_ix}'s route formula replaced with the dragged value"
+                );
+            }
         }
     }
 
@@ -14605,6 +14680,111 @@ mod tests {
             my_shapes_path(Some(PathBuf::from("/home/bret"))),
             PathBuf::from("/home/bret/Documents/My Shapes")
         );
+    }
+
+    /// #188: a NURBSTo row's E-formula interior control points join
+    /// the selection's vertex handles — one circle per group, at the
+    /// fraction position over the bbox extents; the row's own X/Y
+    /// vertex handles stay.
+    #[test]
+    fn nurbs_row_gets_e_point_handles() {
+        let mut sh = vsdx::model::Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..vsdx::model::Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", 2.0),
+            ("PinY", 1.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+            ("LocPinX", 2.0),
+            ("LocPinY", 1.0),
+        ] {
+            sh.sheet.set_cell(n, vsdx::Cell::value(format!("{v}")));
+        }
+        let e = "NURBS(1, 3, 0, 0, 1,0.5,0,1, 3,1.5,0,1)";
+        let row = |t: &str, ix: i64, cells: Vec<(&str, f64)>| vsdx::model::Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .into_iter()
+                .map(|(n, v)| (n.to_string(), vsdx::Cell::value(format!("{v}"))))
+                .collect(),
+            ..vsdx::model::Row::default()
+        };
+        let mut sec = vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..vsdx::model::Section::default()
+        };
+        sec.rows = vec![
+            row("MoveTo", 1, vec![("X", 0.0), ("Y", 0.0)]),
+            row(
+                "NURBSTo",
+                2,
+                vec![("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)],
+            ),
+        ];
+        let nurbs_row = &mut sec.rows[1];
+        nurbs_row.cells.push((
+            "E".to_string(),
+            vsdx::Cell {
+                v: Some(e.to_string()),
+                f: Some(e.to_string()),
+                ..vsdx::Cell::default()
+            },
+        ));
+        sh.sheet
+            .children
+            .push(vsdx::model::SheetChild::Section(std::mem::take(&mut sec)));
+
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        ed.doc.pages[0].shapes.push(sh);
+        let mut app = App::with_doc_opt(None);
+        app.ed = Some(ed);
+        app.page_idx = 0;
+        app.sel = Some((page_id, 1));
+        let handles = app.selection_handles();
+        let nurbs: Vec<_> = handles
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.id,
+                    HandleId::GeoPoint {
+                        cell: canvas::GeoCell::NurbsPt(_),
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(nurbs.len(), 2, "one handle per E group: {nurbs:?}");
+        // Group 0 (1, 0.5) of the 4×2 bbox at origin (0,0): (4, 1).
+        if let HandleId::GeoPoint {
+            cell: canvas::GeoCell::NurbsPt(0),
+            ..
+        } = nurbs[0].id
+        {
+            assert!((nurbs[0].pos.0 - 4.0).abs() < 1e-9, "{}", nurbs[0].pos.0);
+            assert!((nurbs[0].pos.1 - 1.0).abs() < 1e-9, "{}", nurbs[0].pos.1);
+        } else {
+            unreachable!()
+        }
+        // The row's own X/Y vertex handles stay (two per point row).
+        let vertex = handles
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.id,
+                    HandleId::GeoPoint {
+                        cell: canvas::GeoCell::X | canvas::GeoCell::Y,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert!(vertex >= 4, "MoveTo + NURBSTo X/Y handles: {vertex}");
     }
 
     // Dialogs must never block the UI thread; these tests drive the

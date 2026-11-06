@@ -2007,6 +2007,42 @@ fn render_geometry(
         let p = sc(p);
         format!("{:.5} {:.5} ", p.0, -p.1)
     };
+    // #188: the spline-family accumulator — a SplineStart row opens a
+    // spline, SplineKnot rows extend it, and any other row (or the
+    // section's end) flushes the evaluated curve. 16 samples per knot
+    // span: smooth at print scale, and the hit walk flattens with the
+    // same constant so hit-testing agrees with the ink.
+    let mut spline_acc: Option<crate::curve::SplineAcc> = None;
+    macro_rules! flush_spline {
+        () => {
+            if let Some(acc) = spline_acc.take() {
+                if let Some(data) = acc.flush() {
+                    let pts = data.flatten(16);
+                    for p in pts.iter().skip(1) {
+                        let _ = write!(d, "L {}", emit_pt(*p));
+                    }
+                    if let Some(last) = pts.last() {
+                        cur = *last;
+                    }
+                }
+            }
+        };
+    }
+
+    // The section-end flush: no further rows follow, so the walk's
+    // current point is not updated (that assignment would be dead).
+    macro_rules! flush_spline_tail {
+        () => {
+            if let Some(acc) = spline_acc.take() {
+                if let Some(data) = acc.flush() {
+                    let pts = data.flatten(16);
+                    for p in pts.iter().skip(1) {
+                        let _ = write!(d, "L {}", emit_pt(*p));
+                    }
+                }
+            }
+        };
+    }
 
     for row in rows.iter().filter(|r| r.t.is_some()) {
         let Some(t) = row.t.as_deref() else { continue };
@@ -2171,14 +2207,99 @@ fn render_geometry(
                 );
                 cur = (x, y);
             }
-            "SplineStart" | "SplineKnot" | "NURBSTo" | "PolylineTo" | "InfiniteLine" => {
-                // v0.2: approximate splines/polylines with chords.
+            "SplineStart" => {
+                // #188: a SplineStart opens a spline (§2.4.2.15): X/Y
+                // is the SECOND control point (the previous row's end
+                // is the first); A/B/C/D are second/first/last knots
+                // and the degree. Any non-SplineKnot row flushes it.
+                flush_spline!();
+                spline_acc = Some(crate::curve::SplineAcc::start(
+                    cur,
+                    (x, y),
+                    row_num(row, "A").unwrap_or(0.0),
+                    row_num(row, "B").unwrap_or(0.0),
+                    row_num(row, "C").unwrap_or(1.0),
+                    row_num(row, "D").unwrap_or(3.0),
+                ));
+                cur = (x, y);
+            }
+            "SplineKnot" => {
+                match spline_acc.as_mut() {
+                    Some(acc) => {
+                        acc.knot((x, y), row_num(row, "A").unwrap_or(0.0));
+                        cur = (x, y);
+                    }
+                    None => {
+                        // A knot row without an opener degenerates to
+                        // the chord (the v0.2 behavior).
+                        let _ = write!(d, "L {}", emit_pt((x, y)));
+                        cur = (x, y);
+                    }
+                }
+            }
+            "NURBSTo" => {
+                // #188: one self-contained rational B-spline row
+                // (§2.4.2.7). The E cell's NURBS() formula carries the
+                // interior points/knots/weights; the row cells frame
+                // them (C/D first knot/weight, A/B second-to-last
+                // knot/last weight, X/Y the endpoint).
+                flush_spline!();
+                let e_text = row
+                    .cell("E")
+                    .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                    .unwrap_or_default();
+                let mut drew = false;
+                if let Some(f) = crate::curve::parse_nurbs(&e_text) {
+                    let fx = if f.x_type == 0.0 { width } else { 1.0 };
+                    let fy = if f.y_type == 0.0 { height } else { 1.0 };
+                    let mut points = vec![cur];
+                    let mut knots = vec![row_num(row, "C").unwrap_or(0.0)];
+                    let mut weights = vec![row_num(row, "D").unwrap_or(1.0)];
+                    for (gx, gy, gk, gw) in &f.points {
+                        points.push((gx * fx, gy * fy));
+                        knots.push(*gk);
+                        weights.push(*gw);
+                    }
+                    knots.push(row_num(row, "A").unwrap_or(0.0));
+                    knots.push(f.last_knot);
+                    weights.push(row_num(row, "B").unwrap_or(1.0));
+                    points.push((x, y));
+                    let built = crate::curve::SplineData {
+                        degree: f.degree,
+                        points,
+                        weights,
+                        knots,
+                    }
+                    .sanitized();
+                    if let Some(data) = built {
+                        let pts = data.flatten(16);
+                        for p in pts.iter().skip(1) {
+                            let _ = write!(d, "L {}", emit_pt(*p));
+                        }
+                        if let Some(last) = pts.last() {
+                            cur = *last;
+                        }
+                        drew = true;
+                    }
+                }
+                if !drew {
+                    let _ = write!(d, "L {}", emit_pt((x, y)));
+                    cur = (x, y);
+                }
+            }
+            "PolylineTo" | "InfiniteLine" => {
+                // v0.2: approximate polylines/infinite lines with chords.
                 let _ = write!(d, "L {}", emit_pt((x, y)));
                 cur = (x, y);
             }
-            _ => {}
+            _ => {
+                // Any other row ends an open spline.
+                flush_spline!();
+            }
         }
     }
+    // A spline open through the section's end flushes here.
+    flush_spline_tail!();
     if !d.is_empty() {
         // Connector arrowheads: BeginArrow/EndArrow cells (0 = none, ≥1 an
         // arrow; sizes 0–6, 2 = medium). One marker def per distinct
@@ -4267,6 +4388,128 @@ mod tests {
             sh.sheet.set_cell(n, Cell::value(format!("{v}")));
         }
         sh
+    }
+
+    /// A geometry row built from (type, [(cell, value)]).
+    fn geo_row(ix: i64, t: &str, cells: &[(&str, f64)]) -> Row {
+        Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .iter()
+                .map(|(n, v)| (n.to_string(), Cell::value(format!("{v}"))))
+                .collect(),
+            ..Row::default()
+        }
+    }
+
+    fn push_geo(s: &mut Shape, rows: Vec<Row>) {
+        let mut sec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        sec.rows = rows;
+        s.sheet.children.push(SheetChild::Section(sec));
+    }
+
+    /// #188: SplineStart + SplineKnot rows render the EVALUATED
+    /// B-spline — a multi-segment path that leaves the control-point
+    /// chord — not the v0.2 single chord.
+    #[test]
+    fn spline_rows_render_the_evaluated_curve() {
+        let mut s = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        // P0=(0,0); P1=SplineStart (1,1); P2/P3=SplineKnots; cubic.
+        push_geo(
+            &mut s,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(
+                    2,
+                    "SplineStart",
+                    &[("X", 1.0), ("Y", 1.5), ("A", 0.4), ("B", 0.0), ("C", 1.0), ("D", 3.0)],
+                ),
+                geo_row(3, "SplineKnot", &[("X", 2.0), ("Y", 0.5), ("A", 0.6)]),
+                geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
+            ],
+        );
+        let (doc, page) = page_fixture(vec![s]);
+        let svg = render_page(&doc, &page).unwrap();
+        let path = svg.match_indices("L ").count();
+        assert!(
+            path > 8,
+            "the spline flattens to many segments, not a chord: {} L segments",
+            path
+        );
+        // The ink leaves the P0→P3 chord (the S bulge through P1/P2).
+        // The chord from (0,0) to (4,2): at x=2 the chord y is 1; the
+        // spline's belly passes well below (through ~(2, 0.9±)) — assert
+        // some emitted coordinate off the chord line instead of exact.
+        let off = svg
+            .match_indices("L ")
+            .map(|(i, _)| &svg[i + 2..i + 30])
+            .filter_map(|seg| {
+                let mut it = seg.split_whitespace();
+                let x: f64 = it.next()?.parse().ok()?;
+                let y: f64 = it.next()?.parse().ok()?;
+                Some((x, y))
+            })
+            .find(|(x, y)| (0.5 * x + 2.0 - y).abs() > 0.05);
+        assert!(off.is_some(), "some flattened point leaves the chord");
+    }
+
+    /// #188: the corpus NURBSTo row (E = NURBS(...) with the row-cell
+    /// frame) renders off its chord — the v0.2 single chord is gone.
+    #[test]
+    fn nurbs_to_row_renders_from_the_e_formula() {
+        let mut s = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        let e = "NURBS(1, 3, 0, 0, 0.35,0.9,0,1, 0.65,0.1,0,1)";
+        push_geo(
+            &mut s,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "NURBSTo", &[("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)]),
+            ],
+        );
+        // The E cell with its formula text.
+        {
+            let sec = s
+                .sheet
+                .children
+                .iter_mut()
+                .find_map(|c| match c {
+                    SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                    _ => None,
+                })
+                .unwrap();
+            let r2 = sec.rows.iter_mut().find(|r| r.ix == 2).unwrap();
+            r2.cells.push((
+                "E".to_string(),
+                Cell {
+                    v: Some(e.to_string()),
+                    f: Some(e.to_string()),
+                    ..Cell::default()
+                },
+            ));
+        }
+        let (doc, page) = page_fixture(vec![s]);
+        let svg = render_page(&doc, &page).unwrap();
+        let segments = svg.match_indices("L ").count();
+        assert!(segments > 8, "the NURBS flattens to many segments: {segments}");
+        // Interior points (0.35·4=1.4, 0.9·2=1.8) and (2.6, 0.2) pull
+        // the curve off the (0,0)→(4,2) chord; some emitted point must
+        // sit off it (chord: y = 0.5x).
+        let off = svg
+            .match_indices("L ")
+            .map(|(i, _)| &svg[i + 2..i + 30])
+            .filter_map(|seg| {
+                let mut it = seg.split_whitespace();
+                let x: f64 = it.next()?.parse().ok()?;
+                let y: f64 = it.next()?.parse().ok()?;
+                Some((x, y))
+            })
+            .find(|(x, y)| (0.5 * x + 2.0 - y).abs() > 0.05);
+        assert!(off.is_some(), "some flattened point leaves the chord");
     }
 
     const PAD: f64 = 0.08;

@@ -308,6 +308,9 @@ pub enum GeoCell {
     Ctrl,
     /// A CubicBezTo row's second control (C,D) — #202 curve handles.
     Ctrl2,
+    /// A NURBSTo row's E-formula interior control point by group
+    /// index — #188 handles; the drag re-emits the formula.
+    NurbsPt(usize),
 }
 
 /// The ArcTo sagitta implied by a pointer position (#157): |A| is the
@@ -1172,7 +1175,8 @@ pub fn show(
                         t.selection,
                     );
                 }
-                GeoCell::Apex | GeoCell::OnCurve | GeoCell::Ctrl | GeoCell::Ctrl2 => {
+                GeoCell::Apex | GeoCell::OnCurve | GeoCell::Ctrl | GeoCell::Ctrl2
+                | GeoCell::NurbsPt(_) => {
                     p.circle_filled(*pos, 4.0, t.selection);
                     p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
                 }

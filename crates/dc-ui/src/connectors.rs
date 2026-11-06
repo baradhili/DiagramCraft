@@ -445,6 +445,11 @@ pub fn geometry_hit_segments(
     };
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut cur: Option<(f64, f64)> = None; // shape-local
+    // #188: the spline accumulator — SplineStart opens, SplineKnot
+    // rows extend, anything else flushes; NURBSTo rows evaluate
+    // standalone. The flattened samples ARE the hit polyline, so
+    // hit-testing agrees with the rendered ink (dc::curve::flatten).
+    let mut spline_acc: Option<dc::curve::SplineAcc> = None;
     const MAX_ROWS: usize = 64;
     // The ordered walk: the instance's rows, then master-only rows
     // (by ix) the instance never overrode.
@@ -516,12 +521,118 @@ pub fn geometry_hit_segments(
                 pts.push(to_page(end));
                 cur = Some(end);
             }
+            "SplineStart" => {
+                // #188: opens a spline (§2.4.2.15) — X/Y is the
+                // second control point; A/B/C/D are second/first/
+                // last knots and the degree.
+                if let Some(acc) = spline_acc.take() {
+                    if let Some(data) = acc.flush() {
+                        for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                            pts.push(to_page(p));
+                        }
+                    }
+                }
+                spline_acc = Some(dc::curve::SplineAcc::start(
+                    cur.unwrap_or(end),
+                    end,
+                    cell(row, *master, "A").unwrap_or(0.0),
+                    cell(row, *master, "B").unwrap_or(0.0),
+                    cell(row, *master, "C").unwrap_or(1.0),
+                    cell(row, *master, "D").unwrap_or(3.0),
+                ));
+                cur = Some(end);
+            }
+            "SplineKnot" => match spline_acc.as_mut() {
+                Some(acc) => {
+                    acc.knot(end, cell(row, *master, "A").unwrap_or(0.0));
+                    cur = Some(end);
+                }
+                None => {
+                    pts.push(to_page(end));
+                    cur = Some(end);
+                }
+            },
+            "NURBSTo" => {
+                if let Some(acc) = spline_acc.take() {
+                    if let Some(data) = acc.flush() {
+                        for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                            pts.push(to_page(p));
+                        }
+                    }
+                }
+                // §2.4.2.7: the E cell's NURBS() formula carries the
+                // interior points (fractions of Width/Height when
+                // xType/yType = 0) with their knots and weights; the
+                // row cells frame them and X/Y is the endpoint.
+                let e_text = row
+                    .cell("E")
+                    .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                    .unwrap_or_default();
+                let mut drew = false;
+                if let Some(f) = dc::curve::parse_nurbs(&e_text) {
+                    let (fx, fy) = if f.x_type == 0.0 { (own.0, 1.0) } else { (1.0, 1.0) };
+                    let (fx, fy) = if f.y_type == 0.0 { (fx, own.1) } else { (fx, fy) };
+                    let start = cur.unwrap_or(end);
+                    let mut points = vec![start];
+                    let mut knots = vec![cell(row, *master, "C").unwrap_or(0.0)];
+                    let mut weights = vec![cell(row, *master, "D").unwrap_or(1.0)];
+                    for (gx, gy, gk, gw) in &f.points {
+                        points.push((gx * fx, gy * fy));
+                        knots.push(*gk);
+                        weights.push(*gw);
+                    }
+                    knots.push(cell(row, *master, "A").unwrap_or(0.0));
+                    knots.push(f.last_knot);
+                    weights.push(cell(row, *master, "B").unwrap_or(1.0));
+                    points.push(end);
+                    let built = dc::curve::SplineData {
+                        degree: f.degree,
+                        points,
+                        weights,
+                        knots,
+                    }
+                    .sanitized();
+                    if let Some(data) = built {
+                        for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                            pts.push(to_page(p));
+                        }
+                        cur = Some(end);
+                        drew = true;
+                    }
+                }
+                if !drew {
+                    pts.push(to_page(end));
+                    cur = Some(end);
+                }
+            }
             _ if t.ends_with("To") || t.contains("Spline") || t == "InfiniteLine" => {
-                // LineTo plus the v0.2 chord approximations.
+                // LineTo plus the v0.2 polyline/infinite-line chords.
+                if let Some(acc) = spline_acc.take() {
+                    if let Some(data) = acc.flush() {
+                        for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                            pts.push(to_page(p));
+                        }
+                    }
+                }
                 pts.push(to_page(end));
                 cur = Some(end);
             }
-            _ => {}
+            _ => {
+                if let Some(acc) = spline_acc.take() {
+                    if let Some(data) = acc.flush() {
+                        for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                            pts.push(to_page(p));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(acc) = spline_acc.take() {
+        if let Some(data) = acc.flush() {
+            for p in dc::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                pts.push(to_page(p));
+            }
         }
     }
     pts.windows(2).map(|w| (w[0], w[1])).collect()
@@ -977,6 +1088,79 @@ mod tests {
 
     fn near(a: (f64, f64), b: (f64, f64)) -> bool {
         (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9
+    }
+
+    /// #188: a NURBSTo row's hit segments follow the EVALUATED curve
+    /// (the E formula's interior points pull the polyline off the
+    /// MoveTo→endpoint chord), so a click on the curve's belly hits.
+    #[test]
+    fn nurbs_hit_segments_leave_the_chord() {
+        let mut s = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", 2.0),
+            ("PinY", 1.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+            ("LocPinX", 2.0),
+            ("LocPinY", 1.0),
+        ] {
+            s.sheet.set_cell(n, Cell::value(format!("{v}")));
+        }
+        let e = "NURBS(1, 3, 0, 0, 1,0.5,0,1, 3,1.5,0,1)";
+        let row = |t: &str, ix: i64, cells: Vec<(&str, f64)>| Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .into_iter()
+                .map(|(n, v)| (n.to_string(), Cell::value(format!("{v}"))))
+                .collect(),
+            ..Row::default()
+        };
+        let mut sec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        sec.rows = vec![
+            row("MoveTo", 1, vec![("X", 0.0), ("Y", 0.0)]),
+            row(
+                "NURBSTo",
+                2,
+                vec![("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)],
+            ),
+        ];
+        let nurbs_row = &mut sec.rows[1];
+        nurbs_row.cells.push((
+            "E".to_string(),
+            Cell {
+                v: Some(e.to_string()),
+                f: Some(e.to_string()),
+                ..Cell::default()
+            },
+        ));
+        s.sheet
+            .children
+            .push(SheetChild::Section(std::mem::take(&mut sec)));
+
+        let doc = vsdx::Document::default();
+        let chain = vec![&s];
+        let frame = hit_frame(&doc, &chain, &s, (1.0, 1.0));
+        let segs = geometry_hit_segments(&s, None, &frame);
+        // Many samples along the curve, and some OFF the (0,0)→(4,2)
+        // chord (the interior points pull the belly up through
+        // (1,0.5)/(3,1.5) — chord y at x=1 is 0.5, belly is above it).
+        assert!(segs.len() > 8, "the NURBS hit polyline is dense: {}", segs.len());
+        // Segments are page space (the frame is identity here); some
+        // sample must sit off the (0,0)→(4,2) chord — the interior
+        // points pull the belly above it.
+        let off = segs
+            .iter()
+            .any(|(a, _)| (0.5 * a.0 + 2.0 - a.1).abs() > 0.05);
+        assert!(off, "hit samples leave the chord");
     }
 
     /// #172: a master-based connector carries `ObjType=2` on its
