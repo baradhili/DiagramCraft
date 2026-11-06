@@ -619,14 +619,16 @@ pub enum SectionView {
 
 /// One row of a merged section, resolved against deeper levels. A
 /// cell needing resolution (whole section inherited, `F="Inh"`, or
-/// empty) looks up the same section / matching row / same cell name
-/// down the rest of the chain; with no deeper match the cell itself
-/// shows — an `F="Inh"` cell keeps its cached value (marked
-/// inherited), an empty one falls through to "No Formula".
+/// empty) looks up the same section (same index — Geometry repeats)
+/// / matching row / same cell name down the rest of the chain; with
+/// no deeper match the cell itself shows — an `F="Inh"` cell keeps
+/// its cached value (marked inherited), an empty one falls through
+/// to "No Formula".
 fn merged_row(
     base_row: &Row,
     base_inherited: bool,
     section: &str,
+    ix: i64,
     deeper: &[&Sheet],
 ) -> Vec<MergedCell> {
     base_row
@@ -639,7 +641,7 @@ fn merged_row(
                 return MergedCell::local(c, n);
             }
             for sheet in deeper {
-                let Some(sec) = find_section(sheet, section, -1) else {
+                let Some(sec) = find_section(sheet, section, ix) else {
                     continue;
                 };
                 let hit = sec
@@ -1017,7 +1019,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
         let base_inherited = base.as_ref().is_none_or(|(_, inh)| *inh);
         for r in 0..10 {
             let cells: Vec<MergedCell> = match base.and_then(|(sec, _)| sec.rows.get(r)) {
-                Some(row) => merged_row(row, base_inherited, name, &deeper),
+                Some(row) => merged_row(row, base_inherited, name, ix, &deeper),
                 None => headers
                     .iter()
                     .map(|_| MergedCell::fallback("THEMEVAL()".into()))
@@ -1104,7 +1106,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
     }
     for row in &base.rows {
         let (label, red) = row_label(name, row);
-        rows.push((label, red, merged_row(row, base_inherited, name, &deeper)));
+        rows.push((label, red, merged_row(row, base_inherited, name, ix, &deeper)));
     }
     // Row sections Visio always shows (Character/Paragraph/Tabs)
     // render even with no stored rows — one empty row of No Formula.
@@ -1721,6 +1723,67 @@ mod tests {
         assert_eq!(cell_text(&raw, "LeftMargin"), "THEME pt");
         assert_eq!(num_trim(147.53575), "147.5358");
         assert_eq!(num_trim(0.0), "0");
+    }
+
+    #[test]
+    fn merged_geometry_resolves_its_own_index() {
+        let mut doc = fixture();
+        // Master: two Geometry sections with distinct X values.
+        let master = doc.masters[0].shapes.first_mut().unwrap();
+        for (gix, x) in [(0i64, 1.0), (1, 2.0)] {
+            master.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: gix,
+                rows: vec![Row {
+                    ix: 0,
+                    cells: vec![("X".into(), Cell {
+                        v: Some(x.to_string()),
+                        ..Cell::default()
+                    })],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
+        }
+        // Instance: its own Geometry 1 (ix=1) whose X is inherited.
+        let shape = &mut doc.pages[0].shapes[0];
+        shape.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 1,
+            cells: vec![
+                ("NoFill".into(), Cell::value("0")),
+                ("NoLine".into(), Cell::value("0")),
+            ],
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("X".into(), Cell {
+                    v: Some("2".into()),
+                    f: Some("Inh".into()),
+                    ..Cell::default()
+                })],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let views = build_views(&doc, 1, 100);
+        let g2 = views
+            .iter()
+            .find_map(|v| match v {
+                SectionView::Rows { title, rows, .. } if title == "Geometry 2" => {
+                    Some(rows.clone())
+                }
+                _ => None,
+            })
+            .expect("Geometry 2");
+        // Row X resolved from master Geometry 1 (2 in = 50.8 mm),
+        // not Geometry 0 (1 in).
+        let x = g2
+            .iter()
+            .find(|(l, _, _)| !l.is_empty())
+            .and_then(|(_, _, cells)| cells.first())
+            .expect("geometry row");
+        assert_eq!(x.text, "50.8 mm");
+        assert!(x.inherited);
     }
 
     #[test]
