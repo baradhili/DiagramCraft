@@ -189,6 +189,9 @@ pub struct CanvasOut {
     pub right_click_page_pos: Option<(f64, f64)>,
     /// A stencil drop happened at this pin position (inches, y-up).
     pub drop_pos: Option<(f64, f64)>,
+    /// An AutoConnect arrow was clicked (#108): the unit direction
+    /// (page-space, y-up) the new shape goes — right/left/up/down.
+    pub autoclick: Option<(f64, f64)>,
     /// A selection-handle drag finished: (handle, press position,
     /// release position), both in page inches y-up. The app applies the
     /// resize / endpoint move / line move.
@@ -200,6 +203,10 @@ pub struct CanvasOut {
     /// Marquee (empty-area drag) finished: rect in page inches, y-up,
     /// (x0, y0, x1, y1) with y0 <= y1.
     pub marquee_done: Option<(f64, f64, f64, f64)>,
+    /// Lasso drag finished (#110, Visio's Lasso Select): the freehand
+    /// trail in page inches, y-up. The app selects every shape the
+    /// trail touches or encloses.
+    pub lasso_done: Option<Vec<(f64, f64)>>,
     /// A ruler drag released over the page (#113 guides slice): the
     /// guide kind and its page position (inches, y-up).
     pub guide_drop: Option<(GuideSource, (f64, f64))>,
@@ -209,6 +216,8 @@ pub struct CanvasOut {
     pub connector_drop: Option<((f64, f64), (f64, f64))>,
     /// Marquee rect this frame while dragging (page inches, y-down).
     pub marquee_live: Option<Rect>,
+    /// Lasso trail this frame while dragging (screen px).
+    pub lasso_live: Option<Vec<Pos2>>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
     /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
@@ -247,6 +256,20 @@ pub struct GuideFx {
     pub selected: bool,
 }
 
+/// One line-jump hop to paint above the ink (#108): page inches
+/// y-up, the jumping line's direction, both strokes and colors (the
+/// under line is redrawn through the gap so only the JUMPER breaks).
+#[derive(Debug, Clone, Copy)]
+pub struct JumpFx {
+    pub at: (f64, f64),
+    pub dir: (f64, f64),
+    pub under: (f64, f64),
+    pub weight: f64,
+    pub under_weight: f64,
+    pub color: Color32,
+    pub under_color: Color32,
+}
+
 /// The guide color: Visio's teal guide lines.
 const GUIDE: Color32 = Color32::from_rgb(0x00, 0x8F, 0xA3);
 
@@ -262,7 +285,50 @@ pub enum HandleId {
     /// A geometry row's defining point (#137): the row's X/Y pair,
     /// addressed by Geometry section index and row index on the
     /// SELECTED shape's own sheet.
-    GeoPoint { section_ix: i64, row_ix: i64 },
+    /// #157: a row can expose more than its X/Y — curve controls.
+    GeoPoint {
+        section_ix: i64,
+        row_ix: i64,
+        cell: GeoCell,
+    },
+}
+
+/// Which defining value of a geometry row a GeoPoint handle drags
+/// (#157): the X/Y end point (a square vertex, #137), an ArcTo's
+/// sagitta (a circle control at the arc's apex — the drag recomputes
+/// the bulge from the pointer), or an EllipticalArcTo's on-curve
+/// control point (a circle control at A/B).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GeoCell {
+    X,
+    Y,
+    Apex,
+    OnCurve,
+}
+
+/// The ArcTo sagitta implied by a pointer position (#157): |A| is the
+/// arc's height over the chord, positive bulging RIGHT of travel
+/// (the renderer's own convention). Pure page/local-agnostic math.
+pub fn arc_sagitta_from_pointer(
+    cur: (f64, f64),
+    end: (f64, f64),
+    p: (f64, f64),
+) -> f64 {
+    let d = (end.0 - cur.0, end.1 - cur.1);
+    let len = d.0.hypot(d.1).max(1e-9);
+    let right = (d.1 / len, -d.0 / len); // rot90 CW: right of travel
+    let mid = ((cur.0 + end.0) / 2.0, (cur.1 + end.1) / 2.0);
+    (p.0 - mid.0) * right.0 + (p.1 - mid.1) * right.1
+}
+
+/// The ArcTo apex point (where the sagitta handle sits): mid-chord
+/// offset by A along the right-of-travel normal.
+pub fn arc_apex(cur: (f64, f64), end: (f64, f64), a: f64) -> (f64, f64) {
+    let d = (end.0 - cur.0, end.1 - cur.1);
+    let len = d.0.hypot(d.1).max(1e-9);
+    let right = (d.1 / len, -d.0 / len);
+    let mid = ((cur.0 + end.0) / 2.0, (cur.1 + end.1) / 2.0);
+    (mid.0 + a * right.0, mid.1 + a * right.1)
 }
 
 /// A finished handle drag (GitHub #59): (handle, press position,
@@ -295,6 +361,108 @@ pub fn page_to_screen(x: f64, y: f64, view: &View, page: &PageGeom) -> Pos2 {
         view.pan.x + x as f32 * view.px_per_in(),
         view.pan.y + (page.h_in - y) as f32 * view.px_per_in(),
     )
+}
+
+/// Does a lasso trail (page inches, y-up) touch or enclose an
+/// axis-aligned rect (#110, Visio's Lasso Select)? True when any
+/// segment crosses the rect, any sample lies inside it, or the trail
+/// loops around it (the rect's center inside the trail's polygon) —
+/// the trail needs only to TOUCH a shape, unlike the marquee's
+/// contained/intersect band.
+///
+/// `closure_tol` (page inches) decides when the trail's ends count as
+/// meeting for the enclosure test. The CALLER derives it from the view
+/// scale — a hand-drawn loop ends within a few screen pixels of its
+/// start, which is a meaningful inch distance only at the current
+/// zoom; a fixed inch epsilon would read every human-drawn lasso as
+/// open and never enclose.
+pub fn lasso_hits_rect(
+    trail: &[(f64, f64)],
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    closure_tol: f64,
+) -> bool {
+    let inside = |p: (f64, f64)| p.0 >= x && p.0 <= x + w && p.1 >= y && p.1 <= y + h;
+    let mut prev: Option<(f64, f64)> = None;
+    for &p in trail {
+        if inside(p) {
+            return true;
+        }
+        if let Some(a) = prev {
+            if seg_crosses(a, p, x, y, w, h) {
+                return true;
+            }
+        }
+        prev = Some(p);
+    }
+    // Enclosed: the rect's center inside the trail polygon (ray cast).
+    // ENCLOSURE NEEDS A CLOSED LOOP — the trail's ends meeting. An
+    // OPEN wavy trail crosses a center's y-level an odd number of
+    // times with every crossing to one side, which the winding sums
+    // to ±1 and would misread as "surrounded" (found by the MDI
+    // re-run of the lasso kittest; the trail's touch points were
+    // always right, the loop test was run on a non-loop).
+    let closed = trail
+        .first()
+        .zip(trail.last())
+        .is_some_and(|(f, l)| (f.0 - l.0).hypot(f.1 - l.1) <= closure_tol);
+    if !closed {
+        return false;
+    }
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let mut winding = 0i32;
+    // Consecutive segments plus the closing last-to-first edge: with a
+    // tolerance closure the ends differ, so the edge that completes the
+    // loop can itself cross the center's y-level. For an exactly closed
+    // trail that edge is degenerate (equal points never cross).
+    for i in 0..trail.len() {
+        let (a, b) = (trail[i], trail[(i + 1) % trail.len()]);
+        if (a.1 <= cy) != (b.1 <= cy) {
+            let t = (cy - a.1) / (b.1 - a.1);
+            if a.0 + t * (b.0 - a.0) > cx {
+                winding += if b.1 > a.1 { 1 } else { -1 };
+            }
+        }
+    }
+    winding != 0
+}
+
+/// Liang-Barsky: does segment a→b cross or touch the rect?
+fn seg_crosses(a: (f64, f64), b: (f64, f64), x: f64, y: f64, w: f64, h: f64) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-dx, a.0 - x),
+        (dx, x + w - a.0),
+        (-dy, a.1 - y),
+        (dy, y + h - a.1),
+    ] {
+        if p.abs() < 1e-12 {
+            if q < 0.0 {
+                return false; // parallel and outside this boundary
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t1 {
+                    return false;
+                }
+                if r > t0 {
+                    t0 = r;
+                }
+            } else {
+                if r < t0 {
+                    return false;
+                }
+                if r < t1 {
+                    t1 = r;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Live drag feedback (#96) — drawn above the layers, under nothing:
@@ -344,6 +512,14 @@ pub type ConnFxFn<'a> = &'a dyn Fn(Option<(f64, f64)>) -> crate::connectors::Con
 /// other glue/snap targets while dragging.
 pub type SnapEndpointFn<'a> = &'a dyn Fn(bool, (f64, f64)) -> (f64, f64);
 
+/// Corner-resize snapping (#160): page inches in, the per-axis snapped
+/// position out (None = no target on either axis, keep the raw
+/// pointer). The app builds this against the page minus the selected
+/// shape — its own edges must not attract its own corner. Feeds the
+/// live corner preview; the release commits through the same function
+/// on the app side, so the two agree by construction.
+pub type SnapResizeFn<'a> = &'a dyn Fn((f64, f64)) -> Option<(f64, f64)>;
+
 /// A dashed segment (`on`/`off` in px), the dynamic-grid line style.
 fn dashed(p: &egui::Painter, a: Pos2, b: Pos2, color: Color32) {
     let len = (b - a).length();
@@ -369,11 +545,14 @@ pub fn show(
     layers: &[crate::layers::ShapeQuad],
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
+    member_hl: &[Rect], // #156: selected container's members (page-inches, y-down)
     handles: &[Handle],       // grab points for the primary selection
     drag: &DragFx,           // live gesture feedback (#96)
     guides: &[GuideFx],      // #113: guide overlay, above ink
+    jumps: &[JumpFx],        // #108: line-jump hops, above ink
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
     connector_tool: bool,    // #108: the Connector Tool is active
+    lasso_tool: bool, // #110: the Lasso Select tool is active
     stencil_hover: bool,
     // #177: connection-point reveal / glue highlight / glued sites,
     // computed by the app for the live endpoint position (None when
@@ -381,6 +560,8 @@ pub fn show(
     conn_fx: ConnFxFn<'_>,
     // #179: snap the live connector endpoint (preview + drops).
     snap_endpoint: SnapEndpointFn<'_>,
+    // #160: snap the live corner-resize preview (per-axis, snap side).
+    snap_resize: SnapResizeFn<'_>,
     hit_shape: &dyn Fn((f64, f64)) -> bool, // page inches y-up, for marquee gating
     mouse_page: &mut Option<(f64, f64)>,    // y-up inches, for the status bar
     interaction_lock: bool, // in-place text edit (#22): clicks end it, nothing else arms
@@ -393,12 +574,15 @@ pub fn show(
         dbl_click_page_pos: None,
         right_click_page_pos: None,
         drop_pos: None,
+        autoclick: None,
         handle_drag_done: None,
         press_page_pos: None,
         marquee_done: None,
+        lasso_done: None,
         guide_drop: None,
         connector_drop: None,
         marquee_live: None,
+        lasso_live: None,
         shift_click: false,
         ctrl_click: false,
         zoom_changed: false,
@@ -456,13 +640,54 @@ pub fn show(
             .find(|(_, p)| pos.distance(*p) <= HANDLE_GRAB)
             .map(|(id, _)| *id)
     };
+    // #108 AutoConnect arrows: one triangle at each mid-edge of the
+    // primary selection while the pointer hovers the shape (Visio's
+    // blue AutoConnect tags). Returns (screen rect, page-space unit
+    // direction) per edge; the app draws the duplicate+connector on a
+    // click.
+    // sel_rect is page-inches (y-down viewBox); the arrows live in
+    // screen px — map the box the way `to_screen` (below) does.
+    let sel_screen = sel_rect.map(|sr| {
+        let tl = Pos2::new(
+            view.pan.x + sr.left() * view.px_per_in(),
+            view.pan.y + sr.top() * view.px_per_in(),
+        );
+        Rect::from_min_size(
+            tl,
+            Vec2::new(sr.width() * view.px_per_in(), sr.height() * view.px_per_in()),
+        )
+    });
+    let autoc_arrows: Option<Vec<(Rect, (f64, f64))>> = sel_screen.map(|sr| {
+        let c = sr.center();
+        [
+            (Pos2::new(sr.right() + 9.0, c.y), (1.0, 0.0)),
+            (Pos2::new(sr.left() - 9.0, c.y), (-1.0, 0.0)),
+            (Pos2::new(c.x, sr.top() - 9.0), (0.0, 1.0)),
+            (Pos2::new(c.x, sr.bottom() + 9.0), (0.0, -1.0)),
+        ]
+        .into_iter()
+        .map(|(pos, dir)| (Rect::from_center_size(pos, Vec2::splat(18.0)), dir))
+        .collect()
+    });
+    let arrow_at = |pos: Pos2| -> Option<(f64, f64)> {
+        autoc_arrows
+            .as_ref()?
+            .iter()
+            .find(|(r, _)| r.contains(pos))
+            .map(|(_, d)| *d)
+    };
+    let hover_in_sel = resp.hover_pos().is_some_and(|p| {
+        sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some()
+    });
 
     // Stable literal ids are intended for the drag-state memory keys.
     let mem_handle = egui::Id::unique("dc-handle-drag");
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
+    let mem_lasso = egui::Id::unique("dc-lasso");
     let mem_guide = egui::Id::unique("dc-guide-drag");
     let mem_connector = egui::Id::unique("dc-connector-drag");
+    let mem_autoc = egui::Id::unique("dc-autoclick");
     let primary_pressed = ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary));
     let primary_released = ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary));
 
@@ -481,6 +706,9 @@ pub fn show(
             // priority over the pan.
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
+            } else if let Some(dir) = arrow_at(p) {
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
             } else if connector_tool {
                 // The Connector Tool (#108) owns the gesture: press
                 // anywhere (on a shape = glue start), release on the
@@ -507,6 +735,11 @@ pub fn show(
                 if hit_shape(page_pos) {
                     // The app arms its move-drag from the press.
                     out.press_page_pos = Some(page_pos);
+                } else if lasso_tool {
+                    // Empty page with the Lasso Select tool (#110):
+                    // the press starts a freehand trail.
+                    ui.ctx()
+                        .memory_mut(|m| m.data.insert_temp(mem_lasso, vec![p]));
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()
@@ -520,6 +753,22 @@ pub fn show(
     // drag_stopped() needs the drag to have "officially" started (>6 px
     // of travel or >0.8 s hold), which tiny precise drags never reach —
     // so the arm/commit pair is tracked here instead (#59).
+    // AutoConnect arrow click (#108): the arm commits when the
+    // release stays inside the arrow.
+    let armed_autoc = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<(f64, f64)>(mem_autoc));
+    if primary_released || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        ui.ctx()
+            .memory_mut(|m| m.data.remove::<(f64, f64)>(mem_autoc));
+        if let (Some(dir), true) = (armed_autoc, primary_released) {
+            if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                if arrow_at(p) == Some(dir) {
+                    out.autoclick = Some(dir);
+                }
+            }
+        }
+    }
     let armed_handle = ui.ctx().memory(|m| m.data.get_temp::<HandleId>(mem_handle));
     if primary_released || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         ui.ctx()
@@ -593,6 +842,40 @@ pub fn show(
         }
     }
 
+    // Lasso (#110, Visio's Lasso Select): armed on an empty-page press
+    // while the tool is active; the freehand trail follows the pointer;
+    // release selects every shape the trail touches or encloses. A
+    // near-zero-length trail is just a click on empty page — the click
+    // path handles selection.
+    let lasso_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
+    if let Some(mut trail) = lasso_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<Vec<Pos2>>(mem_lasso));
+            if primary_released {
+                let len_px: f32 = trail.windows(2).map(|w| w[0].distance(w[1])).sum();
+                if len_px > 2.0 && trail.len() >= 2 {
+                    out.lasso_done = Some(
+                        trail
+                            .iter()
+                            .map(|p| screen_to_page(*p, view, page))
+                            .collect(),
+                    );
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            // Extend the trail; near-duplicate samples only bloat it.
+            if trail.last().is_none_or(|l| l.distance(p) > 0.75) {
+                trail.push(p);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_lasso, trail.clone()));
+            }
+            out.lasso_live = Some(trail);
+        }
+    }
+
     // Marquee: armed on an empty-page press above; live band while the
     // button is held, committed on release. A degenerate (zero-area)
     // band is just a click on empty page — the click path already
@@ -623,9 +906,16 @@ pub fn show(
         }
     }
 
-    // The Connector Tool draws with a crosshair (Visio).
-    if connector_tool {
+    // The Connector Tool draws with a crosshair (Visio); the Lasso
+    // trails freehand, also a crosshair.
+    if connector_tool || lasso_tool {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+    }
+    // AutoConnect arrow cursor.
+    if let Some(hp) = resp.hover_pos() {
+        if arrow_at(hp).is_some() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+        }
     }
     // Handle cursors.
     if let Some(hp) = resp.hover_pos() {
@@ -859,14 +1149,21 @@ pub fn show(
     for (id, pos) in &handles_screen {
         match id {
             // Geometry vertex handles (#137): Visio's small filled
-            // vertex squares.
-            HandleId::GeoPoint { .. } => {
-                p.rect_filled(
-                    Rect::from_center_size(*pos, Vec2::splat(5.0)),
-                    1.0,
-                    t.selection,
-                );
-            }
+            // vertex squares; #157's curve CONTROLS are circles (Visio
+            // draws control handles round).
+            HandleId::GeoPoint { cell, .. } => match cell {
+                GeoCell::X | GeoCell::Y => {
+                    p.rect_filled(
+                        Rect::from_center_size(*pos, Vec2::splat(5.0)),
+                        1.0,
+                        t.selection,
+                    );
+                }
+                GeoCell::Apex | GeoCell::OnCurve => {
+                    p.circle_filled(*pos, 4.0, t.selection);
+                    p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
+                }
+            },
             HandleId::Corner(_) => {
                 p.rect_filled(
                     Rect::from_center_size(*pos, Vec2::splat(7.0)),
@@ -936,7 +1233,6 @@ pub fn show(
         ui.input(|i| i.pointer.interact_pos()),
     ) {
         let ptr_page = screen_to_page(ptr, view, page); // y-up inches
-        let ptr_y_down = page.h_in - ptr_page.1;
         // The primary's landed layer quad (matched by bbox center —
         // the ink bbox and the selection rect share it).
         let primary_quad = sel_rect.and_then(|sr| {
@@ -949,6 +1245,32 @@ pub fn show(
         match hid {
             HandleId::Corner(c) => {
                 if let Some(sr) = sel_rect {
+                    // #160: the preview follows the SNAPPED corner —
+                    // the release commits through the app's identical
+                    // per-axis snap, so the drop lands where the
+                    // preview drew it. The snap runs on the CORNER
+                    // position (handle origin + drag delta), not the
+                    // raw pointer — a grab up to HANDLE_GRAB off the
+                    // corner must not leave the edge at grid + offset
+                    // (CodeRabbit; matches the commit's math).
+                    let corner_page = handles
+                        .iter()
+                        .find(|h| h.id == hid)
+                        .map(|h| h.pos)
+                        .and_then(|o| {
+                            ui.ctx()
+                                .memory(|m| m.data.get_temp::<Pos2>(mem_start))
+                                .map(|st| screen_to_page(st, view, page))
+                                .map(|st| {
+                                    (
+                                        o.0 + ptr_page.0 - st.0,
+                                        o.1 + ptr_page.1 - st.1,
+                                    )
+                                })
+                        })
+                        .unwrap_or(ptr_page);
+                    let ptr_page = snap_resize(corner_page).unwrap_or(ptr_page);
+                    let ptr_y_down = page.h_in - ptr_page.1;
                     let (mut x0, mut y0, mut x1, mut y1) = (
                         sr.left() as f64,
                         sr.top() as f64,
@@ -1132,6 +1454,20 @@ pub fn show(
         let c = page_to_screen(q.0, q.1, view, page);
         p.circle_stroke(c, 5.0, Stroke::new(2.0, GLUE));
     }
+    if let Some(q) = fx.tool_selected {
+        // The Connection Point tool's selection (#108): the point's
+        // square ring in the selection color — Delete removes it.
+        let c = page_to_screen(q.0, q.1, view, page);
+        let r = Rect::from_center_size(c, Vec2::splat(10.0));
+        p.rect_stroke(r, 0.0, Stroke::new(2.0, t.selection), egui::StrokeKind::Middle);
+        let d = 2.5;
+        for (a, b) in [
+            (c - Vec2::new(d, d), c + Vec2::new(d, d)),
+            (c - Vec2::new(d, -d), c + Vec2::new(d, -d)),
+        ] {
+            p.line_segment([a, b], Stroke::new(1.6, t.selection));
+        }
+    }
 
     // Dynamic-grid hints (#109): dashed full-canvas alignment lines
     // and labeled equal-spacing gaps, Visio's drag-time feedback.
@@ -1175,6 +1511,106 @@ pub fn show(
             egui::StrokeKind::Middle,
         );
         p.rect_filled(mr, 0.0, Color32::from_rgba_premultiplied(30, 120, 200, 24));
+    }
+
+    // Lasso trail (live freehand line, #110) — dashed to read as a
+    // selection aid, never page ink.
+    if let Some(trail) = &out.lasso_live {
+        if trail.len() >= 2 {
+            p.add(egui::Shape::dashed_line(
+                trail,
+                Stroke::new(1.0, t.selection),
+                6.0,
+                4.0,
+            ));
+        }
+    }
+
+    // Container member highlight (#156): Visio tints the selected
+    // container's members — a translucent accent fill + thin stroke
+    // above the ink, never exported.
+    for r in member_hl {
+        let sr = to_screen(*r);
+        p.rect_filled(
+            sr,
+            1.0,
+            Color32::from_rgba_premultiplied(46, 117, 182, 36),
+        );
+        p.rect_stroke(
+            sr,
+            1.0,
+            Stroke::new(1.0, Color32::from_rgba_premultiplied(46, 117, 182, 130)),
+            egui::StrokeKind::Middle,
+        );
+    }
+
+    // AutoConnect arrows (#108): Visio's blue tags at the selection's
+    // mid-edges while hovering; the hovered arrow fills.
+    if let Some(arrows) = &autoc_arrows {
+        if hover_in_sel && !interaction_lock {
+            let hovered = resp.hover_pos();
+            for (r, dir) in arrows {
+                let h = hovered.is_some_and(|h| r.contains(h));
+                let c = r.center();
+                // The triangle points AWAY from the shape, along dir
+                // (screen: y-down, so page-up flips).
+                let (ax, ay) = (dir.0 as f32, -dir.1 as f32);
+                let tip = c + Vec2::new(ax, ay) * 7.0;
+                let b1 = c + Vec2::new(-ay, ax) * 5.0;
+                let b2 = c - Vec2::new(-ay, ax) * 5.0;
+                let (fill, stroke) = if h {
+                    (
+                        Color32::from_rgb(0x2e, 0x75, 0xb6),
+                        Stroke::new(1.0, Color32::from_rgb(0x1f, 0x4e, 0x79)),
+                    )
+                } else {
+                    (
+                        Color32::from_rgba_premultiplied(50, 117, 182, 110),
+                        Stroke::new(1.0, Color32::from_rgb(0x2e, 0x75, 0xb6)),
+                    )
+                };
+                p.add(egui::Shape::convex_polygon(
+                    vec![tip, b1, b2],
+                    fill,
+                    stroke,
+                ));
+            }
+        }
+    }
+
+    // Line jumps (#108): each hop breaks the JUMPING line with a
+    // paper-colored gap, redraws the under line through it, and arcs
+    // the jumper over the crossing (Visio's default arc style).
+    for j in jumps {
+        let ppi = view.px_per_in();
+        let r = crate::connectors::JUMP_RADIUS_IN as f32 * ppi;
+        let at = page_to_screen(j.at.0, j.at.1, view, page);
+        let dir = Vec2::new(j.dir.0 as f32, -(j.dir.1 as f32)); // y flip
+        let under = Vec2::new(j.under.0 as f32, -(j.under.1 as f32));
+        let w = (j.weight * ppi as f64) as f32;
+        let uw = (j.under_weight * ppi as f64) as f32;
+        // 1. the gap — paper-colored, slightly wider than the jumper.
+        let g1 = at - dir * r;
+        let g2 = at + dir * r;
+        p.line_segment([g1, g2], Stroke::new(w + 2.0, Color32::WHITE));
+        // 2. the under line passes straight through the gap.
+        let ext = r + uw + 1.0;
+        p.line_segment(
+            [at - under * ext, at + under * ext],
+            Stroke::new(uw, j.under_color),
+        );
+        // 3. the hop arc, bulging up on screen.
+        let n = Vec2::new(-dir.y, dir.x);
+        let n = if n.y > 0.0 { -n } else { n };
+        let mut pts = Vec::with_capacity(9);
+        for k in 0..=8 {
+            let t = k as f32 / 8.0;
+            let ang = std::f32::consts::PI * t;
+            // local frame: from g1 around to g2 through at + n*r.
+            let local = -dir * r * ang.cos() + n * r * ang.sin();
+            pts.push(at + local);
+        }
+        p.add(egui::Shape::line(pts, Stroke::new(w, j.color)));
     }
 
     // Rulers.
@@ -1362,6 +1798,100 @@ fn format_num(v: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arc_sagitta_round_trips_through_the_apex() {
+        let (cur, end) = ((0.0, 0.0), (2.0, 0.0));
+        // A pointer 0.3 above the chord midpoint: positive A bulges
+        // RIGHT of travel (travel is +x, so right is -y in y-up).
+        let a = arc_sagitta_from_pointer(cur, end, (1.0, -0.3));
+        assert!((a - 0.3).abs() < 1e-9, "bulge right of travel: {a}");
+        // The apex handle sits mid-chord offset by A to the right.
+        let apex = arc_apex(cur, end, a);
+        assert!((apex.0 - 1.0).abs() < 1e-9 && (apex.1 + 0.3).abs() < 1e-9);
+        // Below the chord inverts the sagitta.
+        let a2 = arc_sagitta_from_pointer(cur, end, (1.0, 0.3));
+        assert!((a2 + 0.3).abs() < 1e-9, "signed: {a2}");
+        // Degenerate chord: safe.
+        assert!(arc_sagitta_from_pointer(cur, cur, (0.0, 1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lasso_trail_selects_by_touch() {
+        // Rect [1,3]×[1,2]; a trail passing THROUGH it (both samples
+        // outside) selects — touch, not containment (#110).
+        let trail = [(0.0, 1.5), (4.0, 1.5)];
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
+        // A trail far away does not.
+        assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0, 1e-6));
+        // A sample inside selects.
+        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn lasso_loop_selects_the_enclosed() {
+        // A loop around the rect without any sample inside or segment
+        // crossing: the enclosed center (2, 1.5) selects.
+        let loop_trail = [
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 4.0),
+            (0.0, 4.0),
+            (0.0, 0.0),
+        ];
+        assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
+        // The same loop does not select a shape outside it.
+        assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn lasso_diagonal_cross_counts() {
+        // The trail crosses only the rect's corner region diagonally.
+        let trail = [(0.5, 0.5), (1.5, 1.5)];
+        assert!(lasso_hits_rect(&trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
+    }
+
+    #[test]
+    fn lasso_closure_follows_the_caller_tolerance() {
+        // A hand-drawn loop: the ends land near — not exactly on —
+        // each other. Within the caller's (screen-derived) tolerance
+        // the trail reads as closed and ENCLOSES the rect, whose
+        // center the winding counts across the closing edge.
+        let near_closed = [
+            (0.0, 0.0),
+            (5.0, 0.0),
+            (5.0, 4.0),
+            (0.0, 4.0),
+            (0.02, -0.015), // ≈ 0.025 in from the start
+        ];
+        assert!(
+            lasso_hits_rect(&near_closed, 1.0, 1.0, 2.0, 1.0, 0.05),
+            "a near-closed loop encloses within tolerance"
+        );
+        // The same trail at a tight tolerance is OPEN: no enclosure —
+        // only the touch/inside paths could still select, and this
+        // trail neither touches nor enters the rect.
+        assert!(
+            !lasso_hits_rect(&near_closed, 1.0, 1.0, 2.0, 1.0, 1e-6),
+            "an open trail does not enclose"
+        );
+        // The closing edge is decisive here: the loop's ends straddle
+        // the rect center's y-level (1.5) and only the last-to-first
+        // edge crosses it right of the center — without it the winding
+        // sums to zero and the loop would not enclose.
+        let straddle = [
+            (6.0, 1.49),
+            (6.0, -1.0),
+            (-1.0, -1.0),
+            (-1.0, 4.0),
+            (6.0, 4.0),
+            (6.02, 1.51),
+        ];
+        assert!(
+            lasso_hits_rect(&straddle, 1.0, 1.0, 2.0, 1.0, 0.05),
+            "the closing edge completes the winding"
+        );
+    }
 
     #[test]
     fn screen_to_page_flips_y() {

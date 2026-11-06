@@ -574,6 +574,37 @@ impl Document {
         }
         Cow::Borrowed(&shape.sheet)
     }
+
+    /// Resolve a named User row for `shape` across the master chain: the
+    /// instance sheet first, then the master root shape's sheet — the
+    /// same layering [`resolve_cell`](Self::resolve_cell) uses for
+    /// cells. `effective_sheet` cannot serve this: it is either/or (a
+    /// sheet with ANY local sections returns only that sheet), so a real
+    /// Visio-authored instance — which virtually always carries local
+    /// Geometry/Character snapshots — would hide the master root's
+    /// `User.msvStructureType` and friends, breaking container
+    /// recognition for exactly the containers that carry the row
+    /// (#191).
+    pub fn effective_user_row<'a>(
+        &'a self,
+        shape: &'a Shape,
+        ancestors: &[&'a Shape],
+        name: &str,
+    ) -> Option<&'a Row> {
+        if let Some(r) = shape
+            .sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row(name))
+        {
+            return Some(r);
+        }
+        let src = self.instance_source(shape, ancestors)?;
+        src.sheet
+            .sections_named("User")
+            .iter()
+            .find_map(|sec| sec.named_row(name))
+    }
 }
 
 /// Built-in defaults observed in shipped stylesheets ("No Style", ID 0).

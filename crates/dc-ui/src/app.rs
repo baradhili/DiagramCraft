@@ -10,7 +10,7 @@ use dc_core::commands::{
     AddPage, AddShape, DuplicatePage, DuplicateShape, MovePage, RemovePage, RemoveShape,
     RenamePage, ReorderShape,
 };
-use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
+use dc_core::scope::{shape_chain, Scope};
 use dc_core::{Editor, Macro, SetCell, SetRowCell};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
@@ -152,7 +152,17 @@ pub struct App {
     last_drag_ghosts: usize,
     mouse_page: Option<(f64, f64)>,
     status: String,
-    show_shapesheet: bool,
+    /// #192 spec: the open ShapeSheet windows, one PER SHAPE (each
+    /// its own child window; a shape appears at most once).
+    shapesheets: Vec<i64>,
+    /// #192 spec: the INACTIVE open documents — File > Open ADDS a
+    /// document now; the Window switcher activates one.
+    docs: Vec<DocSession>,
+    /// #192: the Window switcher popup on the tab strip.
+    winmenu_open: bool,
+    /// #192 4a: a Window-menu pick to activate after the strip's
+    /// borrow ends (the popup closure borrows self immutably).
+    pending_activate: Option<usize>,
     /// Snap & glue settings (#109): the document's DocumentSettings,
     /// mirrored in UI state; every toggle writes through to the doc.
     snap: crate::snap::SnapSettings,
@@ -181,6 +191,26 @@ pub struct App {
     pagesetup_open: bool,
     /// The Copy as Picture dialog is open (#113, URS-1200).
     copypic_open: bool,
+    /// #113 remainder: the vector (SVG) flavor for copy-as-picture.
+    copypic_svg: bool,
+    /// #156: the Container Styles gallery dialog (Design ▸ Containers…).
+    contgal_open: bool,
+    /// #192 MDI: the central client rect (what `central`'s ui sees
+    /// after the docked panels) — the region child windows constrain
+    /// to. Captured every frame in `central`.
+    mdi_client: egui::Rect,
+    /// #192 spec: the child-window count last frame — any change
+    /// re-fires the automatic arrangement (children tile to fit the
+    /// client). While exactly ONE child exists it is decorator-free
+    /// and pinned full-bleed ("treated as it is now").
+    mdi_last_count: usize,
+    mdi_arranging: bool,
+    /// #192: the decorator/arrangement decisions for the drawing
+    /// window, computed in `draw` AFTER central ran — central applies
+    /// them on the frame after the count changes (one frame of lag,
+    /// invisible: the count is stable by then).
+    mdi_decorated: bool,
+    mdi_drawing_tile: egui::Rect,
     /// Copy-as-picture quality: 1 screen, 2 high, 4 print (#113).
     copypic_factor: u32,
     /// Text waiting for the OS clipboard (#113, URS-1113): copied on
@@ -200,6 +230,14 @@ pub struct App {
     /// the source shape whose resolved formatting the next shape
     /// click receives.
     painter_armed: Option<i64>,
+    /// #110 remainder: the painter stays armed across applications
+    /// (Visio's double-click Format Painter) until Esc or a cancel.
+    painter_sticky: bool,
+    /// #108: the Connection Point tool's selected point — (shape, row
+    /// ix); Delete removes the row.
+    connpt_sel: Option<(i64, i64)>,
+    /// #108: the line-jump hops painted on the last frame (test seam).
+    jumps_last: usize,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
@@ -354,6 +392,25 @@ enum CloseTarget {
     Doc,
 }
 
+/// #192 spec: one INACTIVE open document (multi-document sessions).
+/// The active document lives in the App's own fields; switching swaps
+/// the session in. View/scroll state resets on switch (4a) — the
+/// per-document view state is slice 4b.
+struct DocSession {
+    ed: Editor,
+    path: PathBuf,
+    dirty: bool,
+    shapesheets: Vec<i64>,
+    /// #192 4b: the document's view (zoom/pan/unit/toggles), page
+    /// selection, shape selection, and group-edit stack — switching
+    /// loses nothing.
+    view: View,
+    page_idx: usize,
+    sel: Option<(i64, i64)>,
+    sel_set: Vec<(i64, i64)>,
+    group_edit: Vec<i64>,
+}
+
 /// Backstage content page (GitHub #55: 2010 three-band rail — commands
 /// above, destinations Info/Recent/New/Print/Share/Export, Options
 /// pinned below; 2016 functions folded in).
@@ -394,14 +451,40 @@ const CONN_REVEAL_IN: f64 = 0.6;
 /// An OS clipboard image probe's payload: (w, h, RGBA bytes).
 type OsImage = (u32, u32, Vec<u8>);
 
+/// #156: the SDCONT container style gallery — the shipped Visio 2016
+/// set, in gallery order (Analysis/container-stencil-sdcont.md; the
+/// masters live in the embedded `sdcont` stencil).
+const CONTAINER_STYLES: [&str; 14] = [
+    "Plain",
+    "Notch",
+    "Waves",
+    "Wire",
+    "Belt",
+    "Classic",
+    "Full sail",
+    "Corners",
+    "Alternating",
+    "Banner",
+    "Picture Frame",
+    "Snapshot",
+    "Intersection",
+    "Translucent",
+];
+
 /// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
-/// and drags; the Connector Tool (#108) draws connectors. Esc returns
-/// to the pointer, like Visio.
+/// and drags; the Connector Tool (#108) draws connectors; the Lasso
+/// (#110, Visio's Lasso Select) trails a freehand selection. Esc
+/// returns to the pointer, like Visio.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tool {
     #[default]
     Pointer,
     Connector,
+    Lasso,
+    /// #108: the Connection Point tool — click a shape to add a
+    /// connection point, click an existing one to select it (Delete
+    /// removes).
+    ConnectionPoint,
 }
 
 struct DragState {
@@ -501,7 +584,10 @@ impl App {
             last_drag_ghosts: 0,
             mouse_page: None,
             status: String::new(),
-            show_shapesheet: false,
+            shapesheets: Vec::new(),
+            docs: Vec::new(),
+            winmenu_open: false,
+            pending_activate: None,
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
             snap_live: Vec::new(),
@@ -515,12 +601,22 @@ impl App {
             pagesetup_open: false,
             copypic_open: false,
             copypic_factor: 2,
+            copypic_svg: false,
+            contgal_open: false,
+            mdi_client: egui::Rect::NOTHING,
+            mdi_last_count: 0,
+            mdi_arranging: false,
+            mdi_decorated: false,
+            mdi_drawing_tile: egui::Rect::NOTHING,
             os_clipboard_text: None,
             os_image_rx: None,
             backgrounds_open: false,
             bg_underlays: Vec::new(),
             last_picture: None,
             painter_armed: None,
+            painter_sticky: false,
+            connpt_sel: None,
+            jumps_last: 0,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -581,6 +677,38 @@ impl App {
     #[doc(hidden)]
     pub fn mark_dirty_for_test(&mut self) {
         self.dirty = true;
+    }
+    /// kittest: the saved state (a Save leaves the document clean).
+    #[doc(hidden)]
+    pub fn mark_clean_for_test(&mut self) {
+        self.dirty = false;
+    }
+    /// #192 4a tests: File > Open ADDS a document — parse the file
+    /// and activate it, stashing the current one (the real load()
+    /// path minus the file-dialog worker).
+    #[doc(hidden)]
+    pub fn debug_load_adds_for_test(&mut self, path: &std::path::Path) {
+        self.load(path.to_path_buf());
+    }
+
+    /// #192 4a tests: the open documents' file names (active first,
+    /// then the inactive sessions).
+    #[doc(hidden)]
+    pub fn debug_open_doc_names(&self) -> Vec<String> {
+        let title = |p: &std::path::Path| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled".into())
+        };
+        let mut names = vec![title(&self.path)];
+        names.extend(self.docs.iter().map(|d| title(&d.path)));
+        names
+    }
+
+    /// #192 4a tests: how many documents are open.
+    #[doc(hidden)]
+    pub fn debug_open_doc_count(&self) -> usize {
+        self.docs.len() + self.ed.is_some() as usize
     }
     /// kittest: what every editing command does — dirty + version bump
     /// (the Info thumbnail's cache key, #58).
@@ -687,6 +815,9 @@ impl App {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
+                // #192 spec: opening ADDS a document — the active one
+                // (if any) becomes an inactive session first.
+                self.stash_active_doc();
                 self.ed = Some(ed);
                 self.reload_snap_settings();
                 self.path = path;
@@ -1773,45 +1904,107 @@ impl App {
         // Geometry vertex handles (#137): one per point row of the
         // shape's OWN Geometry sections (master-inherited geometry has
         // no local rows to drag — its handles arrive with master
-        // editing). Appended after the corners, so corner handles win
-        // overlaps.
-        for geo in sh.sheet.sections_named("Geometry") {
-            for row in &geo.rows {
-                let t = row.t.as_deref().unwrap_or("");
-                if !matches!(t, "MoveTo" | "LineTo" | "ArcTo" | "EllipticalArcTo" | "NURBSTo" | "SplineKnot") {
-                    continue;
-                }
-                let (Some(x), Some(y)) = (
-                    row.cell("X").and_then(|c| c.numeric()),
-                    row.cell("Y").and_then(|c| c.numeric()),
-                ) else {
-                    continue;
-                };
-                // Shape-local (0..w, 0..h, y-up) → page y-up through
-                // the chain-mapped bbox (v1 unrotated: the local frame
-                // maps linearly onto the bbox).
-                if let Some((bx, by, _, _)) = self.shape_rect(&ed.doc, page_id, sh) {
-                    out.push(Handle {
-                        id: HandleId::GeoPoint {
-                            section_ix: geo.ix,
-                            row_ix: row.ix,
-                        },
-                        pos: (bx + x, by + y),
-                    });
+        // editing, #122). Appended after the corners, so corner
+        // handles win overlaps. #157: RELATIVE rows join (their X/Y
+        // are fractions of Width/Height), and curve rows expose their
+        // CONTROLS — an ArcTo's sagitta (a circle at the apex) and an
+        // EllipticalArcTo's on-curve A/B point (NURBS/spline controls
+        // stay unhanded: the renderer draws them as chords, so a
+        // control drag would show no feedback).
+        if let Some((bx, by, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) {
+            let (w, h) = (bw.max(1e-6), bh.max(1e-6));
+            for geo in sh.sheet.sections_named("Geometry") {
+                let mut cur: Option<(f64, f64)> = None; // local end of the previous row
+                for row in &geo.rows {
+                    let t = row.t.as_deref().unwrap_or("");
+                    let rel = t.starts_with("Rel");
+                    let (Some(x), Some(y)) = (
+                        row.cell("X").and_then(|c| c.numeric()),
+                        row.cell("Y").and_then(|c| c.numeric()),
+                    ) else {
+                        continue;
+                    };
+                    let (lx, ly) = if rel { (x * w, y * h) } else { (x, y) };
+                    let point = matches!(
+                        t,
+                        "MoveTo"
+                            | "RelMoveTo"
+                            | "LineTo"
+                            | "RelLineTo"
+                            | "ArcTo"
+                            | "RelArcTo"
+                            | "EllipticalArcTo"
+                            | "RelEllipticalArcTo"
+                            | "NURBSTo"
+                            | "SplineKnot"
+                            | "SplineStart"
+                    );
+                    if point {
+                        for cell in [canvas::GeoCell::X, canvas::GeoCell::Y] {
+                            out.push(Handle {
+                                id: HandleId::GeoPoint {
+                                    section_ix: geo.ix,
+                                    row_ix: row.ix,
+                                    cell,
+                                },
+                                pos: (bx + lx, by + ly),
+                            });
+                        }
+                    }
+                    // #157 curve controls.
+                    match t {
+                        "ArcTo" | "RelArcTo" => {
+                            if let (Some(a), Some(c0)) =
+                                (row.cell("A").and_then(|c| c.numeric()), cur)
+                            {
+                                let apex = canvas::arc_apex(c0, (lx, ly), a);
+                                out.push(Handle {
+                                    id: HandleId::GeoPoint {
+                                        section_ix: geo.ix,
+                                        row_ix: row.ix,
+                                        cell: canvas::GeoCell::Apex,
+                                    },
+                                    pos: (bx + apex.0, by + apex.1),
+                                });
+                            }
+                        }
+                        "EllipticalArcTo" => {
+                            if let (Some(a), Some(b)) = (
+                                row.cell("A").and_then(|c| c.numeric()),
+                                row.cell("B").and_then(|c| c.numeric()),
+                            ) {
+                                out.push(Handle {
+                                    id: HandleId::GeoPoint {
+                                        section_ix: geo.ix,
+                                        row_ix: row.ix,
+                                        cell: canvas::GeoCell::OnCurve,
+                                    },
+                                    pos: (bx + a, by + b),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                    cur = Some((lx, ly));
                 }
             }
         }
         out
     }
 
-    /// #137: commit a geometry-vertex drag — rewrite the row's X/Y
-    /// (shape-local, y-up) through one `SetRowCell` Macro. The #59
-    /// guard policy: a row cell that resolves to a formula refuses
-    /// with a status note and is never written; relative rows
-    /// (`RelMoveTo`/`RelLineTo`) resolve against their PRECEDING row —
-    /// not modeled here, so they refuse with a note rather than
-    /// writing a wrong absolute value.
-    fn apply_geo_vertex(&mut self, section_ix: i64, row_ix: i64, to_page: (f64, f64)) {
+    /// #137/#157: commit a geometry-handle drag — rewrite the row's
+    /// X/Y (shape-local, y-up; RELATIVE rows keep their fractions,
+    /// resolved ×Width/Height), an ArcTo's sagitta from the pointer,
+    /// or an EllipticalArcTo's on-curve A/B — through one `SetRowCell`
+    /// Macro. The #59 guard policy: a written cell that resolves to a
+    /// formula refuses with a status note and is never written.
+    fn apply_geo_vertex(
+        &mut self,
+        section_ix: i64,
+        row_ix: i64,
+        cell: canvas::GeoCell,
+        to_page: (f64, f64),
+    ) {
         let Some((page_id, shape_id)) = self.sel else {
             return;
         };
@@ -1840,14 +2033,17 @@ impl App {
             return;
         };
         let t = row.t.as_deref().unwrap_or("");
-        if matches!(t, "RelMoveTo" | "RelLineTo") {
-            self.status = format!(
-                "vertex drag refused: row {row_ix} is relative ({t}) — \
-                 relative geometry editing arrives separately"
-            );
-            return;
-        }
-        for name in ["X", "Y"] {
+        // #157: RELATIVE rows resolve their X/Y as fractions of the
+        // shape's Width/Height (the hit walk's convention) — the drag
+        // writes the fraction, keeping the row relative.
+        let rel = t.starts_with("Rel");
+        // The cells this drag writes (guards check each).
+        let cells: &[&'static str] = match cell {
+            canvas::GeoCell::X | canvas::GeoCell::Y => &["X", "Y"],
+            canvas::GeoCell::Apex => &["A"],
+            canvas::GeoCell::OnCurve => &["A", "B"],
+        };
+        for name in cells {
             if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
                 .is_some()
             {
@@ -1874,26 +2070,99 @@ impl App {
             page: page_id,
             shape: shape_id,
         };
-        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
-        let (lx, ly) = (to_page.0 - bx, to_page.1 - by);
-        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
-            Box::new(dc_core::SetRowCell::new(
-                scope.clone(),
-                "Geometry",
-                section_ix,
-                dc_core::commands::RowSel::Ix(row_ix),
-                "X",
-                cell(lx),
-            )),
-            Box::new(dc_core::SetRowCell::new(
-                scope,
-                "Geometry",
-                section_ix,
-                dc_core::commands::RowSel::Ix(row_ix),
-                "Y",
-                cell(ly),
-            )),
-        ];
+        let cellv = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let (px, py) = (to_page.0 - bx, to_page.1 - by); // shape-local
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+        match cell {
+            canvas::GeoCell::X | canvas::GeoCell::Y => {
+                let (lx, ly) = if rel {
+                    let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                        return;
+                    };
+                    (
+                        px / bw.max(1e-6),
+                        py / bh.max(1e-6),
+                    )
+                } else {
+                    (px, py)
+                };
+                for (name, v) in [("X", lx), ("Y", ly)] {
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        section_ix,
+                        dc_core::commands::RowSel::Ix(row_ix),
+                        name,
+                        cellv(v),
+                    )));
+                }
+            }
+            canvas::GeoCell::Apex => {
+                // The row's chord: its own end and the previous row's.
+                let (ex, ey) = (
+                    row.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                    row.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                );
+                let (ex, ey) = if rel {
+                    let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                        return;
+                    };
+                    (ex * bw, ey * bh)
+                } else {
+                    (ex, ey)
+                };
+                // The chord's start: the PREVIOUS row's local end
+                // (Rel rows resolve ×Width/Height).
+                let size = self
+                    .shape_rect(&ed.doc, page_id, sh)
+                    .map(|r| (r.2.max(1e-6), r.3.max(1e-6)))
+                    .unwrap_or((1.0, 1.0));
+                let prev: (f64, f64) = {
+                    let secs = sh.sheet.sections_named("Geometry");
+                    let sec = secs.iter().find(|s| s.ix == section_ix);
+                    let mut p = (0.0, 0.0);
+                    if let Some(sec) = sec {
+                        for r in &sec.rows {
+                            if r.ix == row_ix {
+                                break;
+                            }
+                            let t = r.t.as_deref().unwrap_or("");
+                            let (x, y) = (
+                                r.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                                r.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                            );
+                            if t.starts_with("Rel") {
+                                p = (x * size.0, y * size.1);
+                            } else {
+                                p = (x, y);
+                            }
+                        }
+                    }
+                    p
+                };
+                let a = canvas::arc_sagitta_from_pointer(prev, (ex, ey), (px, py));
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope,
+                    "Geometry",
+                    section_ix,
+                    dc_core::commands::RowSel::Ix(row_ix),
+                    "A",
+                    cellv(a),
+                )));
+            }
+            canvas::GeoCell::OnCurve => {
+                for (name, v) in [("A", px), ("B", py)] {
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        section_ix,
+                        dc_core::commands::RowSel::Ix(row_ix),
+                        name,
+                        cellv(v),
+                    )));
+                }
+            }
+        }
         self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
     }
 
@@ -1959,18 +2228,34 @@ impl App {
             if ctrl && i.key_pressed(egui::Key::Y) {
                 self.do_redo();
             }
-            if i.key_pressed(egui::Key::Delete) && self.sel.is_some() && !kb_owned {
-                self.delete_selection();
-            }
-            // Esc leaves the Connector Tool for the pointer (Visio),
-            // and disarms the Format Painter (#110).
-            if i.key_pressed(egui::Key::Escape) && !kb_owned {
-                if self.tool == Tool::Connector {
-                    self.tool = Tool::Pointer;
+            if i.key_pressed(egui::Key::Delete) && !kb_owned {
+                // #108: the connection-point selection only owns
+                // Delete while its tool is active — a stale selection
+                // must never shadow shape deletion (CodeRabbit).
+                if self.tool == Tool::ConnectionPoint && self.connpt_sel.is_some() {
+                    self.delete_selected_conn_point();
+                } else if self.sel.is_some() {
+                    self.delete_selection();
                 }
-                if self.painter_armed.is_some() {
-                    self.painter_armed = None;
-                    self.status = "format painter cancelled".into();
+            }
+            // Esc closes the frontmost open dialog first (#110
+            // tab-order audit: Visio dismisses a dialog on Esc);
+            // only with none open do the tool/painter shortcuts run.
+            if i.key_pressed(egui::Key::Escape) && !kb_owned {
+                let consumed = self.close_front_dialog();
+                if !consumed {
+                    if matches!(
+                        self.tool,
+                        Tool::Connector | Tool::Lasso | Tool::ConnectionPoint
+                    ) {
+                        self.tool = Tool::Pointer;
+                    }
+                    self.connpt_sel = None;
+                    if self.painter_armed.is_some() {
+                        self.painter_armed = None;
+                        self.painter_sticky = false;
+                        self.status = "format painter cancelled".into();
+                    }
                 }
             }
             // Ctrl+A selects the page (#110, URS-1160).
@@ -2121,6 +2406,93 @@ impl App {
         }
         self.sel_set = picked;
         self.sel = self.sel_set.last().copied();
+    }
+
+    /// #110 (Visio's Lasso Select): the freehand trail (page inches,
+    /// y-up) selects every shape it touches or encloses — the marquee's
+    /// group-edit semantics, the lasso's touch geometry.
+    fn apply_lasso(&mut self, trail: &[(f64, f64)]) {
+        let Some(ed) = self.ed() else { return };
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        let page = &ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))];
+        let mut picked = Vec::new();
+        // Group-edit mode (#78): the lasso selects among the open
+        // group's members only, like the marquee.
+        let mut members = Vec::new();
+        if let Some(g) = self.group_edit.last().copied() {
+            if let Some(group) = vsdx::model::find_shape_by_id(&page.shapes, g) {
+                collect_members(&group.sub_shapes, &mut members);
+            }
+        } else {
+            members.extend(page.shapes.iter());
+        }
+        for shape in members {
+            if let Some((sx, sy, w, h)) = self.shape_rect(&ed.doc, page_id, shape) {
+                // Closure tolerance from the view scale: the pointer's
+                // return to the start reads as a closed loop within a
+                // few SCREEN pixels, whatever the zoom (inches/px).
+                let tol = 4.0 / self.view.px_per_in() as f64;
+                if canvas::lasso_hits_rect(trail, sx, sy, w, h, tol) {
+                    picked.push((page_id, shape.id));
+                }
+            }
+        }
+        let n = picked.len();
+        self.sel_set = picked;
+        self.sel = self.sel_set.last().copied();
+        self.status = format!("lasso selected {n} shape{}", if n == 1 { "" } else { "s" });
+    }
+
+    /// #110 tab-order audit: Esc dismisses the frontmost open dialog
+    /// (Visio behavior) before the tool/painter shortcuts see the key.
+    /// Only one dialog is realistically open at a time; with several,
+    /// each Esc closes the next in a fixed order. The Hyperlinks
+    /// window manages its OWN Esc (a draft discards first — closing
+    /// the window on the same key would lose the layering), and the
+    /// confirm-close/new modals handle theirs. Returns true when one
+    /// closed.
+    fn close_front_dialog(&mut self) -> bool {
+        if self.selby_open {
+            self.selby_open = false;
+            return true;
+        }
+        if self.snap_dlg_open {
+            self.snap_dlg_open = false;
+            return true;
+        }
+        if self.pagesetup_open {
+            self.pagesetup_open = false;
+            return true;
+        }
+        if self.copypic_open {
+            self.copypic_open = false;
+            return true;
+        }
+        if self.contgal_open {
+            self.contgal_open = false;
+            return true;
+        }
+        if self.backgrounds_open {
+            self.backgrounds_open = false;
+            return true;
+        }
+        if self.reorder_open {
+            self.reorder_open = false;
+            return true;
+        }
+        if self.color_pick.is_some() {
+            self.color_pick = None;
+            return true;
+        }
+        // The ShapeSheet WINDOWS (#190/#192): persistent surfaces like
+        // the dialogs — Esc dismisses the most recently opened one
+        // after the dialogs.
+        if self.shapesheets.pop().is_some() {
+            return true;
+        }
+        false
     }
 
     /// The resize/lock guard for one axis of a 2D resize (GitHub #59):
@@ -2750,11 +3122,12 @@ impl App {
                 .find(|p| p.id == page_id)
                 .and_then(|p| p.shapes.iter().find(|s| s.id == container))
                 .and_then(|cont| {
-                    cont.sheet.sections_named("User").iter().find_map(|sec| {
-                        sec.named_row("msvSDContainerTitle")
-                            .and_then(|r| r.cell("Value"))
-                            .and_then(|c| c.v.clone())
-                    })
+                    // #191: master-based containers keep the title row on
+                    // the master root — resolve through the chain.
+                    ed.doc
+                        .effective_user_row(cont, &[], "msvSDContainerTitle")
+                        .and_then(|r| r.cell("Value"))
+                        .and_then(|c| c.v.clone())
                 })
                 .unwrap_or_else(|| "Container".into());
             // The UNION — already-members selected again must not
@@ -3290,6 +3663,505 @@ impl App {
         self.apply(Macro::new(format!("glue connector {sid} {}", end.cell()), cmds));
     }
 
+    /// #108 AutoConnect: an arrow click duplicates the selected shape
+    /// one spacing unit in the arrow's direction and connects the pair
+    /// (dynamic glue both ends) — one undo Macro, Visio's
+    /// click-the-blue-arrow flow.
+    fn autoconnect(&mut self, dir: (f64, f64)) {
+        use crate::connectors::{
+            attach_point, bake_end, bake_trigger, glue_connect, connector_shape,
+            rewrite_route_rows, route, route_rows, walkglue_formula, End, GlueKind, GlueTarget,
+            ROUTE_RIGHT_ANGLE,
+        };
+        let Some((page_id, sid)) = self.sel else {
+            return;
+        };
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return;
+        };
+        if crate::connectors::is_connector(sh) || crate::guides::is_guide(sh) {
+            self.status = "AutoConnect needs a 2D shape".into();
+            return;
+        }
+        let Some(rect) = self.shape_rect(&ed.doc, page_id, sh) else {
+            return;
+        };
+        // Visio's spacing: one shape-size plus a gap, along the arrow.
+        let gap = 0.4;
+        let offset = (
+            dir.0 * (rect.2 + gap) * dir.0.abs(),
+            dir.1 * (rect.3 + gap) * dir.1.abs(),
+        );
+        let dup_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let conn_id = dup_id + 1;
+        let src_c = (rect.0 + rect.2 / 2.0, rect.1 + rect.3 / 2.0);
+        let dup_rect = (rect.0 + offset.0, rect.1 + offset.1, rect.2, rect.3);
+        let dup_c = (dup_rect.0 + rect.2 / 2.0, dup_rect.1 + rect.3 / 2.0);
+        let beg_attach = attach_point(rect, dup_c);
+        let end_attach = attach_point(dup_rect, src_c);
+        let mut conn = connector_shape(conn_id, beg_attach, end_attach);
+        let pts = route(ROUTE_RIGHT_ANGLE, beg_attach, end_attach);
+        rewrite_route_rows(&mut conn, &route_rows(beg_attach, &pts));
+        let beg_t = GlueTarget {
+            shape_id: sid,
+            kind: GlueKind::Dynamic,
+            attach: beg_attach,
+        };
+        let end_t = GlueTarget {
+            shape_id: dup_id,
+            kind: GlueKind::Dynamic,
+            attach: end_attach,
+        };
+        bake_end(
+            &mut conn,
+            End::Begin,
+            beg_attach,
+            &walkglue_formula(End::Begin),
+        );
+        bake_trigger(&mut conn, End::Begin, sid);
+        bake_end(
+            &mut conn,
+            End::End,
+            end_attach,
+            &walkglue_formula(End::End),
+        );
+        bake_trigger(&mut conn, End::End, dup_id);
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::commands::DuplicateShape::new(
+                page_id,
+                sid,
+                offset,
+            )),
+            Box::new(dc_core::AddShape {
+                page: page_id,
+                parent: None,
+                shape: conn,
+            }),
+            Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: glue_connect(conn_id, End::Begin, &beg_t),
+            }),
+            Box::new(dc_core::AddConnect {
+                owner: dc_core::ConnectsOwner::Page(page_id),
+                connect: glue_connect(conn_id, End::End, &end_t),
+            }),
+        ];
+        self.apply(Macro::new(format!("AutoConnect shape {sid}"), cmds));
+        self.set_selection(Some((page_id, dup_id)));
+        self.sel_set = vec![(page_id, dup_id)];
+        self.status = format!("shape {dup_id} connected to {sid} (AutoConnect)");
+    }
+
+    /// #156: is the primary selection a container — the target of a
+    /// member-side `msvSDContainerShape` reference, a `Container.`
+    /// synthetic (#138), or an effective `msvStructureType=Container`
+    /// root (the master-based SDCONT family)?
+    fn sel_is_container(&self) -> bool {
+        let Some((page_id, sid)) = self.sel else {
+            return false;
+        };
+        let Some(ed) = self.ed() else {
+            return false;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return false;
+        };
+        if !self.container_member_ids(page_id, sid).is_empty() {
+            return true;
+        }
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return false;
+        };
+        if sh.name_u.as_deref().is_some_and(|n| n.starts_with("Container.")) {
+            return true;
+        }
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return false;
+        };
+        // #191: the msvStructureType row lives on the MASTER root; a
+        // real instance carries local sections, so effective_sheet's
+        // either/or return hides it — resolve through the chain.
+        ed.doc
+            .effective_user_row(sh, &chain, "msvStructureType")
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.v.clone())
+            .is_some_and(|v| v == "Container")
+    }
+
+    /// #156: member highlight reads the container's effective
+    /// `msvSDContainerNoHighlight` row (Visio's switch); default on.
+    fn container_highlight_on(&self) -> bool {
+        let Some((page_id, sid)) = self.sel else {
+            return true;
+        };
+        let Some(ed) = self.ed() else {
+            return true;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return true;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            return true;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
+            return true;
+        };
+        // #191: chain-aware like sel_is_container — the row lives on
+        // the master root until an instance edit materializes it.
+        ed.doc
+            .effective_user_row(sh, &chain, "msvSDContainerNoHighlight")
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.numeric())
+            .map(|v| v == 0.0)
+            .unwrap_or(true)
+    }
+
+    /// #156: the Container Tools toggle — writes the
+    /// `msvSDContainerNoHighlight` User row onto the container
+    /// (materialized like Visio's first edit of an inherited row).
+    fn toggle_container_highlight(&mut self) {
+        let Some((page_id, sid)) = self.sel else {
+            return;
+        };
+        let on = self.container_highlight_on();
+        self.apply(Macro::new(
+            "toggle member highlight",
+            vec![Box::new(dc_core::SetRowCell::new(
+                Scope::Shape { page: page_id, shape: sid },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named("msvSDContainerNoHighlight".into()),
+                "Value",
+                vsdx::Cell::value(if on { "1" } else { "0" }),
+            ))],
+        ));
+        self.status = if on {
+            "member highlight off".into()
+        } else {
+            "member highlight on".into()
+        };
+    }
+
+    /// #156 (owner note 2026-11-01): which stencil variant matches the
+    /// PAPER — an ISO A-size page is metric (the `-m` masters), an
+    /// ANSI/Letter page is US units; a custom size falls back to the
+    /// pane's "Metric Stencils" preference. The preset pairs mirror
+    /// page_setup_window's SIZES table.
+    fn paper_is_metric(&self) -> bool {
+        let geom = self.page_geom();
+        let (lo, hi) = (geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in));
+        const ISO: &[(f64, f64)] = &[
+            (5.83, 8.27),  // A5
+            (8.27, 11.69), // A4
+            (11.69, 16.54),// A3
+            (16.54, 23.39),// A2
+            (23.39, 33.11),// A1
+            (33.11, 46.81),// A0
+        ];
+        const ANSI: &[(f64, f64)] = &[
+            (8.5, 11.0),  // Letter (ANSI A)
+            (8.5, 14.0),  // Legal
+            (11.0, 17.0), // Tabloid (ANSI B)
+            (17.0, 22.0), // ANSI C
+            (22.0, 34.0), // ANSI D
+            (34.0, 44.0), // ANSI E
+        ];
+        let near = |t: &(f64, f64)| (lo - t.0).abs() < 0.02 && (hi - t.1).abs() < 0.02;
+        if ISO.iter().any(near) {
+            return true;
+        }
+        if ANSI.iter().any(near) {
+            return false;
+        }
+        self.stencil.metric_units
+    }
+
+    /// #156: apply an SDCONT style — the selection (or the selected
+    /// container's members, a restyle) wraps in a master-based
+    /// container of that style, one undo Macro.
+    fn apply_container_style(&mut self, style: &str) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        // The sdcont source: an open stencil (the session's explicit
+        // variant choice), else the embedded catalog parsed in the
+        // variant that matches the PAPER (owner note 2026-11-01: ISO
+        // A-size → the metric twin sdcont-m, ANSI/Letter → US).
+        let src_master: Option<vsdx::Master> = self
+            .stencils
+            .iter()
+            .filter(|(_, st)| st.source.to_string_lossy().contains("sdcont"))
+            .find_map(|(_, st)| find_master_by_name(&st.doc, style).cloned())
+            .or_else(|| {
+                let b = crate::stencil::builtin::by_slug("sdcont")?;
+                let doc = vsdx::parse::parse_bytes(b.bytes_for(self.paper_is_metric())).ok()?;
+                find_master_by_name(&doc, style).cloned()
+            });
+        let Some(src) = src_master else {
+            self.status = format!("container style {style} not found");
+            return;
+        };
+        // Members: the selected container re-wraps (a restyle);
+        // anything else wraps the selection itself.
+        let (members, old_container) = if self.sel_is_container() {
+            let (_, sid) = self.sel.unwrap();
+            (self.container_member_ids(page_id, sid), Some(sid))
+        } else {
+            (
+                self.sel_set
+                    .iter()
+                    .filter(|(p, _)| *p == page_id)
+                    .map(|(_, s)| *s)
+                    .collect(),
+                None,
+            )
+        };
+        if members.is_empty() {
+            self.status = "select the shapes to contain first".into();
+            return;
+        }
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let mut x0 = f64::MAX;
+        let mut y0 = f64::MAX;
+        let mut x1 = f64::MIN;
+        let mut y1 = f64::MIN;
+        for sid in &members {
+            let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, *sid) else {
+                continue;
+            };
+            let Ok(chain) = shape_chain(&ed.doc, page_id, *sid) else {
+                continue;
+            };
+            let g = |n: &str| {
+                ed.doc
+                    .resolve_cell(sh, &chain, n)
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0)
+            };
+            let (px, py) = (g("PinX"), g("PinY"));
+            let (w, h) = (g("Width"), g("Height"));
+            let (lx, ly) = (g("LocPinX"), g("LocPinY"));
+            x0 = x0.min(px - lx);
+            y0 = y0.min(py - ly);
+            x1 = x1.max(px - lx + w);
+            y1 = y1.max(py - ly + h);
+        }
+        if x0 > x1 {
+            return;
+        }
+        // The style's own member margin (the master's
+        // msvSDContainerMargin; SDCONT runs 0.125–0.375).
+        let margin = src
+            .shapes
+            .first()
+            .and_then(|root| {
+                root.sheet
+                    .sections_named("User")
+                    .iter()
+                    .find_map(|sec| sec.named_row("msvSDContainerMargin"))
+            })
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.numeric())
+            .unwrap_or(0.25);
+        let rect = (
+            x0 - margin,
+            y0 - margin,
+            x1 - x0 + 2.0 * margin,
+            y1 - y0 + 2.0 * margin,
+        );
+        // Place + size the instance, then move the members over.
+        let new_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
+        let mut place = dc_core::place_master_from_stencil(
+            &ed.doc,
+            page_id,
+            &src,
+            (rect.0, rect.1),
+        );
+        let mut cmds = std::mem::take(&mut place.cmds);
+        for (n, v) in [
+            ("PinX", rect.0),
+            ("PinY", rect.1),
+            ("Width", rect.2),
+            ("Height", rect.3),
+            ("LocPinX", 0.0),
+            ("LocPinY", 0.0),
+        ] {
+            cmds.push(Box::new(SetCell::new(
+                Scope::Shape { page: page_id, shape: new_id },
+                n,
+                vsdx::Cell::value(format!("{v:.6}")),
+            )));
+        }
+        for m in &members {
+            cmds.push(Box::new(dc_core::SetRowCell::new(
+                Scope::Shape { page: page_id, shape: *m },
+                "User",
+                0,
+                dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
+                "Value",
+                vsdx::Cell::value(new_id.to_string()),
+            )));
+        }
+        cmds.push(Box::new(dc_core::commands::ReorderShape::new(
+            page_id, new_id, false,
+        )));
+        if let Some(old) = old_container {
+            cmds.push(Box::new(dc_core::commands::RemoveShape::new(
+                page_id, old,
+            )));
+        }
+        self.apply(Macro::new(
+            format!("apply container style {style}"),
+            cmds,
+        ));
+        self.set_selection(Some((page_id, new_id)));
+        self.sel_set = vec![(page_id, new_id)];
+        self.tab = Tab::ContainerTools;
+        self.status = format!("container style {style} applied");
+    }
+
+    /// #108: the Connection Point tool's click — near an existing
+    /// point of the hit shape selects it (a second click elsewhere
+    /// re-selects), on the body adds a fresh row at the click, both in
+    /// the shape's local frame.
+    fn handle_conn_point_click(&mut self, page_pos: (f64, f64)) {
+        let Some(hit) = self.shape_hit(page_pos) else {
+            self.connpt_sel = None;
+            self.status = "click a shape to add a connection point".into();
+            return;
+        };
+        let Some(page_id) = self.page_id() else { return };
+        // Existing (effective) points as page positions — the same
+        // resolution the glue engine uses.
+        let near = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
+        if let Some(cand) = self
+            .glue_candidates(&[])
+            .iter()
+            .find(|c| c.id == hit && !c.conn_rows.is_empty())
+        {
+            if let Some((ix, _)) = cand
+                .conn_rows
+                .iter()
+                .min_by_key(|(_, p)| {
+                    ((p.0 - page_pos.0).hypot(p.1 - page_pos.1) * 1e6) as i64
+                })
+                .filter(|(_, p)| (p.0 - page_pos.0).hypot(p.1 - page_pos.1) <= near)
+            {
+                self.connpt_sel = Some((hit, *ix));
+                self.status = format!(
+                    "connection point {ix} selected (Delete removes it)"
+                );
+                return;
+            }
+        }
+        // Add: the local frame of the (top-level) hit shape — the
+        // glue engine's rect convention (Pin − LocPin origin).
+        let Some(ed) = self.ed() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, hit) else {
+            return;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, hit) else {
+            return;
+        };
+        let get = |n: &str| {
+            ed.doc
+                .resolve_cell(sh, &chain, n)
+                .and_then(|c| c.numeric())
+        };
+        let (Some(px), Some(py), Some(lx), Some(ly)) =
+            (get("PinX"), get("PinY"), get("LocPinX"), get("LocPinY"))
+        else {
+            return;
+        };
+        let local = (page_pos.0 - (px - lx), page_pos.1 - (py - ly));
+        // The next row IX: max across the EFFECTIVE section (a
+        // collision would shadow a master row).
+        let eff = ed.doc.effective_sheet(sh, &chain);
+        let next_ix = eff
+            .sections_named("Connection")
+            .first()
+            .map(|sec| sec.rows.iter().map(|r| r.ix).max().unwrap_or(1) + 1)
+            .unwrap_or(2);
+        let scope = Scope::Shape {
+            page: page_id,
+            shape: hit,
+        };
+        let cell = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
+        let cmds: Vec<Box<dyn dc_core::Command>> = vec![
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(next_ix),
+                "X",
+                cell(local.0),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope,
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(next_ix),
+                "Y",
+                cell(local.1),
+            )),
+        ];
+        self.apply(Macro::new(
+            format!("add connection point {next_ix} on shape {hit}"),
+            cmds,
+        ));
+        self.connpt_sel = Some((hit, next_ix));
+        self.status = format!("connection point {next_ix} added to shape {hit}");
+    }
+
+    /// #108: Delete on the Connection Point tool's selection — the
+    /// LOCAL row goes; a master-inherited point explains instead
+    /// (Visio edits those on the master).
+    fn delete_selected_conn_point(&mut self) {
+        let Some((shape, ix)) = self.connpt_sel else {
+            return;
+        };
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed() else { return };
+        let local = ed
+            .doc
+            .pages
+            .iter()
+            .find(|p| p.id == page_id)
+            .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, shape))
+            .map(|sh| {
+                sh.sheet
+                    .sections_named("Connection")
+                    .iter()
+                    .any(|sec| sec.rows.iter().any(|r| r.ix == ix))
+            })
+            .unwrap_or(false);
+        if !local {
+            self.status = format!(
+                "connection point {ix} is inherited from the master — edit it there"
+            );
+            return;
+        }
+        self.apply(Macro::new(
+            format!("remove connection point {ix}"),
+            vec![Box::new(dc_core::commands::RemoveSectionRow::new(
+                Scope::Shape { page: page_id, shape },
+                "Connection",
+                0,
+                dc_core::commands::RowSel::Ix(ix),
+            ))],
+        ));
+        self.connpt_sel = None;
+        self.status = format!("connection point {ix} removed");
+    }
+
     /// #108/URS-1114: set a connector's route style and re-route its
     /// geometry immediately — one undo step.
     fn apply_connector_route_style(&mut self, page_id: i64, sid: i64, style: &str) {
@@ -3334,6 +4206,43 @@ impl App {
                     dc_core::commands::RowSel::Ix(ix),
                     cell,
                     vsdx::Cell::value(format!("{v:.6}")),
+                )));
+            }
+        }
+        // Curved (#108): row 2 becomes a CubicBezTo whose A/B/C/D
+        // controls sit at mid-x/the endpoints' heights as Width/Height
+        // formulas (an S — chord-collinear controls would render
+        // straight; a reroute's size rewrite re-tracks them
+        // automatically); every other style keeps the rows plain
+        // LineTo.
+        let curved = style == crate::connectors::ROUTE_CURVED;
+        for ix in 2i64..=4 {
+            let t = if ix == 2 && curved {
+                Some("CubicBezTo".to_string())
+            } else {
+                Some("LineTo".to_string())
+            };
+            cmds.push(Box::new(dc_core::commands::SetSectionRowType::new(
+                scope.clone(),
+                "Geometry",
+                0,
+                dc_core::commands::RowSel::Ix(ix),
+                t,
+            )));
+        }
+        if curved {
+            for (name, f, v) in crate::connectors::curved_row_extras(ex - bx, ey - by) {
+                cmds.push(Box::new(dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    0,
+                    dc_core::commands::RowSel::Ix(2),
+                    name,
+                    vsdx::Cell {
+                        v: Some(format!("{v:.6}")),
+                        f: Some(f),
+                        ..vsdx::Cell::default()
+                    },
                 )));
             }
         }
@@ -3421,6 +4330,83 @@ impl App {
     /// page rect with its connection-point rows (IX → page position —
     /// own rows first, the master's for instances, like #109's
     /// snap-target collection).
+    /// #108 line jumps: every top-level connector's page polyline
+    /// (unrotated, instance- or master-geometry through the hit
+    /// frame) with its stroke, in z order — the input to
+    /// [`crate::connectors::line_jumps`].
+    fn jump_lines(&self) -> Vec<crate::connectors::JumpLine> {
+        let mut out = Vec::new();
+        let Some(ed) = self.ed() else {
+            return out;
+        };
+        let Some(page_id) = self.page_id() else {
+            return out;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return out;
+        };
+        for (z, sh) in page.shapes.iter().enumerate() {
+            let Ok(chain) = shape_chain(&ed.doc, page_id, sh.id) else {
+                continue;
+            };
+            if !crate::connectors::is_connector_in(&ed.doc, &chain, sh) {
+                continue;
+            }
+            // Rotated connectors keep a straight crossing (Visio hops
+            // rotated lines too; v1 keeps to the unrotated frame).
+            let angle = ed
+                .doc
+                .resolve_cell(sh, &chain, "Angle")
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.0);
+            if angle.abs() > 1e-6 {
+                continue;
+            }
+            let (root, msize) = sh
+                .master
+                .and_then(|mid| ed.doc.master(mid))
+                .and_then(|m| m.shapes.first())
+                .map(|r| {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(r, &[r], n)
+                            .and_then(|c| c.numeric())
+                            .unwrap_or(1.0)
+                    };
+                    (Some(r), (g("Width"), g("Height")))
+                })
+                .unwrap_or((None, (1.0, 1.0)));
+            let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
+            let segs = crate::connectors::geometry_hit_segments(sh, root, &frame);
+            let mut pts = Vec::with_capacity(segs.len() + 1);
+            if let Some((a, _)) = segs.first() {
+                pts.push(*a);
+            }
+            for (_, b) in &segs {
+                pts.push(*b);
+            }
+            let weight = ed
+                .doc
+                .resolve_cell(sh, &chain, "LineWeight")
+                .and_then(|c| c.numeric())
+                .unwrap_or(0.01);
+            let color = ed
+                .doc
+                .resolve_cell(sh, &chain, "LineColor")
+                .and_then(|c| c.v.clone())
+                .and_then(|v| parse_hex_rgb(&v))
+                .unwrap_or((0x42, 0x42, 0x42));
+            out.push(crate::connectors::JumpLine {
+                id: sh.id,
+                z,
+                weight,
+                color,
+                pts,
+            });
+        }
+        out
+    }
+
     fn glue_candidates(&self, excluding: &[i64]) -> Vec<crate::connectors::GlueCandidate> {
         let Some(ed) = self.ed() else {
             return Vec::new();
@@ -3665,6 +4651,17 @@ impl App {
         let guide_list = self.snap_guides(&[dragged]);
         let ctx = self.snap_ctx_of(&targets, &guide_list);
         crate::snap::point_snap(p, &ctx, &self.snap, glue)
+    }
+
+    /// #160: per-axis corner snap for a resize drag — the SNAP
+    /// settings (resize edges are snap targets, not glue targets),
+    /// against the page minus the resized shape.
+    fn snap_corner_for(&self, dragged: i64, p: (f64, f64)) -> Option<(f64, f64)> {
+        let page_id = self.page_id()?;
+        let targets = self.snap_targets(page_id, &[dragged]);
+        let guide_list = self.snap_guides(&[dragged]);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
+        crate::snap::corner_snap(p, &ctx, &self.snap)
     }
 
     /// #110 (URS-1149): align every selected shape's feature to the
@@ -3968,11 +4965,13 @@ impl App {
         let mut pick: Option<Option<i64>> = None; // Some(None) = clear
         let Some(page_id) = self.page_id() else { return };
         let Some(ed) = self.ed.as_ref() else { return };
+        // Visio's gallery lists BACKGROUND pages (the #113 mark makes
+        // one); a plain page never shows as a background choice.
         let entries: Vec<(i64, String)> = ed
             .doc
             .pages
             .iter()
-            .filter(|p| p.id != page_id)
+            .filter(|p| p.id != page_id && self.is_background_page(p.id))
             .map(|p| (p.id, p.name.clone()))
             .collect();
         let current = self.back_page_of(page_id);
@@ -3990,6 +4989,11 @@ impl App {
                 ui.separator();
                 if ui.radio(current.is_none(), "No background").clicked() {
                     pick = Some(None);
+                }
+                if entries.is_empty() {
+                    ui.weak(
+                        "No background pages. Right-click a page tab and pick \"Set as Background\".",
+                    );
                 }
                 for (id, name) in &entries {
                     if ui
@@ -4365,6 +5369,43 @@ impl App {
     }
 
     /// The Copy as Picture dialog (#113, URS-1200).
+    /// #156: the Container Styles gallery (Design ▸ Containers…) —
+    /// the 14 SDCONT styles; a click wraps the selection (Visio's
+    /// gallery-with-a-selection flow) and selects the new container.
+    fn container_gallery_window(&mut self, ctx: &egui::Context) {
+        if !self.contgal_open {
+            return;
+        }
+        let mut open = true;
+        let mut pick: Option<&'static str> = None;
+        egui::Window::new("Container Styles")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_width(260.0)
+            .show(ctx, |ui| {
+                ui.weak("Wrap the selection in a container style:");
+                ui.add_space(4.0);
+                egui::Grid::new("dc-contgal")
+                    .num_columns(2)
+                    .spacing(egui::vec2(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for name in CONTAINER_STYLES {
+                            if ui.button(name).clicked() {
+                                pick = Some(name);
+                            }
+                        }
+                    });
+            });
+        if let Some(name) = pick {
+            self.contgal_open = false;
+            self.apply_container_style(name);
+        }
+        if !open {
+            self.contgal_open = false;
+        }
+    }
+
     fn copy_picture_window(&mut self, ctx: &egui::Context) {
         if !self.copypic_open {
             return;
@@ -4378,21 +5419,45 @@ impl App {
             .default_width(280.0)
             .show(ctx, |ui| {
                 ui.strong("Resolution");
+                if ui
+                    .radio(self.copypic_svg, "Vector (SVG)")
+                    .clicked()
+                {
+                    self.copypic_svg = true;
+                }
                 for (f, label) in [(1u32, "Screen (96 dpi)"), (2, "High (192 dpi)"), (4, "Print (384 dpi)")] {
                     if ui
-                        .radio(self.copypic_factor == f, label)
+                        .radio(!self.copypic_svg && self.copypic_factor == f, label)
                         .clicked()
                     {
                         self.copypic_factor = f;
+                        self.copypic_svg = false;
                     }
                 }
                 ui.add_space(6.0);
                 if ui.button("Copy Picture").clicked() {
                     copy = true;
                 }
-                ui.weak("The picture lands on the clipboard as a PNG bitmap.");
+                ui.weak(if self.copypic_svg {
+                    "The SVG markup lands on the clipboard as vector text."
+                } else {
+                    "The picture lands on the clipboard as a PNG bitmap."
+                });
             });
-        if copy {
+        if copy && self.copypic_svg {
+            match self.picture_svg() {
+                Some(svg) => {
+                    let n = svg.len();
+                    self.last_picture = Some(svg.clone().into_bytes());
+                    ctx.copy_text(svg);
+                    self.status = format!(
+                        "SVG copied ({n} bytes, vector — paste into editors that accept SVG text)"
+                    );
+                }
+                None => self.status = "nothing selected to copy".into(),
+            }
+        }
+        if copy && !self.copypic_svg {
             match self.picture_png(self.copypic_factor) {
                 Some(bytes) => {
                     self.last_picture = Some(bytes.clone());
@@ -4419,6 +5484,70 @@ impl App {
         if !open {
             self.copypic_open = false;
         }
+    }
+
+    /// #113 remainder: the vector copy — the page rendered with every
+    /// non-selected shape hidden, the viewBox retargeted to the
+    /// selection bounds, as SVG markup for the text clipboard (the
+    /// interchange egui can carry; raster flavors stay on the image
+    /// clipboard).
+    fn picture_svg(&self) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page_id = self.page_id()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+        let sel: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, s)| *s)
+            .collect();
+        if sel.is_empty() {
+            return None;
+        }
+        let geom = self.page_geom();
+        let mut b: Option<(f64, f64, f64, f64)> = None;
+        for sid in &sel {
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, *sid)?;
+            let r = self.shape_rect(&ed.doc, page_id, sh)?;
+            let corners = (r.0, r.1, r.0 + r.2, r.1 + r.3);
+            b = Some(match b {
+                None => corners,
+                Some((x0, y0, x1, y1)) => (
+                    x0.min(corners.0),
+                    y0.min(corners.1),
+                    x1.max(corners.2),
+                    y1.max(corners.3),
+                ),
+            });
+        }
+        let (bx0, by0, bx1, by1) = b?;
+        let hidden: Vec<i64> = page
+            .shapes
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !sel.contains(id))
+            .collect();
+        let svg = dc::svg::render_page_with(&ed.doc, page, &hidden).ok()?;
+        // Rebuild the ROOT element around the selection's box (page
+        // y-up → the svg's y-down frame), padding a hair to keep
+        // strokes intact. The root is written fresh — token-stripping
+        // the emitted one would split its space-bearing viewBox value
+        // and leave orphan tokens (invalid XML; CodeRabbit).
+        let pad = 0.06;
+        let (vx, vy, vw, vh) = (
+            (bx0 - pad).max(0.0),
+            (geom.h_in - by1 - pad).max(0.0),
+            (bx1 - bx0 + 2.0 * pad).min(geom.w_in),
+            (by1 - by0 + 2.0 * pad).min(geom.h_in),
+        );
+        let root_end = svg.find('>').map(|i| i + 1)?;
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{vx:.4} {vy:.4} {vw:.4} {vh:.4}\" width=\"{pw:.0}\" height=\"{ph:.0}\">",
+            pw = vw * 96.0,
+            ph = vh * 96.0,
+        );
+        out.push_str(&svg[root_end..]);
+        Some(out)
     }
 
     /// The Page Setup dialog (#113, URS-1122): ISO/ANSI presets plus
@@ -4549,15 +5678,27 @@ impl App {
     /// #110 (URS-1053): arm the Format Painter on the primary
     /// selection — the next shape click receives its resolved
     /// formatting (single-shot, Visio's click mode).
-    fn arm_format_painter(&mut self) {
+    fn arm_format_painter(&mut self, sticky: bool) {
+        // A second click while armed disarms (Visio's toggle).
+        if self.painter_armed.is_some() && !sticky {
+            self.painter_armed = None;
+            self.painter_sticky = false;
+            self.status = "format painter cancelled".into();
+            return;
+        }
         let Some((_, sid)) = self.sel else {
             self.status = "select a shape to copy formatting from first".into();
             return;
         };
         self.painter_armed = Some(sid);
-        self.status = format!(
-            "format painter: click a shape to apply shape {sid}'s formatting"
-        );
+        self.painter_sticky = sticky;
+        self.status = if sticky {
+            format!(
+                "format painter: click shapes to apply shape {sid}'s formatting (Esc to finish)"
+            )
+        } else {
+            format!("format painter: click a shape to apply shape {sid}'s formatting")
+        };
     }
 
     /// The painter's application: copy the resolved FORMAT_CELLS from
@@ -4593,8 +5734,16 @@ impl App {
         }
         let n = cmds.len();
         self.apply(Macro::new(format!("paint formatting onto shape {to}"), cmds));
-        self.status = format!("{n} formatting cells copied to shape {to}");
-        self.painter_armed = None;
+        // #110: the sticky (double-clicked) painter stays armed for
+        // the next click; the single-shot one is spent.
+        if self.painter_sticky {
+            self.status = format!(
+                "{n} formatting cells copied to shape {to} (click more shapes, Esc to finish)"
+            );
+        } else {
+            self.status = format!("{n} formatting cells copied to shape {to}");
+            self.painter_armed = None;
+        }
     }
 
     /// The page's guides as UI info (#113), resolved through the
@@ -4971,6 +6120,13 @@ impl App {
 
     fn on_canvas_click(&mut self, page_pos: (f64, f64), shift: bool, ctrl: bool) {
         self.placed_last_click = false;
+        // The Connection Point tool owns clicks on shapes (#108):
+        // near an existing point selects it (Delete removes); on the
+        // body adds one at the click.
+        if self.tool == Tool::ConnectionPoint && !ctrl {
+            self.handle_conn_point_click(page_pos);
+            return;
+        }
         // Ctrl/Cmd+click follows the hit shape's first hyperlink
         // (Visio, #28) before any selection semantics.
         if ctrl {
@@ -4994,9 +6150,10 @@ impl App {
             return;
         }
         // The armed Format Painter consumes the click (#110): the hit
-        // shape receives the source's resolved formatting.
+        // shape receives the source's resolved formatting. The sticky
+        // (double-clicked) painter stays armed; empty-page or
+        // on-the-source clicks cancel either way.
         if let Some(src) = self.painter_armed {
-            self.painter_armed = None;
             if let Some(hit) = self.shape_hit(page_pos) {
                 if hit != src {
                     self.apply_format_painter(src, hit);
@@ -5006,6 +6163,8 @@ impl App {
                     return;
                 }
             }
+            self.painter_armed = None;
+            self.painter_sticky = false;
             self.status = "format painter cancelled".into();
             return;
         }
@@ -5037,6 +6196,11 @@ impl App {
                 }
                 self.set_selection(Some((page_id, shape_id)));
                 self.status = format!("selected shape {shape_id}");
+                // #156: selecting a container raises the contextual
+                // Container Tools tab (Visio 2016).
+                if self.sel_is_container() {
+                    self.tab = Tab::ContainerTools;
+                }
             }
             None => {
                 self.set_selection(None);
@@ -5246,7 +6410,10 @@ impl App {
                 self.apply_snap_settings();
             }
             Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
-            Action::PointerTool => self.tool = Tool::Pointer,
+            Action::PointerTool => {
+                self.tool = Tool::Pointer;
+                self.connpt_sel = None;
+            }
             Action::AlignLeft => self.align_selection(crate::align::AlignKind::Left),
             Action::AlignHCenter => self.align_selection(crate::align::AlignKind::HCenter),
             Action::AlignRight => self.align_selection(crate::align::AlignKind::Right),
@@ -5270,7 +6437,8 @@ impl App {
                     self.status = "select by type: pick a criterion and value".into();
                 }
             }
-            Action::FormatPainter => self.arm_format_painter(),
+            Action::FormatPainter => self.arm_format_painter(false),
+            Action::FormatPainterSticky => self.arm_format_painter(true),
             Action::PageOrientation => self.toggle_page_orientation(),
             Action::PageSizeDialog => self.pagesetup_open = !self.pagesetup_open,
             Action::CopyAsPicture => self.copypic_open = !self.copypic_open,
@@ -5281,6 +6449,35 @@ impl App {
                 self.status = "Connector Tool: drag from one shape to another (Esc to finish)"
                     .into();
             }
+            Action::ContainerStyle(name) => self.apply_container_style(name),
+            Action::ContainerGallery => self.contgal_open = !self.contgal_open,
+            Action::ContainerHighlight => self.toggle_container_highlight(),
+            Action::ConnPointTool => {
+                if self.tool == Tool::ConnectionPoint {
+                    self.tool = Tool::Pointer;
+                    self.connpt_sel = None;
+                    self.status = "connection point tool off".into();
+                } else {
+                    self.tool = Tool::ConnectionPoint;
+                    self.connpt_sel = None;
+                    self.status =
+                        "Connection Point tool: click a shape to add a connection point"
+                            .into();
+                }
+            }
+            Action::LassoTool => {
+                // Toggle like Visio's Select ▸ Lasso Select menu item;
+                // the Pointer Tool (or Esc) is Select Area.
+                if self.tool == Tool::Lasso {
+                    self.tool = Tool::Pointer;
+                    self.status = "lasso select off".into();
+                } else {
+                    self.tool = Tool::Lasso;
+                    self.status =
+                        "Lasso Select: drag a freehand trail around shapes (Esc to finish)"
+                            .into();
+                }
+            }
             Action::ToggleUnits => {
                 self.view.unit = if self.view.unit == crate::units::Unit::Mm {
                     crate::units::Unit::In
@@ -5288,7 +6485,16 @@ impl App {
                     crate::units::Unit::Mm
                 };
             }
-            Action::ShowShapeSheet => self.show_shapesheet = !self.show_shapesheet,
+            Action::ShowShapeSheet => {
+                // #192 spec: per-shape sheets — the button targets the
+                // selection's sheet (toggling); without a selection it
+                // closes every open sheet.
+                if let Some((_, sid)) = self.sel {
+                    self.toggle_shapesheet(sid);
+                } else {
+                    self.shapesheets.clear();
+                }
+            }
             Action::Macros => self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into(),
             Action::FillMenu | Action::LineMenu => {
                 self.color_pick = Some(if a == Action::FillMenu {
@@ -5384,7 +6590,13 @@ impl App {
                         };
                     }
                     ui.add_space(8.0);
-                    for t in TABS {
+                    // #156: the contextual Container Tools tab rides
+                    // after the fixed strip while a container is the
+                    // primary selection (Visio 2016).
+                    let sel_is_container = self.sel_is_container();
+                    for t in TABS.iter().chain(
+                        sel_is_container.then_some(&Tab::ContainerTools),
+                    ) {
                         if *t == Tab::File {
                             continue;
                         }
@@ -5411,7 +6623,65 @@ impl App {
                         }
                         ui.add_space(6.0);
                     }
-                    // Office's "Tell me what you want to do" search box.
+                    // #192 4a: the Window switcher (classic MDI
+                    // position) — every open document, the active one
+                    // marked; clicking activates.
+                    let n_docs = self.docs.len() + self.ed.is_some() as usize;
+                    if n_docs > 0 {
+                        ui.add_space(8.0);
+                        let label = format!("Window {}", n_docs);
+                        // (no widget_info override — the Button's own
+                        // text is the accessible label, #56's concern is
+                        // painted text only)
+                        let wresp = ui.add(egui::Button::new(
+                            egui::RichText::new(label).size(12.0),
+                        ).frame(false));
+                        if wresp.clicked() {
+                            self.winmenu_open = !self.winmenu_open;
+                        }
+                        if self.winmenu_open {
+                            let mut close_menu = false;
+                            egui::Popup::menu(&wresp).show(|ui| {
+                                ui.set_min_width(220.0);
+                                // The ACTIVE document first (marked).
+                                if self.ed.is_some() {
+                                    let name = self
+                                        .path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "Untitled".into());
+                                    let mark = if self.dirty { " •" } else { "" };
+                                    ui.add_enabled(
+                                        false,
+                                        egui::Label::new(
+                                            // (› — Carlito has no ✓ glyph;
+                                            // the breadcrumb's arrow)
+                                            egui::RichText::new(format!("› {name}{mark}")).strong(),
+                                        ),
+                                    );
+                                }
+                                for (ix, d) in self.docs.iter().enumerate() {
+                                    let name = d
+                                        .path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().into_owned())
+                                        .unwrap_or_else(|| "Untitled".into());
+                                    let mark = if d.dirty { " •" } else { "" };
+                                    if ui
+                                        .button(format!("  {name}{mark}"))
+                                        .clicked()
+                                    {
+                                        self.pending_activate = Some(ix);
+                                        close_menu = true;
+                                    }
+                                }
+                            });
+                            if close_menu {
+                                self.winmenu_open = false;
+                            }
+                        }
+                    }
+                    // Office's "Tell me what you want to do" search box.                    // Office's "Tell me what you want to do" search box.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(6.0);
                         let (pr, presp) =
@@ -5462,6 +6732,11 @@ impl App {
                     });
                 });
             });
+        // #192 4a: a Window-menu pick activates after the strip's
+        // mutable borrows end.
+        if let Some(ix) = self.pending_activate.take() {
+            self.activate_doc(ix);
+        }
     }
 
     fn ribbon_content(&mut self, ui: &mut Ui) {
@@ -5472,6 +6747,10 @@ impl App {
         let dispatch = |a: Action, act: &mut Option<Action>| {
             *act = Some(a);
         };
+        // The contextual tab leaves when its context does (#156).
+        if self.tab == Tab::ContainerTools && !self.sel_is_container() {
+            self.tab = Tab::Home;
+        }
         let groups: Vec<crate::ribbon::Group> = match self.tab {
             // File opens the backstage view instead of ribbon content.
             Tab::File => vec![],
@@ -5493,6 +6772,13 @@ impl App {
                         RibbonButton::new(Icon::Connector, "Connector", Action::ConnectorTool)
                             .selected(self.tool == Tool::Connector)
                             .tip("Draw a connector between shapes or points (Esc to finish)"),
+                        RibbonButton::new(Icon::ConnPoint, "Conn Point", Action::ConnPointTool)
+                            .width(90.0)
+                            .selected(self.tool == Tool::ConnectionPoint)
+                            .tip(
+                                "Connection Point tool: click a shape to add a connection \
+                                 point; click one to select it (Delete removes)",
+                            ),
                     ])],
                 ),
                 crate::ribbon::Group::new(
@@ -5518,21 +6804,38 @@ impl App {
                             )
                             .enabled(has_sel)
                             .selected(self.painter_armed.is_some())
-                            .tip("Copy the selection's formatting to the next shape you click")],
+                            .tip(
+                                "Copy the selection's formatting to the next shape you click; \
+                                 double-click to keep painting until Esc",
+                            )],
                         ]),
                         // Visio's Editing group rides beside Clipboard:
-                        // Select All + Select by Type (#110, URS-1160).
-                        grid(vec![vec![
-                            RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
-                                .tip("Select every shape on the page (Ctrl+A)"),
-                            RibbonButton::new(
-                                Icon::Shapes,
-                                "Select by Type…",
-                                Action::SelectByType,
+                        // Select All + Select by Type (#110, URS-1160),
+                        // plus the Select menu's Lasso Select (#110
+                        // remainder: the freehand trail).
+                        grid(vec![
+                            vec![
+                                RibbonButton::new(Icon::Shapes, "Select All", Action::SelectAll)
+                                    .tip("Select every shape on the page (Ctrl+A)"),
+                                RibbonButton::new(
+                                    Icon::Shapes,
+                                    "Select by Type…",
+                                    Action::SelectByType,
+                                )
+                                .selected(self.selby_open)
+                                .tip("Select shapes by type, master, or layer"),
+                            ],
+                            vec![RibbonButton::new(
+                                Icon::Lasso,
+                                "Lasso Select",
+                                Action::LassoTool,
                             )
-                            .selected(self.selby_open)
-                            .tip("Select shapes by type, master, or layer"),
-                        ]]),
+                            .selected(self.tool == Tool::Lasso)
+                            .tip(
+                                "Draw a freehand trail; shapes the trail touches or encloses \
+                                 are selected (Esc to finish)",
+                            )],
+                        ]),
                     ],
                 ),
                 crate::ribbon::Group::new(
@@ -5799,6 +7102,19 @@ impl App {
                         ],
                     ])],
                 ),
+                // #156: the Container Styles gallery — the SDCONT
+                // masters (also on the Container Tools contextual
+                // tab once a container exists).
+                crate::ribbon::Group::new(
+                    "Containers",
+                    vec![stack(vec![RibbonButton::new(
+                        Icon::Container,
+                        "Containers…",
+                        Action::ContainerGallery,
+                    )
+                    .selected(self.contgal_open)
+                    .tip("Wrap the selection in a container style")])],
+                ),
             ],
             Tab::Data => vec![
                 crate::ribbon::Group::new(
@@ -5980,6 +7296,50 @@ impl App {
                     ))],
                 ),
             ],
+            // #156: the Container Tools contextual tab — the SDCONT
+            // style gallery (each click wraps the selection, or
+            // re-wraps the selected container's members, in a
+            // master-based container of that style) plus the member
+            // highlight toggle.
+            Tab::ContainerTools => vec![
+                crate::ribbon::Group::new(
+                    "Container Styles",
+                    vec![grid(vec![
+                        CONTAINER_STYLES[..7]
+                            .iter()
+                            .map(|n| {
+                                RibbonButton::new(
+                                    Icon::Container,
+                                    n,
+                                    Action::ContainerStyle(n),
+                                )
+                                .tip("Wrap the selection in this container style")
+                            })
+                            .collect::<Vec<_>>(),
+                        CONTAINER_STYLES[7..]
+                            .iter()
+                            .map(|n| {
+                                RibbonButton::new(
+                                    Icon::Container,
+                                    n,
+                                    Action::ContainerStyle(n),
+                                )
+                                .tip("Wrap the selection in this container style")
+                            })
+                            .collect::<Vec<_>>(),
+                    ])],
+                ),
+                crate::ribbon::Group::new(
+                    "Members",
+                    vec![stack(vec![RibbonButton::new(
+                        Icon::Container,
+                        "Highlight Members",
+                        Action::ContainerHighlight,
+                    )
+                    .selected(self.container_highlight_on())
+                    .tip("Tint the container's members while it is selected")])],
+                ),
+            ],
             Tab::Developer => vec![
                 crate::ribbon::Group::new(
                     "Show/Hide",
@@ -5990,7 +7350,9 @@ impl App {
                                 "ShapeSheet",
                                 Action::ShowShapeSheet,
                             )
-                            .selected(self.show_shapesheet)
+                            .selected(self.sel.is_some_and(|(_, sid)| {
+                                self.shapesheets.contains(&sid)
+                            }))
                             .tip("Inspect the selected shape's cells"),
                             RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
                                 .tip("Toggle display units (model stays inches)"),
@@ -6375,14 +7737,26 @@ impl App {
         let r = ui.button(format!("{display}  ›"));
         let mut picked = None;
         egui::Popup::menu(&r)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            // Close-on-click would dismiss the menu on any scrollbar
+            // interaction, so the menu closes only on outside clicks
+            // and ui.close() after a pick (the arrow gallery's 46
+            // entries need the scroll).
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.set_min_width(130.0);
-                for (k, d) in choices {
-                    if ui.selectable_label(*k == current, *d).clicked() {
-                        picked = Some(key_of(k));
-                    }
-                }
+                let max_h = (ui.input(|i| i.viewport_rect().height()) - 120.0).clamp(180.0, 520.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_h)
+                    .show(ui, |ui| {
+                        for (k, d) in choices {
+                            if ui.selectable_label(*k == current, *d).clicked() {
+                                picked = Some(key_of(k));
+                                // CloseOnClickOutside keeps the menu
+                                // open otherwise — close on a pick.
+                                ui.close();
+                            }
+                        }
+                    });
             });
         picked
     }
@@ -6506,24 +7880,58 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
-                // Begin/End Arrow (#72, corrected #169): the gallery the
-                // renderer draws per Visio 2016's observed numbering —
-                // no value below 34 is double-headed there; 4 is the
-                // classic triangle, 6 the stealth dart, 13 a single
-                // filled head. 35 offers the double chevron.
+                // Begin/End Arrow (#72, #169, #199): every value 0–45
+                // carries its own glyph, pinned from the 600 dpi Visio
+                // print (Analysis/arrow-gallery-visio2016.md, the
+                // 2026-11-06 re-read). The picker lists the gallery
+                // per value, Visio-style.
                 const ARROWS: &[(&str, &str)] = &[
                     ("0", "None"),
-                    ("1", "Arrow"),
+                    ("1", "Open 2-Prong"),
                     ("2", "Small Arrow"),
-                    ("3", "Concave Arrow"),
+                    ("3", "Open Wide"),
                     ("4", "Classic Arrow"),
-                    ("6", "Stealth"),
-                    ("7", "Open Arrow"),
-                    ("9", "Slash"),
-                    ("10", "Circle"),
-                    ("11", "Diamond"),
-                    ("13", "Filled Arrow"),
-                    ("35", "Double Arrow"),
+                    ("5", "Wide Arrow"),
+                    ("6", "Long Arrow"),
+                    ("7", "Open Fork"),
+                    ("8", "Stealth Dart"),
+                    ("9", "Slanted Tick"),
+                    ("10", "Filled Circle"),
+                    ("11", "Filled Square"),
+                    ("12", "Open Double Chevron"),
+                    ("13", "Filled Arrow (Plain)"),
+                    ("14", "Open Triangle (Large)"),
+                    ("15", "Open Triangle (Small)"),
+                    ("16", "Open Triangle (Medium-Large)"),
+                    ("17", "Open Triangle (Medium)"),
+                    ("18", "Open Triangle (Concave Base)"),
+                    ("19", "Open Barbed"),
+                    ("20", "Open Circle"),
+                    ("21", "Open Square"),
+                    ("22", "Open Diamond"),
+                    ("23", "Slanted Tick"),
+                    ("24", "Tick"),
+                    ("25", "Double Tick"),
+                    ("26", "Triple Tick"),
+                    ("27", "Crow's Foot"),
+                    ("28", "Crow's Foot + Tick"),
+                    ("29", "Fork + Ring"),
+                    ("30", "Ring + Tick"),
+                    ("31", "Tick + Ring"),
+                    ("32", "Double Tick + Ring"),
+                    ("33", "Triple Tick + Ring"),
+                    ("34", "Diamond + Ring"),
+                    ("35", "Tick + Dot"),
+                    ("36", "Double Tick + Dot"),
+                    ("37", "Triple Tick + Dot"),
+                    ("38", "Diamond + Dot"),
+                    ("39", "Double Arrow (Filled)"),
+                    ("40", "Double Arrow (Open)"),
+                    ("41", "Ring"),
+                    ("42", "Dot"),
+                    ("43", "Open Double Chevron (Large)"),
+                    ("44", "Tick + Chevron"),
+                    ("45", "Tick + Double Chevron"),
                 ];
                 let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
                 if let Some(v) =
@@ -6661,106 +8069,26 @@ impl App {
         }
     }
 
-    fn shapesheet_panel(&mut self, ui: &mut Ui) {
+    /// #192 spec: toggle one shape's ShapeSheet window (open order
+    /// kept; re-toggling removes).
+    fn toggle_shapesheet(&mut self, shape: i64) {
+        if let Some(i) = self.shapesheets.iter().position(|sid| *sid == shape) {
+            self.shapesheets.remove(i);
+        } else {
+            self.shapesheets.push(shape);
+        }
+    }
+
+    fn shapesheet_panel(&mut self, ui: &mut Ui, shape_id: i64, max_w: f32) {
+        // #190/#192: the window's title bar carries the close; this is
+        // pure content, bound to the sheet's OWN shape (not the live
+        // selection). #189: the body itself lives in `shapesheet.rs`
+        // (app decomposition) — the resolved, Visio-2016-style view.
         ui.vertical(|ui| {
-            ui.strong("ShapeSheet");
             ui.separator();
-            let Some((page_id, shape_id)) = self.sel else {
-                ui.label("Select a shape to inspect its cells.");
-                return;
-            };
+            let Some(page_id) = self.page_id() else { return };
             let Some(ed) = self.ed() else { return };
-            let Ok(sheet) = scope_sheet(
-                &ed.doc,
-                &Scope::Shape {
-                    page: page_id,
-                    shape: shape_id,
-                },
-            ) else {
-                ui.label("shape not found");
-                return;
-            };
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("cells").striped(true).show(ui, |ui| {
-                    ui.label("Cell");
-                    ui.label("Value");
-                    ui.label("Unit");
-                    ui.label("Formula");
-                    ui.end_row();
-                    let mut cells: Vec<_> = sheet
-                        .children
-                        .iter()
-                        .filter_map(|c| match c {
-                            vsdx::model::SheetChild::Cell(n, c) => Some((n.clone(), c.clone())),
-                            _ => None,
-                        })
-                        .collect();
-                    cells.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (n, c) in cells {
-                        ui.label(n);
-                        ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                        ui.label(c.u.clone().unwrap_or_else(|| "—".into()));
-                        ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                        ui.end_row();
-                    }
-                });
-                // Sections with their rows — the ShapeSheet's real
-                // structure (Geometry, Character, Paragraph, Text Block
-                // Format, Actions, …), like Visio's inspector.
-                for sec in sheet.children.iter().filter_map(|c| match c {
-                    vsdx::model::SheetChild::Section(s) => Some(s),
-                    _ => None,
-                }) {
-                    ui.add_space(6.0);
-                    ui.strong(section_display_name(&sec.name));
-                    egui::Grid::new(format!("sec-{}", sec.name))
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.label("Row");
-                            ui.label("Cell");
-                            ui.label("Value");
-                            ui.label("Formula");
-                            ui.end_row();
-                            if sec.rows.is_empty() {
-                                // Section-level cells (NoFill, NoLine, …).
-                                for (n, c) in &sec.cells {
-                                    ui.label("—");
-                                    ui.label(n);
-                                    ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                                    ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                                    ui.end_row();
-                                }
-                            }
-                            for row in &sec.rows {
-                                let label = row
-                                    .n
-                                    .clone()
-                                    .or_else(|| row.t.clone())
-                                    .unwrap_or_else(|| format!("Row {}", row.ix));
-                                let mut first = true;
-                                for (n, c) in &row.cells {
-                                    if first {
-                                        ui.strong(&label);
-                                        first = false;
-                                    } else {
-                                        ui.label(" ");
-                                    }
-                                    ui.label(n);
-                                    ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                                    ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                                    ui.end_row();
-                                }
-                                if first {
-                                    ui.strong(&label);
-                                    ui.label("—");
-                                    ui.label("—");
-                                    ui.label("—");
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                }
-            });
+            crate::shapesheet::panel(ui, &ed.doc, page_id, shape_id, max_w);
         });
     }
 
@@ -6800,7 +8128,92 @@ impl App {
         clicked
     }
 
+    /// #192 MDI: with a document open, the drawing is a titled child
+    /// window (document name + page, movable/resizable, no close —
+    /// documents close through File) constrained to the client area
+    /// this ui already is. The id is pinned: the TITLE changes with
+    /// page/dirty flips, and an id-from-title window would lose its
+    /// placement on every one of them. Without a document the start
+    /// screen fills the frame unwrapped.
     fn central(&mut self, ui: &mut Ui) {
+        // The client area is what the docked panels LEFT — the
+        // available rect, not max_rect (the ui's full allocation):
+        // egui's inside-panels shrink the former, and a window
+        // constrained to max_rect would float over the stencil pane.
+        // An 8 px gutter insets the child windows inside it: the
+        // workspace reads as an MDI client region, and the windows'
+        // resize-border sense zones never cover a docked panel's own
+        // resize handle at the shared edge.
+        let avail = ui.available_rect_before_wrap();
+        self.mdi_client = if avail.is_finite() && avail.width() > 24.0 && avail.height() > 24.0 {
+            avail.shrink(8.0)
+        } else {
+            avail
+        };
+        if self.ed.is_none() {
+            self.central_inner(ui);
+            return;
+        }
+        let doc_name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".to_string());
+        let page_name = self
+            .ed()
+            .and_then(|e| e.doc.pages.get(self.page_idx))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        let mut title = format!("{doc_name} — {page_name}");
+        if self.dirty {
+            title.push_str(" •");
+        }
+        let client = self.mdi_drawing_tile;
+        // #192 spec: the drawing's title-bar close (decorated mode
+        // only — the single undecorated child has no X) runs the
+        // SAME flow as File > Close: dirty asks first, clean closes.
+        let mut doc_close = false;
+        let mut win = egui::Window::new(title)
+            .id(egui::Id::unique("dc-drawing-window"))
+            .title_bar(self.mdi_decorated)
+            .resizable(true)
+            .collapsible(false)
+            .min_size(egui::vec2(240.0, 180.0));
+        let mut open = true;
+        if self.mdi_decorated {
+            win = win.open(&mut open);
+        }
+        if (!self.mdi_decorated || self.mdi_arranging) && client.is_finite() && client.width() > 0.0
+        {
+            // Undecorated single child: pinned full-bleed; arranging:
+            // pinned to the tile for the transition frame(s). (Frame 0
+            // carries no tile yet — the window seeds from its
+            // defaults and the pin takes over the frame after.)
+            win = win.current_pos(client.left_top()).fixed_size(client.size());
+        }
+        if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+            win = win.constrain_to(self.mdi_client);
+        }
+        win.show(ui.ctx(), |ui| self.central_inner(ui));
+        if !open {
+            doc_close = true;
+        }
+        if doc_close {
+            // Identical to BackAction::CloseDoc: a dirty document
+            // asks (the modal), a clean one closes now.
+            if self.dirty {
+                self.confirm_close = Some(CloseTarget::Doc);
+            } else {
+                self.close_doc();
+            }
+        }
+        // The arrangement pin is consumed HERE (the drawing window
+        // builds in this fn, one frame after `draw` computed it on
+        // the count change); the sheets consumed it in `draw`.
+        self.mdi_arranging = false;
+    }
+
+    fn central_inner(&mut self, ui: &mut Ui) {
         if self.ed.is_none() {
             // Visio 2016 start screen shape: Recent on the left,
             // template choices on the right.
@@ -6901,6 +8314,35 @@ impl App {
         let geom = self.page_geom();
         let sel_rect = self.sel_page_rect();
         let extra_rects: Vec<Rect> = self.sel_extra_page_rects();
+        // #156: the selected container's member rects — the highlight
+        // overlay (default on; the Container Tools toggle writes the
+        // container's msvSDContainerNoHighlight row).
+        let member_hl: Vec<Rect> = if self.sel_is_container() && self.container_highlight_on() {
+            let (page_id, sid) = self.sel.unwrap();
+            self.ed()
+                .and_then(|ed| ed.doc.pages.iter().find(|p| p.id == page_id))
+                .map(|page| {
+                    self.container_member_ids(page_id, sid)
+                        .iter()
+                        .filter_map(|m| {
+                            let doc = &self.ed().unwrap().doc;
+                            vsdx::model::find_shape_by_id(&page.shapes, *m)
+                                .and_then(|sh| self.shape_rect(doc, page_id, sh))
+                        })
+                        .map(|(x, y, w, h)| {
+                            // page y-up → the canvas's y-down rect frame
+                            let geom = self.page_geom();
+                            Rect::from_min_max(
+                                egui::pos2(x as f32, (geom.h_in - y - h) as f32),
+                                egui::pos2((x + w) as f32, (geom.h_in - y) as f32),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // The page's guides (#113): collected before the borrows below
         // (the marquee-gating hit closure and the overlay both use
         // them).
@@ -7061,6 +8503,20 @@ impl App {
         // Background pages render beneath this page's ink (#113) —
         // built before the field borrows below.
         let underlays = self.build_bg_underlays(ui.ctx());
+        // #108: line-jump hops for the frame's connector crossings.
+        let jump_fx: Vec<canvas::JumpFx> = crate::connectors::line_jumps(&self.jump_lines())
+            .into_iter()
+            .map(|j| canvas::JumpFx {
+                at: j.at,
+                dir: j.dir,
+                under: j.under,
+                weight: j.weight,
+                under_weight: j.under_weight,
+                color: Color32::from_rgb(j.color.0, j.color.1, j.color.2),
+                under_color: Color32::from_rgb(j.under_color.0, j.under_color.1, j.under_color.2),
+            })
+            .collect();
+        self.jumps_last = jump_fx.len();
         // #177: everything the connection-point overlay needs, built
         // before the destructuring borrows below (the closure runs
         // inside `canvas::show`, while `view` is borrowed).
@@ -7068,6 +8524,18 @@ impl App {
         let conn_threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
         let conn_snap = self.snap;
         let conn_sel = self.sel;
+        // #108: the Connection Point tool's state, precomputed (the
+        // fx closure below cannot borrow self).
+        let conn_tool = self.tool == Tool::ConnectionPoint;
+        let connpt_sel_pos = self.connpt_sel.and_then(|(sid, ix)| {
+            self.glue_candidates(&[])
+                .into_iter()
+                .find(|c| c.id == sid)?
+                .conn_rows
+                .into_iter()
+                .find(|(rix, _)| *rix == ix)
+                .map(|(_, p)| p)
+        });
         // #179: live endpoint snapping — two target sets: one
         // excluding the selected connector (its own endpoint handle
         // is the dragged thing) and one excluding nothing (the
@@ -7089,9 +8557,12 @@ impl App {
                 self.snap_guides(&[-1]),
             )
         };
+        // Both closures below share t_sel/g_sel, so they capture
+        // references, not the vectors.
+        let (t_sel_r, g_sel_r) = (&t_sel, &g_sel);
         let snap_end = move |endpoint_drag: bool, p: (f64, f64)| -> (f64, f64) {
             let (targets, guides) = if endpoint_drag {
-                (&t_sel, &g_sel)
+                (t_sel_r, g_sel_r)
             } else {
                 (&t_all, &g_all)
             };
@@ -7103,6 +8574,20 @@ impl App {
                 threshold_in: snap_thr,
             };
             crate::snap::point_snap(p, &ctx, &snap_settings, true).map_or(p, |(q, _)| q)
+        };
+        // #160: the live corner-resize preview snaps per axis under
+        // the SNAP settings against the page minus the selected shape
+        // (t_sel/g_sel exclude it) — the commit path runs the
+        // identical snap on the release pointer.
+        let snap_corner = move |p: (f64, f64)| -> Option<(f64, f64)> {
+            let ctx = crate::snap::SnapCtx {
+                targets: t_sel_r,
+                guides: g_sel_r,
+                grid_step_in: snap_grid,
+                ruler_step_in: snap_ruler,
+                threshold_in: snap_thr,
+            };
+            crate::snap::corner_snap(p, &ctx, &snap_settings)
         };
         let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
@@ -7151,6 +8636,13 @@ impl App {
                 fx.reveal = g.reveal;
                 fx.glue_target = g.glue_target;
             }
+            // #108: the Connection Point tool's selection ring — the
+            // selected row's page position.
+            if conn_tool {
+                if let Some(q) = connpt_sel_pos {
+                    fx.tool_selected = Some(q);
+                }
+            }
             *conn_fx_seen.borrow_mut() = fx.clone();
             fx
         };
@@ -7161,14 +8653,18 @@ impl App {
             &quads,
             sel_rect,
             &extra_rects,
+            &member_hl,
             &handles,
             &drag_fx,
             &guide_fx,
+            &jump_fx,
             &underlays,
             self.tool == Tool::Connector,
+            self.tool == Tool::Lasso,
             armed,
             &conn_fx,
             &snap_end,
+            &snap_corner,
             &hit,
             &mut mouse,
             // While the in-place text editor is open (#22) the canvas
@@ -7187,19 +8683,32 @@ impl App {
                 self.end_text_edit(true);
             }
         } else {
+            // An AutoConnect arrow click (#108) consumes the gesture
+            // BEFORE the empty-page click semantics run — the arrow
+            // sits outside the shape, and a plain click there would
+            // clear the selection the AutoConnect needs.
+            if let Some(dir) = out.autoclick {
+                self.autoconnect(dir);
+            }
             if let Some(pos) = out.dbl_click_page_pos {
                 // The second click of the pair completes a double-click
                 // instead of a plain click: the first click already ran its
                 // select (and possible drag-start) semantics on its frame.
                 self.on_canvas_dbl_click(pos);
-            } else if let Some(pos) = out.click_page_pos {
-                self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+            } else if out.autoclick.is_none() {
+                if let Some(pos) = out.click_page_pos {
+                    self.on_canvas_click(pos, out.shift_click, out.ctrl_click);
+                }
             }
             if let Some(pos) = out.press_page_pos {
                 self.on_canvas_press(pos);
             }
             if let Some((x0, y0, x1, y1)) = out.marquee_done {
                 self.apply_marquee(x0, y0, x1, y1);
+            }
+            // The Lasso trail finished (#110): touch/enclose selection.
+            if let Some(trail) = out.lasso_done {
+                self.apply_lasso(&trail);
             }
             // A ruler drag released over the page drops a guide
             // (#113, URS-1076).
@@ -7307,6 +8816,27 @@ impl App {
             if travel_px > 1.0 {
                 match id {
                     HandleId::Corner(corner) => {
+                        // #160: snap the resized edge under the snap
+                        // settings — the same per-axis snap the live
+                        // preview showed. Snap the CORNER position
+                        // (handle origin + drag delta), not the raw
+                        // pointer: the grab may start up to
+                        // HANDLE_GRAB away from the corner, and
+                        // snapping the pointer would leave the edge
+                        // at grid + grab-offset (CodeRabbit). Applied
+                        // AFTER the travel check so a no-travel press
+                        // never gains a phantom snap.
+                        let dragged = self.sel.map(|(_, s)| s);
+                        let origin = handles.iter().find(|h| h.id == id).map(|h| h.pos);
+                        let end = match (dragged, origin) {
+                            (Some(sid), Some(o)) => {
+                                let raw = (o.0 + end.0 - start.0, o.1 + end.1 - start.1);
+                                self.snap_corner_for(sid, raw)
+                                    .map(|sn| (start.0 + sn.0 - o.0, start.1 + sn.1 - o.1))
+                                    .unwrap_or(end)
+                            }
+                            _ => end,
+                        };
                         // y-down screen-orientation delta, as before.
                         let dx = end.0 - start.0;
                         let dy = start.1 - end.1;
@@ -7394,7 +8924,11 @@ impl App {
                             self.apply_line_move(start, end);
                         }
                     }
-                    HandleId::GeoPoint { section_ix, row_ix } => {
+                    HandleId::GeoPoint {
+                        section_ix,
+                        row_ix,
+                        cell,
+                    } => {
                         // The DELTA from the handle's own position (the
                         // grab may start inside the grab radius).
                         // #109: a vertex drag runs through the snap
@@ -7408,7 +8942,7 @@ impl App {
                                 .sel
                                 .and_then(|(_, sid)| self.snap_point_for(sid, raw, false))
                                 .map_or(raw, |(p, _)| p);
-                            self.apply_geo_vertex(section_ix, row_ix, target);
+                            self.apply_geo_vertex(section_ix, row_ix, cell, target);
                         }
                     }
                 }
@@ -7517,6 +9051,7 @@ impl App {
             Delete,
             Rename,
             Duplicate,
+            MarkBg,
             Reorder,
         }
         let mut act: Option<Act> = None;
@@ -7553,6 +9088,26 @@ impl App {
             if ctx_item(ui, None, "Duplicate Page", "", true) {
                 act = Some(Act::Duplicate);
             }
+            // #113 remainder: mark a page AS a background (Visio's Page
+            // Setup ▸ Page Properties ▸ Type: Background, surfaced on
+            // the tab the way Visio surfaces page commands).
+            let marked = self
+                .ed()
+                .and_then(|e| e.doc.pages.get(idx))
+                .is_some_and(|p| self.is_background_page(p.id));
+            if ctx_item(
+                ui,
+                None,
+                if marked {
+                    "Remove Background Mark"
+                } else {
+                    "Set as Background"
+                },
+                "",
+                true,
+            ) {
+                act = Some(Act::MarkBg);
+            }
             ui.separator();
             ctx_item(ui, None, "Page Setup…", "(later milestone)", false);
             if ctx_item(ui, None, "Reorder Pages…", "", true) {
@@ -7587,8 +9142,41 @@ impl App {
                 }
             }
             Act::Duplicate => self.tab_cmd_duplicate(idx),
+            Act::MarkBg => self.toggle_background_mark(idx),
             Act::Reorder => self.reorder_open = true,
         }
+    }
+
+    /// #113 remainder: the page-tab menu's background mark — the
+    /// `Background="1"` page attribute (the same attribute the
+    /// underlay chain and the Backgrounds gallery read), assigned the
+    /// same direct-mutation way `set_back_page` works.
+    fn toggle_background_mark(&mut self, idx: usize) {
+        let Some(page_id) = self.ed().and_then(|e| e.doc.pages.get(idx)).map(|p| p.id)
+        else {
+            return;
+        };
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page_id) else {
+            return;
+        };
+        let marked = page
+            .attrs
+            .iter()
+            .any(|(k, v)| k == "Background" && v == "1");
+        page.attrs.retain(|(k, _)| k != "Background");
+        let name = page.name.clone();
+        if !marked {
+            page.attrs
+                .push(("Background".to_string(), "1".to_string()));
+        }
+        self.dirty = true;
+        self.version += 1;
+        self.status = if marked {
+            format!("page {name} is a foreground page again")
+        } else {
+            format!("page {name} marked as a background")
+        };
     }
 
     /// The shape's hyperlink rows (#28): instance rows first, then the
@@ -8713,14 +10301,30 @@ impl App {
         // any draft and dismiss the window.
         let mut open = true;
         // The Close BUTTON flips this (the X writes `open` via the
-        // builder; the two can't share a borrow).
+        // builder; the two can't share a borrow). Esc-no-draft does
+        // too (#110 audit).
         let mut close_btn = false;
+        let mut esc_close = false;
         egui::Window::new("Hyperlinks")
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(380.0)
             .show(ctx, |ui| {
+                // #110 audit: this window manages its own Esc — a
+                // draft discards first (a window close on the same key
+                // would lose the layering); Enter commits the draft
+                // (the dialog's default OK button). Skipped while the
+                // in-place text editor owns the keyboard (#22).
+                if self.text_edit.is_none()
+                    && ui.input(|i| i.key_pressed(egui::Key::Escape))
+                {
+                    if draft.is_some() {
+                        draft = None;
+                    } else {
+                        esc_close = true;
+                    }
+                }
                 // The 2016 storage toggle (#71) sits above the list.
                 if ui
                     .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
@@ -8924,6 +10528,14 @@ impl App {
                             close_draft = true;
                         }
                     });
+                    // #110 audit: Enter is the dialog's OK (Visio's
+                    // default button) — commits and closes the draft.
+                    if ui.input(|i| {
+                        i.key_pressed(egui::Key::Enter) && !i.modifiers.shift
+                    }) {
+                        commit(self);
+                        close_draft = true;
+                    }
                     if close_draft {
                         draft = None;
                     }
@@ -8950,7 +10562,7 @@ impl App {
                     });
                 });
             });
-        if open && !close_btn {
+        if open && !close_btn && !esc_close {
             self.hyperlink_draft = draft;
         } else {
             // Cancelled: discard the draft and close.
@@ -8967,7 +10579,13 @@ impl App {
             return;
         }
         let mut close = false;
+        let mut open = true;
         egui::Window::new("Reorder Pages")
+            // #110 tab-order audit: the title-bar close X — the window
+            // was the one dialog without a keyboard-reachable dismiss
+            // besides tabbing to Close (Esc arrives through
+            // `close_front_dialog`).
+            .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(280.0)
@@ -9003,7 +10621,7 @@ impl App {
                     close = true;
                 }
             });
-        if close {
+        if close || !open {
             self.reorder_open = false;
         }
     }
@@ -9430,6 +11048,7 @@ impl App {
             /// #108: per-connector route style (URS-1114).
             RouteStraight,
             RouteRightAngle,
+            RouteCurved,
             /// #113/URS-1200: render the selection to a picture.
             CopyAsPicture,
         }
@@ -9748,6 +11367,9 @@ impl App {
                     if ctx_item(ui, None, "Right-Angle Connector", "", true) {
                         act = Some(Act::RouteRightAngle);
                     }
+                    if ctx_item(ui, None, "Curved Connector", "", true) {
+                        act = Some(Act::RouteCurved);
+                    }
                     ui.separator();
                 }
             }
@@ -9933,7 +11555,10 @@ impl App {
                 self.begin_text_edit(shape_id, draft);
                 self.status = format!("editing text of shape {shape_id}");
             }
-            Act::ShapeSheet => self.show_shapesheet = true,
+            // #190/#192: a per-shape toggle for the CLICKED shape —
+            // the one-way open left no reachable close; the spec made
+            // sheets per-shape.
+            Act::ShapeSheet => self.toggle_shapesheet(shape_id),
             Act::RouteStraight => {
                 self.apply_connector_route_style(page_id, shape_id, crate::connectors::ROUTE_STRAIGHT)
             }
@@ -9941,6 +11566,11 @@ impl App {
                 page_id,
                 shape_id,
                 crate::connectors::ROUTE_RIGHT_ANGLE,
+            ),
+            Act::RouteCurved => self.apply_connector_route_style(
+                page_id,
+                shape_id,
+                crate::connectors::ROUTE_CURVED,
             ),
             Act::CopyAsPicture => {
                 self.copypic_open = true;
@@ -10277,6 +11907,202 @@ impl App {
     /// #108 tests: the active mouse tool.
     pub fn debug_tool(&self) -> Tool {
         self.tool
+    }
+
+    /// #108 tests: the shape's LOCAL Connection-section rows as
+    /// (row ix, X, Y) — empty until a point is materialized onto the
+    /// instance.
+    pub fn debug_conn_rows(&self, page: i64, shape: i64) -> Vec<(i64, f64, f64)> {
+        let Some(ed) = self.ed.as_ref() else {
+            return Vec::new();
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page) else {
+            return Vec::new();
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape) else {
+            return Vec::new();
+        };
+        sh.sheet
+            .sections_named("Connection")
+            .into_iter()
+            .flat_map(|sec| {
+                sec.rows.iter().map(|r| {
+                    (
+                        r.ix,
+                        r.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0),
+                        r.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// #108 tests: the Connection Point tool's selection.
+    pub fn debug_connpt_sel(&self) -> Option<(i64, i64)> {
+        self.connpt_sel
+    }
+
+    /// #108 tests: the line-jump hops painted on the last frame.
+    pub fn debug_jump_count(&self) -> usize {
+        self.jumps_last
+    }
+
+    /// #113 tests: the last copy-as-picture payload as text (the SVG
+    /// vector flavor); None for the PNG flavor.
+    pub fn debug_last_picture_text(&self) -> Option<String> {
+        self.last_picture
+            .as_ref()
+            .and_then(|b| String::from_utf8(b.clone()).ok())
+            .filter(|t| t.starts_with("<svg"))
+    }
+
+    /// #113 tests: whether the page carries the background mark.
+    pub fn debug_page_is_bg(&self, page: i64) -> bool {
+        self.is_background_page(page)
+    }
+
+    /// #156 tests: a shape's effective User-row value by name.
+    pub fn debug_user_row(&self, page: i64, shape: i64, row: &str) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        let chain = shape_chain(&ed.doc, page.id, shape).ok()?;
+        // #191: chain-aware — master-root rows resolve too.
+        ed.doc
+            .effective_user_row(sh, &chain, row)?
+            .cell("Value")
+            .and_then(|c| c.v.clone())
+    }
+
+    /// #156 tests: whether the Container Tools contextual tab is up.
+    pub fn debug_tab_is_container_tools(&self) -> bool {
+        self.tab == Tab::ContainerTools
+    }
+
+    /// #190/#192 tests: whether any ShapeSheet window is open.
+    pub fn debug_shapesheet_open(&self) -> bool {
+        !self.shapesheets.is_empty()
+    }
+
+    /// #192 tests: the open sheets' shape ids, in open order.
+    pub fn debug_shapesheets(&self) -> Vec<i64> {
+        self.shapesheets.clone()
+    }
+
+    /// #157 tests: a geometry row's type.
+    pub fn debug_geo_row_type_for_test(&self, shape: i64, row_ix: i64) -> Option<String> {
+        let ed = self.ed()?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet
+            .sections_named("Geometry")
+            .first()?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?
+            .t
+            .clone()
+    }
+
+    /// #157 tests: replace one of the shape's OWN geometry rows (the
+    /// section must exist) — sets the row type and cell values.
+    pub fn debug_set_geo_row_for_test(
+        &mut self,
+        page: i64,
+        shape: i64,
+        sec_ix: i64,
+        row_ix: i64,
+        t: &str,
+        cells: &[(&str, f64)],
+    ) {
+        let Some(ed) = self.ed.as_mut() else { return };
+        let Some(page) = ed.doc.pages.iter_mut().find(|p| p.id == page) else {
+            return;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id_mut(&mut page.shapes, shape) else {
+            return;
+        };
+        let mut row_cells: Vec<(String, vsdx::Cell)> = vec![
+            ("X".into(), vsdx::Cell::value("0.5")),
+            ("Y".into(), vsdx::Cell::value("0.5")),
+        ];
+        for (n, v) in cells {
+            row_cells.retain(|(k, _)| k != n);
+            row_cells.push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+        }
+        let mut hit = false;
+        for sec in sh.sheet.children.iter_mut() {
+            if let vsdx::model::SheetChild::Section(sec) = sec {
+                if sec.name == "Geometry" && sec.ix == sec_ix {
+                    match sec.rows.iter_mut().find(|r| r.ix == row_ix) {
+                        Some(row) => {
+                            row.t = Some(t.to_string());
+                            row.cells.retain(|(n, _)| !cells.iter().any(|(c, _)| c == n));
+                            for (n, v) in cells {
+                                row.cells
+                                    .push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+                            }
+                        }
+                        None => {
+                            // The section exists, the row does not —
+                            // append it.
+                            sec.rows.push(vsdx::model::Row {
+                                ix: row_ix,
+                                t: Some(t.to_string()),
+                                cells: row_cells,
+                                ..vsdx::model::Row::default()
+                            });
+                        }
+                    }
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        if !hit {
+            // Materialize the section (a master-based shape has none
+            // locally): a MoveTo at the origin + the requested row.
+            let mut row = vsdx::model::Row {
+                ix: row_ix,
+                t: Some(t.to_string()),
+                ..vsdx::model::Row::default()
+            };
+            let mut all: Vec<(String, vsdx::Cell)> = vec![
+                ("X".into(), vsdx::Cell::value("0.5")),
+                ("Y".into(), vsdx::Cell::value("0.5")),
+            ];
+            for (n, v) in cells {
+                all.retain(|(k, _)| k != n);
+                all.push((n.to_string(), vsdx::Cell::value(format!("{v:.6}"))));
+            }
+            row.cells = all;
+            sh.sheet
+                .children
+                .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+                    name: "Geometry".into(),
+                    ix: sec_ix,
+                    rows: vec![
+                        vsdx::model::Row {
+                            ix: 1,
+                            t: Some("MoveTo".into()),
+                            cells: vec![
+                                ("X".into(), vsdx::Cell::value("0")),
+                                ("Y".into(), vsdx::Cell::value("0")),
+                            ],
+                            ..vsdx::model::Row::default()
+                        },
+                        row,
+                    ],
+                    ..vsdx::model::Section::default()
+                }));
+        }
+    }
+
+    /// #113 tests: the page ids in order.
+    pub fn debug_page_ids(&self) -> Vec<i64> {
+        self.ed()
+            .map(|e| e.doc.pages.iter().map(|p| p.id).collect())
+            .unwrap_or_default()
     }
 
     /// #113 tests: the last copy-as-picture PNG's byte length.
@@ -11280,6 +13106,7 @@ impl App {
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
         self.copy_picture_window(&ctx);
+        self.container_gallery_window(&ctx);
         self.backgrounds_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
@@ -11415,19 +13242,122 @@ impl App {
                     });
                 });
         }
-        if self.show_shapesheet {
-            egui::Panel::right("shapesheet")
-                .default_size(260.0)
-                .resizable(true)
-                .show(ui, |ui| self.shapesheet_panel(ui));
-        }
         if self.format_pane_open && self.sel.is_some() {
             egui::Panel::right("format_pane")
                 .default_size(240.0)
                 .resizable(true)
                 .show(ui, |ui| self.format_pane(ui));
         }
+        // #192 MDI: `central` hosts the drawing as a CHILD WINDOW
+        // inside the client area (its own ui — the region the docked
+        // panels left), and publishes that rect. SPEC: with exactly
+        // ONE child window there are NO decorators and it fills the
+        // client ("treated as it is now"); once more than one child
+        // exists, every child gets its decorators and the children
+        // AUTOMATICALLY ARRANGE (equal tiles) to fit — any change of
+        // the child count re-fires the arrangement.
         self.central(ui);
+        let drawing_open = self.ed.is_some();
+        let n_children = drawing_open as usize + self.shapesheets.len();
+        if n_children != self.mdi_last_count {
+            self.mdi_last_count = n_children;
+            self.mdi_arranging = true;
+        }
+        // The per-child tiles: an equal-width column each (the
+        // drawing first/left, sheets after), inside the client.
+        let client_ok = self.mdi_client.is_finite()
+            && self.mdi_client.width() > 24.0
+            && self.mdi_client.height() > 24.0;
+        let tiles: Vec<egui::Rect> = if n_children == 0 || !client_ok {
+            Vec::new()
+        } else {
+            let c = self.mdi_client;
+            let gutter = 8.0;
+            let n = n_children as f32;
+            let w = (c.width() - gutter * 2.0 - gutter * (n - 1.0)) / n;
+            (0..n_children)
+                .map(|i| {
+                    egui::Rect::from_min_size(
+                        egui::pos2(
+                            c.left() + gutter + i as f32 * (w + gutter),
+                            c.top() + gutter,
+                        ),
+                        egui::vec2(w, c.height() - 2.0 * gutter),
+                    )
+                })
+                .collect()
+        };
+        let decorated = n_children >= 2;
+        // Drawing window: created inside `central` (it needs the
+        // client ui), but its decorators/arrangement are decided
+        // here — central reads these fields the frame before... no:
+        // central runs first and builds the window, so the flags it
+        // reads were set by THIS block last frame. One frame of lag
+        // on transitions is invisible (the count itself is stable).
+        self.mdi_decorated = decorated;
+        self.mdi_drawing_tile = if n_children == 1 && drawing_open {
+            // Single child: pinned full-bleed, decorator-free.
+            self.mdi_client
+        } else {
+            tiles.first().copied().unwrap_or(self.mdi_client)
+        };
+        // #190/#192: the ShapeSheet as a floating child window — the
+        // native title bar carries the close. Painted after the
+        // drawing window so it stacks above; constrained to the
+        // client area so children overlap only each other, never the
+        // ribbon/status/docked panes.
+        if !self.shapesheets.is_empty() && client_ok {
+            // One window per open sheet (#192 spec), in open order;
+            // the tiles follow the drawing (first) then the sheets.
+            let mut close_ix: Option<usize> = None;
+            for (i, &sid) in self.shapesheets.clone().iter().enumerate() {
+                let mut open = true;
+                let sheet_tile = if n_children == 1 {
+                    // Sheets-only child (no drawing open): full-bleed,
+                    // decorator-free per the spec.
+                    self.mdi_client
+                } else {
+                    tiles
+                        .get(drawing_open as usize + i)
+                        .copied()
+                        .unwrap_or(self.mdi_client)
+                };
+                let name = self
+                    .ed()
+                    .and_then(|ed| ed.doc.pages.get(self.page_idx))
+                    .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sid))
+                    .and_then(|sh| sh.name_u.clone())
+                    .unwrap_or_else(|| format!("shape {sid}"));
+                let title = format!("ShapeSheet — {name}");
+                let mut win = egui::Window::new(title)
+                    .id(egui::Id::unique(("dc-shapesheet", sid)))
+                    .open(&mut open)
+                    .title_bar(n_children >= 2 || !drawing_open)
+                    .resizable(true)
+                    .collapsible(false)
+                    .default_size([320.0, 460.0]);
+                if self.mdi_arranging || n_children == 1 {
+                    win = win
+                        .current_pos(sheet_tile.left_top())
+                        .fixed_size(sheet_tile.size());
+                }
+                if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
+                    win = win.constrain_to(self.mdi_client);
+                }
+                win.show(ui.ctx(), |ui| {
+                    // #189: the body caps its content to the tile so
+                    // the window never outgrows its slot and drifts
+                    // over a neighboring child's title bar.
+                    self.shapesheet_panel(ui, sid, sheet_tile.width() - 14.0);
+                });
+                if !open {
+                    close_ix = Some(i);
+                }
+            }
+            if let Some(i) = close_ix {
+                self.shapesheets.remove(i);
+            }
+        }
         self.stencil_carry(&ctx);
 
         // Automated visual smoke: DC_UI_SCREENSHOT=path.png captures the
@@ -11570,10 +13500,66 @@ impl App {
     }
 
     /// File → Close teardown: back to the start screen, nothing dirty.
+    /// #192 4a: move the active document into the inactive set
+    /// (capture its session fields; the per-doc UI state resets on
+    /// the way back — view/selection state is slice 4b).
+    fn stash_active_doc(&mut self) {
+        if self.ed.is_none() {
+            return;
+        }
+        let ed = self.ed.take().unwrap();
+        self.docs.push(DocSession {
+            ed,
+            path: std::mem::take(&mut self.path),
+            dirty: std::mem::replace(&mut self.dirty, false),
+            shapesheets: std::mem::take(&mut self.shapesheets),
+            view: std::mem::take(&mut self.view),
+            page_idx: self.page_idx,
+            sel: self.sel,
+            sel_set: std::mem::take(&mut self.sel_set),
+            group_edit: std::mem::take(&mut self.group_edit),
+        });
+    }
+
+    /// #192 4a: activate an inactive document — the active one swaps
+    /// into its slot (nothing is lost).
+    fn activate_doc(&mut self, ix: usize) {
+        if ix >= self.docs.len() {
+            return;
+        }
+        let mut incoming = self.docs.swap_remove(ix);
+        self.stash_active_doc();
+        self.ed = Some(incoming.ed);
+        self.path = incoming.path;
+        self.dirty = incoming.dirty;
+        self.shapesheets = std::mem::take(&mut incoming.shapesheets);
+        self.view = incoming.view;
+        // A stored fit-MODE view re-fits to the (possibly changed)
+        // client; a manual zoom/pan view restores exactly.
+        if self.view.fit_mode {
+            self.view.fit_pending = true;
+        }
+        self.page_idx = incoming.page_idx;
+        self.sel = incoming.sel;
+        self.sel_set = incoming.sel_set;
+        self.group_edit = incoming.group_edit;
+        self.tex.clear();
+        self.layers.clear();
+        self.page_states.clear();
+        let name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".into());
+        self.status = format!("switched to {name}");
+    }
+
     fn close_doc(&mut self) {
         self.ed = None;
         self.path = PathBuf::new();
         self.dirty = false;
+        // #192 spec: closing the document closes its ShapeSheet(s).
+        self.shapesheets.clear();
         self.set_selection(None);
         self.stencil = Stencil::default();
         // The reset pane drops the configured category order (#105,
@@ -11587,7 +13573,22 @@ impl App {
         self.reorder_open = false;
         self.comment_target = None;
         self.comment_edit = None;
-        self.status = "document closed".into();
+        // #192 4a: another open document promotes to active.
+        if !self.docs.is_empty() {
+            let next = self.docs.remove(0);
+            self.ed = Some(next.ed);
+            self.path = next.path;
+            self.dirty = next.dirty;
+            self.shapesheets = next.shapesheets;
+            let name = self
+                .path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "Untitled".into());
+            self.status = format!("closed; switched to {name}");
+        } else {
+            self.status = "document closed".into();
+        }
     }
 
     /// Unsaved-changes prompt before File → New discards work.
@@ -12242,6 +14243,7 @@ fn t_title(t: Tab) -> &'static str {
         Tab::Review => "Review",
         Tab::View => "View",
         Tab::Developer => "Developer",
+        Tab::ContainerTools => "Container Tools",
     }
 }
 
@@ -12688,24 +14690,21 @@ fn classify_dbl_click(formula: Option<&str>) -> DblClick {
     }
 }
 
-/// Visio's display names for ShapeSheet sections.
-fn section_display_name(n: &str) -> String {
-    match n {
-        "TextBlock" => "Text Block Format".into(),
-        "XForm" => "Shape Transform".into(),
-        "XForm1D" => "1-D Endpoints".into(),
-        "Character" => "Character".into(),
-        "Paragraph" => "Paragraph".into(),
-        "Tabs" => "Tabs".into(),
-        "RulerGrid" => "Ruler & Grid".into(),
-        "Connection" => "Connection Points".into(),
-        "Fill" => "Fill Format".into(),
-        "Line" => "Line Format".into(),
-        "TextXForm" => "Text Transform".into(),
-        "Misc" => "Miscellaneous".into(),
-        "PageLayout" => "Page Layout".into(),
-        "PrintPageSetup" => "Print Setup".into(),
-        "PagesXForm" => "Page Properties".into(),
-        other => other.into(),
+/// "#rrggbb" → rgb triple (the renderer's resolved color form);
+/// None on malformed values (#108 line jumps).
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim_start_matches('#');
+    if h.len() == 6 {
+        if let Ok(v) = u32::from_str_radix(h, 16) {
+            return Some((((v >> 16) & 0xff) as u8, ((v >> 8) & 0xff) as u8, (v & 0xff) as u8));
+        }
     }
+    None
+}
+
+/// #156: a stencil's master by NameU (SDCONT's gallery names).
+fn find_master_by_name<'a>(doc: &'a Document, name: &str) -> Option<&'a vsdx::Master> {
+    doc.masters
+        .iter()
+        .find(|m| m.name_u.as_deref() == Some(name))
 }

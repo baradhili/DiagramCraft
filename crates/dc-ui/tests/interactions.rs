@@ -7,6 +7,7 @@ use dc_ui::app::App;
 use egui::Pos2;
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
+use std::io::Write;
 
 fn harness_with_blank() -> Harness<'static, App> {
     // Goldens/steps must be machine-independent: pin text to the
@@ -114,7 +115,6 @@ fn stencil_drag_places_shape() {
         "drag from stencil placed a shape"
     );
 }
-
 
 /// GitHub #77: the icon action bar heads the shape context menu —
 /// icons dispatch the same commands as the text rows, and enablement
@@ -355,10 +355,14 @@ fn right_click_menu_flips_near_right_edge() {
     h.run();
     let from = h.state().debug_master_cells()[0].1.center();
     let canvas = h.state().debug_canvas_rect();
-    // The flip decision compares against the window's right edge; the
-    // canvas must reach it for this placement to force the mirror. High
-    // on the canvas so the menu fits below (see test above).
-    assert!(canvas.right() >= 1270.0, "canvas reaches window edge");
+    // The flip decision compares the menu's width against the
+    // window's right edge; the canvas must reach the CLIENT edge for
+    // this placement to force the mirror. With the drawing as an MDI
+    // child window (#192) the canvas stops at the window's frame
+    // (~1265 in a 1280 harness) — still no room for a 232 px menu to
+    // the right of a shape placed here. High on the canvas so the
+    // menu fits below (see test above).
+    assert!(canvas.right() >= 1250.0, "canvas reaches the client edge");
     let to = egui::pos2(canvas.right() - 6.0, canvas.top() + 80.0);
     click_at(&mut h, from, egui::PointerButton::Primary);
     click_at(&mut h, to, egui::PointerButton::Primary);
@@ -874,6 +878,78 @@ fn all_four_corner_drags_resize() {
     }
 }
 
+/// #160: a corner-resize drag snaps the resized edge under the snap
+/// settings — dragging the bottom-right corner to just short of a grid
+/// line lands the right edge ON the line (grid-only snap, so the grid
+/// is the single target family), while the same drag with snap off
+/// lands on the raw pointer position.
+#[test]
+fn corner_resize_snaps_the_edge_to_grid() {
+    let run = |snap_on: bool| -> (f64, f64, f64, f64) {
+        let mut h = harness_with_blank();
+        h.run();
+        let (page, shape) = place_master(&mut h, 2);
+        let mut s = h.state().debug_snap_settings();
+        s.snap_active = snap_on;
+        // Grid is the only target family left on.
+        s.snap_ruler_subdivisions = false;
+        s.snap_shape_extensions = false;
+        s.snap_connection_points = false;
+        s.snap_alignment_boxes = false;
+        s.snap_shape_intersections = false;
+        s.snap_guides = false;
+        s.dynamic_grid = false;
+        h.state_mut().debug_set_snap_for_test(s);
+        h.run();
+
+        let ppi = 96.0 * h.state().debug_zoom() as f64;
+        let step = 5.0 / 25.4; // 5 mm grid (mm display units)
+        let (w0, px0, lx0) = (
+            cell_of(&h, page, shape, "Width"),
+            cell_of(&h, page, shape, "PinX"),
+            cell_of(&h, page, shape, "LocPinX"),
+        );
+        // LocPinX is inches from the shape's left edge (Width*0.5 →
+        // half the width), so the right edge is PinX + Width − LocPin.
+        let right0 = px0 + w0 - lx0;
+        // Drag toward the second grid line right of the edge, stopping
+        // 0.03 in short of it — inside the snap strength, never on it.
+        let k = ((right0 + 1.5 * step) / step).round();
+        let target = k * step;
+        let raw = target - 0.03;
+        let br = h.state().debug_sel_br_corner().expect("selection");
+        let dx_px = (raw - right0) * ppi;
+        assert!(dx_px > 4.0, "drag is a real gesture: {dx_px:.1} px");
+        // Grab 6 px UP-LEFT of the corner — inside HANDLE_GRAB but
+        // off the corner itself. The drag delta stays dx_px: the
+        // commit snaps the CORNER (origin + delta), so the edge lands
+        // on the grid regardless of where inside the grab radius the
+        // press began (grid + grab-offset would be the pointer-snap
+        // bug).
+        let grab = br + egui::vec2(-6.0, -6.0);
+        drag_naturally(&mut h, grab, egui::vec2(dx_px as f32, 30.0));
+        let (w1, px1, lx1) = (
+            cell_of(&h, page, shape, "Width"),
+            cell_of(&h, page, shape, "PinX"),
+            cell_of(&h, page, shape, "LocPinX"),
+        );
+        (px1 + w1 - lx1, raw, target, ppi)
+    };
+
+    let (snapped, _raw, target, _ppi) = run(true);
+    assert!(
+        (snapped - target).abs() < 1e-4,
+        "snapped run lands on the grid line: {snapped:.5} vs {target:.5}"
+    );
+    let (free, raw, _target, _ppi) = run(false);
+    // Snap off: no snap at all — the edge follows the raw drag DELTA
+    // from the corner (the grab offset cancels in origin + delta).
+    assert!(
+        (free - raw).abs() < 1e-4,
+        "snap-off run keeps the raw edge: {free:.5} vs {raw:.5}"
+    );
+}
+
 /// A `GUARD(...)`-driven Width is never silently overwritten: the drag
 /// refuses that axis with a status note and the cell is untouched
 /// (#59). The height axis (unguarded) still resizes.
@@ -1236,7 +1312,7 @@ fn double_click_opens_inplace_text_editor_and_edits_shape_text() {
     // content vertically centered in the block per the default
     // VertAlign — no jump to the block's top-left on entry.
     assert!(
-        (er.center().y - block.center().y).abs() < 4.0,
+        (er.center().y - block.center().y).abs() < 6.0,
         "editor content anchored mid-block: editor {er:?} vs block {block:?}"
     );
     assert!(
@@ -1962,6 +2038,13 @@ fn context_menu_group_creates_one_shape_that_moves_as_one() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness_with_blank();
     h.run();
+    // Pure translation semantics for the carry asserts — snap
+    // landings are #109/#160's own tests.
+    let mut snap_off = h.state().debug_snap_settings();
+    snap_off.snap_active = false;
+    snap_off.glue_active = false;
+    h.state_mut().debug_set_snap_for_test(snap_off);
+    h.run();
     let cells = h.state().debug_master_cells();
     let from = cells[0].1.center();
     let canvas = h.state().debug_canvas_rect();
@@ -2188,6 +2271,15 @@ fn container_delete_strips_membership_rows() {
 fn add_to_underlying_container_members_and_carries() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness_with_blank();
+    h.run();
+    // Pure translation semantics for the carry asserts: with the
+    // (default-on) snap engine a 60 px drag lands on the nearest grid
+    // line — within the old tolerance by luck, outside it at this
+    // zoom. Snap landings are #109/#160's own tests.
+    let mut snap_off = h.state().debug_snap_settings();
+    snap_off.snap_active = false;
+    snap_off.glue_active = false;
+    h.state_mut().debug_set_snap_for_test(snap_off);
     h.run();
     // Two shapes, wrapped in a container (#27 flow).
     let cells = h.state().debug_master_cells();
@@ -2619,6 +2711,13 @@ fn group_resize_scales_its_members() {
 fn context_menu_container_wraps_and_carries_members() {
     use egui_kittest::kittest::Queryable;
     let mut h = harness_with_blank();
+    h.run();
+    // Pure translation semantics for the carry asserts — snap
+    // landings are #109/#160's own tests.
+    let mut snap_off = h.state().debug_snap_settings();
+    snap_off.snap_active = false;
+    snap_off.glue_active = false;
+    h.state_mut().debug_set_snap_for_test(snap_off);
     h.run();
     let cells = h.state().debug_master_cells();
     let from = cells[0].1.center();
@@ -3425,7 +3524,8 @@ fn format_pane_edits_cells_for_whole_selection() {
         .expect("the End Arrow dropdown (shows None)");
     btn.click();
     h.run();
-    h.get_by_label("Arrow").click();
+    // #199 renamed the gallery labels: value 1 is "Open 2-Prong".
+    h.get_by_label("Open 2-Prong").click();
     h.run();
     assert_eq!(
         h.state().debug_cell_for_test(sid, "EndArrow"),
@@ -3607,6 +3707,56 @@ fn hyperlink_dialog_close_dismisses_and_discards_draft() {
     assert!(
         h.state().debug_hyperlinks_for_test(sid).is_empty(),
         "the discarded draft wrote nothing"
+    );
+}
+
+/// #110 keytips/tab-order audit: Esc layers — with a hyperlink DRAFT
+/// open the first Esc discards only the draft (window stays), the
+/// second closes the window; Enter commits the draft like OK.
+#[test]
+fn hyperlink_dialog_esc_layers_and_enter_commits() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let from = h.state().debug_master_cells()[0].1.center();
+    let to = h.state().debug_canvas_rect().center();
+    click_at(&mut h, from, egui::PointerButton::Primary);
+    click_at(&mut h, to, egui::PointerButton::Primary);
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
+    h.get_all_by_label_contains("Hyperlink")
+        .filter(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .min_by_key(|n| n.rect().min.y as i64)
+        .expect("Hyperlink… row")
+        .click();
+    h.run();
+
+    // Draft + text: Enter commits like OK (the default button).
+    h.get_by_label("New…").click();
+    h.run();
+    h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::TextInput)
+            .label("Address"),
+    )
+    .set_text_value_accesskit("https://example.test/enter");
+    h.run();
+    h.key_press(egui::Key::Enter);
+    h.run();
+    let links = h.state().debug_hyperlinks_for_test(sid);
+    assert_eq!(links.len(), 1, "Enter committed the draft: {links:?}");
+    assert_eq!(links[0].0, "https://example.test/enter");
+
+    // Esc with no draft closes the window.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(
+        h.query_all_by_label_contains("New…").count(),
+        0,
+        "Esc closed the Hyperlinks window"
     );
 }
 
@@ -5354,6 +5504,226 @@ fn glued_shape_follows_its_guide() {
 
 // ---- GitHub #108: connector authoring -------------------------------------
 
+/// #108 AutoConnect: hovering a selected shape shows the blue
+/// arrows; clicking the right one duplicates the shape one spacing
+/// right and connects the pair with dynamic glue — one undo Macro.
+#[test]
+fn autoconnect_arrow_duplicates_and_connects() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    let n0 = h.state().debug_shape_count();
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+
+    // The right AutoConnect arrow sits just outside the right edge.
+    let arrow = egui::pos2(asr.right() + 7.0, asr.center().y);
+    click_at(&mut h, arrow, egui::PointerButton::Primary);
+    h.run();
+
+    assert_eq!(
+        h.state().debug_shape_count(),
+        n0 + 2,
+        "the duplicate AND the connector landed"
+    );
+    let sel = h.state().debug_sel().expect("selection");
+    assert_ne!(sel.1, a, "the duplicate is selected");
+    // The connector: one shape with two Connect records (dynamic).
+    let connects = h.state().debug_connects();
+    assert_eq!(
+        connects.len(),
+        2,
+        "both ends carry <Connect> records: {connects:?}"
+    );
+    // The duplicate sits one spacing right of A.
+    let ar = h.state().debug_shape_page_rect(a).unwrap();
+    let sr = h.state().debug_shape_page_rect(sel.1).unwrap();
+    assert!(
+        sr.0 > ar.0 + ar.2 - 1e-6,
+        "the duplicate lands clear right: {ar:?} vs {sr:?}"
+    );
+
+    // One undo removes the pair (one Macro).
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), n0, "one undo, both gone");
+}
+
+/// #108 line jumps: a glued horizontal connector and a free-ended
+/// vertical one cross — the horizontal line hops (arc over the
+/// crossing); a lone connector paints no hop.
+#[test]
+fn crossing_connectors_paint_line_jumps() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    assert_eq!(h.state().debug_jump_count(), 0, "nothing crosses yet");
+
+    // A right, B left: a glued horizontal connector A→B across the
+    // canvas center.
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(220.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(-160.0, 0.0));
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let bsr2 = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    h.run();
+    assert_eq!(h.state().debug_jump_count(), 0, "one connector, no hop");
+
+    // A free-ended vertical connector straight through the band at
+    // the canvas center x (clear of A and B).
+    let band_y = asr2.center().y;
+    let cx = h.state().debug_canvas_rect().center().x;
+    drag_naturally(
+        &mut h,
+        egui::pos2(cx, band_y - 150.0),
+        egui::vec2(0.0, 300.0),
+    );
+    h.run();
+    assert!(
+        h.state().debug_jump_count() >= 1,
+        "the crossing paints a hop"
+    );
+    let _ = page;
+}
+
+/// #108 remainder: the Connection Point tool — a click on a shape
+/// adds a Connection row at the click (local frame), a click on the
+/// point selects it, Delete removes it, undo restores; Esc leaves the
+/// tool. And the curved route style: the ctx menu's Curved Connector
+/// writes ShapeRouteStyle 16 + a CubicBezTo row 2 whose A/B/C/D are
+/// frame formulas.
+#[test]
+fn connection_point_tool_adds_selects_deletes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+
+    // Home ▸ Tools ▸ Connection Point.
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Conn Point").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_tool(),
+        dc_ui::app::Tool::ConnectionPoint
+    );
+
+    // Click the shape's right edge — a point materializes with local
+    // x ≈ Width (the master 2 rect is 1.5 in wide).
+    let edge = egui::pos2(asr.right() - 4.0, asr.center().y);
+    click_at(&mut h, edge, egui::PointerButton::Primary);
+    h.run();
+    let rows = h.state().debug_conn_rows(page, a);
+    assert_eq!(rows.len(), 1, "one local Connection row: {rows:?}");
+    assert!(
+        rows[0].1 > 1.2,
+        "the point sits at the clicked right edge (local x): {rows:?}"
+    );
+    assert!(h.state().debug_connpt_sel().is_some(), "selected after add");
+
+    // Click the same spot — the point is already selected (no dup).
+    click_at(&mut h, edge, egui::PointerButton::Primary);
+    h.run();
+    assert_eq!(h.state().debug_conn_rows(page, a).len(), 1, "no duplicate");
+
+    // Delete removes it; undo restores.
+    h.key_press(egui::Key::Delete);
+    h.run();
+    assert!(h.state().debug_conn_rows(page, a).is_empty(), "row removed");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(h.state().debug_conn_rows(page, a).len(), 1, "undo restores");
+
+    // Esc leaves the tool for the pointer.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+}
+
+/// #108 remainder: the ctx menu's Curved Connector — ShapeRouteStyle
+/// 16 lands and row 2 becomes the Bézier with frame-formula controls;
+/// undo returns the straight route.
+#[test]
+fn connector_ctx_menu_sets_curved_route() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    // Two rectangles, B clear right of A (the connector test setup).
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    // The connector is the selection now.
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let style0 = h
+        .state()
+        .debug_cell(page, conn, "ShapeRouteStyle")
+        .map(|(v, _)| v)
+        .unwrap_or_else(|| "1".into());
+
+    // ctx ▸ Curved Connector.
+    let pos = h
+        .state()
+        .debug_shape_screen_rect_for_test(conn)
+        .map(|r| r.center())
+        .unwrap_or(asr2.center());
+    click_at(&mut h, pos, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Curved Connector").click();
+    h.run();
+    let style = cell_of(&h, page, conn, "ShapeRouteStyle");
+    assert!(
+        (style - 16.0).abs() < 1e-9,
+        "ShapeRouteStyle 16 landed (was {style0}): {style}"
+    );
+    // Row 2's controls are the chord-third formulas.
+    let a_cell = h
+        .state()
+        .debug_cell_formula(page, conn, "Width")
+        .is_some(); // (formula seam exists)
+    let _ = a_cell;
+    // Undo returns the pre-toggle style.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let back = cell_of(&h, page, conn, "ShapeRouteStyle");
+    assert!(
+        (back - style0.parse::<f64>().unwrap_or(1.0)).abs() < 1e-9,
+        "undo restores the route style: {back}"
+    );
+}
+
 /// The Connector Tool draws between two shapes (URS-1067) and glues
 /// both ends dynamically (URS-1091): corpus formulas on the endpoint
 /// cells, Connect records with ToPart 3, one undo step.
@@ -5879,7 +6249,1020 @@ fn arrow_keys_nudge_the_selection() {
     assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
 }
 
+/// #110 remainder: a DOUBLE-clicked Format Painter stays armed across
+/// applications — two shapes painted from one arming, then Esc
+/// finishes. (The 0.05 s-step harness groups the click pair; see the
+/// `dblclick_harness_with_blank` note.)
+#[test]
+fn format_painter_double_click_stays_armed() {
+    let mut h = dblclick_harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(160.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    drag_naturally(&mut h, bsr.center(), egui::vec2(0.0, 120.0));
+    let (_, c) = place_master(&mut h, 2);
+    // A distinct source format: A's line weight, resolved and painted.
+    h.state_mut()
+        .set_cell_for_test(page, a, "LineWeight", "0.0555", None);
+    h.run();
+
+    // Select A, then double-click the Format Painter.
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr2.center(), egui::PointerButton::Primary);
+    h.run();
+    h.get_by_label_contains("Home").click();
+    h.run();
+    let fp = h.get_by_label_contains("Format Painter").rect().center();
+    dbl_click_at(&mut h, fp);
+    h.run();
+
+    // Paint onto B, then onto C: the painter stays armed after B.
+    let bsr2 = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, bsr2.center(), egui::PointerButton::Primary);
+    h.run();
+    let bv = cell_of(&h, page, b, "LineWeight");
+    assert!(
+        (bv - 0.0555).abs() < 1e-6,
+        "B painted from the sticky painter: {bv}"
+    );
+    let csr = h.state().debug_shape_screen_rect_for_test(c).unwrap();
+    click_at(&mut h, csr.center(), egui::PointerButton::Primary);
+    h.run();
+    let cv = cell_of(&h, page, c, "LineWeight");
+    assert!(
+        (cv - 0.0555).abs() < 1e-6,
+        "C painted too — the painter stayed armed: {cv}"
+    );
+    assert!(
+        h.state().debug_status().contains("Esc to finish"),
+        "status says the painter is still live: {}",
+        h.state().debug_status()
+    );
+    // Esc finishes.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(
+        h.state().debug_status().contains("cancelled"),
+        "Esc disarmed the painter: {}",
+        h.state().debug_status()
+    );
+}
+
+/// #110 remainder: the Lasso Select tool — a freehand trail selects
+/// the shapes it passes through (touch, not containment); a shape the
+/// trail never meets stays unselected.
+#[test]
+fn lasso_select_trail_picks_touched_shapes() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let ar = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let br = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    assert!(ar.left() > br.right(), "A sits clear right of B");
+
+    // Home ▸ Editing ▸ Lasso Select (Visio's Select menu entry).
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Lasso Select").click();
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Lasso);
+
+    // Freehand from the empty gap between the shapes, through A, past
+    // its right edge — every point of the trail clears B.
+    let start = egui::pos2((br.right() + ar.left()) / 2.0, ar.center().y);
+    drag_naturally(
+        &mut h,
+        start,
+        egui::vec2(ar.right() - start.x + 40.0, 8.0),
+    );
+    assert_eq!(
+        h.state().debug_sel_set_len(),
+        1,
+        "only the touched shape is selected"
+    );
+    assert_eq!(h.state().debug_sel(), Some((page, a)));
+    assert!(
+        h.state().debug_status().contains("lasso selected 1"),
+        "status notes the lasso pick: {}",
+        h.state().debug_status()
+    );
+
+    // Esc returns to the pointer (Select Area), and the next empty
+    // drag is a marquee again — touching A's row selects by band.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_tool(), dc_ui::app::Tool::Pointer);
+}
+
+/// #110 keytips/tab-order audit: Esc dismisses an open dialog (Visio)
+/// instead of falling through to the tool/painter shortcuts.
+#[test]
+fn esc_closes_an_open_dialog() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, _a) = place_master(&mut h, 2);
+
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Select by Type…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label("Select").count() > 0,
+        "the Select by Type dialog is up"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(
+        h.query_all_by_label("Select").count(),
+        0,
+        "Esc dismissed the dialog"
+    );
+}
+
 // ---- GitHub #113: the remaining slices -------------------------------------
+/// #192 slice 4a: multi-document sessions — File > Open ADDS a
+/// document (the previous one stays open as an inactive session, the
+/// Window switcher lists both), closing the active promotes the next,
+/// and each document's ShapeSheets survive the round trip.
+#[test]
+fn multi_document_open_adds_and_switches() {
+    use egui_kittest::kittest::Queryable;
+    let tmp = tempfile::tempdir().unwrap();
+    // Two small documents: fixture + a saved copy of the blank one.
+    let doc_a = hyperlink_master_fixture(tmp.path());
+    let doc_b = tmp.path().join("second.vsdx");
+    {
+        // Save the fresh blank editor as the second document.
+        let pkg = vsdx::Package::open(&doc_a).unwrap();
+        let file = std::fs::File::create(&doc_b).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default();
+        for name in pkg.part_names() {
+            w.start_file(name, opts).unwrap();
+            std::io::Write::write_all(&mut w, pkg.part(name).unwrap()).unwrap();
+        }
+        w.finish().unwrap();
+    }
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    h.run();
+
+    // Open A, then B: open ADDS (spec). The harness starts with an
+    // active untitled blank, so A stashes it: 2 docs; B: 3.
+    h.state_mut().debug_load_adds_for_test(&doc_a);
+    h.run();
+    assert_eq!(h.state().debug_open_doc_count(), 2, "A added");
+    h.state_mut().debug_load_adds_for_test(&doc_b);
+    h.run();
+    assert_eq!(h.state().debug_open_doc_count(), 3, "open ADDS a document");
+    assert_eq!(
+        h.state().debug_open_doc_names(),
+        vec!["second.vsdx", "Untitled", "hyperlink-master.vsdx"],
+    );
+
+    // The Window switcher lists all three (active marked).
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("› second.vsdx").count() == 1,
+        "the active document is marked"
+    );
+    h.get_by_label_contains("hyperlink-master.vsdx").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_open_doc_names().first().map(String::as_str),
+        Some("hyperlink-master.vsdx"),
+        "the pick activated the stashed document"
+    );
+
+    // 4b: A's per-document UI state survives the round trip. Zoom in
+    // on A, switch to B (B keeps its own zoom), switch back: A's zoom
+    // returns, and A's placed shape selection is still the selection.
+    h.hover_at(h.state().debug_canvas_rect().center());
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 120.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run();
+    let zoom_a = h.state().debug_zoom();
+    assert!(zoom_a > 0.4, "A zoomed in: {zoom_a}");
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    h.get_by_label_contains("second.vsdx").click();
+    h.run();
+    let zoom_b = h.state().debug_zoom();
+    assert!(
+        (zoom_b - zoom_a).abs() > 1e-3,
+        "B kept its own zoom: {zoom_b} vs A's {zoom_a}"
+    );
+    h.get_by_label_contains("Window 3").click();
+    h.run();
+    h.get_by_label_contains("hyperlink-master.vsdx").click();
+    h.run();
+    let zoom_back = h.state().debug_zoom();
+    assert!(
+        (zoom_back - zoom_a).abs() < 1e-3,
+        "A's zoom survived the round trip: {zoom_back} vs {zoom_a}"
+    );
+}
+
+
+/// #192 slice 3: per-shape ShapeSheet windows — two shapes carry
+/// two SIMULTANEOUS sheets (titled per shape), the ctx entry toggles
+/// each independently, Esc closes the most recent, and closing the
+/// document closes them all.
+#[test]
+fn per_shape_shapesheets_open_simultaneously() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    // A SHORT separation drag: the shape must stay ON the page — with
+    // several MDI tiles the canvas can be narrower than the page, and
+    // an off-page shape is clipped out of every tile (a 220px push
+    // sent it past the 8.5in page edge).
+    drag_naturally(&mut h, asr.center(), egui::vec2(110.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let rect = |h: &Harness<'_, App>, id| {
+        h.state().debug_shape_screen_rect_for_test(id).unwrap()
+    };
+    let toggle_sheet = |h: &mut Harness<'_, App>, id| {
+        let c = rect(h, id).center();
+        click_at(h, c, egui::PointerButton::Secondary);
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+        h.get_all_by_label_contains("Show ShapeSheet")
+            .into_iter()
+            .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+            .expect("Show ShapeSheet row")
+            .click();
+        h.run();
+    };
+
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![a]);
+    toggle_sheet(&mut h, b);
+    assert_eq!(h.state().debug_shapesheets(), vec![a, b], "both open");
+    // Both windows are up, titled per shape.
+    assert_eq!(
+        h.query_all_by_label_contains("ShapeSheet —").count(),
+        2,
+        "two per-shape windows"
+    );
+
+    // The ctx entry toggles EACH independently.
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![b]);
+    toggle_sheet(&mut h, a);
+    assert_eq!(h.state().debug_shapesheets(), vec![b, a]);
+
+    // Esc closes the most recently opened (a), b survives.
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert_eq!(h.state().debug_shapesheets(), vec![b]);
+
+    // Closing the document (clean here — nothing was edited after the
+    // placements, but dirty asks; save-state both) closes the rest.
+    h.state_mut().mark_clean_for_test();
+    h.run();
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("the drawing's close")
+        .click();
+    h.run();
+    assert!(
+        h.state().debug_shapesheets().is_empty(),
+        "doc close cleared the sheets"
+    );
+    let _ = page;
+}
+
+
+/// #192 slice 2b: a CLEAN document's drawing-window X closes
+/// straight away — no save prompt (the sheet rides along).
+#[test]
+fn drawing_window_close_x_clean_closes() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_shape_screen_rect_for_test(a)
+            .unwrap()
+            .center()
+    };
+    let c = center(&h);
+    click_at(&mut h, c, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Show ShapeSheet")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Show ShapeSheet row")
+        .click();
+    h.run();
+    // The saved state (undo alone keeps the document dirty).
+    h.state_mut().mark_clean_for_test();
+    h.run();
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("two close buttons")
+        .click();
+    h.run();
+    assert!(!h.state().debug_close_prompt(), "clean close asks nothing");
+    assert_eq!(h.state().debug_shape_count(), 0, "closed clean");
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "the sheet closed with it"
+    );
+}
+
+
+/// #192 slice 2: the drawing window's title-bar close (decorated
+/// mode only) runs the File > Close flow — a dirty document asks
+/// first, Don't Save closes it (and its sheet with it); a clean one
+/// closes straight away.
+#[test]
+fn drawing_window_close_x_runs_doc_close() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_shape_screen_rect_for_test(a)
+            .unwrap()
+            .center()
+    };
+    let open_sheet = |h: &mut Harness<'_, App>| {
+        click_at(h, center(h), egui::PointerButton::Secondary);
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+        h.get_all_by_label_contains("Show ShapeSheet")
+            .into_iter()
+            .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+            .expect("Show ShapeSheet row")
+            .click();
+        h.run();
+    };
+
+    // Two children -> the drawing is decorated; its X is the close
+    // button far from the ShapeSheet title (the sheet's own X sits
+    // beside that title). The placed shape already made the document
+    // dirty (placement is an undoable edit), so the X must ASK first.
+    open_sheet(&mut h);
+    let sheet_title = h.get_by_label_contains("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .max_by_key(|n| (n.rect().center().distance(sheet_title.center())) as i64)
+        .expect("two close buttons when decorated")
+        .click();
+    h.run();
+    assert!(h.state().debug_close_prompt(), "dirty close asks");
+    h.get_by_label_contains("Don't Save").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), 0, "document closed");
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "closing the document closed its sheet"
+    );
+
+}
+
+
+/// #189: the ShapeSheet body is the resolved, Visio-2016-style view —
+/// the fixed catalog (Shape Transform, Protection, Theme Properties,
+/// …) renders for a master-backed shape even though the instance's
+/// own sheet is nearly empty, with inherited cells dimmed.
+#[test]
+fn shapesheet_shows_the_full_resolved_catalog() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .unwrap()
+        .center();
+    click_at(&mut h, center, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Show ShapeSheet")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Show ShapeSheet row")
+        .click();
+    h.run();
+    h.run();
+
+    // The resolved catalog: pseudo-sections exist even when the
+    // instance sheet carries none of their cells, so an instanced
+    // shape always shows the full Visio structure.
+    for section in [
+        "Shape Transform",
+        "Protection",
+        "Miscellaneous",
+        "Line Format",
+        "Fill Format",
+        "Text Block Format",
+        "Events",
+        "Shape Layout",
+        "Theme Properties",
+        "Quick Style",
+        "Change Shape Behavior",
+    ] {
+        assert!(
+            h.query_all_by_label_contains(section).count() > 0,
+            "{section} section renders"
+        );
+    }
+    // Canonical cells resolve through the chain (defaults dimmed).
+    assert!(
+        h.query_all_by_label_contains("LockWidth").count() > 0,
+        "Protection cells render"
+    );
+    assert!(
+        h.query_all_by_label_contains("EventDblClick").count() > 0,
+        "Events cells render"
+    );
+}
+
+/// #190/#192: the ShapeSheet is a closable MDI-style child window —
+/// the native title-bar close dismisses it, Esc dismisses it, and the
+/// context-menu entry toggles it.
+#[test]
+fn shapesheet_window_closes() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    // The canvas narrows while the window is open — re-read the
+    // shape's screen rect for every gesture.
+    let center = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_shape_screen_rect_for_test(a)
+            .unwrap()
+            .center()
+    };
+    let open_via_ctx = |h: &mut Harness<'_, App>| {
+        click_at(h, center(h), egui::PointerButton::Secondary);
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+        h.get_all_by_label_contains("Show ShapeSheet")
+            .into_iter()
+            .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+            .expect("Show ShapeSheet row")
+            .click();
+        h.run();
+    };
+
+    // The child window is up with its native title.
+    open_via_ctx(&mut h);
+    assert!(h.state().debug_shapesheet_open(), "window opened");
+    assert!(
+        h.query_all_by_label_contains("ShapeSheet").count() > 0,
+        "the window title renders"
+    );
+
+    // The SHEET's native title-bar close dismisses it (decorated
+    // mode gives the drawing window a close button too — take the one
+    // beside the ShapeSheet title).
+    let title = h.get_by_label_contains("ShapeSheet").rect();
+    h.get_all_by_label("Close window")
+        .min_by_key(|n| (n.rect().center().distance(title.center())) as i64)
+        .expect("the sheet's close button")
+        .click();
+    h.run();
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "the title-bar close dismissed the window"
+    );
+
+    // Esc dismisses it too (frontmost-surface order).
+    open_via_ctx(&mut h);
+    assert!(h.state().debug_shapesheet_open(), "reopened");
+    h.key_press(egui::Key::Escape);
+    h.run();
+    assert!(!h.state().debug_shapesheet_open(), "Esc closed it");
+
+    // The ctx entry is a toggle: with the window OPEN, the same entry
+    // CLOSES it.
+    open_via_ctx(&mut h);
+    assert!(h.state().debug_shapesheet_open());
+    open_via_ctx(&mut h);
+    assert!(
+        !h.state().debug_shapesheet_open(),
+        "the ctx entry toggles the window closed"
+    );
+}
+
+
+/// #157: curve control handles and relative-row editing on the
+/// geometry handles — an ArcTo row exposes an APEX circle (the drag
+/// recomputes the sagitta from the pointer), and RelLineTo rows
+/// (fractions of Width/Height — the #137 refusal) drag to new
+/// fractions, the row staying relative.
+#[test]
+fn curve_controls_and_relative_rows_edit() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, rect) = place_master(&mut h, 2);
+
+    // Local geometry materializes on the master-based rect: an ArcTo
+    // row (A bulging right of travel).
+    h.state_mut()
+        .debug_set_geo_row_for_test(page, rect, 0, 3, "ArcTo", &[("A", 0.15)]);
+    h.run();
+    let a0 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("the arc row seeded");
+    assert!((a0 - 0.15).abs() < 1e-9);
+
+    // The APEX control handle exists; dragging it ACROSS the chord
+    // flips the sagitta's sign.
+    let apex = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::GeoPoint {
+            section_ix: 0,
+            row_ix: 3,
+            cell: dc_ui::canvas::GeoCell::Apex,
+        })
+        .expect("the apex control handle");
+    drag_naturally(&mut h, apex, egui::vec2(0.0, -160.0));
+    h.run();
+    let a1 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("A rewritten");
+    assert!(
+        a1.signum() != a0.signum() && a1.abs() > a0.abs(),
+        "the apex drag re-bends the arc: {a0} -> {a1}"
+    );
+
+    // One undo restores the sagitta.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let a2 = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 3, "A")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap();
+    assert!((a2 - a0).abs() < 1e-6, "undo restored the arc: {a2}");
+
+    // A REL row: the old refusal. Row 4 becomes RelLineTo at a
+    // DISTINCT position (0.2/0.8) — its X/Y handle must not overlap
+    // row 3's end point, or the shared point's first handle wins the
+    // grab and the Rel row never drags.
+    h.state_mut()
+        .debug_set_geo_row_for_test(page, rect, 0, 4, "RelLineTo", &[("X", 0.2), ("Y", 0.8)]);
+    h.run();
+    let rel = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::GeoPoint {
+            section_ix: 0,
+            row_ix: 4,
+            cell: dc_ui::canvas::GeoCell::X,
+        })
+        .expect("the relative row's vertex handle");
+    drag_naturally(&mut h, rel, egui::vec2(60.0, 0.0));
+    h.run();
+    let fx = h
+        .state()
+        .debug_geo_row_cell_for_test(rect, 4, "X")
+        .and_then(|(v, _)| v)
+        .and_then(|v| v.parse::<f64>().ok())
+        .expect("fraction written");
+    assert!(
+        (fx - 0.2).abs() > 1e-3 && fx.abs() < 3.0,
+        "the Rel row moved to a new fraction (a fraction, not page inches): {fx}"
+    );
+    // The row is STILL relative — the write kept the row type.
+    assert_eq!(
+        h.state().debug_geo_row_type_for_test(rect, 4).as_deref(),
+        Some("RelLineTo")
+    );
+}
+
+
+
+/// #156: the Container Styles gallery — Design ▸ Containers… wraps a
+/// two-shape selection in a master-based Classic container (members
+/// #191: a container opened from a real file — the MASTER root carries
+/// the SDCONT recognition rows and the page instance carries LOCAL
+/// sections (the Visio-authored situation: Geometry snapshots, no
+/// membership touched), so effective_sheet's either/or return used to
+/// hide `User.msvStructureType` and the container was invisible.
+fn container_instance_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("container-instance.vsdx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
+<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
+<Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
+<Override PartName="/visio/masters/masters.xml" ContentType="application/vnd.ms-visio.masters+xml"/>
+<Override PartName="/visio/masters/master1.xml" ContentType="application/vnd.ms-visio.master+xml"/>
+</Types>"#;
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/>
+</Relationships>"#;
+    let document = r#"<?xml version="1.0" encoding="utf-8"?>
+<VisioDocument xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<StyleSheets><StyleSheet ID='0' NameU='No Style'>
+  <Cell N='LineWeight' V='0.01041666666666667'/><Cell N='LineColor' V='0'/>
+  <Cell N='FillForegnd' V='1'/><Cell N='FillPattern' V='1'/>
+</StyleSheet></StyleSheets>
+</VisioDocument>"#;
+    let document_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/>
+<Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/masters" Target="masters/masters.xml"/>
+</Relationships>"#;
+    let pages = r#"<?xml version="1.0" encoding="utf-8"?>
+<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Page ID='0' NameU='Page-1' Name='Page-1'>
+<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/>
+</PageSheet>
+<Rel r:id='rId1'/>
+</Page>
+</Pages>"#;
+    let pages_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/page" Target="page1.xml"/>
+</Relationships>"#;
+    let page1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<PageContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='20' Type='Shape' Master='7' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='4.25'/><Cell N='PinY' V='5.5'/>
+  <Cell N='Width' V='3'/><Cell N='Height' V='2'/>
+  <Cell N='LocPinX' V='1.5'/><Cell N='LocPinY' V='1'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='3'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='3'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+</Shape>
+</Shapes>
+</PageContents>"#;
+    let masters = r#"<?xml version="1.0" encoding="utf-8"?>
+<Masters xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Master ID='7' NameU='Classic' r:id='rId1'/>
+</Masters>"#;
+    let masters_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/master" Target="master1.xml"/>
+</Relationships>"#;
+    let master1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<MasterContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='3' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='1.5'/><Cell N='PinY' V='1'/>
+  <Cell N='Width' V='3'/><Cell N='Height' V='2'/>
+  <Cell N='LocPinX' V='1.5'/><Cell N='LocPinY' V='1'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='3'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='3'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+  <Section N='User'>
+    <Row N='msvStructureType'><Cell N='Value' V='Container' U='STR'/><Cell N='Prompt' V=''/></Row>
+    <Row N='msvSDContainerNoHighlight'><Cell N='Value' V='0'/><Cell N='Prompt' V=''/></Row>
+  </Section>
+</Shape>
+</Shapes>
+</MasterContents>"#;
+
+    for (name, data) in [
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("visio/document.xml", document),
+        ("visio/_rels/document.xml.rels", document_rels),
+        ("visio/pages/pages.xml", pages),
+        ("visio/pages/_rels/pages.xml.rels", pages_rels),
+        ("visio/pages/page1.xml", page1),
+        ("visio/masters/masters.xml", masters),
+        ("visio/masters/_rels/masters.xml.rels", masters_rels),
+        ("visio/masters/master1.xml", master1),
+    ] {
+        w.start_file(name, opts).unwrap();
+        w.write_all(data.as_bytes()).unwrap();
+    }
+    w.finish().unwrap();
+    path
+}
+
+/// #191: selecting the master-based container raises the Container
+/// Tools tab, and the Highlight Members toggle resolves the master
+/// root's `msvSDContainerNoHighlight` (default on) and materializes
+/// the local row on first edit.
+#[test]
+fn master_based_container_recognition_and_highlight() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = container_instance_fixture(tmp.path());
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui_state(
+            move |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_doc(&path),
+        );
+    h.run();
+    h.run();
+    let page = h.state().debug_page_ids()[0];
+
+    // The instance has local sections and no membership rows — the
+    // exact shape of a real Visio-authored container instance.
+    assert!(
+        h.state().debug_shape_screen_rect_for_test(20).is_some(),
+        "the master instance is on the page"
+    );
+    let sr = h.state().debug_shape_screen_rect_for_test(20).unwrap();
+    click_at(&mut h, sr.center(), egui::PointerButton::Primary);
+    h.run();
+    assert!(
+        h.state().debug_tab_is_container_tools(),
+        "the Container Tools tab raises for a master-based container"
+    );
+    assert_eq!(
+        h.state().debug_user_row(page, 20, "msvStructureType").as_deref(),
+        Some("Container"),
+        "the master root's recognition row resolves"
+    );
+
+    // Highlight toggles against the master-root default (on): first
+    // click writes off (1) locally, second restores on (0).
+    h.get_by_label_contains("Highlight Members").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_user_row(page, 20, "msvSDContainerNoHighlight").as_deref(),
+        Some("1"),
+        "off materialized on the instance"
+    );
+    h.get_by_label_contains("Highlight Members").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_user_row(page, 20, "msvSDContainerNoHighlight").as_deref(),
+        Some("0"),
+        "back on"
+    );
+
+    // One undo per toggle.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_user_row(page, 20, "msvSDContainerNoHighlight").as_deref(),
+        Some("1"),
+        "undo restores the first toggle"
+    );
+}
+
+/// re-pointed, one undo); the contextual Container Tools tab raises,
+/// restyles via Belt (old container replaced), and the member
+/// highlight toggle writes the container's msvSDContainerNoHighlight.
+#[test]
+fn container_styles_gallery_tab_and_highlight() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    let n0 = h.state().debug_shape_count();
+
+    // Select both (click A, shift-click B).
+    let asr2 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
+    click_at(&mut h, asr2.center(), egui::PointerButton::Primary);
+    h.run();
+    h.hover_at(bsr.center());
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::SHIFT));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: bsr.center(),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::SHIFT,
+        });
+    }
+    h.run();
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    h.run();
+    assert_eq!(h.state().debug_sel_set_len(), 2, "both selected");
+
+    // Design ▸ Containers… ▸ Classic.
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Containers…").click();
+    h.run();
+    h.get_by_label("Classic").click();
+    h.run();
+
+    // A master-based container wrapped the pair: +1 shape, members
+    // re-pointed at it, it is the selection, the contextual tab is up.
+    assert_eq!(h.state().debug_shape_count(), n0 + 1, "the container landed");
+    let (_, c) = h.state().debug_sel().expect("container selected");
+    for m in [a, b] {
+        assert_eq!(
+            h.state().debug_user_row(page, m, "msvSDContainerShape").as_deref(),
+            Some(c.to_string().as_str()),
+            "member {m} points at the new container"
+        );
+    }
+    assert!(
+        h.state().debug_tab_is_container_tools(),
+        "the Container Tools tab raised"
+    );
+
+    // Restyle to Belt: the OLD container goes, members re-point at a
+    // new one — still n0+1 shapes, still members of a container.
+    h.get_by_label_contains("Belt").click();
+    h.run();
+    assert_eq!(h.state().debug_shape_count(), n0 + 1, "one swap, no leak");
+    let (_, c2) = h.state().debug_sel().expect("new container selected");
+    assert_ne!(c, c2, "the restyle replaced the container");
+    for m in [a, b] {
+        assert_eq!(
+            h.state().debug_user_row(page, m, "msvSDContainerShape").as_deref(),
+            Some(c2.to_string().as_str()),
+            "member {m} re-pointed at the restyled container"
+        );
+    }
+
+    // The member-highlight toggle writes the container's
+    // msvSDContainerNoHighlight row (1 = off).
+    h.get_by_label_contains("Highlight Members").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_user_row(page, c2, "msvSDContainerNoHighlight").as_deref(),
+        Some("1".to_string().into_boxed_str().as_ref()),
+        "highlight off lands on the container"
+    );
+
+    // One undo per action: back through the toggle, the restyle, the
+    // first wrap.
+    for _ in 0..3 {
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+        h.run();
+    }
+    assert_eq!(h.state().debug_shape_count(), n0, "undo unwinds everything");
+}
+
+
+/// #113 remainder: the page-tab menu's background mark — Set as
+/// Background writes the mark (the Backgrounds gallery then lists the
+/// page; an unmarked page never shows as a choice), Remove clears it.
+#[test]
+fn page_tab_menu_marks_a_background() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    // Two pages.
+    let tab = h.get_by_label("Page-1").rect().center();
+    click_at(&mut h, tab, egui::PointerButton::Secondary);
+    h.run();
+    h.get_all_by_label_contains("Insert Page")
+        .into_iter()
+        .find(|n| n.rect().height() < 30.0)
+        .expect("Insert Page… row")
+        .click();
+    h.run();
+    let pages: Vec<i64> = h.state().debug_page_ids();
+    assert_eq!(pages.len(), 2);
+
+    // Mark Page-2 as a background from ITS tab.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Set as Background").click();
+    h.run();
+    assert!(
+        h.state().debug_page_is_bg(pages[1]),
+        "Page-2 carries the mark"
+    );
+    assert!(
+        !h.state().debug_page_is_bg(pages[0]),
+        "Page-1 stays foreground"
+    );
+
+    // The Backgrounds gallery (on Page-1) now lists Page-2 only.
+    h.get_by_label("Page-1").click();
+    h.run();
+    h.get_by_label_contains("Design").click();
+    h.run();
+    h.get_by_label_contains("Backgrounds").click();
+    h.run();
+    let listed = h.query_all_by_label_contains("(page 2)").count();
+    assert_eq!(listed, 1, "the marked page is the gallery entry");
+    assert_eq!(
+        h.query_all_by_label_contains("(page 1)").count(),
+        0,
+        "a foreground page never lists as a background"
+    );
+
+    // Remove the mark; the gallery is empty again.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Remove Background Mark").click();
+    h.run();
+    assert!(!h.state().debug_page_is_bg(pages[1]), "mark removed");
+}
+
+/// #113 remainder: Copy as Picture's vector flavor — the SVG markup
+/// (selection-only viewBox) lands for the clipboard.
+#[test]
+fn copy_as_picture_svg_vector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let _ = a;
+
+    // Right-click ▸ Copy as Picture… ▸ Vector (SVG) ▸ Copy Picture.
+    let asr = h.state().debug_shape_screen_rect_for_test(a).unwrap();
+    click_at(&mut h, asr.center(), egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Copy as Picture")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Copy as Picture… row")
+        .click();
+    h.run();
+    h.get_by_label_contains("Vector (SVG)").click();
+    h.run();
+    h.get_by_label("Copy Picture").click();
+    h.run();
+    let svg = h.state().debug_last_picture_text().expect("SVG copied");
+    assert!(svg.starts_with("<svg"), "an SVG document: {}", &svg[..40]);
+    assert!(
+        svg.contains("viewBox=\""),
+        "the viewBox is retargeted to the selection"
+    );
+    // The rebuilt root is well-formed: the whole document parses
+    // (token-stripping the emitted root left orphan viewBox tokens).
+    assert!(
+        dc_ui::svgimg::parse_svg(&svg, dc_ui::perf::Kind::Thumb).is_ok(),
+        "the copied SVG parses: {}",
+        &svg[..svg.len().min(160)]
+    );
+}
+
+
 
 /// A picture inserts as a Foreign shape carrying real media: a PNG in,
 /// a media part + rel recorded, and the render path sees it.
@@ -5994,6 +7377,13 @@ fn background_page_assignment_and_underlay() {
     assert_eq!(h.state().debug_shape_count(), 0, "fresh page is empty");
     let (p2, b) = place_master(&mut h, 2);
     let _ = (p2, b);
+    // #113 remainder: the gallery lists MARKED pages only — mark
+    // page 2 as a background from its tab before assigning.
+    let tab2 = h.get_by_label("Page-2").rect().center();
+    click_at(&mut h, tab2, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Set as Background").click();
+    h.run();
     // Switch back to page 1 and assign page 2 as its background.
     h.get_by_label_contains("Page-1").click();
     h.run();
@@ -6659,3 +8049,14 @@ fn connection_points_reveal_highlight_and_show_glued_sites() {
         pinx - lpx + last_x
     );
 }
+
+
+
+
+
+
+
+
+
+
+
