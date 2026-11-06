@@ -294,6 +294,9 @@ pub fn shape_ink_bounds(
                 a.apply(x1, y1),
                 a.apply(x0, y1),
             ];
+            if std::env::var("DC_DEBUG_BOUNDS").is_ok() && s.id == 1022 {
+                println!("DEBUG box corners: {c:?}");
+            }
             let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
             let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
             union((
@@ -304,6 +307,106 @@ pub fn shape_ink_bounds(
             ));
         };
         box_union(0.0, -height, width, 0.0, &a, union);
+        // #202: the geometry rows' REAL extent — a curved connector's
+        // arc belly leaves the begin-corner box (a 1D connector's
+        // Height is 0), and a layer viewBox built from the box alone
+        // clips the belly into a straight line (every arc-pair
+        // connector in utilisation.vsdx rendered flat). Union every
+        // row's endpoint and control points: every path this module
+        // emits is a line/quad/cubic whose curve stays inside the
+        // hull of those points, plus the elliptical arc's apex
+        // (2·on-curve − chord mid) as the conservative bound.
+        for geo in s.sheet.sections_named("Geometry") {
+            let mut cur = (0.0f64, 0.0f64);
+            for row in &geo.rows {
+                let Some(t) = row.t.as_deref() else { continue };
+                let num = |n: &str| -> f64 {
+                    row.cell(n)
+                        .and_then(|c| {
+                            c.f.as_deref()
+                                .and_then(|f| vsdx::formula::eval(f, &env).ok())
+                                .and_then(|v| v.as_f64())
+                                .filter(|v| v.is_finite())
+                                .or(c.numeric())
+                        })
+                        .unwrap_or(0.0)
+                };
+                let rel = t.starts_with("Rel");
+                let (mut x, mut y) = (num("X"), num("Y"));
+                if rel {
+                    x *= width.max(1e-6);
+                    y *= height.max(1e-6);
+                }
+                // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
+                // box union above; the row coordinates are y-UP.
+                let pt = |x: f64, y: f64, u: &mut dyn FnMut((f64, f64, f64, f64))| {
+                    let (px, py) = a.apply(x, -y);
+                    u((px, py, 0.0, 0.0));
+                };
+                pt(x, y, union);
+                match t {
+                    "ArcTo" | "RelArcTo" => {
+                        // The apex: chord mid + A·right-of-travel.
+                        let sag = num("A");
+                        let (dx, dy) = (x - cur.0, y - cur.1);
+                        let len = dx.hypot(dy).max(1e-9);
+                        let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
+                        pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, union);
+                    }
+                    "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                        let (mut mx, mut my) = (num("A"), num("B"));
+                        if rel {
+                            mx *= width.max(1e-6);
+                            my *= height.max(1e-6);
+                        }
+                        pt(mx, my, union);
+                        // The arc's apex beyond the on-curve point.
+                        pt(2.0 * mx - (cur.0 + x) / 2.0, 2.0 * my - (cur.1 + y) / 2.0, union);
+                    }
+                    "CubicBezTo" | "RelCubBezTo" => {
+                        // (A,B) and (C,D): two control points.
+                        let (mut a, mut b) = (num("A"), num("B"));
+                        let (mut c, mut d) = (num("C"), num("D"));
+                        if rel {
+                            a *= width.max(1e-6);
+                            b *= height.max(1e-6);
+                            c *= width.max(1e-6);
+                            d *= height.max(1e-6);
+                        }
+                        pt(a, b, union);
+                        pt(c, d, union);
+                    }
+                    "QuadBezTo" | "RelQuadBezTo" => {
+                        let (mut a, mut b) = (num("A"), num("B"));
+                        if rel {
+                            a *= width.max(1e-6);
+                            b *= height.max(1e-6);
+                        }
+                        pt(a, b, union);
+                    }
+                    "NURBSTo" => {
+                        // #188: the interior control points live in the
+                        // E formula's (x, y, knot, weight) groups.
+                        let e_text = row
+                            .cell("E")
+                            .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                            .unwrap_or_default();
+                        if let Some(f) = crate::curve::parse_nurbs(&e_text) {
+                            let (fx, fy) = if f.x_type == 0.0 {
+                                (width.max(1e-6), height.max(1e-6))
+                            } else {
+                                (1.0, 1.0)
+                            };
+                            for (gx, gy, _, _) in &f.points {
+                                pt(gx * fx, gy * fy, union);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                cur = (x, y);
+            }
+        }
         // Text can overflow the shape box (TxtWidth/TxtHeight are
         // independent cells); bound it with emit_text's placement math.
         let has_text = s
@@ -338,6 +441,14 @@ pub fn shape_ink_bounds(
         }
     }
     walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut union);
+    #[allow(clippy::let_unit_value)]
+    {
+        if std::env::var("DC_DEBUG_BOUNDS").is_ok() {
+            if let Some(b) = &acc {
+                println!("DEBUG bounds raw for {shape_id}: {b:?}");
+            }
+        }
+    }
     let (x, y, w, h) = acc?;
     // Stroke bleed margin; then clamp to the page ± 2 in so a rogue
     // formula cannot push a layer off to infinity.
@@ -1761,6 +1872,7 @@ fn render_all_geometry(
     // carry the visuals) but container groups DO carry a visible rect,
     // so group geometry renders too; degenerate leftover rows collapse
     // to invisible zero-area paths after the row-cell merge below.
+    let env = shape_env(doc, s, chain);
     let own: Vec<&vsdx::Section> = s.sheet.sections_named("Geometry");
     if !own.is_empty() {
         // Row-cell inheritance: inline copies often keep only the Y cells
@@ -1884,7 +1996,31 @@ fn render_all_geometry(
                             .map(|f| f.contains("Width") || f.contains("Height"))
                             .unwrap_or(true);
                         let placed = |v: f64| if proportional { scaled(cname, v) } else { v };
-                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound) else {
+                        // Formula-authoritative for PROPORTIONAL master
+                        // cells (the same rule the row walk uses):
+                        // corpus connector masters carry stale zero
+                        // caches (`Y V=0 F=Height/2` — utilisation
+                        // master3) that would collapse the inherited
+                        // arcs to flat lines (#202). The formula
+                        // evaluates against the INSTANCE dims — for a
+                        // proportional formula that IS the
+                        // master→instance scaling. Non-proportional
+                        // formulas (`Controls.Row_1`, `User.*`) have no
+                        // instance meaning; their cached value (if any)
+                        // stands, unfilled otherwise.
+                        let sv = if proportional {
+                            scell.f
+                                .as_deref()
+                                .and_then(|f| vsdx::formula::eval(f, &env).ok())
+                                .and_then(|v| v.as_f64())
+                                .filter(|v| v.is_finite() && placed(*v).abs() <= bound)
+                                .or_else(|| {
+                                    scell.numeric().filter(|v| placed(*v).abs() <= bound)
+                                })
+                        } else {
+                            scell.numeric().filter(|v| placed(*v).abs() <= bound)
+                        };
+                        let Some(sv) = sv else {
                             continue;
                         };
                         let patched = Cell::value(format!("{}", placed(sv)));

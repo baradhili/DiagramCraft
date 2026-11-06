@@ -244,6 +244,34 @@ pub fn glue_decision(
     glue_active: bool,
     glue_connection_points: bool,
 ) -> Option<GlueTarget> {
+    glue_decision_ex(
+        cands,
+        p,
+        toward,
+        threshold,
+        glue_active,
+        glue_connection_points,
+        true,
+    )
+}
+
+/// [`glue_decision`] with the dynamic-glue halo control (#202): the
+/// endpoint-drop commit passes `halo = false` — Visio glues a dragged
+/// endpoint to a shape only when the drop lands ON it; the
+/// threshold-wide ring around every shape made the endpoints feel
+/// hard-glued (they re-attached without the cursor ever touching the
+/// shape) and confined them to the shape's edges afterwards. The
+/// Connector Tool keeps the halo (drawing a connector ONTO a shape's
+/// vicinity is the tool's whole gesture).
+pub fn glue_decision_ex(
+    cands: &[GlueCandidate],
+    p: (f64, f64),
+    toward: (f64, f64),
+    threshold: f64,
+    glue_active: bool,
+    glue_connection_points: bool,
+    halo: bool,
+) -> Option<GlueTarget> {
     if !glue_active {
         return None;
     }
@@ -268,12 +296,13 @@ pub fn glue_decision(
     // Dynamic glue: the drop is on (or at the edge of — within the
     // threshold) the shape. Visio glues a connector dropped on a
     // shape's boundary even when no connection point is involved.
+    let pad = if halo { threshold } else { 0.0 };
     for c in cands {
         let (x, y, w, h) = c.rect;
-        if p.0 >= x - threshold
-            && p.0 <= x + w + threshold
-            && p.1 >= y - threshold
-            && p.1 <= y + h + threshold
+        if p.0 >= x - pad
+            && p.0 <= x + w + pad
+            && p.1 >= y - pad
+            && p.1 <= y + h + pad
         {
             return Some(GlueTarget {
                 shape_id: c.id,

@@ -5729,6 +5729,79 @@ fn connector_ctx_menu_sets_curved_route() {
     );
 }
 
+/// #202 (owner follow-up): an endpoint dropped NEAR a shape — inside
+/// the old threshold halo but OFF the shape — must RELEASE, not
+/// re-glue: the halo re-attached endpoints the cursor never touched
+/// and pinned them to the shape's edges afterwards (the "hard glued /
+/// only moves horizontally" report).
+#[test]
+fn endpoint_drop_off_shape_releases_even_in_the_old_halo() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr.center() - asr2.center());
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let glue_count = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn)
+            .count()
+    };
+    assert!(glue_count(&h) >= 1, "the connector carries glue");
+
+    // Drag the END handle 6 px LEFT of B's left edge: off the shape,
+    // inside the old halo (8 px).
+    let br = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    // The END handle sits at the walkglue landing (B's center for the
+    // dynamic glue) — press the ACTUAL handle.
+    let endh = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("END handle");
+    // Drop 5 px left of B's left edge: OFF the shape, inside the old
+    // threshold halo.
+    let drop = egui::pos2(br.left() - 5.0, endh.y);
+    drag_naturally(&mut h, endh, drop - endh);
+    h.run();
+    assert_eq!(
+        glue_count(&h),
+        1,
+        "the dropped END releases (the Begin record stays): {}",
+        glue_count(&h)
+    );
+    assert!(
+        h.state()
+            .debug_cell_formula(page, conn, "EndX")
+            .map(|f| f.is_empty())
+            .unwrap_or(true),
+        "the dragged end's glue formula cleared: {:?}",
+        h.state().debug_cell_formula(page, conn, "EndX")
+    );
+}
+
 /// #132 (URS-1225): the Freeform tool — Home ▸ Tools ▸ Freeform arms
 /// the pen; a drag over empty page builds an editable shape (selected,
 /// vertex handles); Esc leaves the tool; undo removes the shape.

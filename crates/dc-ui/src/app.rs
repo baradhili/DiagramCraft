@@ -3827,13 +3827,18 @@ impl App {
         let Some(other) = other else { return };
         let cands = self.glue_candidates(&[sid]);
         let threshold = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
-        let target = crate::connectors::glue_decision(
+        // #202: the endpoint drop glues STRICTLY — a connection point
+        // within the snap radius, or a shape under the cursor (no
+        // halo: the ring around every shape re-attached endpoints the
+        // cursor never touched, pinning them to the shape's edges).
+        let target = crate::connectors::glue_decision_ex(
             &cands,
             raw,
             other,
             threshold,
             self.snap.glue_active,
             self.snap.glue_connection_points,
+            false,
         );
         let attach = target.map(|t| t.attach).unwrap_or(raw);
         // The plain endpoint move first (derived cells + guards).
@@ -4952,6 +4957,23 @@ impl App {
         let guide_list = self.snap_guides(&[dragged]);
         let ctx = self.snap_ctx_of(&targets, &guide_list);
         crate::snap::point_snap(p, &ctx, &self.snap, glue)
+    }
+
+    /// #202: the CONNECTOR-ENDPOINT snap — connection points and
+    /// guides only. The shape-handle/vertex magnets made drops near a
+    /// shape's edge snap onto the edge and re-glue there (the
+    /// endpoints felt hard-glued and afterwards slid only along the
+    /// shape's edges); Visio's endpoint drag magnetizes to connection
+    /// points, and a drop off-shape stays loose.
+    fn snap_endpoint_for(&self, dragged: i64, p: (f64, f64)) -> (f64, f64) {
+        let page_id = self.page_id().unwrap_or(0);
+        let targets = self.snap_targets(page_id, &[dragged]);
+        let guide_list = self.snap_guides(&[dragged]);
+        let ctx = self.snap_ctx_of(&targets, &guide_list);
+        let mut s = self.snap;
+        s.glue_shape_handles = false;
+        s.glue_shape_vertices = false;
+        crate::snap::point_snap(p, &ctx, &s, true).map_or(p, |(q, _)| q)
     }
 
     /// #160: per-axis corner snap for a resize drag — the SNAP
@@ -8862,6 +8884,22 @@ impl App {
         // Connector Tool's fresh draw). The context is built inside
         // the closure (SnapCtx borrows the targets).
         let snap_settings = self.snap;
+        // #202: connector-endpoint drags magnetize to CONNECTION
+        // POINTS (+ guides) only — the shape-handle/vertex magnets
+        // snapped drops onto the old shape's edges and re-glued them
+        // there (the hard-glued / one-axis-only feel).
+        let sel_is_conn = self.sel.is_some_and(|(p, sid)| {
+            p == self.page_id().unwrap_or(0)
+                && self.ed.as_ref().is_some_and(|ed| {
+                    let page = &ed.doc.pages[self.page_idx];
+                    vsdx::model::find_shape_by_id(&page.shapes, sid)
+                        .is_some_and(|sh| {
+                            shape_chain(&ed.doc, page.id, sid).ok().is_some_and(|ch| {
+                                crate::connectors::is_connector_in(&ed.doc, &ch, sh)
+                            })
+                        })
+                })
+        });
         let (snap_grid, snap_ruler, snap_thr) = (
             canvas::grid_step_in(&self.view),
             canvas::ruler_interval_in(&self.view),
@@ -8893,7 +8931,12 @@ impl App {
                 ruler_step_in: snap_ruler,
                 threshold_in: snap_thr,
             };
-            crate::snap::point_snap(p, &ctx, &snap_settings, true).map_or(p, |(q, _)| q)
+            let mut settings = snap_settings;
+            if endpoint_drag && sel_is_conn {
+                settings.glue_shape_handles = false;
+                settings.glue_shape_vertices = false;
+            }
+            crate::snap::point_snap(p, &ctx, &settings, true).map_or(p, |(q, _)| q)
         };
         // #160: the live corner-resize preview snaps per axis under
         // the SNAP settings against the page minus the selected shape
@@ -9207,8 +9250,7 @@ impl App {
                                 // to connection points (and the other
                                 // snap targets) on release.
                                 let snapped = dragged
-                                    .and_then(|sid| self.snap_point_for(sid, raw, true))
-                                    .map_or(raw, |(p, _)| p);
+                                    .map_or(raw, |sid| self.snap_endpoint_for(sid, raw));
                                 self.commit_connector_endpoint(id, snapped);
                             } else {
                                 let glue = dragged
