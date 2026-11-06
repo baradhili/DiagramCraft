@@ -80,6 +80,35 @@ fn release(h: &mut Harness<'_, App>, pos: egui::Pos2) {
     h.run();
 }
 
+/// Pump frames until the whole render pipeline goes quiet — six
+/// consecutive frames with zero work on ANY stage (page fills and
+/// re-buckets, thumbnails, icons; only the always-incrementing frame
+/// counter is ignored). A fixed frame count cannot serve as the
+/// warm-up: under the sync seam the per-frame post cap does not
+/// apply, but kittest's run() drains repaint requests into a varying
+/// number of draws, and at n=2000 the first-fill wave outlasts any
+/// small count. Six, not two, because of the #124 item 6.2 settle
+/// gate: a deferred re-bucket fires on the third stable frame, so a
+/// shorter quiet streak can exit while it is still pending. And the
+/// check spans every stage because page-quiet frames can still carry
+/// stencil-thumbnail landings whose layout shifts re-fit the zoom —
+/// a late fit nudge re-buckets the page and would bleed into the
+/// measured window.
+fn pump_settled(h: &mut Harness<'_, App>) {
+    const QUIET_FRAMES: usize = 6;
+    let mut quiet = 0;
+    let mut frames = 0;
+    while quiet < QUIET_FRAMES {
+        let before = perf::snapshot();
+        h.run();
+        frames += 1;
+        let d = perf::diff(&before, &perf::snapshot());
+        let busy = d.iter().any(|s| s.stage != "frame" && s.count > 0);
+        quiet = if busy { 0 } else { quiet + 1 };
+        assert!(frames < 400, "the fill/settle never went quiet ({frames} frames)");
+    }
+}
+
 #[test]
 #[ignore = "informational perf bench (GitHub #89); run with --release --ignored --nocapture"]
 fn render_perf_stage_split() {
@@ -91,14 +120,17 @@ fn render_perf_stage_split() {
         let tmp = tempfile::tempdir().unwrap();
         let path = many_shape_fixture(tmp.path(), n, 6);
 
-        // --- open: first frames pay page raster + thumbnail warm-up ---
+        // --- open: first frames pay page raster + thumbnail warm-up;
+        //     since #124 item 6.2 the fit-settle re-bucket waits for a
+        //     stable bucket, so settle needs ~6 frames, not 2 ---
         perf::reset();
         let mut h = mount(App::with_doc(&path));
         let t = Instant::now();
-        h.run();
-        h.run(); // second pass: textures and fit settle
+        for _ in 0..6 {
+            h.run();
+        }
         let open = perf::snapshot();
-        report("open (2 frames)", &open, t.elapsed());
+        report("open + fit-settle (6 frames)", &open, t.elapsed());
 
         // --- idle cached frames: nothing changes ---
         let base = perf::snapshot();
@@ -144,31 +176,40 @@ fn render_perf_stage_split() {
         report("resize commit (mutation frame)", &perf::diff(&mid, &perf::snapshot()), t.elapsed());
 
         // --- zoom bucket: a fresh harness mounted at 200% pays the new
-        // bucket's raster (same work a mid-session bucket change
-        // pays: same version, new bucket → render+upload only, the
-        // parsed tree is reused) ---
+        //     bucket's raster (same work a mid-session bucket change
+        //     pays: same version, new bucket → render+upload only, the
+        //     parsed tree is reused) ---
         let mut app = App::with_doc(&path);
         app.set_zoom_for_test(2.0);
         perf::reset();
         let mut h2 = mount(app);
         let t = Instant::now();
-        h2.run();
-        h2.run();
+        for _ in 0..6 {
+            h2.run();
+        }
         report("open at 200% zoom (new bucket raster)", &perf::snapshot(), t.elapsed());
 
-        // --- zoom sweep (#91/#93): one harness, several bucket
+        // --- zoom sweep (#91/#93/#124): one harness, several bucket
         //     crossings without a model change — layers re-RENDER at
-        //     the new width and never re-serialize (the strings are
-        //     retained per version) ---
+        //     the new width from the retained parse (#124 item 6.3:
+        //     zero re-serializes, zero re-parses) after the bucket
+        //     holds for SETTLE_FRAMES frames (item 6.2: four runs per
+        //     step — the changed frame counts settle=0, the fourth
+        //     posts) ---
         let app = App::with_doc(&path);
         let mut h3 = mount(app);
-        h3.run();
-        h3.run(); // warm the tree at the fit zoom
+        for _ in 0..6 {
+            h3.run(); // warm the tree at the fit zoom
+        }
         let base = perf::snapshot();
         let t = Instant::now();
         for &z in &[1.25f32, 1.5, 1.75, 2.0] {
             h3.state_mut().set_zoom_for_test(z);
-            h3.run();
+            // The changed frame counts settle=0; the re-bucket posts on
+            // the fourth frame (settle = SETTLE_FRAMES).
+            for _ in 0..4 {
+                h3.run();
+            }
         }
         report("zoom sweep x4 buckets (tree reuse)", &perf::diff(&base, &perf::snapshot()), t.elapsed());
     }
@@ -183,8 +224,12 @@ fn render_perf_stage_split() {
 fn move_and_resize_commits_are_flat(n: usize, tmp: &std::path::Path) {
     let path = many_shape_fixture(tmp, n, 4);
     let mut h = mount(App::with_doc(&path));
-    h.run();
-    h.run(); // fill + settle (sync seam: everything lands inline)
+    // Fill + settle (sync seam: everything lands inline). Pumped until
+    // quiet, not a fixed count: since #124 item 6.2 the fit-settle's
+    // bucket crossing waits for SETTLE_FRAMES stable frames, and the
+    // first-fill wave scales with the page (a fixed count bled
+    // trailing work into the move window at n=2000).
+    pump_settled(&mut h);
 
     // --- move commit: O(0) ---
     let center = h.state().debug_canvas_rect().center();
@@ -236,8 +281,8 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
         let tmp = tempfile::tempdir().unwrap();
         let path = many_shape_fixture(tmp.path(), 40, 4);
         let mut h = mount(App::with_doc(&path));
-        h.run();
-        h.run(); // let the fit/zoom and layers settle
+        // Fill + settle — pumped until quiet (see move_and_resize leg).
+        pump_settled(&mut h);
         let base = perf::snapshot();
         for _ in 0..20 {
             h.run();
@@ -254,6 +299,68 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
         }
         let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap();
         assert_eq!(frames, 20);
+    }
+
+    // --- #124 items 6.2+6.3: the fit-settle parses each shape ONCE —
+    //     frame one's first fills parse at the pre-fit bucket, and the
+    //     settled re-bucket re-renders the retained trees instead of
+    //     re-parsing (the #93-era behavior re-parsed the visible set
+    //     at every bucket the fit hysteresis crossed) ---
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = many_shape_fixture(tmp.path(), 40, 4);
+        perf::reset();
+        let mut h = mount(App::with_doc(&path));
+        pump_settled(&mut h); // first fills + the whole fit-settle
+        let d = perf::snapshot();
+        let count = |stage: &str| {
+            d.iter().find(|s| s.stage == stage).map(|s| s.count).unwrap_or(0)
+        };
+        assert_eq!(count("page/parse"), 40, "each visible shape parses exactly once across the fit-settle");
+        assert!(
+            count("page/render") >= 40,
+            "the settled re-bucket re-renders (from trees), not re-parses"
+        );
+        assert_eq!(
+            count("page/render"),
+            count("page/upload"),
+            "every settled re-render lands as a texture"
+        );
+    }
+
+    // --- #124 item 6.3: a zoom sweep across 4 buckets NEVER
+    //     re-parses — every crossing re-renders the retained parse.
+    //     A change that silently reverts bucket changes to re-serializing
+    //     fails here with page/parse > 0. (Render counts are not pinned:
+    //     higher zooms cull off-viewport shapes, so exact counts vary
+    //     with the pan — the parse-zero property is the invariant.) ---
+    {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = many_shape_fixture(tmp.path(), 40, 4);
+        perf::reset();
+        let mut h = mount(App::with_doc(&path));
+        pump_settled(&mut h); // settle the fit bucket's cache
+        let base = perf::snapshot();
+        for &z in &[1.25f32, 1.5, 1.75, 2.0] {
+            h.state_mut().set_zoom_for_test(z);
+            // The changed frame counts settle=0; the post lands on the
+            // fourth frame (settle = SETTLE_FRAMES).
+            for _ in 0..4 {
+                h.run();
+            }
+        }
+        let d = perf::diff(&base, &perf::snapshot());
+        let count = |stage: &str| {
+            d.iter().find(|s| s.stage == stage).map(|s| s.count).unwrap_or(0)
+        };
+        assert_eq!(
+            count("page/parse"),
+            0,
+            "a 4-bucket zoom sweep must re-render trees, never re-parse"
+        );
+        let (renders, uploads) = (count("page/render"), count("page/upload"));
+        assert!(renders > 0, "the sweep re-renders at each settled bucket");
+        assert_eq!(renders, uploads, "every sweep render lands as a texture");
     }
 
     let tmp = tempfile::tempdir().unwrap();

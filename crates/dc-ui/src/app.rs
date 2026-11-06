@@ -12904,6 +12904,20 @@ impl App {
         self.layers.version_for_test(shape_id)
     }
 
+    /// kittest (#124 item 4): total RGBA bytes of the cached layer
+    /// textures — the LRU budget's volume probe.
+    #[doc(hidden)]
+    pub fn debug_layer_tex_bytes_for_test(&self) -> u64 {
+        self.layers.tex_bytes_for_test()
+    }
+
+    /// kittest (#124 item 4): pin the texture byte budget for an
+    /// eviction test (the production default is 768 MiB).
+    #[doc(hidden)]
+    pub fn set_layer_texture_budget_for_test(&mut self, bytes: u64) {
+        self.layers.set_texture_budget_for_test(bytes)
+    }
+
     /// kittest (#143): the Quick Shapes entry's cell keys from the
     /// last stencil layout, in display order.
     #[doc(hidden)]
@@ -13553,6 +13567,9 @@ impl App {
                         version,
                         bucket,
                         done.image,
+                        // #124 item 6.3: the parsed tree rides along —
+                        // bucket changes re-render it, no re-parse.
+                        done.tree,
                     ) {
                         self.status = msg;
                     }

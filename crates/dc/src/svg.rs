@@ -16,6 +16,48 @@ use vsdx::{Cell, Document, Row, Shape};
 
 const PX_PER_IN: f64 = 96.0;
 
+/// Text renders as glyphs only while its on-screen em height clears
+/// this many pixels; below it the canvas layer path emits gray greek
+/// bars instead (GitHub #124 item 2 — Visio greeks text at low zoom,
+/// and the bars skip the font resolve / glyph-outline work the usvg
+/// parse would otherwise pay for text nobody can read). Export, print,
+/// and stencil thumbnails never greek: their calls pass no ppi.
+pub const TEXT_GREEK_PX: f64 = 4.0;
+
+/// Count of the recorded text sizes (inches, one entry per text block
+/// a layer serialization met) that would greek at `ppi`. The canvas
+/// layer cache compares this across ppi-bucket changes: equal counts
+/// mean the same blocks greeked on both sides (greeked-ness is
+/// monotone in size, so the greeked set is always a prefix), i.e. the
+/// retained SVG/tree serializes identically and the re-render can
+/// skip the re-parse (#124 item 2 + item 6.3).
+pub fn greeked_count(sizes: &[f64], ppi: f32) -> usize {
+    sizes
+        .iter()
+        .filter(|&&s| s * (ppi as f64) < TEXT_GREEK_PX)
+        .count()
+}
+
+/// Greeking context for canvas-layer serializations (#124 item 2).
+/// `Some` only on the `render_shape_layer_opts` path; the ppi decides
+/// per text block whether it emits glyphs or bars, and every text
+/// size met is recorded so the layer cache can build its re-serialize
+/// profile (see [`greeked_count`]).
+pub(crate) struct GreekCtx {
+    ppi: f32,
+    sizes: std::cell::RefCell<Vec<f64>>,
+}
+
+impl GreekCtx {
+    fn new(ppi: f32) -> Self {
+        Self { ppi, sizes: std::cell::RefCell::new(Vec::new()) }
+    }
+
+    fn greeks(&self, size_in: f64) -> bool {
+        size_in * (self.ppi as f64) < TEXT_GREEK_PX
+    }
+}
+
 /// Contact sheet of every master's shape tree, laid out on a grid — the
 /// rendering path for stencils (`.vssx`), whose pages are empty.
 pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
@@ -79,7 +121,7 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
             r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
         );
         for shape in &m.shapes {
-            render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
+            render_shape(doc, shape, master_h, &[], &m.part, None, None, &mut svg);
         }
         let _ = writeln!(svg, "</g>");
         let _ = writeln!(
@@ -182,7 +224,7 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
         r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
     );
     for shape in &m.shapes {
-        render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
+        render_shape(doc, shape, master_h, &[], &m.part, None, None, &mut svg);
     }
     let _ = writeln!(svg, "</g>");
     let _ = writeln!(svg, "</svg>");
@@ -470,13 +512,17 @@ pub fn render_shape_layer(
     hidden: &[i64],
     bounds: (f64, f64, f64, f64),
 ) -> anyhow::Result<String> {
-    render_shape_layer_opts(doc, page, shape_id, hidden, bounds, None)
+    render_shape_layer_opts(doc, page, shape_id, hidden, bounds, None, None).map(|(_, svg)| svg)
 }
 
-/// [`render_shape_layer`] with one shape's text suppressed (GitHub
-/// #22): while the GUI's in-place editor is open on `skip_text_shape`,
-/// its layer renders every stroke except that shape's own text — the
-/// editor overlay is the only copy of the text on screen.
+/// [`render_shape_layer`] with the canvas-only options (GitHub #22,
+/// #124): `skip_text_shape` suppresses one shape's text while the
+/// GUI's in-place editor is open on it, and `greek_ppi` turns on text
+/// greeking for layers rasterized at `ppi` — text blocks whose em
+/// height would fall under [`TEXT_GREEK_PX`] device pixels emit gray
+/// bars instead of glyphs. Returns the SVG plus every text size the
+/// walk met (inches), the cache's greek profile for deciding whether
+/// a ppi-bucket change re-renders or re-serializes.
 pub fn render_shape_layer_opts(
     doc: &Document,
     page: &vsdx::Page,
@@ -484,7 +530,8 @@ pub fn render_shape_layer_opts(
     hidden: &[i64],
     bounds: (f64, f64, f64, f64),
     skip_text: Option<i64>,
-) -> anyhow::Result<String> {
+    greek_ppi: Option<f32>,
+) -> anyhow::Result<(Vec<f64>, String)> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let Some(shape) = page.shapes.iter().find(|s| s.id == shape_id) else {
         anyhow::bail!("shape {shape_id} not found on page {}", page.id);
@@ -495,6 +542,7 @@ pub fn render_shape_layer_opts(
             .and_then(|c| c.numeric())
             .is_some_and(|m| hidden.contains(&(m as i64)))
     };
+    let greek = greek_ppi.map(GreekCtx::new);
     let mut svg = String::new();
     let (bx, by, bw, bh) = bounds;
     let _ = writeln!(
@@ -504,10 +552,11 @@ pub fn render_shape_layer_opts(
         ph = bh * PX_PER_IN,
     );
     if !hidden_member(shape) {
-        render_shape(doc, shape, page_h, &[], &page.part, skip_text, &mut svg);
+        render_shape(doc, shape, page_h, &[], &page.part, skip_text, greek.as_ref(), &mut svg);
     }
     let _ = writeln!(svg, "</svg>");
-    Ok(svg)
+    let sizes = greek.map(|g| g.sizes.into_inner()).unwrap_or_default();
+    Ok((sizes, svg))
 }
 
 /// [`render_page_with`] restricted to one top-level shape's subtree —
@@ -575,7 +624,7 @@ fn render_page_opts(
                 continue;
             }
         }
-        render_shape(doc, shape, h, &[], &page.part, skip_text, &mut svg);
+        render_shape(doc, shape, h, &[], &page.part, skip_text, None, &mut svg);
     }
     // #187: line jumps — Visio prints hops. The export appends the
     // same treatment the canvas paints (white gap, under redraw, hop
@@ -907,6 +956,10 @@ pub fn parent_local_point_to_page(
     (sx, page_h - sy)
 }
 
+/// Render a shape in absolute page coordinates: the XForm transform
+/// wraps geometry, master mirroring, sub-shape recursion, and the
+/// text block.
+#[allow(clippy::too_many_arguments)] // the walk carries its whole environment
 fn render_shape<'a>(
     doc: &'a Document,
     s: &'a Shape,
@@ -914,6 +967,7 @@ fn render_shape<'a>(
     chain: &[&'a Shape],
     part: &str,
     skip_text: Option<i64>,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -970,11 +1024,11 @@ fn render_shape<'a>(
     }
     // Sub-shapes of a group live in the parent's local frame.
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, out);
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, out);
     }
-    mirror_master(doc, s, &chain, width, height, out);
+    mirror_master(doc, s, &chain, width, height, greek, out);
 
-    emit_text(doc, s, &chain, width, height, sx, sy, skip_text == Some(s.id), out);
+    emit_text(doc, s, &chain, width, height, sx, sy, skip_text == Some(s.id), greek, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -986,6 +1040,7 @@ fn render_shape_local<'a>(
     chain: &[&'a Shape],
     part: &str,
     skip_text: Option<i64>,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -1022,12 +1077,12 @@ fn render_shape_local<'a>(
         }
     }
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, out);
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, out);
     }
-    mirror_master(doc, s, &chain, width, height, out);
+    mirror_master(doc, s, &chain, width, height, greek, out);
     // Group-local rendering applies no flip scale of its own, so the text
     // needs no flip compensation here.
-    emit_text(doc, s, &chain, width, height, 1.0, 1.0, skip_text == Some(s.id), out);
+    emit_text(doc, s, &chain, width, height, 1.0, 1.0, skip_text == Some(s.id), greek, out);
     let _ = writeln!(out, "</g>");
 }
 
@@ -1060,6 +1115,7 @@ fn mirror_master(
     chain: &[&Shape],
     width: f64,
     height: f64,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     if !s.sub_shapes.is_empty() {
@@ -1107,7 +1163,7 @@ fn mirror_master(
             ty = -(by + bh),
         );
         for r in &m.shapes {
-            render_shape_local(doc, r, &[], mpart, None, out);
+            render_shape_local(doc, r, &[], mpart, None, greek, out);
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
@@ -1131,7 +1187,7 @@ fn mirror_master(
             if let Some(t) = &wrapper {
                 let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
             }
-            render_shape_local(doc, sub, chain, mpart, None, out);
+            render_shape_local(doc, sub, chain, mpart, None, greek, out);
             if wrapper.is_some() {
                 let _ = writeln!(out, "</g>");
             }
@@ -1601,7 +1657,7 @@ pub(crate) fn wrap_block_text(
     lines
 }
 
-#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
+#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip + #124 greek ctx
 fn emit_text(
     doc: &Document,
     s: &Shape,
@@ -1611,6 +1667,7 @@ fn emit_text(
     sx: f64,
     sy: f64,
     skip: bool,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     if skip {
@@ -1674,8 +1731,38 @@ fn emit_text(
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
     let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
-    let lines = wrap_block_text(&face, text, size, usable_w);
-    let n_lines = lines.len() as f64;
+    // Greeking (#124 item 2): a block whose on-screen em height falls
+    // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
+    // at paragraph granularity (one width_in per paragraph, no greedy
+    // word wrap and no <text> node for usvg to turn into glyph
+    // outlines). Every met size is recorded regardless, so the layer
+    // cache can tell when a ppi-bucket change flips the decision.
+    let greeked = greek.is_some_and(|g| {
+        g.sizes.borrow_mut().push(size);
+        g.greeks(size)
+    });
+    let (lines, bar_widths) = if greeked {
+        let mut bars = Vec::new();
+        for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+            let w = face.width_in(para, size);
+            if w <= usable_w {
+                bars.push(w.max(usable_w * 0.2));
+            } else {
+                // Chunk the paragraph across an estimated wrap: full
+                // bars of the usable width plus one remainder bar.
+                let full = (w / usable_w).floor() as usize; // ≥ 1: w > usable_w
+                let rem = w - full as f64 * usable_w;
+                bars.extend(std::iter::repeat_n(usable_w, full));
+                if rem > usable_w * 0.05 {
+                    bars.push(rem);
+                }
+            }
+        }
+        (Vec::new(), bars)
+    } else {
+        (wrap_block_text(&face, text, size, usable_w), Vec::new())
+    };
+    let n_lines = if greeked { bar_widths.len() } else { lines.len() } as f64;
     let total_h = n_lines * line_h;
 
     // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
@@ -1696,6 +1783,25 @@ fn emit_text(
     };
 
     let mut body = String::new();
+    if greeked {
+        // Greek bars (#124 item 2): one neutral-gray rect per line,
+        // anchored like the tspan it replaces (left/center/right).
+        // Height sits in the x-height band of the line's em box.
+        for (i, w) in bar_widths.iter().enumerate() {
+            let y = first_baseline + i as f64 * line_h;
+            let (bx, bw) = match anchor {
+                "start" => (x, *w),
+                "end" => (x - *w, *w),
+                _ => (x - *w / 2.0, *w),
+            };
+            let _ = write!(
+                body,
+                r##"<rect x="{bx:.4}" y="{y:.4}" width="{bw:.4}" height="{h:.4}" fill="#7f7f7f"/>"##,
+                y = y - size * 0.72,
+                h = size * 0.62,
+            );
+        }
+    }
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
         let _ = write!(
@@ -1729,7 +1835,20 @@ fn emit_text(
     // spaces the splitter now preserves would be dropped again at
     // raster time. usvg (resvg 0.49) honors the attribute — inherited
     // by every tspan — and skips its stripping only for preserve, so
-    // the authored spacing reaches the pixels.
+    // the authored spacing reaches the pixels. Greeked blocks (#124)
+    // carry plain rects in `body`, never glyph nodes: they emit as a
+    // bare <g> (a <text> wrapper's content model has no place for
+    // shapes, and no font attributes are needed).
+    if greeked {
+        if flipped || net_txt_deg.abs() > 1e-6 {
+            let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
+            let _ = writeln!(out, r#"<g>{b}</g>"#, b = body);
+            let _ = writeln!(out, "</g>");
+        } else {
+            let _ = writeln!(out, r#"<g>{b}</g>"#, b = body);
+        }
+        return;
+    }
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
@@ -3873,7 +3992,7 @@ mod tests {
             }));
             let chain = [&s];
             let mut out = String::new();
-            render_shape(&doc, &s, 11.0, &chain, "", None, &mut out);
+            render_shape(&doc, &s, 11.0, &chain, "", None, None, &mut out);
             out
         };
         // 0 = no marker at all.
@@ -3990,7 +4109,7 @@ mod tests {
             }));
             let chain = [&s];
             let mut out = String::new();
-            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
             out
         };
         let hex = emit("#ED7D31");
@@ -4016,7 +4135,7 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert!(out.contains(r##"fill="#000000""##), "default text is black: {out}");
     }
 
@@ -4127,12 +4246,64 @@ mod tests {
         s.sheet.text = Some("hello".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert!(
             out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
             "emitted text element: {out}"
         );
         assert!(out.contains("hello"), "emitted: {out}");
+    }
+
+    /// #124 item 2: a text block whose on-screen em height falls under
+    /// TEXT_GREEK_PX emits gray bars (no glyph nodes for usvg to turn
+    /// into outlines) and records its size in the greek profile; above
+    /// the threshold — or with no ppi at all (export/print/thumbnail
+    /// paths pass None) — glyphs emit exactly as before.
+    #[test]
+    fn text_greeks_below_the_pixel_threshold() {
+        let doc = Document::default();
+        let tiny = |size: &str| { // sizes floor at 0.02 in in resolve_text_block
+            let mut s = Shape::default();
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Character".into(),
+                rows: vec![Row {
+                    cells: vec![("Size".to_string(), Cell::value(size))],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
+            s.sheet.text = Some("tiny text".into());
+            s
+        };
+        // 0.02 in em (the resolver floor) at 96 ppi = 1.92 px: greeked to bars.
+        let s = tiny("0.02");
+        let chain = [&s];
+        let ctx = GreekCtx::new(96.0);
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, Some(&ctx), &mut out);
+        assert!(out.contains(r##"fill="#7f7f7f""##), "greek bars emitted: {out}");
+        assert!(!out.contains("<text"), "no glyph node when greeked: {out}");
+        assert!(!out.contains("<tspan"), "no tspan when greeked: {out}");
+        assert_eq!(ctx.sizes.into_inner(), vec![0.02]);
+        assert_eq!(greeked_count(&[0.02], 96.0), 1);
+
+        // 0.13889 in em (the 10 pt default) at 96 ppi ≈ 13.3 px: glyphs.
+        let s = tiny("0.13889");
+        let chain = [&s];
+        let ctx = GreekCtx::new(96.0);
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, Some(&ctx), &mut out);
+        assert!(out.contains("tiny text"), "glyph path unchanged: {out}");
+        assert!(!out.contains("#7f7f7f"), "no bars above the threshold: {out}");
+        assert_eq!(greeked_count(&[0.13889], 96.0), 0, "13 px text does not greek");
+
+        // No greek context (export/print/thumbnails): glyphs regardless
+        // of size — greeking never enters those paths.
+        let s = tiny("0.02");
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        assert!(out.contains("tiny text"), "export never greeks: {out}");
     }
 
     /// Compose an SVG transform list (`translate(a,b) scale(c,d)
@@ -4190,7 +4361,7 @@ mod tests {
         let s = shape_with_pinned_text(txt_angle_deg);
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, false, None, &mut out);
         let t = out
             .split("transform=\"")
             .nth(1)?
@@ -5147,7 +5318,7 @@ mod tests {
         let s = shape_1065();
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
         assert_eq!(
             lines,
@@ -5171,7 +5342,7 @@ mod tests {
         {
             let chain = [&s];
             let mut out = String::new();
-            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
             assert!(out.is_empty(), "no text, no text element: {out}");
         }
 
@@ -5182,7 +5353,7 @@ mod tests {
         s.sheet.text = Some("  opened\r\na  b\n   \n\nend ".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["  opened", "a  b", "   ", "", "end"],
@@ -5212,7 +5383,7 @@ mod tests {
         s.sheet.set_cell("RightMargin", Cell::value("0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["a", " ", "b"],
@@ -5233,7 +5404,7 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("0.8"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
         assert!(lines.len() > 1, "must wrap: {lines:?}");
         // The greedy invariant: every line except the last is full —
@@ -5262,7 +5433,7 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("0.5"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
         assert!(lines.len() > 1, "a 26-em-ish run cannot fit 0.3 in: {lines:?}");
         assert!(
@@ -5284,7 +5455,7 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("8.0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 8.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 8.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["one", "two", "three"],
