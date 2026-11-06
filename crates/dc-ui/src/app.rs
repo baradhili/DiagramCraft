@@ -7737,14 +7737,26 @@ impl App {
         let r = ui.button(format!("{display}  ›"));
         let mut picked = None;
         egui::Popup::menu(&r)
-            .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+            // Close-on-click would dismiss the menu on any scrollbar
+            // interaction, so the menu closes only on outside clicks
+            // and ui.close() after a pick (the arrow gallery's 46
+            // entries need the scroll).
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.set_min_width(130.0);
-                for (k, d) in choices {
-                    if ui.selectable_label(*k == current, *d).clicked() {
-                        picked = Some(key_of(k));
-                    }
-                }
+                let max_h = (ui.input(|i| i.viewport_rect().height()) - 120.0).clamp(180.0, 520.0);
+                egui::ScrollArea::vertical()
+                    .max_height(max_h)
+                    .show(ui, |ui| {
+                        for (k, d) in choices {
+                            if ui.selectable_label(*k == current, *d).clicked() {
+                                picked = Some(key_of(k));
+                                // CloseOnClickOutside keeps the menu
+                                // open otherwise — close on a pick.
+                                ui.close();
+                            }
+                        }
+                    });
             });
         picked
     }
