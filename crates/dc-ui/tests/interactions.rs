@@ -116,7 +116,6 @@ fn stencil_drag_places_shape() {
     );
 }
 
-
 /// GitHub #77: the icon action bar heads the shape context menu —
 /// icons dispatch the same commands as the text rows, and enablement
 /// mirrors them. (The bar's accessible labels are exact: the text
@@ -6657,6 +6656,65 @@ fn drawing_window_close_x_runs_doc_close() {
 
 }
 
+
+/// #189: the ShapeSheet body is the resolved, Visio-2016-style view —
+/// the fixed catalog (Shape Transform, Protection, Theme Properties,
+/// …) renders for a master-backed shape even though the instance's
+/// own sheet is nearly empty, with inherited cells dimmed.
+#[test]
+fn shapesheet_shows_the_full_resolved_catalog() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_, a) = place_master(&mut h, 2);
+    let center = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .unwrap()
+        .center();
+    click_at(&mut h, center, egui::PointerButton::Secondary);
+    h.run();
+    let menu = h.state().debug_ctx_menu_rect().expect("ctx menu");
+    h.get_all_by_label_contains("Show ShapeSheet")
+        .into_iter()
+        .find(|n| menu.expand(2.0).contains_rect(n.rect()))
+        .expect("Show ShapeSheet row")
+        .click();
+    h.run();
+    h.run();
+
+    // The resolved catalog: pseudo-sections exist even when the
+    // instance sheet carries none of their cells, so an instanced
+    // shape always shows the full Visio structure.
+    for section in [
+        "Shape Transform",
+        "Protection",
+        "Miscellaneous",
+        "Line Format",
+        "Fill Format",
+        "Text Block Format",
+        "Events",
+        "Shape Layout",
+        "Theme Properties",
+        "Quick Style",
+        "Change Shape Behavior",
+    ] {
+        assert!(
+            h.query_all_by_label_contains(section).count() > 0,
+            "{section} section renders"
+        );
+    }
+    // Canonical cells resolve through the chain (defaults dimmed).
+    assert!(
+        h.query_all_by_label_contains("LockWidth").count() > 0,
+        "Protection cells render"
+    );
+    assert!(
+        h.query_all_by_label_contains("EventDblClick").count() > 0,
+        "Events cells render"
+    );
+}
 
 /// #190/#192: the ShapeSheet is a closable MDI-style child window —
 /// the native title-bar close dismisses it, Esc dismisses it, and the

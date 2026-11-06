@@ -21,6 +21,7 @@ mod rasterpool;
 pub mod quickshapes;
 pub mod recent;
 pub mod ribbon;
+pub mod shapesheet;
 pub mod snap;
 pub mod stencil;
 pub mod svgimg;

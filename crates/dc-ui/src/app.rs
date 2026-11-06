@@ -10,7 +10,7 @@ use dc_core::commands::{
     AddPage, AddShape, DuplicatePage, DuplicateShape, MovePage, RemovePage, RemoveShape,
     RenamePage, ReorderShape,
 };
-use dc_core::scope::{shape_chain, sheet as scope_sheet, Scope};
+use dc_core::scope::{shape_chain, Scope};
 use dc_core::{Editor, Macro, SetCell, SetRowCell};
 use egui::{Color32, Context, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 use vsdx::model::{Document, Shape};
@@ -8038,105 +8038,16 @@ impl App {
         }
     }
 
-    fn shapesheet_panel(&mut self, ui: &mut Ui, shape_id: i64) {
-        // #190/#192: the panel body — the window's title bar carries
-        // the close; this is pure content, bound to the sheet's OWN
-        // shape (not the live selection).
+    fn shapesheet_panel(&mut self, ui: &mut Ui, shape_id: i64, max_w: f32) {
+        // #190/#192: the window's title bar carries the close; this is
+        // pure content, bound to the sheet's OWN shape (not the live
+        // selection). #189: the body itself lives in `shapesheet.rs`
+        // (app decomposition) — the resolved, Visio-2016-style view.
         ui.vertical(|ui| {
             ui.separator();
             let Some(page_id) = self.page_id() else { return };
             let Some(ed) = self.ed() else { return };
-            let Ok(sheet) = scope_sheet(
-                &ed.doc,
-                &Scope::Shape {
-                    page: page_id,
-                    shape: shape_id,
-                },
-            ) else {
-                ui.label("shape not found");
-                return;
-            };
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                egui::Grid::new("cells").striped(true).show(ui, |ui| {
-                    ui.label("Cell");
-                    ui.label("Value");
-                    ui.label("Unit");
-                    ui.label("Formula");
-                    ui.end_row();
-                    let mut cells: Vec<_> = sheet
-                        .children
-                        .iter()
-                        .filter_map(|c| match c {
-                            vsdx::model::SheetChild::Cell(n, c) => Some((n.clone(), c.clone())),
-                            _ => None,
-                        })
-                        .collect();
-                    cells.sort_by(|a, b| a.0.cmp(&b.0));
-                    for (n, c) in cells {
-                        ui.label(n);
-                        ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                        ui.label(c.u.clone().unwrap_or_else(|| "—".into()));
-                        ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                        ui.end_row();
-                    }
-                });
-                // Sections with their rows — the ShapeSheet's real
-                // structure (Geometry, Character, Paragraph, Text Block
-                // Format, Actions, …), like Visio's inspector.
-                for sec in sheet.children.iter().filter_map(|c| match c {
-                    vsdx::model::SheetChild::Section(s) => Some(s),
-                    _ => None,
-                }) {
-                    ui.add_space(6.0);
-                    ui.strong(section_display_name(&sec.name));
-                    egui::Grid::new(format!("sec-{}", sec.name))
-                        .striped(true)
-                        .show(ui, |ui| {
-                            ui.label("Row");
-                            ui.label("Cell");
-                            ui.label("Value");
-                            ui.label("Formula");
-                            ui.end_row();
-                            if sec.rows.is_empty() {
-                                // Section-level cells (NoFill, NoLine, …).
-                                for (n, c) in &sec.cells {
-                                    ui.label("—");
-                                    ui.label(n);
-                                    ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                                    ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                                    ui.end_row();
-                                }
-                            }
-                            for row in &sec.rows {
-                                let label = row
-                                    .n
-                                    .clone()
-                                    .or_else(|| row.t.clone())
-                                    .unwrap_or_else(|| format!("Row {}", row.ix));
-                                let mut first = true;
-                                for (n, c) in &row.cells {
-                                    if first {
-                                        ui.strong(&label);
-                                        first = false;
-                                    } else {
-                                        ui.label(" ");
-                                    }
-                                    ui.label(n);
-                                    ui.label(c.v.clone().unwrap_or_else(|| "—".into()));
-                                    ui.label(c.f.clone().unwrap_or_else(|| "—".into()));
-                                    ui.end_row();
-                                }
-                                if first {
-                                    ui.strong(&label);
-                                    ui.label("—");
-                                    ui.label("—");
-                                    ui.label("—");
-                                    ui.end_row();
-                                }
-                            }
-                        });
-                }
-            });
+            crate::shapesheet::panel(ui, &ed.doc, page_id, shape_id, max_w);
         });
     }
 
@@ -13392,7 +13303,12 @@ impl App {
                 if self.mdi_client.is_finite() && self.mdi_client.width() > 0.0 {
                     win = win.constrain_to(self.mdi_client);
                 }
-                win.show(ui.ctx(), |ui| self.shapesheet_panel(ui, sid));
+                win.show(ui.ctx(), |ui| {
+                    // #189: the body caps its content to the tile so
+                    // the window never outgrows its slot and drifts
+                    // over a neighboring child's title bar.
+                    self.shapesheet_panel(ui, sid, sheet_tile.width() - 14.0);
+                });
                 if !open {
                     close_ix = Some(i);
                 }
@@ -14730,28 +14646,6 @@ fn classify_dbl_click(formula: Option<&str>) -> DblClick {
         DblClick::Deferred(format!(
             "EventDblClick '{f}' — macro and navigation actions arrive with a later milestone"
         ))
-    }
-}
-
-/// Visio's display names for ShapeSheet sections.
-fn section_display_name(n: &str) -> String {
-    match n {
-        "TextBlock" => "Text Block Format".into(),
-        "XForm" => "Shape Transform".into(),
-        "XForm1D" => "1-D Endpoints".into(),
-        "Character" => "Character".into(),
-        "Paragraph" => "Paragraph".into(),
-        "Tabs" => "Tabs".into(),
-        "RulerGrid" => "Ruler & Grid".into(),
-        "Connection" => "Connection Points".into(),
-        "Fill" => "Fill Format".into(),
-        "Line" => "Line Format".into(),
-        "TextXForm" => "Text Transform".into(),
-        "Misc" => "Miscellaneous".into(),
-        "PageLayout" => "Page Layout".into(),
-        "PrintPageSetup" => "Print Setup".into(),
-        "PagesXForm" => "Page Properties".into(),
-        other => other.into(),
     }
 }
 
