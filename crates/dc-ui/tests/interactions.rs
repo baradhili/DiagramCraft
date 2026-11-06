@@ -5729,6 +5729,152 @@ fn connector_ctx_menu_sets_curved_route() {
     );
 }
 
+/// #203: the spline/NURBS fixtures render in the GUI — a synthetic
+/// page (SplineStart+2×SplineKnot, NURBS uniform, NURBS rational)
+/// loaded through the real load path and rastered through the
+/// per-shape layers. The committed golden pins the curved ink
+/// (regenerate with UPDATE_SNAPSHOTS=1 after reviewing the diff).
+#[test]
+fn spline_nurbs_fixture_pixel_golden() {
+    use vsdx::model::*;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("spline_nurbs.vsdx");
+    let xmlns = || {
+        vec![(
+            "xmlns".to_string(),
+            "http://schemas.microsoft.com/office/visio/2012/main".to_string(),
+        )]
+    };
+    let mut doc = vsdx::Document {
+        root_attrs: xmlns(),
+        pages_attrs: xmlns(),
+        doc_part: "visio/document.xml".into(),
+        pages_part: "visio/pages/pages.xml".into(),
+        ..Document::default()
+    };
+    let sheet = |id: i64, pin: (f64, f64), w: f64, hgt: f64| {
+        let mut sh = Shape {
+            id,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", pin.0),
+            ("PinY", pin.1),
+            ("Width", w),
+            ("Height", hgt),
+            ("LocPinX", 0.0),
+            ("LocPinY", 0.0),
+        ] {
+            sh.sheet.set_cell(n, Cell::value(format!("{v}")));
+        }
+        sh
+    };
+    let row = |ix: i64, t: &str, cells: Vec<(&str, f64)>| Row {
+        t: Some(t.into()),
+        ix,
+        cells: cells
+            .into_iter()
+            .map(|(n, v)| (n.to_string(), Cell::value(format!("{v}"))))
+            .collect(),
+        ..Row::default()
+    };
+    let nurbs_row = |ix: i64, x: f64, y: f64, e: &str| Row {
+        t: Some("NURBSTo".into()),
+        ix,
+        cells: [
+            ("X".to_string(), Cell::value(format!("{x}"))),
+            ("Y".to_string(), Cell::value(format!("{y}"))),
+            ("A".to_string(), Cell::value("0")),
+            ("B".to_string(), Cell::value("1")),
+            ("C".to_string(), Cell::value("0")),
+            ("D".to_string(), Cell::value("1")),
+            (
+                "E".to_string(),
+                vsdx::Cell {
+                    v: Some(e.to_string()),
+                    f: Some(e.to_string()),
+                    ..Cell::default()
+                },
+            ),
+        ]
+        .into(),
+        ..Row::default()
+    };
+    let mut spline = sheet(1, (1.0, 7.5), 4.0, 2.0);
+    let mut sec = Section {
+        name: "Geometry".into(),
+        ix: 0,
+        ..Section::default()
+    };
+    sec.rows = vec![
+        row(1, "MoveTo", vec![("X", 0.0), ("Y", 0.0)]),
+        row(
+            2,
+            "SplineStart",
+            vec![("X", 1.0), ("Y", 1.5), ("A", 0.3), ("B", 0.0), ("C", 1.0), ("D", 3.0)],
+        ),
+        row(3, "SplineKnot", vec![("X", 2.5), ("Y", 0.4), ("A", 0.6)]),
+        row(4, "SplineKnot", vec![("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
+    ];
+    spline.sheet.children.push(SheetChild::Section(sec));
+    let mut nurbs_u = sheet(2, (6.0, 7.5), 4.0, 2.0);
+    let mut sec2 = Section {
+        name: "Geometry".into(),
+        ix: 0,
+        ..Section::default()
+    };
+    sec2.rows = vec![
+        row(1, "MoveTo", vec![("X", 0.0), ("Y", 0.0)]),
+        nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,1, 2.8,0.2,0,1)"),
+    ];
+    nurbs_u
+        .sheet
+        .children
+        .push(SheetChild::Section(std::mem::take(&mut sec2)));
+    let mut nurbs_r = sheet(3, (11.0, 7.5), 4.0, 2.0);
+    let mut sec3 = Section {
+        name: "Geometry".into(),
+        ix: 0,
+        ..Section::default()
+    };
+    sec3.rows = vec![
+        row(1, "MoveTo", vec![("X", 0.0), ("Y", 0.0)]),
+        nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,2, 2.8,0.2,0,1)"),
+    ];
+    nurbs_r
+        .sheet
+        .children
+        .push(SheetChild::Section(std::mem::take(&mut sec3)));
+    let mut psheet = Sheet::default();
+    psheet.set_cell("PageWidth", Cell::value("16.5"));
+    psheet.set_cell("PageHeight", Cell::value("11"));
+    doc.pages.push(vsdx::Page {
+        id: 0,
+        name: "S".into(),
+        children: vec![IndexChild::Sheet {
+            tag: "PageSheet".into(),
+            sheet: psheet,
+        }],
+        shapes: vec![spline, nurbs_u, nurbs_r],
+        ..Page::default()
+    });
+    vsdx::write::save(&doc, &path).unwrap();
+
+    let mut h = harness_with_blank();
+    h.run();
+    h.state_mut().debug_load_adds_for_test(&path);
+    for _ in 0..12 {
+        h.run();
+    }
+    h.snapshot_options(
+        "dc_ui_spline_nurbs_fixture",
+        &egui_kittest::SnapshotOptions::new()
+            .threshold(3.0)
+            .max_failed_pixels(10_000),
+    );
+}
+
 /// #202 (owner follow-up): an endpoint dropped NEAR a shape — inside
 /// the old threshold halo but OFF the shape — must RELEASE, not
 /// re-glue: the halo re-attached endpoints the cursor never touched

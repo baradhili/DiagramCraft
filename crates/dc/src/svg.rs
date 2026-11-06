@@ -4679,6 +4679,113 @@ mod tests {
         );
     }
 
+    /// #203: a NURBSTo row's E cell (formula text) — the interior
+    /// points/knots/weights ride in `E`, the endpoint in X/Y.
+    fn nurbs_row(ix: i64, x: f64, y: f64, e_text: &str) -> Row {
+        Row {
+            t: Some("NURBSTo".into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), Cell::value(format!("{x}"))),
+                ("Y".to_string(), Cell::value(format!("{y}"))),
+                ("A".to_string(), Cell::value("0")),
+                ("B".to_string(), Cell::value("1")),
+                ("C".to_string(), Cell::value("0")),
+                ("D".to_string(), Cell::value("1")),
+                (
+                    "E".to_string(),
+                    vsdx::Cell {
+                        v: Some(e_text.to_string()),
+                        f: Some(e_text.to_string()),
+                        ..Cell::default()
+                    },
+                ),
+            ],
+            ..Row::default()
+        }
+    }
+
+    /// #203: the golden fixture page — (1) a SplineStart+2×SplineKnot
+    /// cubic, (2) a NURBSTo with uniform weights, (3) a NURBSTo with
+    /// NON-uniform weights (the rational case the chord approximates
+    /// wrongly). Committed as an SVG golden; regenerate with
+    /// UPDATE_SPLINE_GOLDENS=1.
+    #[test]
+    fn spline_nurbs_goldens() {
+        // 1. the spline: MoveTo(0,0), SplineStart (second control
+        //    point) with knots 0/0.3/1 degree 3, knots at 0.6/1.
+        let mut spline = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut spline,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(
+                    2,
+                    "SplineStart",
+                    &[("X", 1.0), ("Y", 1.5), ("A", 0.3), ("B", 0.0), ("C", 1.0), ("D", 3.0)],
+                ),
+                geo_row(3, "SplineKnot", &[("X", 2.5), ("Y", 0.4), ("A", 0.6)]),
+                geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
+            ],
+        );
+        // 2. NURBS uniform: M(0,0) → NURBSTo(4,2), interior points
+        //    (1.2, 1.6) and (2.8, 0.2), weights 1.
+        let mut nurbs_u = shape_at(2, (7.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut nurbs_u,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                nurbs_row(
+                    2,
+                    4.0,
+                    2.0,
+                    "NURBS(1, 3, 0, 0, 1.2,1.6,0,1, 2.8,0.2,0,1)",
+                ),
+            ],
+        );
+        // 3. NURBS rational: the same geometry with the middle
+        //    control weighted 2 — the belly pulls toward that point.
+        let mut nurbs_r = shape_at(3, (12.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut nurbs_r,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                nurbs_row(
+                    2,
+                    4.0,
+                    2.0,
+                    "NURBS(1, 3, 0, 0, 1.2,1.6,0,2, 2.8,0.2,0,1)",
+                ),
+            ],
+        );
+        let (doc, page) = page_fixture(vec![spline, nurbs_u, nurbs_r]);
+        let svg = render_page(&doc, &page).unwrap();
+
+        let regenerate =
+            std::env::var("UPDATE_SPLINE_GOLDENS").is_ok();
+        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/goldens/spline_nurbs.svg");
+        if regenerate {
+            let _ = std::fs::create_dir_all(golden_path.parent().unwrap());
+            std::fs::write(&golden_path, &svg).unwrap();
+        }
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect("the spline/NURBS golden exists (regenerate with UPDATE_SPLINE_GOLDENS=1)");
+        assert_eq!(
+            svg.trim(),
+            golden.trim(),
+            "the spline/NURBS golden drifted — if the change is intended, \
+             regenerate with UPDATE_SPLINE_GOLDENS=1 and review the diff"
+        );
+        // Each curve emits a multi-point polyline well above the
+        // chord: count `L` segments (16 per knot span, >8 per curve).
+        let segments = svg.match_indices("L ").count();
+        assert!(
+            segments > 24,
+            "three flattened curves produce many segments: {segments}"
+        );
+    }
+
     fn page_fixture(shapes: Vec<Shape>) -> (Document, Page) {
         let mut sheet = Sheet::default();
         sheet.set_cell("PageWidth", Cell::value("8.5"));

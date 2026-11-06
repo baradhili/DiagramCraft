@@ -1820,4 +1820,218 @@ mod reroute_master_tests {
             .unwrap();
         assert!((a2 - 2.25).abs() < 1e-6, "the customized literal stays: {a2}");
     }
+
+    // ---- #203: a SPLINE-authored connector reroutes without flattening ----
+
+    /// A master whose root is a spline connector (ObjType 2 on the
+    /// master, SplineStart+2 SplineKnot rows) — the corpus
+    /// connector-carried-spline shape.
+    fn doc_with_spline_connector() -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "2.5"),
+            ("PinY", "3.5"),
+            ("Width", "1.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        // The connector master root: ObjType 2 + spline rows.
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("ObjType", VCell::value("2"));
+        let spline_row = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), VCell::value(x)),
+                ("Y".to_string(), VCell::value(y)),
+            ],
+            ..Row::default()
+        };
+        let mut sec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        sec.rows = vec![
+            spline_row(1, "MoveTo", "0", "0"),
+            spline_row(2, "SplineStart", "0.5", "0.3"),
+            spline_row(3, "SplineKnot", "0.8", "0.6"),
+            spline_row(4, "SplineKnot", "1.0", "1.0"),
+        ];
+        // A/B/C on SplineStart + A on SplineKnot (the knot values).
+        sec.rows[1].cells.push(("A".to_string(), VCell::value("0.3")));
+        sec.rows[1].cells.push(("B".to_string(), VCell::value("0")));
+        sec.rows[1].cells.push(("C".to_string(), VCell::value("1")));
+        sec.rows[1].cells.push(("D".to_string(), VCell::value("3")));
+        sec.rows[2].cells.push(("A".to_string(), VCell::value("0.6")));
+        root.sheet.children.push(SheetChild::Section(sec));
+        let mut m = vsdx::Master::default();
+        m.shapes.push(root);
+        ed.doc.masters.push(m);
+
+        // The instance: 1D frame over the master, master_shape 1, with
+        // its own spline-row SNAPSHOT (Visio saves the routed arc/curve
+        // pair on the instance — the corpus pattern from utilisation
+        // master5 instances).
+        let mut conn = Shape {
+            id: 11,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            master_shape: Some(1),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("BeginX", "1.0"),
+            ("BeginY", "1.0"),
+            ("EndX", "2.0"),
+            ("EndY", "2.0"),
+            ("PinX", "1.5"),
+            ("PinY", "1.5"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            conn.sheet.set_cell(n, VCell::value(v));
+        }
+        // The corpus tracking guards: Width/Height derive from the
+        // endpoints (the #175 translate gate fires on them).
+        conn.sheet.set_cell(
+            "Width",
+            VCell {
+                v: Some("1.0".into()),
+                f: Some("GUARD(Abs(EndX-BeginX))".into()),
+                ..VCell::default()
+            },
+        );
+        conn.sheet.set_cell(
+            "Height",
+            VCell {
+                v: Some("1.0".into()),
+                f: Some("GUARD(Abs(EndY-BeginY))".into()),
+                ..VCell::default()
+            },
+        );
+        let mut isec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        let irow = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), VCell::value(x)),
+                ("Y".to_string(), VCell::value(y)),
+            ],
+            ..Row::default()
+        };
+        isec.rows = vec![
+            irow(1, "MoveTo", "0", "0"),
+            irow(2, "SplineStart", "0.5", "0.3"),
+            irow(3, "SplineKnot", "0.8", "0.6"),
+            irow(4, "SplineKnot", "1.0", "1.0"),
+        ];
+        isec.rows[1].cells.push(("A".to_string(), VCell::value("0.3")));
+        isec.rows[1].cells.push(("B".to_string(), VCell::value("0")));
+        isec.rows[1].cells.push(("C".to_string(), VCell::value("1")));
+        isec.rows[1].cells.push(("D".to_string(), VCell::value("3")));
+        isec.rows[2].cells.push(("A".to_string(), VCell::value("0.6")));
+        conn.sheet
+            .children
+            .push(SheetChild::Section(std::mem::take(&mut isec)));
+        ed.doc.pages[0].shapes.push(target);
+        ed.doc.pages[0].shapes.push(conn);
+        (ed, page_id)
+    }
+
+    /// #203: a spline connector's rows survive a reroute — the types
+    /// stay SplineStart/SplineKnot (never flattened to lines) and the
+    /// LITERAL cells translate by the endpoint delta (#175), so the
+    /// curve re-tracks with the moved endpoint.
+    #[test]
+    fn reroute_keeps_spline_connector_rows() {
+        let (mut ed, page_id) = doc_with_spline_connector();
+        // The END is dynamically glued to the target (ToPart 3 — the
+        // walkglue record); moving the TARGET drives the reroute the
+        // way the canvas does (the corpus flow).
+        {
+            use dc_core::connects::ConnectsHost;
+            let mut list = ed.doc.pages[0].connects();
+            list.list.push(dc_core::connects::Connect::new(
+                11,
+                "EndX",
+                crate::connectors::PART_END_X,
+                10,
+                "PinX",
+                crate::connectors::PART_WALKGLUE,
+            ));
+            ed.doc.pages[0].set_connects(&list);
+        }
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("3.5"));
+                sh.sheet.set_cell("PinY", VCell::value("4.5"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let geo = conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| g.rows.clone())
+            .unwrap_or_default();
+        if geo.is_empty() {
+            // Instance carries no own rows — the master's spline rows
+            // render through inheritance; nothing to flatten.
+            return;
+        }
+        let types: Vec<&str> = geo
+            .iter()
+            .map(|r| r.t.as_deref().unwrap_or(""))
+            .collect();
+        assert!(
+            types.contains(&"SplineStart") && types.contains(&"SplineKnot"),
+            "the spline rows survive the reroute: {types:?}"
+        );
+        // The LITERAL end knot translates by the endpoint delta
+        // (+1, +1): master (1.0, 1.0) → instance cached (2.0, 2.0).
+        let last = geo.iter().rfind(|r| r.t.as_deref() == Some("SplineKnot"));
+        let Some(last) = last else {
+            panic!("a SplineKnot row exists");
+        };
+        let (lx, ly) = (
+            last.cell("X").and_then(|c| c.numeric()).unwrap_or(-9.0),
+            last.cell("Y").and_then(|c| c.numeric()).unwrap_or(-9.0),
+        );
+        // The END knot is the frame's (W, H) corner: it MUST have
+        // translated with the walked endpoint (not stay at the
+        // authored (1, 1)).
+        let ex_new = conn.sheet.cell("EndX").and_then(|c| c.numeric()).unwrap_or(0.0);
+        let ey_new = conn.sheet.cell("EndY").and_then(|c| c.numeric()).unwrap_or(0.0);
+        assert!(
+            ((lx - (ex_new - 2.0 + 1.0)).abs() < 1e-6
+                && (ly - (ey_new - 2.0 + 1.0)).abs() < 1e-6),
+            "the literal spline end translated with the endpoint: ({lx}, {ly})"
+        );
+    }
 }

@@ -1929,6 +1929,61 @@ impl App {
                     pos: frame.to_page(c.ctrl2),
                 });
             }
+            // #203: spline-family rows on a connector — SplineStart/
+            // SplineKnot/NURBSTo are point rows; their resolved
+            // endpoints (and the NURBSTo E formula's interior
+            // points) join the handles through the same frame. Own
+            // rows only (master-inherited rows have no local cells
+            // to drag — the #137 rule).
+            for geo in sh.sheet.sections_named("Geometry") {
+                for row in &geo.rows {
+                    let Some(rt) = row.t.as_deref() else {
+                        continue;
+                    };
+                    if !matches!(rt, "SplineStart" | "SplineKnot" | "NURBSTo") {
+                        continue;
+                    }
+                    let cell = |n: &str| -> f64 {
+                        crate::connectors::row_cell_value(
+                            row.cell(n),
+                            None,
+                            1.0,
+                            &frame.env,
+                        )
+                        .unwrap_or(0.0)
+                    };
+                    let (rx, ry) = (cell("X"), cell("Y"));
+                    out.push(Handle {
+                        id: HandleId::GeoPoint {
+                            section_ix: geo.ix,
+                            row_ix: row.ix,
+                            cell: canvas::GeoCell::X,
+                        },
+                        pos: frame.to_page((rx, ry)),
+                    });
+                    if rt == "NURBSTo" {
+                        let e_text = row
+                            .cell("E")
+                            .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                            .unwrap_or_default();
+                        if let Some(f) = dc::curve::parse_nurbs(&e_text) {
+                            for (i, (gx, gy, _, _)) in f.points.iter().enumerate() {
+                                out.push(Handle {
+                                    id: HandleId::GeoPoint {
+                                        section_ix: geo.ix,
+                                        row_ix: row.ix,
+                                        cell: canvas::GeoCell::NurbsPt(i),
+                                    },
+                                    pos: frame.to_page((
+                                        gx * frame.size.0.max(1e-6),
+                                        gy * frame.size.1.max(1e-6),
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
             return out;
         }
         let Some(r) = self.sel_page_rect() else {
@@ -2204,10 +2259,38 @@ impl App {
         };
         let cellv = |v: f64| vsdx::Cell::value(format!("{v:.6}"));
         let (px, py) = (to_page.0 - bx, to_page.1 - by); // shape-local
+        // #203: 1D shapes (connectors) map drags through the HitFrame
+        // local frame — the bbox the 2D mapping uses starts at a
+        // different origin than the geometry rows for a rotated/
+        // signed-frame connector.
+        let one_d = ed.doc.resolve_cell(sh, &chain, "BeginX").is_some();
+        let hit = if one_d {
+            let msize = sh
+                .master
+                .and_then(|mid| ed.doc.master(mid))
+                .and_then(|m| m.shapes.first())
+                .map(|r| {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(r, &[r], n)
+                            .and_then(|c| c.numeric())
+                            .unwrap_or(1.0)
+                    };
+                    (g("Width"), g("Height"))
+                })
+                .unwrap_or((1.0, 1.0));
+            Some(crate::connectors::hit_frame(&ed.doc, &chain, sh, msize))
+        } else {
+            None
+        };
         let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
         match cell {
             canvas::GeoCell::X | canvas::GeoCell::Y => {
-                let (lx, ly) = if rel {
+                let (lx, ly) = if let Some(hf) = &hit {
+                    // #203: 1D geometry rows are LOCAL-absolute in the
+                    // connector frame.
+                    hf.to_local(to_page)
+                } else if rel {
                     let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
                         return;
                     };
@@ -2343,16 +2426,24 @@ impl App {
                 if idx >= f.points.len() {
                     return;
                 }
-                let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
-                    return;
-                };
-                let (fx, fy) = if f.x_type == 0.0 {
-                    (bw.max(1e-6), bh.max(1e-6))
+                // #203: 1D shapes map the drop through the HitFrame —
+                // the E fractions are of the LOCAL Width/Height in row
+                // space; 2D shapes keep the bbox mapping.
+                let (fx, fy, drop) = if let Some(hf) = &hit {
+                    let local = hf.to_local(to_page);
+                    (
+                        hf.size.0.max(1e-6),
+                        hf.size.1.max(1e-6),
+                        local,
+                    )
                 } else {
-                    (1.0, 1.0)
+                    let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
+                        return;
+                    };
+                    (bw.max(1e-6), bh.max(1e-6), (px, py))
                 };
-                f.points[idx].0 = px / fx;
-                f.points[idx].1 = py / fy;
+                f.points[idx].0 = drop.0 / fx;
+                f.points[idx].1 = drop.1 / fy;
                 let text = dc::curve::render_nurbs(&f);
                 cmds.push(Box::new(dc_core::SetRowCell::new(
                     scope,
@@ -14932,6 +15023,118 @@ mod tests {
         app.do_undo();
         let page = &app.ed.as_ref().unwrap().doc.pages[0];
         assert_eq!(page.shapes.len(), 0, "undo removes the shape");
+    }
+
+    /// #203: a spline/NURBS-authored CONNECTOR surfaces its
+    /// positional controls through the 1D handle branch — vertex
+    /// handles per SplineStart/SplineKnot/NURBSTo row (via the
+    /// HitFrame) plus NurbsPt handles for the E formula's interior
+    /// points.
+    #[test]
+    fn spline_connector_rows_get_handles() {
+        let mut sh = vsdx::model::Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..vsdx::model::Shape::default()
+        };
+        for (n, v) in [
+            ("ObjType", 2.0),
+            ("BeginX", 1.0),
+            ("BeginY", 1.0),
+            ("EndX", 5.0),
+            ("EndY", 3.0),
+            ("PinX", 3.0),
+            ("PinY", 2.0),
+            ("Width", 4.0),
+            ("Height", 2.0),
+            ("LocPinX", 2.0),
+            ("LocPinY", 1.0),
+        ] {
+            sh.sheet.set_cell(n, vsdx::Cell::value(format!("{v}")));
+        }
+        // The E group (0.5, 1.0) = fractions of W=4/H=2 → local (2, 2)
+        // → page (3, 3) through the identity-ish frame.
+        let e = "NURBS(1, 3, 0, 0, 0.5,1,0,1)";
+        let row = |ix: i64, t: &str, cells: Vec<(&str, f64)>| vsdx::model::Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .into_iter()
+                .map(|(n, v)| (n.to_string(), vsdx::Cell::value(format!("{v}"))))
+                .collect(),
+            ..vsdx::model::Row::default()
+        };
+        let mut sec = vsdx::model::Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..vsdx::model::Section::default()
+        };
+        sec.rows = vec![
+            row(1, "MoveTo", vec![("X", 0.0), ("Y", 0.0)]),
+            row(
+                2,
+                "NURBSTo",
+                vec![("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)],
+            ),
+        ];
+        let nurbs_row = &mut sec.rows[1];
+        nurbs_row.cells.push((
+            "E".to_string(),
+            vsdx::Cell {
+                v: Some(e.to_string()),
+                f: Some(e.to_string()),
+                ..vsdx::Cell::default()
+            },
+        ));
+        sh.sheet
+            .children
+            .push(vsdx::model::SheetChild::Section(std::mem::take(&mut sec)));
+
+        let ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut app = App::with_doc_opt(None);
+        app.ed = Some(ed);
+        app.page_idx = 0;
+        // The shape must be IN the doc for selection_handles: swap the
+        // doc's blank shape out — simplest is to keep the fixture in a
+        // second doc and copy the shape in.
+        {
+            let page = &mut app.ed.as_mut().unwrap().doc.pages[0];
+            page.shapes.retain(|s| s.id != 1);
+            page.shapes.push(sh);
+        }
+        app.sel = Some((page_id, 1));
+        let handles = app.selection_handles();
+        // The NURBSTo row's X/Y vertex handle + one NurbsPt per E
+        // group.
+        let nurbs_vertex = handles.iter().any(|h| {
+            matches!(
+                h.id,
+                HandleId::GeoPoint {
+                    section_ix: 0,
+                    row_ix: 2,
+                    cell: canvas::GeoCell::X,
+                }
+            )
+        });
+        assert!(nurbs_vertex, "the NURBSTo endpoint handle exists");
+        let pts: Vec<_> = handles
+            .iter()
+            .filter(|h| {
+                matches!(
+                    h.id,
+                    HandleId::GeoPoint {
+                        cell: canvas::GeoCell::NurbsPt(_),
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(pts.len(), 1, "one NurbsPt per E group: {pts:?}");
+        // The interior point (2, 2) local → page through the frame
+        // (Pin/LocPin identity here: origin (1,1), no rotation).
+        assert!((pts[0].pos.0 - 3.0).abs() < 1e-6, "{}", pts[0].pos.0);
+        assert!((pts[0].pos.1 - 3.0).abs() < 1e-6, "{}", pts[0].pos.1);
     }
 
     /// #187 slice 2: a ROTATED connector joins the jump lines — the
