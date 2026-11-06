@@ -7868,33 +7868,58 @@ impl App {
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
                 }
-                // Begin/End Arrow (#72, corrected #169, completed
-                // #158): every value 0–45 now has its own glyph (the
-                // 600 dpi fixture pinned the families — doubles at
-                // 14/16–22 and 35/39, hollow diamonds 40–42/44, the
-                // double hash 27); the picker offers one entry per
-                // distinct family, Visio's named head set.
+                // Begin/End Arrow (#72, #169, #199): every value 0–45
+                // carries its own glyph, pinned from the 600 dpi Visio
+                // print (Analysis/arrow-gallery-visio2016.md, the
+                // 2026-11-06 re-read). The picker lists the gallery
+                // per value, Visio-style.
                 const ARROWS: &[(&str, &str)] = &[
                     ("0", "None"),
-                    ("1", "Arrow"),
+                    ("1", "Open 2-Prong"),
                     ("2", "Small Arrow"),
-                    ("3", "Concave Arrow"),
+                    ("3", "Open Wide"),
                     ("4", "Classic Arrow"),
-                    ("6", "Stealth"),
-                    ("7", "Open Arrow"),
-                    ("8", "Small Open Arrow"),
-                    ("9", "Slash"),
-                    ("10", "Circle"),
-                    ("11", "Diamond"),
-                    ("12", "Open Double Arrow"),
-                    ("13", "Filled Arrow"),
-                    ("14", "Double Arrow"),
-                    ("22", "Double Arrow (Long)"),
-                    ("27", "Double Slash"),
-                    ("34", "Open Double Arrow (Wide)"),
-                    ("35", "Double Arrow (Wide)"),
-                    ("41", "Open Diamond"),
-                    ("40", "Double Open Diamond"),
+                    ("5", "Wide Arrow"),
+                    ("6", "Long Arrow"),
+                    ("7", "Open Fork"),
+                    ("8", "Stealth Dart"),
+                    ("9", "Slanted Tick"),
+                    ("10", "Filled Circle"),
+                    ("11", "Filled Square"),
+                    ("12", "Open Double Chevron"),
+                    ("13", "Filled Arrow (Plain)"),
+                    ("14", "Open Triangle (Large)"),
+                    ("15", "Open Triangle (Small)"),
+                    ("16", "Open Triangle (Medium-Large)"),
+                    ("17", "Open Triangle (Medium)"),
+                    ("18", "Open Triangle (Concave Base)"),
+                    ("19", "Open Barbed"),
+                    ("20", "Open Circle"),
+                    ("21", "Open Square"),
+                    ("22", "Open Diamond"),
+                    ("23", "Slanted Tick"),
+                    ("24", "Tick"),
+                    ("25", "Double Tick"),
+                    ("26", "Triple Tick"),
+                    ("27", "Crow's Foot"),
+                    ("28", "Crow's Foot + Tick"),
+                    ("29", "Fork + Ring"),
+                    ("30", "Ring + Tick"),
+                    ("31", "Tick + Ring"),
+                    ("32", "Double Tick + Ring"),
+                    ("33", "Triple Tick + Ring"),
+                    ("34", "Diamond + Ring"),
+                    ("35", "Tick + Dot"),
+                    ("36", "Double Tick + Dot"),
+                    ("37", "Triple Tick + Dot"),
+                    ("38", "Diamond + Dot"),
+                    ("39", "Double Arrow (Filled)"),
+                    ("40", "Double Arrow (Open)"),
+                    ("41", "Ring"),
+                    ("42", "Dot"),
+                    ("43", "Open Double Chevron (Large)"),
+                    ("44", "Tick + Chevron"),
+                    ("45", "Tick + Double Chevron"),
                 ];
                 let cur = self.eff_cell_str("BeginArrow").unwrap_or_else(|| "0".into());
                 if let Some(v) =

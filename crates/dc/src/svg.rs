@@ -2200,23 +2200,20 @@ fn render_geometry(
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
         let mut attrs = String::new();
-        // #72/#169/#158: per-value arrowheads — Visio 2016's
+        // #72/#169/#199: per-value arrowheads — Visio 2016's
         // Begin/EndArrow gallery, drawn from our own paths (behavior
-        // reference: the shipped Visio 2016 gallery plus a
+        // reference: the shipped Visio 2016 gallery plus the
         // Visio-authored fixture with EndArrow 0–50 printed at 600 dpi
         // — see Analysis/arrow-gallery-visio2016.md; artwork ours).
-        // Key facts: 13 is a single filled head (the #169 report: it
-        // drew our two chevrons); 4 — the corpus's default — is the
-        // classic filled triangle, 6 the stealth dart, 9 the slanted
-        // dimension tick; the doubles are the chevron family (12/23/24
-        // open, 25/34/38/45 open wide, 14/16–22/29–31/35/39 filled)
-        // plus the diamond pair 40; 41/42/44 are hollow diamonds, 27
-        // the double hash, 26 a small filled triangle, 8/28 small open
-        // chevrons. The #158 fixture pass pinned 46–50 to NO head
-        // (Visio draws bare ends past the gallery). Unmapped values
-        // fall back to the filled triangle; per-value size variants
-        // share the family glyph. Sizes ride markerUnits=strokeWidth
-        // (LineWeight) times the ArrowSize factor.
+        // The table lives in [`arrow_spec`], pinned from the 2026-11-06
+        // full-resolution re-read of the print: 14–22 are Visio's
+        // OPEN-head set (triangles, ring, square, diamond), 23–26 the
+        // ticks, 27/28 the crow's-foot fork, 29–38 the dimension
+        // composites (tick counts + ring/dot/diamond), 39/40 the double
+        // triangles, 46–50 bare ends. Unmapped values fall back to the
+        // filled triangle; per-value size variants share the family
+        // glyph. Sizes ride markerUnits=strokeWidth (LineWeight) times
+        // the ArrowSize factor.
         let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
             if arrow < 0.5 || (46.0..=50.5).contains(&arrow) {
                 return;
@@ -2229,73 +2226,9 @@ fn render_geometry(
                 fnv(&format!("{kind}|{line_weight:.5}|{scale:.2}|{line_color}"))
             );
             if !out_all.contains(&format!(r#"id="{id}""#)) {
-                // Paths point ALONG +x (end markers, tip at x=10/12);
-                // begin markers mirror around the viewBox center, which
-                // orients the tip at the path start (orient=auto).
-                // (path body, tip_x, box_w, stroke_only); the circle is
-                // a circle element, handled separately.
-                let spec: (&str, f64, f64, bool) = match kind {
-                    // 1 — narrow filled triangle.
-                    1 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 2 — small filled triangle.
-                    2 => ("M0,1.5 L8,5 L0,8.5 z", 8.0, 10.0, false),
-                    // 3 — filled, concave (dipped) base.
-                    3 => ("M0,0 L10,5 L0,10 Q3.5,5 0,0 z", 10.0, 10.0, false),
-                    // 4 — the classic filled triangle (the corpus
-                    // default; was wrongly the stealth dart pre-#169).
-                    4 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 5 — filled triangle, wide.
-                    5 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 6 — the stealth dart (was wrongly the circle).
-                    6 => ("M0,0 L10,5 L0,10 L5,5 z", 10.0, 10.0, false),
-                    // 7 — open chevron (the open V).
-                    7 => ("M0,0 L10,5 L0,10", 10.0, 10.0, true),
-                    // 8/28 — small open chevron (thinner V) — #158.
-                    8 | 28 => ("M0,1.5 L8,5 L0,8.5", 8.0, 10.0, true),
-                    // 9 — the slanted dimension tick.
-                    9 => ("M2,-1 L6,9", 5.0, 10.0, true),
-                    // 10 — the filled circle (symmetric, no mirror).
-                    10 => ("", 12.0, 12.0, false),
-                    // 11 — the filled diamond (tip at both ends; anchor
-                    // the right tip on the line end).
-                    11 => ("M0,5 L5,0 L10,5 L5,10 z", 10.0, 10.0, false),
-                    // 12/23/24/32/33/36/37/43 — open double chevron
-                    // (the `>>` family's size variants share the glyph).
-                    12 | 23 | 24 | 32 | 33 | 36 | 37 | 43 => {
-                        ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true)
-                    }
-                    // 13 — single filled triangle, plain base (Visio's
-                    // 13 is NOT a double — #169's core fix).
-                    13 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 14/16–21/29–31/39 — filled double chevron
-                    // (35's glyph; spacing/size variants).
-                    14 | 16 | 17 | 18 | 19 | 20 | 21 | 29 | 30 | 31 | 39 => {
-                        ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false)
-                    }
-                    // 15 — plain filled triangle, medium.
-                    15 => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
-                    // 22 — the longest filled double.
-                    22 => ("M0,0 L7,5 L0,10 z M7,0 L14,5 L7,10 z", 14.0, 14.0, false),
-                    // 25/34/38/45 — open double chevron, wide.
-                    25 | 34 | 38 | 45 => ("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10", 12.0, 12.0, true),
-                    // 26 — small filled triangle (a size variant of 2).
-                    26 => ("M0,1.5 L8,5 L0,8.5 z", 8.0, 10.0, false),
-                    // 27 — the double hash/tick (crow's-foot pair).
-                    27 => ("M1,-1 L5,9 M6,-1 L10,9", 10.0, 10.0, true),
-                    // 35 — filled double chevron (the gallery's first
-                    // filled double; the old wrong-13 glyph lives on).
-                    35 => ("M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z", 12.0, 12.0, false),
-                    // 40 — double open (hollow) diamond.
-                    40 => (
-                        "M0,5 L4,0 L8,5 L4,10 Z M8,5 L12,0 L16,5 L12,10 Z",
-                        16.0, 16.0, true,
-                    ),
-                    // 41/42/44 — open (hollow) diamond.
-                    41 | 42 | 44 => ("M0,5 L5,0 L10,5 L5,10 Z", 10.0, 10.0, true),
-                    // Unmapped gallery values: the filled triangle.
-                    _ => ("M0,0 L10,5 L0,10 z", 10.0, 10.0, false),
+                let Some((parts, tip, box_w)) = arrow_spec(kind) else {
+                    return;
                 };
-                let (d, tip, box_w, stroke_only) = spec;
                 let mirror_x = |d: &str| -> String {
                     // "M0,0 L10,5" → every x mirrored about box_w/2's
                     // frame (x → box_w - x), keeping command letters.
@@ -2327,29 +2260,38 @@ fn render_geometry(
                     }
                     m.trim_end().to_string()
                 };
-                // Begin markers mirror horizontally so the tip faces
-                // the path start (orient=auto supplies direction).
-                let d = if begin && kind != 10 {
-                    mirror_x(d)
-                } else {
-                    d.to_string()
-                };
-                let body = if kind == 10 {
-                    format!(
-                        r#"<circle cx="6" cy="5" r="5" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
-                        c = line_color,
-                    )
-                } else if stroke_only {
-                    format!(
-                        r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="1.2"/>"#,
-                        c = line_color,
-                    )
-                } else {
-                    format!(
-                        r#"<path d="{d}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#,
-                        c = line_color,
-                    )
-                };
+                // Composite heads are several parts sharing one marker:
+                // paths mirror for begin markers, circles mirror their
+                // center about the same frame.
+                let mut body = String::new();
+                for part in parts {
+                    let c = &line_color;
+                    if let Some((cx, cy, r)) = part.circle {
+                        let cx = if begin { box_w - cx } else { cx };
+                        body += &if part.filled {
+                            format!(
+                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#
+                            )
+                        } else {
+                            format!(
+                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
+                            )
+                        };
+                    } else {
+                        let d = if begin {
+                            mirror_x(part.d)
+                        } else {
+                            part.d.to_string()
+                        };
+                        body += &if part.filled {
+                            format!(r#"<path d="{d}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#)
+                        } else {
+                            format!(
+                                r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
+                            )
+                        };
+                    }
+                }
                 let _ = writeln!(
                     out_all,
                     r#"<defs><marker id="{id}" viewBox="0 0 {w} 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto">{body}</marker></defs>"#,
@@ -2357,6 +2299,9 @@ fn render_geometry(
                     rx = if begin { 0.0 } else { tip },
                 );
             }
+            // Begin markers mirror their parts (paths and circle
+            // centers) so the head faces the path start; orient=auto
+            // supplies the direction.
             if begin {
                 attrs.push_str(&format!(r#" marker-start="url(#{id})""#));
             } else {
@@ -2375,6 +2320,241 @@ fn render_geometry(
     }
 }
 
+/// One drawable piece of a marker head (#199): a path — filled when
+/// `filled`, stroked (fill="none") otherwise — or a circle (filled
+/// dot vs open ring). Composite heads (the dimension set's tick +
+/// glyph rows) are just several parts in one marker.
+struct HeadPart {
+    d: &'static str,
+    circle: Option<(f64, f64, f64)>,
+    filled: bool,
+}
+
+/// A filled path part.
+const fn fp(d: &'static str) -> HeadPart {
+    HeadPart {
+        d,
+        circle: None,
+        filled: true,
+    }
+}
+
+/// A stroked (open) path part.
+const fn sp(d: &'static str) -> HeadPart {
+    HeadPart {
+        d,
+        circle: None,
+        filled: false,
+    }
+}
+
+/// An open ring (stroke-only circle).
+const fn ring(cx: f64, cy: f64, r: f64) -> HeadPart {
+    HeadPart {
+        d: "",
+        circle: Some((cx, cy, r)),
+        filled: false,
+    }
+}
+
+/// A filled dot (circle).
+const fn dot(cx: f64, cy: f64, r: f64) -> HeadPart {
+    HeadPart {
+        d: "",
+        circle: Some((cx, cy, r)),
+        filled: true,
+    }
+}
+
+/// The Visio 2016 Begin/EndArrow gallery, pinned from the owner-
+/// authored fixture printed at 600 dpi (Analysis/
+/// arrow-gallery-visio2016.md, 2026-11-06 re-read; artwork ours —
+/// reimplemented from the observed glyphs, no Microsoft assets).
+/// Returns `(parts, tip_x, box_w)`: paths point along +x with the
+/// shaft on y=5 in a 10-high viewBox, and `tip_x` anchors the marker
+/// on the line end (refX). `None` = no head (the bare ends 46–50).
+/// Per-value size variants share one glyph (see the analysis's open
+/// refinements).
+/// The gallery: (EndArrow value, parts, tip_x, box_w). A const table
+/// so every parts slice is 'static.
+const GALLERY: &[(i64, &[HeadPart], f64, f64)] = &[
+    // 1 — narrow open V (unfilled 2-prong).
+    (1, &[sp("M0,1 L7,5 L0,9")], 7.0, 7.0),
+    // 2 — small filled triangle.
+    (2, &[fp("M0,1.5 L8,5 L0,8.5 z")], 8.0, 8.0),
+    // 3 — open wide V.
+    (3, &[sp("M0,0 L9,5 L0,10")], 9.0, 9.0),
+    // 4 — the classic filled triangle (the corpus default).
+    (4, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
+    // 5 — filled triangle, wide (curved-in base).
+    (5, &[fp("M0,0 L11,5 L0,10 Q4,5 0,0 z")], 11.0, 11.0),
+    // 6 — narrow filled triangle, long.
+    (6, &[fp("M0,1 L12,5 L0,9 z")], 12.0, 12.0),
+    // 7 — open fork (curved concave-back barbs).
+    (7, &[sp("M0,0 Q2.5,3.5 9,5 Q2.5,6.5 0,10")], 9.0, 9.0),
+    // 8 — filled stealth dart (concave back).
+    (8, &[fp("M0,0 L10,5 L0,10 L3,5 z")], 10.0, 10.0),
+    // 9 — the slanted dimension tick (line passes through).
+    (9, &[sp("M2,-1 L6,9")], 8.0, 8.0),
+    // 10 — the filled circle (dot at the end).
+    (10, &[dot(5.0, 5.0, 5.0)], 10.0, 10.0),
+    // 11 — the filled square.
+    (11, &[fp("M2,0 L10,0 L10,10 L2,10 z")], 10.0, 10.0),
+    // 12 — the open double chevron (shaft passes through).
+    (12, &[sp("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10")], 12.0, 12.0),
+    // 13 — single filled triangle, plain base (NOT a double — the
+    // #169 report).
+    (13, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
+    // 14–19 — Visio's open-head set: large→medium triangles, concave
+    // bases, then the open barbs.
+    (14, &[sp("M0,0 L10,5 L0,10")], 10.0, 10.0),
+    (15, &[sp("M0,1.5 L7.5,5 L0,8.5")], 7.5, 7.5),
+    (16, &[sp("M0,0.5 L9,5 L0,9.5")], 9.0, 9.0),
+    (17, &[sp("M0,1 L8.4,5 L0,9")], 8.4, 8.4),
+    (18, &[sp("M0,0 L9,5 L0,10 Q3,5 0,0")], 9.0, 9.0),
+    (19, &[sp("M0,0 Q4,4 9,5 Q4,6 0,10")], 9.0, 9.0),
+    // 20 — the open circle (ring).
+    (20, &[ring(4.5, 5.0, 4.2)], 9.0, 9.0),
+    // 21 — the open square.
+    (21, &[sp("M1,0 L9,0 L9,10 L1,10 z")], 9.0, 9.0),
+    // 22 — the open diamond.
+    (22, &[sp("M0,5 L5,0 L10,5 L5,10 z")], 10.0, 10.0),
+    // 23 — single slanted tick (line passes through).
+    (23, &[sp("M2,-1 L6,9")], 8.0, 8.0),
+    // 24 — single perpendicular tick.
+    (24, &[sp("M4,-1 L4,11")], 7.0, 7.0),
+    // 25 — double perpendicular tick.
+    (25, &[sp("M2.5,-1 L2.5,11 M6,-1 L6,11")], 9.5, 9.5),
+    // 26 — triple perpendicular tick.
+    (26, &[sp("M1,-1 L1,11 M4,-1 L4,11 M7,-1 L7,11")], 10.5, 10.5),
+    // 27 — the three-pronged open fork (crow's foot).
+    (27, &[sp("M0,0 L8,5 L0,10 M8,5 L1,5")], 8.0, 8.0),
+    // 28 — crow's-foot fork + perpendicular tick behind it.
+    (
+        28,
+        &[sp("M2,0 L10,5 L2,10 M10,5 L3,5"), sp("M0.5,-1 L0.5,11")],
+        10.0,
+        10.0,
+    ),
+    // 29 — open fork barbs, then the open ring at the tip.
+    (
+        29,
+        &[sp("M0,0 L4,5 L0,10"), ring(7.2, 5.0, 2.8)],
+        10.0,
+        10.0,
+    ),
+    // 30 — open ring, then a perpendicular tick toward the tip.
+    (30, &[ring(3.2, 5.0, 3.0), sp("M8,-1 L8,11")], 11.0, 11.0),
+    // 31 — perpendicular tick, then the open ring at the tip.
+    (
+        31,
+        &[sp("M1.5,-1 L1.5,11"), ring(7.2, 5.0, 3.2)],
+        10.8,
+        10.8,
+    ),
+    // 32 — double tick + open ring.
+    (
+        32,
+        &[sp("M1,-1 L1,11 M3.5,-1 L3.5,11"), ring(7.6, 5.0, 3.0)],
+        10.8,
+        10.8,
+    ),
+    // 33 — triple tick + open ring.
+    (
+        33,
+        &[
+            sp("M0.5,-1 L0.5,11 M2.8,-1 L2.8,11 M5,-1 L5,11"),
+            ring(8.2, 5.0, 2.9),
+        ],
+        11.3,
+        11.3,
+    ),
+    // 34 — open diamond, then the open ring at the tip.
+    (
+        34,
+        &[sp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), ring(9.6, 5.0, 2.4)],
+        12.0,
+        12.0,
+    ),
+    // 35 — perpendicular tick + filled dot.
+    (35, &[sp("M1.5,-1 L1.5,11"), dot(7.4, 5.0, 3.4)], 11.0, 11.0),
+    // 36 — double tick + filled dot.
+    (
+        36,
+        &[sp("M0.8,-1 L0.8,11 M3.2,-1 L3.2,11"), dot(7.8, 5.0, 3.3)],
+        11.3,
+        11.3,
+    ),
+    // 37 — triple tick + filled dot.
+    (
+        37,
+        &[
+            sp("M0.4,-1 L0.4,11 M2.6,-1 L2.6,11 M4.8,-1 L4.8,11"),
+            dot(8.4, 5.0, 3.2),
+        ],
+        11.8,
+        11.8,
+    ),
+    // 38 — filled diamond, then the filled dot at the tip.
+    (
+        38,
+        &[fp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), dot(9.6, 5.0, 2.6)],
+        12.2,
+        12.2,
+    ),
+    // 39 — double filled triangle (two solid heads).
+    (
+        39,
+        &[fp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
+        10.0,
+        10.0,
+    ),
+    // 40 — double open triangle (two hollow heads).
+    (
+        40,
+        &[sp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
+        10.0,
+        10.0,
+    ),
+    // 41 — the open ring (line ends at it).
+    (41, &[ring(4.3, 5.0, 4.0)], 8.5, 8.5),
+    // 42 — the filled dot (line ends at it).
+    (42, &[dot(4.5, 5.0, 4.5)], 9.0, 9.0),
+    // 43 — open double chevron, large (shaft passes through).
+    (43, &[sp("M0,0 L7,5 L0,10 M7,0 L14,5 L7,10")], 14.0, 14.0),
+    // 44 — perpendicular tick + open chevron at the tip.
+    (
+        44,
+        &[sp("M1,-1 L1,11"), sp("M3.5,0 L10,5 L3.5,10")],
+        10.0,
+        10.0,
+    ),
+    // 45 — perpendicular tick + open double chevron.
+    (
+        45,
+        &[
+            sp("M0.8,-1 L0.8,11"),
+            sp("M3.2,0 L6.8,5 L3.2,10 M6.8,0 L10.4,5 L6.8,10"),
+        ],
+        10.4,
+        10.4,
+    ),
+];
+
+/// The unmapped-value fallback: the filled triangle.
+const FALLBACK_TRIANGLE: &[HeadPart] = &[fp("M0,0 L10,5 L0,10 z")];
+fn arrow_spec(kind: i64) -> Option<(&'static [HeadPart], f64, f64)> {
+    // 46–50 — no head: Visio draws bare ends past the gallery.
+    if (46..=50).contains(&kind) {
+        return None;
+    }
+    for (k, parts, tip, w) in GALLERY.iter().copied() {
+        if k == kind {
+            return Some((parts, tip, w));
+        }
+    }
+    Some((FALLBACK_TRIANGLE, 10.0, 10.0))
+}
 /// Tiny FNV-1a for stable marker-id hashing (no external deps).
 fn fnv(s: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
@@ -3310,8 +3490,10 @@ mod tests {
         s
     }
 
-    /// #72: arrowheads render per value — each gallery entry emits
-    /// its own marker (distinct ids and shapes), the head scales with
+    /// #72 + #199: arrowheads render per value — each gallery entry
+    /// emits its own marker matching the 600 dpi Visio print (the
+    /// 2026-11-06 re-read: open heads 14–22 stroke, the dimension set
+    /// composes ticks with rings/dots), the head scales with
     /// LineWeight (markerUnits=strokeWidth), and 0 emits none.
     #[test]
     fn arrow_heads_render_per_value_and_scale() {
@@ -3355,29 +3537,29 @@ mod tests {
         let none = line_with(&[("EndArrow", "0")]);
         assert!(!none.contains("marker"), "value 0 emits no head: {none}");
         // Each gallery value emits a marker with its own kind id and
-        // the expected body shape (#169 + the #158 fixture pass: mapped
-        // to Visio 2016's observed gallery).
+        // the expected body shape (#169 + the #199 re-read: pinned to
+        // the Visio print's glyphs).
         for (v, needle) in [
-            (1, "M0,0 L10,5 L0,10 z"),
+            (1, "M0,1 L7,5 L0,9"),
             (2, "M0,1.5 L8,5 L0,8.5 z"),
-            (3, "Q3.5,5"),
+            (3, "M0,0 L9,5 L0,10"),
             (4, "M0,0 L10,5 L0,10 z"),
-            (5, "M0,0 L10,5 L0,10 z"),
-            (6, "L5,5 z"),
-            (7, r#"fill="none""#),
-            (8, "M0,1.5 L8,5 L0,8.5"),
+            (5, "Q4,5"),
+            (6, "M0,1 L12,5 L0,9 z"),
+            (7, "Q2.5,3.5 9,5"),
+            (8, "L3,5 z"),
             (9, "M2,-1 L6,9"),
-            (11, "M0,5 L5,0 L10,5 L5,10 z"),
+            (11, "M2,0 L10,0 L10,10 L2,10 z"),
             (12, "M6,0 L12,5 L6,10"),
             (13, "M0,0 L10,5 L0,10 z"),
-            (14, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
-            (15, "M0,0 L10,5 L0,10 z"),
-            (22, "M0,0 L7,5 L0,10 z M7,0 L14,5 L7,10 z"),
-            (26, "M0,1.5 L8,5 L0,8.5 z"),
-            (27, "M1,-1 L5,9 M6,-1 L10,9"),
-            (35, "M0,0 L6,5 L0,10 z M6,0 L12,5 L6,10 z"),
-            (40, "M0,5 L4,0 L8,5 L4,10 Z M8,5 L12,0 L16,5 L12,10 Z"),
-            (41, "M0,5 L5,0 L10,5 L5,10 Z"),
+            (14, "M0,0 L10,5 L0,10"),
+            (15, "M0,1.5 L7.5,5 L0,8.5"),
+            (22, "M0,5 L5,0 L10,5 L5,10 z"),
+            (25, "M2.5,-1 L2.5,11 M6,-1 L6,11"),
+            (27, "M0,0 L8,5 L0,10 M8,5 L1,5"),
+            (35, "M1.5,-1 L1.5,11"),
+            (40, "M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z"),
+            (43, "M0,0 L7,5 L0,10 M7,0 L14,5 L7,10"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
@@ -3386,37 +3568,47 @@ mod tests {
             );
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
-        // The circle is a circle.
-        let circle = line_with(&[("EndArrow", "10")]);
-        assert!(circle.contains("<circle"), "value 10 is a circle: {circle}");
-        // #169 regression (evidence-refined by #158): 13 is a SINGLE
-        // head — one closed triangle — while the fixture-pinned double
-        // chevrons (14 and the 16–22 family) stack two, and the plain
-        // singles (4, 13, 15) never do.
-        let singles = [4i64, 13, 15, 26];
-        for v in singles {
+        // The dots/rings are circle elements (10 filled, 20/41 rings).
+        for (v, ring) in [(10i64, false), (20, true), (41, true)] {
+            let out = line_with(&[("EndArrow", &v.to_string())]);
+            assert!(out.contains("<circle"), "value {v} is a circle: {out}");
+            // Rings stroke unfilled; the dot fills. (The shape's own
+            // white path fill means the marker part decides it.)
+            let head = out.split("<marker").nth(1).expect("marker def");
+            assert_eq!(head.contains("fill=\"none\""), ring, "value {v}: {out}");
+        }
+        // #169 regression: 13 is a SINGLE head — one closed triangle —
+        // and the other filled singles (2, 4) never stack.
+        for v in [2i64, 4, 13] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             let closes = out.matches(" z").count();
             assert!(closes <= 1, "value {v} must not stack triangles: {out}");
         }
-        let doubles = [14i64, 16, 17, 18, 19, 20, 21, 22, 29, 30, 31, 35, 39];
-        for v in doubles {
+        // #199: the open heads 14–22 stroke (fill="none"), never fill;
+        // the double triangles 39/40 stack two heads, filled vs open.
+        for v in 14..=22i64 {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
-                out.matches(" z").count() >= 2,
-                "value {v} is the filled double chevron: {out}"
+                out.contains("fill=\"none\""),
+                "value {v} is an open head: {out}"
             );
         }
+        let d39 = line_with(&[("EndArrow", "39")]);
+        assert_eq!(d39.matches(" z").count(), 2, "39 stacks two: {d39}");
+        let d40 = line_with(&[("EndArrow", "40")]);
+        assert_eq!(d40.matches(" z").count(), 2, "40 stacks two: {d40}");
+        assert!(d40.contains("fill=\"none\""), "40 is the open double");
         // #158: past the gallery, Visio draws a bare end (fixture
         // values 46–50 print no head).
         for v in 46..=50i64 {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(!out.contains("marker"), "value {v} emits no head: {out}");
         }
+        // 35 is the dimension composite: tick + filled dot.
         let dbl = line_with(&[("EndArrow", "35")]);
         assert!(
-            dbl.matches(" z").count() >= 2,
-            "value 35 is the double chevron: {dbl}"
+            dbl.contains("M1.5,-1 L1.5,11") && dbl.contains("<circle"),
+            "value 35 composes tick + dot: {dbl}"
         );
         // Weight scaling: the head rides stroke width.
         let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
@@ -3424,12 +3616,12 @@ mod tests {
             heavy.contains("markerUnits=\"strokeWidth\""),
             "the head rides stroke width: {heavy}"
         );
-        // Begin markers mirror: the begin triangle faces -x.
+        // Begin markers mirror: the begin open V faces -x.
         let both = line_with(&[("BeginArrow", "1"), ("EndArrow", "1")]);
         assert!(both.contains("dc-ahbk"), "the begin head carries its id");
         assert!(
-            both.contains("M10,0 L0,5 L10,10 z"),
-            "the begin triangle mirrors: {both}"
+            both.contains("M7,1 L0,5 L7,9"),
+            "the begin V mirrors: {both}"
         );
     }
 
@@ -4464,4 +4656,112 @@ mod tests {
         assert!(skipped.contains("beta"), "other shapes keep their text");
         assert!(skipped.contains("<g transform"), "geometry keeps rendering");
     }
+
+    /// #199: the gallery matches the 600 dpi Visio print (the 2026-11-06
+    /// re-read in Analysis/arrow-gallery-visio2016.md) — the open-head
+    /// set 14–22 strokes instead of filling, the dimension set composes
+    /// ticks with rings/dots, and the bare ends 46–50 have no head.
+    #[test]
+    fn arrow_gallery_matches_the_visio_print() {
+        // The open heads 14–22: stroked paths, never filled.
+        for kind in [14, 15, 16, 17, 18, 19, 20, 21, 22] {
+            let Some((parts, _, _)) = arrow_spec(kind) else {
+                panic!("arrow {kind} should exist");
+            };
+            assert!(
+                parts.iter().all(|p| !p.filled),
+                "arrow {kind} is an open head"
+            );
+        }
+        // 22 is the stroked diamond.
+        let (parts, _, _) = arrow_spec(22).unwrap();
+        assert!(parts[0].d.contains("L5,0 L10,5"), "diamond profile");
+        // 39/40: double triangles — filled vs stroked.
+        let (filled, _, _) = arrow_spec(39).unwrap();
+        assert!(filled.iter().all(|p| p.filled));
+        assert_eq!(filled[0].d.matches('M').count(), 2, "two heads");
+        let (open, _, _) = arrow_spec(40).unwrap();
+        assert!(open.iter().all(|p| !p.filled));
+        // 20/41: rings; 42: a filled dot.
+        for kind in [20, 41] {
+            let (parts, _, _) = arrow_spec(kind).unwrap();
+            assert!(parts.iter().all(|p| p.circle.is_some() && !p.filled));
+        }
+        let (dot_parts, _, _) = arrow_spec(42).unwrap();
+        assert!(dot_parts[0].circle.is_some() && dot_parts[0].filled);
+        // 25/26: two / three tick strokes in one part.
+        let (t2, _, _) = arrow_spec(25).unwrap();
+        assert_eq!(t2[0].d.matches('M').count(), 2);
+        let (t3, _, _) = arrow_spec(26).unwrap();
+        assert_eq!(t3[0].d.matches('M').count(), 3);
+        // 35: a tick part plus a filled-dot part (composite).
+        let (comp, _, _) = arrow_spec(35).unwrap();
+        assert_eq!(comp.len(), 2);
+        assert!(!comp[0].filled && comp[0].circle.is_none());
+        assert!(comp[1].filled && comp[1].circle.is_some());
+        // 46–50: bare ends.
+        for kind in [46, 47, 48, 49, 50] {
+            assert!(arrow_spec(kind).is_none(), "arrow {kind} is bare");
+        }
+    }
+
+    /// #199 smoke: a line with EndArrow renders the marker from the
+    /// verified table — the open diamond 22 strokes, the classic
+    /// triangle 4 fills, and the bare end 46 carries no marker.
+    #[test]
+    fn arrow_markers_render_from_the_verified_table() {
+        let fixture = |kind: i64| -> String {
+            let mut shape = Shape {
+                id: 1,
+                ..Shape::default()
+            };
+            shape.sheet.set_cell("EndArrow", Cell::value(kind.to_string()));
+            shape.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                rows: vec![
+                    Row {
+                        t: Some("MoveTo".into()),
+                        ix: 0,
+                        cells: vec![
+                            ("X".into(), Cell::value("0")),
+                            ("Y".into(), Cell::value("0")),
+                        ],
+                        ..Row::default()
+                    },
+                    Row {
+                        t: Some("LineTo".into()),
+                        ix: 1,
+                        cells: vec![
+                            ("X".into(), Cell::value("2")),
+                            ("Y".into(), Cell::value("0")),
+                        ],
+                        ..Row::default()
+                    },
+                ],
+                ..Section::default()
+            }));
+            let mut page = Page {
+                id: 1,
+                name: "Page-1".into(),
+                ..Page::default()
+            };
+            page.shapes.push(shape);
+            let mut doc = Document::default();
+            doc.pages.push(page);
+            render_page(&doc, &doc.pages[0]).expect("render")
+        };
+        // The open diamond 22 strokes (fill="none" inside its marker).
+        let open22 = fixture(22);
+        assert!(open22.contains("marker-end"), "marker attached: {open22}");
+        assert!(open22.contains("M0,5 L5,0 L10,5 L5,10 z"));
+        assert!(open22.contains("fill=\"none\" stroke=\"#000000\""));
+        // The classic triangle 4 fills.
+        let classic4 = fixture(4);
+        assert!(classic4.contains("marker-end"), "marker attached: {classic4}");
+        assert!(classic4.contains("<path d=\"M0,0 L10,5 L0,10 z\" fill=\"#000000\""));
+        // The bare end 46 carries no marker at all.
+        let bare46 = fixture(46);
+        assert!(!bare46.contains("marker-end"), "bare ends carry no marker");
+    }
 }
+
