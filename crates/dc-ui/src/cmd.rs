@@ -489,7 +489,7 @@ fn curved_control_caches(
     conn: &vsdx::model::Shape,
     w_new: f64,
     h_new: f64,
-) -> Vec<(i64, String, Cell)> {
+) -> Vec<(i64, i64, String, Cell)> {
     let mut out = Vec::new();
     let mut env = vsdx::formula::Env::new();
     env.insert("Width".to_string(), w_new);
@@ -519,6 +519,7 @@ fn curved_control_caches(
                     .filter(|v| v.is_finite())
                 {
                     out.push((
+                        g.ix,
                         r.ix,
                         name.to_string(),
                         Cell {
@@ -561,13 +562,14 @@ impl Command for RerouteConnectors {
             conn_id: i64,
             cells: Vec<(String, f64, Option<String>)>,
             rows: Vec<(i64, f64, f64)>,
-            /// #202: CubicBezTo control-cache refreshes — (row ix,
-            /// cell name, new cell). The curved route's controls are
+            /// #202: CubicBezTo control-cache refreshes — (section
+            /// ix, row ix, cell name, new cell). The curved route's
+            /// controls are
             /// Width/Height FORMULAS; the frame rewrite leaves their
             /// cached values at the pre-drag pose, and anything
             /// reading caches (hit samples, ShapeSheet) sees the old
             /// curve. Literal (customized) controls stay untouched.
-            row_cells: Vec<(i64, String, Cell)>,
+            row_cells: Vec<(i64, i64, String, Cell)>,
         }
         // Both ends may glue to moved shapes (a two-shape selection
         // drag): each connector is planned ONCE from both new
@@ -945,12 +947,12 @@ impl Command for RerouteConnectors {
             // #202: refresh the curved route's formula-driven control
             // caches against the new frame (the formula is kept — the
             // SetGluedCell pattern; a customized literal stays).
-            for (ix, name, cell) in &plan.row_cells {
+            for (sec_ix, row_ix, name, cell) in &plan.row_cells {
                 let mut c = dc_core::SetRowCell::new(
                     scope.clone(),
                     "Geometry",
-                    0,
-                    dc_core::commands::RowSel::Ix(*ix),
+                    *sec_ix,
+                    dc_core::commands::RowSel::Ix(*row_ix),
                     name.clone(),
                     cell.clone(),
                 );

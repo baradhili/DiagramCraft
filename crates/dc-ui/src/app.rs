@@ -2427,23 +2427,21 @@ impl App {
                     return;
                 }
                 // #203: 1D shapes map the drop through the HitFrame —
-                // the E fractions are of the LOCAL Width/Height in row
-                // space; 2D shapes keep the bbox mapping.
-                let (fx, fy, drop) = if let Some(hf) = &hit {
+                // 2D shapes keep the bbox mapping. Per-axis type gates
+                // (the render arm's rule): only an axis whose type is
+                // 0 is fractional and divides by its dimension; an
+                // absolute axis keeps the local drop value.
+                let (gx, gy, drop) = if let Some(hf) = &hit {
                     let local = hf.to_local(to_page);
-                    (
-                        hf.size.0.max(1e-6),
-                        hf.size.1.max(1e-6),
-                        local,
-                    )
+                    (hf.size.0.max(1e-6), hf.size.1.max(1e-6), local)
                 } else {
                     let Some((_, _, bw, bh)) = self.shape_rect(&ed.doc, page_id, sh) else {
                         return;
                     };
                     (bw.max(1e-6), bh.max(1e-6), (px, py))
                 };
-                f.points[idx].0 = drop.0 / fx;
-                f.points[idx].1 = drop.1 / fy;
+                f.points[idx].0 = if f.x_type == 0.0 { drop.0 / gx } else { drop.0 };
+                f.points[idx].1 = if f.y_type == 0.0 { drop.1 / gy } else { drop.1 };
                 let text = dc::curve::render_nurbs(&f);
                 cmds.push(Box::new(dc_core::SetRowCell::new(
                     scope,
@@ -4914,7 +4912,10 @@ impl App {
             return;
         };
         let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
-        let shape = crate::freeform::build_shape(id, &stroke);
+        let Some(shape) = crate::freeform::build_shape(id, &stroke) else {
+            self.status = "freeform stroke too short to draw".into();
+            return;
+        };
         let segs = shape
             .sheet
             .sections_named("Geometry")

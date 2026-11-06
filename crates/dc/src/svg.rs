@@ -294,9 +294,6 @@ pub fn shape_ink_bounds(
                 a.apply(x1, y1),
                 a.apply(x0, y1),
             ];
-            if std::env::var("DC_DEBUG_BOUNDS").is_ok() && s.id == 1022 {
-                println!("DEBUG box corners: {c:?}");
-            }
             let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
             let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
             union((
@@ -334,8 +331,10 @@ pub fn shape_ink_bounds(
                 let rel = t.starts_with("Rel");
                 let (mut x, mut y) = (num("X"), num("Y"));
                 if rel {
-                    x *= width.max(1e-6);
-                    y *= height.max(1e-6);
+                    // Raw signed dims — rel_adjust (which the renderer
+                    // uses) multiplies raw, so the bound must match.
+                    x *= width;
+                    y *= height;
                 }
                 // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
                 // box union above; the row coordinates are y-UP.
@@ -356,8 +355,10 @@ pub fn shape_ink_bounds(
                     "EllipticalArcTo" | "RelEllipticalArcTo" => {
                         let (mut mx, mut my) = (num("A"), num("B"));
                         if rel {
-                            mx *= width.max(1e-6);
-                            my *= height.max(1e-6);
+                            // Raw signed dims — rel_adjust multiplies
+                            // raw (negative widths mirror the bound).
+                            mx *= width;
+                            my *= height;
                         }
                         pt(mx, my, union);
                         // The arc's apex beyond the on-curve point.
@@ -392,11 +393,11 @@ pub fn shape_ink_bounds(
                             .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
                             .unwrap_or_default();
                         if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                            let (fx, fy) = if f.x_type == 0.0 {
-                                (width.max(1e-6), height.max(1e-6))
-                            } else {
-                                (1.0, 1.0)
-                            };
+                            // Per-axis: xType gates X by Width, yType
+                            // gates Y by Height (raw signed — rel_adjust
+                            // and the render arm multiply raw).
+                            let fx = if f.x_type == 0.0 { width } else { 1.0 };
+                            let fy = if f.y_type == 0.0 { height } else { 1.0 };
                             for (gx, gy, _, _) in &f.points {
                                 pt(gx * fx, gy * fy, union);
                             }
@@ -441,14 +442,6 @@ pub fn shape_ink_bounds(
         }
     }
     walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut union);
-    #[allow(clippy::let_unit_value)]
-    {
-        if std::env::var("DC_DEBUG_BOUNDS").is_ok() {
-            if let Some(b) = &acc {
-                println!("DEBUG bounds raw for {shape_id}: {b:?}");
-            }
-        }
-    }
     let (x, y, w, h) = acc?;
     // Stroke bleed margin; then clamp to the page ± 2 in so a rogue
     // formula cannot push a layer off to infinity.
@@ -587,8 +580,14 @@ fn render_page_opts(
     // #187: line jumps — Visio prints hops. The export appends the
     // same treatment the canvas paints (white gap, under redraw, hop
     // arc) as a page-space group above the ink. The gap/extension
-    // paddings pin the canvas's screen-px extras at 96 dpi.
-    let jumps = crate::geom::page_jumps(doc, page, hidden);
+    // paddings pin the canvas's screen-px extras at 96 dpi. Scoped
+    // renders (`only`) draw one shape's subtree — page-wide jumps
+    // would drag in crossings from connectors outside the scope.
+    let jumps = if only.is_none() {
+        crate::geom::page_jumps(doc, page, hidden)
+    } else {
+        Vec::new()
+    };
     if !jumps.is_empty() {
         let _ = writeln!(svg, r#"<g data-dc="line-jumps">"#);
         for j in &jumps {
@@ -2008,22 +2007,24 @@ fn render_all_geometry(
                         // formulas (`Controls.Row_1`, `User.*`) have no
                         // instance meaning; their cached value (if any)
                         // stands, unfilled otherwise.
+                        // Formula-authoritative cells evaluate against
+                        // the INSTANCE env — the value is already in
+                        // instance units and must NOT be placed-scaled
+                        // again (#203 review). Cached master-unit
+                        // numerics are master-unit and keep placed().
                         let sv = if proportional {
                             scell.f
                                 .as_deref()
                                 .and_then(|f| vsdx::formula::eval(f, &env).ok())
                                 .and_then(|v| v.as_f64())
-                                .filter(|v| v.is_finite() && placed(*v).abs() <= bound)
-                                .or_else(|| {
-                                    scell.numeric().filter(|v| placed(*v).abs() <= bound)
-                                })
+                                .filter(|v| v.is_finite() && v.abs() <= bound)
                         } else {
-                            scell.numeric().filter(|v| placed(*v).abs() <= bound)
+                            scell.numeric().map(placed).filter(|v| v.abs() <= bound)
                         };
                         let Some(sv) = sv else {
                             continue;
                         };
-                        let patched = Cell::value(format!("{}", placed(sv)));
+                        let patched = Cell::value(format!("{sv}"));
                         match row.cells.iter_mut().find(|(n, _)| n == cname) {
                             Some((_, cell)) => {
                                 // A local numeric V wins even under F='Inh':

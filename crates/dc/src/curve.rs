@@ -126,6 +126,15 @@ impl SplineData {
         if interior.len() > allowed {
             interior.truncate(allowed);
         }
+        // Sparse inputs (fewer interior knots than n − d − 1) would
+        // leave the vector short of n + d + 1 — de_boor indexes up to
+        // knots[n + d] — so pad the interior (repeat its last knot, or
+        // `first` when there is none) until the assembled vector is
+        // EXACTLY n + d + 1 entries.
+        let pad_from = *interior.last().unwrap_or(&first);
+        while interior.len() < allowed {
+            interior.push(pad_from);
+        }
         let mut knots = vec![first; d + 1];
         knots.append(&mut interior);
         knots.extend(std::iter::repeat_n(last, d + 1));

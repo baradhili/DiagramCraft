@@ -100,9 +100,19 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             let Some((center, r)) = circle3(pts[i], mid, pts[j]) else {
                 break;
             };
+            // Every intermediate point must sit within tol of the
+            // fitted circle AND on the arc's side of the run chord —
+            // a same-circle point on the other side belongs to the
+            // complementary arc, which the single sagitta row cannot
+            // represent (the emitted arc would cut through it).
+            let (dx, dy) = (pts[j].0 - pts[i].0, pts[j].1 - pts[i].1);
+            let side_of = |p: (f64, f64)| dx * (p.1 - pts[i].1) - dy * (p.0 - pts[i].0);
+            let run_side = side_of(mid);
             let ok = pts[i + 1..j].iter().all(|p| {
-                (p.0 - center.0).hypot(p.1 - center.1).abs() - r < tol
-                    && r - (p.0 - center.0).hypot(p.1 - center.1) < tol
+                let dist = (p.0 - center.0).hypot(p.1 - center.1);
+                (dist - r).abs() < tol
+                    && r - dist < tol
+                    && run_side * side_of(*p) > 0.0
             });
             if !ok {
                 break;
@@ -153,8 +163,13 @@ fn sagitta(a: (f64, f64), b: (f64, f64), center: (f64, f64), r: f64) -> f64 {
 /// section carries the fitted segments in the bbox-local frame (the
 /// renderer's and #137 vertex handles' convention). Ordinary rows —
 /// editable in-app, saved and round-tripped like any shape.
-pub fn build_shape(id: i64, stroke: &[(f64, f64)]) -> Shape {
+/// Build the freeform shape; `None` for a stroke that simplifies to
+/// fewer than two points (nothing to draw).
+pub fn build_shape(id: i64, stroke: &[(f64, f64)]) -> Option<Shape> {
     let simplified = simplify(stroke, 0.01);
+    if simplified.len() < 2 {
+        return None;
+    }
     let segs = fit_segments(&simplified, 0.01);
     let xs = simplified.iter().map(|p| p.0);
     let ys = simplified.iter().map(|p| p.1);
@@ -230,7 +245,7 @@ pub fn build_shape(id: i64, stroke: &[(f64, f64)]) -> Shape {
         ix += 1;
     }
     s.sheet.children.push(SheetChild::Section(sec));
-    s
+    Some(s)
 }
 
 #[cfg(test)]
@@ -273,12 +288,62 @@ mod tests {
         );
     }
 
+    /// #203 review: a stroke wrapping ~240° around one circle — the
+    /// radial fit alone would accept the WHOLE wrap as one arc (all
+    /// points on the circle), but the emitted sagitta arc only covers
+    /// the ≤180° span. The side check must split the run, and every
+    /// EMITTED segment must follow the stroke (each segment's arc
+    /// midpoint lands near a stroke sample).
+    #[test]
+    fn fit_splits_a_240_degree_wrap_and_tracks_the_stroke() {
+        // 240° of a radius-2 circle centered (3, 3), sampled finely;
+        // the stroke starts at angle 150° so the wrap crosses the
+        // chord of every candidate run.
+        let stroke: Vec<(f64, f64)> = (0..=60)
+            .map(|i| {
+                let a = (150.0 + 240.0 * i as f64 / 60.0).to_radians();
+                (3.0 + 2.0 * a.cos(), 3.0 + 2.0 * a.sin())
+            })
+            .collect();
+        let segs = fit_segments(&simplify(&stroke, 0.005), 0.01);
+        assert!(segs.len() > 1, "a 240° wrap splits: {segs:?}");
+
+        // Each emitted segment (chord a→b, sagitta s) has its arc
+        // midpoint at chord_mid + s·right-of-travel; that midpoint
+        // must land within 2·tol·(arc factor) of the STROKE — i.e.
+        // the emitted geometry follows the samples instead of
+        // shortcutting across the circle's far side.
+        for seg in &segs {
+            let (a, b, s) = match seg {
+                Seg::Arc(a, b, s) => (a, b, *s),
+                Seg::Line(a, b) => {
+                    // A line segment's mid must also track the stroke.
+                    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                    let near = stroke.iter().any(|p| (p.0 - mid.0).hypot(p.1 - mid.1) < 0.2);
+                    assert!(near, "line mid tracks the stroke: {a:?}→{b:?}");
+                    continue;
+                }
+            };
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let len = dx.hypot(dy).max(1e-9);
+            let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+            let arc_mid = (mid.0 + dy / len * s, mid.1 - dx / len * s);
+            let near = stroke
+                .iter()
+                .any(|p| (p.0 - arc_mid.0).hypot(p.1 - arc_mid.1) < 0.2);
+            assert!(
+                near,
+                "arc mid {arc_mid:?} tracks the stroke (a={a:?} b={b:?} s={s})"
+            );
+        }
+    }
+
     /// The built shape: bbox frame cells, MoveTo + the fitted rows,
     /// and the geometry in LOCAL coordinates.
     #[test]
     fn build_shape_frames_the_stroke() {
         let stroke = vec![(1.0, 1.0), (2.0, 1.0), (3.0, 2.0)];
-        let s = build_shape(7, &stroke);
+        let s = build_shape(7, &stroke).expect("a nonempty stroke builds");
         let num = |n: &str| {
             s.sheet
                 .cell(n)
