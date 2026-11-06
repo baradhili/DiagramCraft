@@ -620,7 +620,9 @@ pub enum SectionView {
 /// One row of a merged section, resolved against deeper levels. A
 /// cell needing resolution (whole section inherited, `F="Inh"`, or
 /// empty) looks up the same section / matching row / same cell name
-/// down the rest of the chain.
+/// down the rest of the chain; with no deeper match the cell itself
+/// shows — an `F="Inh"` cell keeps its cached value (marked
+/// inherited), an empty one falls through to "No Formula".
 fn merged_row(
     base_row: &Row,
     base_inherited: bool,
@@ -652,11 +654,10 @@ fn merged_row(
                     return MergedCell::deep(h, n);
                 }
             }
-            if base_inherited {
-                MergedCell::deep(c, n)
-            } else {
-                MergedCell::fallback("No Formula".into())
-            }
+            // No deeper source: the cell itself. An `F="Inh"` cell's
+            // cached V survives (shown inherited); an empty cell's
+            // text is "No Formula" anyway.
+            MergedCell::deep(c, n)
         })
         .collect()
 }
@@ -1010,9 +1011,13 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
                 .collect()
             });
         let mut rows = Vec::new();
+        // Stored stop rows inherit together with their section: a
+        // master-side FillGradient table renders inherited, only a
+        // locally-stored table is the shape's own.
+        let base_inherited = base.as_ref().is_none_or(|(_, inh)| *inh);
         for r in 0..10 {
             let cells: Vec<MergedCell> = match base.and_then(|(sec, _)| sec.rows.get(r)) {
-                Some(row) => merged_row(row, base_pos.is_none(), name, &deeper),
+                Some(row) => merged_row(row, base_inherited, name, &deeper),
                 None => headers
                     .iter()
                     .map(|_| MergedCell::fallback("THEMEVAL()".into()))
@@ -1577,6 +1582,79 @@ mod tests {
         assert_eq!(stops[0].2[0].text, "#afc2da");
         assert!(!stops[0].2[0].inherited);
         assert_eq!(stops[1].2[0].text, "THEMEVAL()");
+    }
+
+    #[test]
+    fn gradient_stops_inherit_from_a_master_side_table() {
+        let mut doc = fixture();
+        // The stop table lives on the MASTER, not the instance.
+        let master = doc.masters[0].shapes.first_mut().unwrap();
+        master.sheet.children.push(SheetChild::Section(Section {
+            name: "FillGradient".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![
+                    ("GradientStopColor".into(), Cell::value("#eef2f7")),
+                    ("GradientStopColorTrans".into(), Cell::value("0")),
+                    ("GradientStopPosition".into(), Cell::value("1")),
+                ],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let views = build_views(&doc, 1, 100);
+        let stops = views
+            .iter()
+            .find_map(|v| match v {
+                SectionView::Rows { title, rows, .. } if title == "Fill Gradient Stops" => {
+                    Some(rows.clone())
+                }
+                _ => None,
+            })
+            .expect("Fill Gradient Stops");
+        assert_eq!(stops[0].2[0].text, "#eef2f7");
+        assert!(stops[0].2[0].inherited, "a master-side stop is inherited");
+    }
+
+    #[test]
+    fn local_inh_cell_keeps_its_cached_value() {
+        let mut doc = fixture();
+        // A local stop cell marked F="Inh" with a cached value, and no
+        // deeper source carrying the section.
+        let shape = &mut doc.pages[0].shapes[0];
+        shape.sheet.children.push(SheetChild::Section(Section {
+            name: "FillGradient".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![
+                    (
+                        "GradientStopColor".into(),
+                        Cell {
+                            v: Some("#afc2da".into()),
+                            f: Some("Inh".into()),
+                            ..Cell::default()
+                        },
+                    ),
+                    ("GradientStopColorTrans".into(), Cell::value("0")),
+                    ("GradientStopPosition".into(), Cell::value("0")),
+                ],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let views = build_views(&doc, 1, 100);
+        let stops = views
+            .iter()
+            .find_map(|v| match v {
+                SectionView::Rows { title, rows, .. } if title == "Fill Gradient Stops" => {
+                    Some(rows.clone())
+                }
+                _ => None,
+            })
+            .expect("Fill Gradient Stops");
+        // The cached value survives the failed deeper lookup.
+        assert_eq!(stops[0].2[0].text, "#afc2da");
+        assert!(stops[0].2[0].inherited);
     }
 
     #[test]
