@@ -3118,11 +3118,12 @@ impl App {
                 .find(|p| p.id == page_id)
                 .and_then(|p| p.shapes.iter().find(|s| s.id == container))
                 .and_then(|cont| {
-                    cont.sheet.sections_named("User").iter().find_map(|sec| {
-                        sec.named_row("msvSDContainerTitle")
-                            .and_then(|r| r.cell("Value"))
-                            .and_then(|c| c.v.clone())
-                    })
+                    // #191: master-based containers keep the title row on
+                    // the master root — resolve through the chain.
+                    ed.doc
+                        .effective_user_row(cont, &[], "msvSDContainerTitle")
+                        .and_then(|r| r.cell("Value"))
+                        .and_then(|c| c.v.clone())
                 })
                 .unwrap_or_else(|| "Container".into());
             // The UNION — already-members selected again must not
@@ -3777,10 +3778,11 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
             return false;
         };
-        let eff = ed.doc.effective_sheet(sh, &chain);
-        eff.sections_named("User")
-            .iter()
-            .find_map(|sec| sec.named_row("msvStructureType"))
+        // #191: the msvStructureType row lives on the MASTER root; a
+        // real instance carries local sections, so effective_sheet's
+        // either/or return hides it — resolve through the chain.
+        ed.doc
+            .effective_user_row(sh, &chain, "msvStructureType")
             .and_then(|r| r.cell("Value"))
             .and_then(|c| c.v.clone())
             .is_some_and(|v| v == "Container")
@@ -3804,10 +3806,10 @@ impl App {
         let Ok(chain) = shape_chain(&ed.doc, page_id, sid) else {
             return true;
         };
-        let eff = ed.doc.effective_sheet(sh, &chain);
-        eff.sections_named("User")
-            .iter()
-            .find_map(|sec| sec.named_row("msvSDContainerNoHighlight"))
+        // #191: chain-aware like sel_is_container — the row lives on
+        // the master root until an instance edit materializes it.
+        ed.doc
+            .effective_user_row(sh, &chain, "msvSDContainerNoHighlight")
             .and_then(|r| r.cell("Value"))
             .and_then(|c| c.numeric())
             .map(|v| v == 0.0)
@@ -12013,10 +12015,9 @@ impl App {
         let page = ed.doc.pages.iter().find(|p| p.id == page)?;
         let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
         let chain = shape_chain(&ed.doc, page.id, shape).ok()?;
-        let eff = ed.doc.effective_sheet(sh, &chain);
-        eff.sections_named("User")
-            .iter()
-            .find_map(|sec| sec.named_row(row))?
+        // #191: chain-aware — master-root rows resolve too.
+        ed.doc
+            .effective_user_row(sh, &chain, row)?
             .cell("Value")
             .and_then(|c| c.v.clone())
     }

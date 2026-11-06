@@ -467,3 +467,170 @@ fn retained_package_without_masters_keeps_added_master() {
     assert_eq!(back.masters[0].shapes.len(), 1, "contents bound, not lost");
     assert_eq!(back.masters[0].part, "visio/masters/master1.xml");
 }
+
+/// A container-flavored package: master 7's root carries the SDCONT
+/// recognition rows (`User.msvStructureType=Container` and friends),
+/// and the page instantiates it as a shape with LOCAL sections — the
+/// real Visio-authored situation (#191's evidence: instances virtually
+/// always carry Geometry/Character snapshots).
+fn write_container_package(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("container.vsdx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+
+    let content_types = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
+<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
+<Override PartName="/visio/pages/page1.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
+<Override PartName="/visio/masters/masters.xml" ContentType="application/vnd.ms-visio.masters+xml"/>
+<Override PartName="/visio/masters/master1.xml" ContentType="application/vnd.ms-visio.master+xml"/>
+</Types>"#;
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/>
+</Relationships>"#;
+    let document = r#"<?xml version="1.0" encoding="utf-8"?>
+<VisioDocument xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<StyleSheets><StyleSheet ID='0' NameU='No Style'>
+  <Cell N='LineWeight' V='0.01041666666666667'/><Cell N='LineColor' V='0'/>
+  <Cell N='FillForegnd' V='1'/><Cell N='FillPattern' V='1'/>
+</StyleSheet></StyleSheets>
+</VisioDocument>"#;
+    let document_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/>
+<Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/masters" Target="masters/masters.xml"/>
+</Relationships>"#;
+    let pages = r#"<?xml version="1.0" encoding="utf-8"?>
+<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Page ID='0' NameU='Page-1' Name='Page-1'>
+<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11.0'/>
+</PageSheet>
+<Rel r:id='rId1'/>
+</Page>
+</Pages>"#;
+    let pages_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/page" Target="page1.xml"/>
+</Relationships>"#;
+    let page1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<PageContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='10' Type='Shape' Master='7' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='4.25'/><Cell N='PinY' V='5.5'/>
+  <Cell N='Width' V='3'/><Cell N='Height' V='2'/>
+  <Cell N='LocPinX' V='1.5'/><Cell N='LocPinY' V='1'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='3'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='3'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+</Shape>
+<Shape ID='11' Type='Shape'>
+  <Cell N='PinX' V='1'/><Cell N='PinY' V='1'/>
+  <Cell N='Width' V='1'/><Cell N='Height' V='1'/>
+  <Cell N='LocPinX' V='0.5'/><Cell N='LocPinY' V='0.5'/>
+  <Section N='User'>
+    <Row N='msvStructureType'><Cell N='Value' V='Group' U='STR'/><Cell N='Prompt' V=''/></Row>
+  </Section>
+</Shape>
+</Shapes>
+</PageContents>"#;
+    let masters = r#"<?xml version="1.0" encoding="utf-8"?>
+<Masters xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Master ID='7' NameU='Container box' r:id='rId1'/>
+</Masters>"#;
+    let masters_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/master" Target="master1.xml"/>
+</Relationships>"#;
+    let master1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<MasterContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='3' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='1.5'/><Cell N='PinY' V='1'/>
+  <Cell N='Width' V='3'/><Cell N='Height' V='2'/>
+  <Cell N='LocPinX' V='1.5'/><Cell N='LocPinY' V='1'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='3'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='3'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='2'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+  <Section N='User'>
+    <Row N='msvStructureType'><Cell N='Value' V='Container' U='STR'/><Cell N='Prompt' V=''/></Row>
+    <Row N='msvSDContainerNoHighlight'><Cell N='Value' V='0'/><Cell N='Prompt' V=''/></Row>
+    <Row N='msvSDContainerMargin'><Cell N='Value' V='0.125' U='IN' F='0.125IN*DropOnPageScale'/><Cell N='Prompt' V=''/></Row>
+  </Section>
+</Shape>
+</Shapes>
+</MasterContents>"#;
+
+    for (name, data) in [
+        ("[Content_Types].xml", content_types),
+        ("_rels/.rels", root_rels),
+        ("visio/document.xml", document),
+        ("visio/_rels/document.xml.rels", document_rels),
+        ("visio/pages/pages.xml", pages),
+        ("visio/pages/_rels/pages.xml.rels", pages_rels),
+        ("visio/pages/page1.xml", page1),
+        ("visio/masters/masters.xml", masters),
+        ("visio/masters/_rels/masters.xml.rels", masters_rels),
+        ("visio/masters/master1.xml", master1),
+    ] {
+        w.start_file(name, opts).unwrap();
+        w.write_all(data.as_bytes()).unwrap();
+    }
+    w.finish().unwrap();
+    path
+}
+
+/// #191: a master-based container instance that carries LOCAL sections
+/// (the real-file situation) must still resolve the master root's
+/// named User rows — `effective_sheet` is either/or and hides them;
+/// `effective_user_row` walks the chain instance-first, master-second.
+#[test]
+fn container_user_rows_resolve_through_the_master_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_container_package(tmp.path());
+    let doc = vsdx::parse::parse(&path).unwrap();
+
+    let inst = &doc.pages[0].shapes[0];
+    assert_eq!(inst.master, Some(7));
+    // The regression's precondition: the instance has local sections,
+    // so effective_sheet stops at it and the User rows are invisible.
+    assert!(inst.sheet.has_sections());
+    assert!(
+        doc.effective_sheet(inst, &[])
+            .sections_named("User")
+            .is_empty(),
+        "either/or effective_sheet hides the master root's User rows"
+    );
+
+    let v = |sh: &vsdx::model::Shape, name: &str| {
+        doc.effective_user_row(sh, &[], name)
+            .and_then(|r| r.cell("Value"))
+            .and_then(|c| c.v.clone())
+    };
+    assert_eq!(v(inst, "msvStructureType").as_deref(), Some("Container"));
+    assert_eq!(
+        v(inst, "msvSDContainerNoHighlight").as_deref(),
+        Some("0")
+    );
+    assert_eq!(v(inst, "msvSDContainerMargin").as_deref(), Some("0.125"));
+    assert_eq!(v(inst, "msvSDContainerLocked"), None, "unknown row stays None");
+
+    // An instance-local User row shadows the master's same-name row
+    // (shape 11 has no master, so its own row is all there is).
+    let local = &doc.pages[0].shapes[1];
+    assert_eq!(v(local, "msvStructureType").as_deref(), Some("Group"));
+    assert_eq!(v(local, "msvSDContainerNoHighlight"), None);
+}
