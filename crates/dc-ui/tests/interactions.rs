@@ -8055,51 +8055,7 @@ fn connection_points_reveal_highlight_and_show_glued_sites() {
 
 
 
-#[test]
-fn dbg_zoom_stability() {
-    let mut h = harness_with_blank();
-    for i in 0..8 {
-        h.run();
-        eprintln!("frame {i}: zoom={:.6} canvas={:?}",
-            h.state().debug_zoom(),
-            h.state().debug_canvas_rect());
-    }
-}
 
-#[test]
-fn dbg_corner_nums() {
-    let mut h = harness_with_blank();
-    for _ in 0..4 { h.run(); }
-    let (page, shape) = place_master(&mut h, 2);
-    let mut s = h.state().debug_snap_settings();
-    s.snap_active = true;
-    s.snap_ruler_subdivisions = false;
-    s.snap_shape_extensions = false;
-    s.snap_connection_points = false;
-    s.snap_alignment_boxes = false;
-    s.snap_shape_intersections = false;
-    s.snap_guides = false;
-    s.dynamic_grid = false;
-    h.state_mut().debug_set_snap_for_test(s);
-    h.run();
-    let ppi = 96.0 * h.state().debug_zoom() as f64;
-    let step = 5.0 / 25.4;
-    let w0 = cell_of(&h, page, shape, "Width");
-    let px0 = cell_of(&h, page, shape, "PinX");
-    let lx0 = cell_of(&h, page, shape, "LocPinX");
-    let right0 = px0 + w0 - lx0;
-    let k = ((right0 + 1.5 * step) / step).round();
-    let target = k * step;
-    let raw = target - 0.03;
-    let br = h.state().debug_sel_br_corner().unwrap();
-    eprintln!("ppi={ppi} step={step} right0={right0} target={target} raw={raw} br={br:?} dxpx={}", (raw - right0) * ppi);
-    let grab = br + egui::vec2(-6.0, -6.0);
-    drag_naturally(&mut h, grab, egui::vec2(((raw - right0) * ppi + 6.0) as f32, 30.0));
-    let w1 = cell_of(&h, page, shape, "Width");
-    let px1 = cell_of(&h, page, shape, "PinX");
-    let lx1 = cell_of(&h, page, shape, "LocPinX");
-    eprintln!("landed={}", px1 + w1 - lx1);
-}
 
 
 
