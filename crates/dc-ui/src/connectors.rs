@@ -1330,7 +1330,19 @@ mod tests {
             l(2, 5, &[(0.0, 2.0), (2.0, 0.0)]),
         ]);
         assert_eq!(js.len(), 1);
-        assert!((js[0].dir.1 - (-1.0)).abs() < 1e-9 || true); // direction of line 2
+        // The later-in-z line 2 hops: its direction (0,2)->(2,0)
+        // normalizes to (1/sqrt(2), -1/sqrt(2)).
+        let sq = 1.0 / (2.0f64).sqrt();
+        assert!(
+            (js[0].dir.0 - sq).abs() < 1e-9,
+            "the later-z line hops: dir.x = {}",
+            js[0].dir.0
+        );
+        assert!(
+            (js[0].dir.1 - (-sq)).abs() < 1e-9,
+            "the later-z line hops: dir.y = {}",
+            js[0].dir.1
+        );
         // Non-crossing segments never hop.
         assert!(line_jumps(&[
             l(1, 0, &[(0.0, 0.0), (1.0, 0.0)]),
