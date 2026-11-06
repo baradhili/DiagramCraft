@@ -3524,7 +3524,8 @@ fn format_pane_edits_cells_for_whole_selection() {
         .expect("the End Arrow dropdown (shows None)");
     btn.click();
     h.run();
-    h.get_by_label("Arrow").click();
+    // #199 renamed the gallery labels: value 1 is "Open 2-Prong".
+    h.get_by_label("Open 2-Prong").click();
     h.run();
     assert_eq!(
         h.state().debug_cell_for_test(sid, "EndArrow"),
