@@ -473,8 +473,93 @@ fn render_page_opts(
         }
         render_shape(doc, shape, h, &[], &page.part, skip_text, &mut svg);
     }
+    // #187: line jumps — Visio prints hops. The export appends the
+    // same treatment the canvas paints (white gap, under redraw, hop
+    // arc) as a page-space group above the ink. The gap/extension
+    // paddings pin the canvas's screen-px extras at 96 dpi.
+    let jumps = crate::geom::page_jumps(doc, page, hidden);
+    if !jumps.is_empty() {
+        let _ = writeln!(svg, r#"<g data-dc="line-jumps">"#);
+        for j in &jumps {
+            append_jump(&mut svg, h, j);
+        }
+        let _ = writeln!(svg, "</g>");
+    }
     let _ = writeln!(svg, "</svg>");
     Ok(svg)
+}
+
+/// The page-space paddings of the canvas overlay's screen-px extras
+/// (2 px gap weight, 1 px under extension), pinned at 96 dpi.
+const JUMP_GAP_EXTRA_IN: f64 = 2.0 / 96.0;
+const JUMP_UNDER_EXT_IN: f64 = 1.0 / 96.0;
+
+/// One hop in page-space SVG (y-down: `sy = page_h − y`), the canvas
+/// overlay's three strokes — the white gap across the jumper, the
+/// under line redrawn straight through it, and the hop arc bulging
+/// page-up (`canvas.rs`'s screen-up flip, computed here in page
+/// space so rotated jumpers stay correct).
+fn append_jump(svg: &mut String, page_h: f64, j: &crate::geom::Jump) {
+    let (r, w, uw) = (
+        crate::geom::JUMP_RADIUS_IN,
+        j.weight,
+        j.under_weight,
+    );
+    let sy = |y: f64| page_h - y;
+    let pt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, sy(p.1));
+    let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+    // 1. the gap — paper-white, slightly wider than the jumper.
+    let g1 = (j.at.0 - j.dir.0 * r, j.at.1 - j.dir.1 * r);
+    let g2 = (j.at.0 + j.dir.0 * r, j.at.1 + j.dir.1 * r);
+    let white = "#ffffff";
+    let _ = writeln!(
+        svg,
+        r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{white}" stroke-width="{gw:.4}"/>"#,
+        x1 = g1.0,
+        y1 = sy(g1.1),
+        x2 = g2.0,
+        y2 = sy(g2.1),
+        gw = w + JUMP_GAP_EXTRA_IN,
+    );
+    // 2. the under line passes straight through the gap.
+    let ext = r + uw + JUMP_UNDER_EXT_IN;
+    let u1 = (j.at.0 - j.under.0 * ext, j.at.1 - j.under.1 * ext);
+    let u2 = (j.at.0 + j.under.0 * ext, j.at.1 + j.under.1 * ext);
+    let _ = writeln!(
+        svg,
+        r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{uw:.4}"/>"#,
+        x1 = u1.0,
+        y1 = sy(u1.1),
+        x2 = u2.0,
+        y2 = sy(u2.1),
+        c = hex(j.under_color),
+        uw = uw,
+    );
+    // 3. the hop arc — a 9-point semicircle from g1 around to g2
+    // through at + n·r, the normal flipped toward page-up.
+    let mut n = (-j.dir.1, j.dir.0);
+    if n.1 < 0.0 {
+        n = (-n.0, -n.1);
+    }
+    let mut path = String::new();
+    for k in 0..=8 {
+        let t = k as f64 / 8.0;
+        let ang = std::f64::consts::PI * t;
+        let local = (
+            -j.dir.0 * r * ang.cos() + n.0 * r * ang.sin(),
+            -j.dir.1 * r * ang.cos() + n.1 * r * ang.sin(),
+        );
+        let p = (j.at.0 + local.0, j.at.1 + local.1);
+        path.push_str(if k == 0 { "M " } else { "L " });
+        path.push_str(&pt(p));
+        path.push(' ');
+    }
+    let _ = writeln!(
+        svg,
+        r#"<path d="{path}" fill="none" stroke="{c}" stroke-width="{w:.4}"/>"#,
+        c = hex(j.color),
+        w = w,
+    );
 }
 
 /// An SVG-order affine: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`
@@ -4357,6 +4442,107 @@ mod tests {
     // ---- #93: per-shape layer bounds + renderer ----
 
     /// A minimal page: PageWidth/Height sheet plus `shapes`.
+    /// #187: the export draws line jumps — a crossing fixture's page
+    /// SVG carries the jump group with the white gap, the under
+    /// redraw, and an arc that bulges page-up (smaller SVG y).
+    #[test]
+    fn export_renders_line_jumps() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        // A horizontal connector crossed by a vertical one at (3, 5)
+        // strictly inside both segments.
+        let (doc, page) = page_fixture(vec![
+            connector(1, (3.0, 5.0), 4.0, 0.0),
+            connector(2, (3.0, 5.0), 0.0, 4.0),
+        ]);
+        let svg = render_page(&doc, &page).unwrap();
+        assert!(
+            svg.contains(r#"data-dc="line-jumps""#),
+            "the jump overlay group is present"
+        );
+        assert!(
+            svg.contains(r##"stroke="#ffffff""##),
+            "the white gap stroke is present"
+        );
+        // The arc bulges page-UP: the apex sits at a SMALLER SVG y
+        // than the crossing's (page y 5 → SVG y 6 on an 11in page).
+        let apex = format!("{:.5} {:.5}", 3.0, 6.0 - crate::geom::JUMP_RADIUS_IN);
+        assert!(svg.contains(&apex), "the arc apex is page-up: {apex}");
+    }
+
+    /// #187: a page with NO crossings draws no jump group.
+    #[test]
+    fn export_without_crossings_has_no_jump_group() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        let (doc, page) = page_fixture(vec![connector(1, (3.0, 5.0), 4.0, 0.0)]);
+        let svg = render_page(&doc, &page).unwrap();
+        assert!(
+            !svg.contains(r##"data-dc="line-jumps""##),
+            "no crossings, no overlay"
+        );
+    }
+
     fn page_fixture(shapes: Vec<Shape>) -> (Document, Page) {
         let mut sheet = Sheet::default();
         sheet.set_cell("PageWidth", Cell::value("8.5"));

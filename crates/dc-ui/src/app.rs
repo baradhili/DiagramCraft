@@ -4621,16 +4621,10 @@ impl App {
             if !crate::connectors::is_connector_in(&ed.doc, &chain, sh) {
                 continue;
             }
-            // Rotated connectors keep a straight crossing (Visio hops
-            // rotated lines too; v1 keeps to the unrotated frame).
-            let angle = ed
-                .doc
-                .resolve_cell(sh, &chain, "Angle")
-                .and_then(|c| c.numeric())
-                .unwrap_or(0.0);
-            if angle.abs() > 1e-6 {
-                continue;
-            }
+            // #187 slice 2: rotated connectors hop too — the polyline
+            // source (HitFrame + geometry_hit_segments) maps the
+            // rotated frame, and the overlay's arc normal is chosen
+            // per jump in page space, so no Angle gate remains.
             let (root, msize) = sh
                 .master
                 .and_then(|mid| ed.doc.master(mid))
@@ -14789,6 +14783,83 @@ mod tests {
 
     // Dialogs must never block the UI thread; these tests drive the
     // polling half directly (no real native dialog is ever spawned).
+
+    /// #187 slice 2: a ROTATED connector joins the jump lines — the
+    /// Angle gate is gone; the HitFrame polyline carries the rotated
+    /// geometry, so it crosses the axis-aligned line and hops.
+    #[test]
+    fn rotated_connector_joins_the_jump_lines() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, angle: f64| {
+            let mut s = vsdx::model::Shape {
+                id,
+                type_: Some("Shape".into()),
+                ..vsdx::model::Shape::default()
+            };
+            for (n, v) in [
+                ("PinX", pin.0),
+                ("PinY", pin.1),
+                ("Width", w),
+                ("Height", 0.0),
+                ("LocPinX", w / 2.0),
+                ("LocPinY", 0.0),
+                ("Angle", angle),
+                ("ObjType", 2.0),
+            ] {
+                s.sheet.set_cell(n, vsdx::Cell::value(format!("{v}")));
+            }
+            let mut sec = vsdx::model::Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..vsdx::model::Section::default()
+            };
+            sec.rows = vec![
+                vsdx::model::Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), vsdx::Cell::value("0")),
+                        ("Y".to_string(), vsdx::Cell::value("0")),
+                    ],
+                    ..vsdx::model::Row::default()
+                },
+                vsdx::model::Row {
+                    t: Some("LineTo".into()),
+                    ix: 2,
+                    cells: vec![
+                        ("X".to_string(), vsdx::Cell::value(format!("{w}"))),
+                        ("Y".to_string(), vsdx::Cell::value("0")),
+                    ],
+                    ..vsdx::model::Row::default()
+                },
+            ];
+            s.sheet
+                .children
+                .push(vsdx::model::SheetChild::Section(sec));
+            s
+        };
+        let mut ed = dc_core::Editor::new_blank();
+        ed.doc.pages[0].shapes.push(connector(1, (3.0, 3.0), 4.0, 0.0));
+        // The 45° rotated line through pin (3, 2.5) crosses the
+        // horizontal at (3.5, 3), strictly inside both.
+        ed.doc
+            .pages[0]
+            .shapes
+            .push(connector(2, (3.0, 2.5), 2.8284271, std::f64::consts::FRAC_PI_4));
+        let mut app = App::with_doc_opt(None);
+        app.ed = Some(ed);
+        app.page_idx = 0;
+        let lines = app.jump_lines();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the rotated connector joins the jump lines: {}",
+            lines.len()
+        );
+        // And the crossing hops: the axis line (flatter) jumps.
+        let jumps = crate::connectors::line_jumps(&lines);
+        assert_eq!(jumps.len(), 1, "one crossing: {jumps:?}");
+        assert!(jumps[0].dir.1.abs() < 1e-6, "the axis line hops");
+    }
 
     #[test]
     fn dialog_pending_keeps_polling() {
