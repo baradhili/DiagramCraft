@@ -188,6 +188,19 @@ impl HitFrame {
         (self.pin.0 + dx * cs - dy * sn, self.pin.1 + dx * sn + dy * cs)
     }
 
+    /// Page → local: the exact inverse of [`HitFrame::to_page`] — the
+    /// #202 curve-control drags map the pointer into row space through
+    /// it (rotation and flips included).
+    pub fn to_local(&self, p: (f64, f64)) -> (f64, f64) {
+        let (dx, dy) = (p.0 - self.pin.0, p.1 - self.pin.1);
+        let (sn, cs) = (-self.angle).sin_cos();
+        let (dx, dy) = (dx * cs - dy * sn, dx * sn + dy * cs);
+        (
+            dx / self.flip.0 + self.loc_pin.0,
+            dy / self.flip.1 + self.loc_pin.1,
+        )
+    }
+
     /// The axis-aligned bounds of the shape's local box through the
     /// full frame — a rotated connector's ink lives OUTSIDE its
     /// unrotated Pin/Width/Height rect, so gates must use this.
@@ -245,13 +258,81 @@ pub fn hit_frame(
     }
 }
 
+/// The #202 curved-connector facts: one shape's first local
+/// `CubicBezTo` row with its Bézier walk state, shape-local through
+/// [`HitFrame`]'s formula-preferred resolution (the same precedence
+/// the renderer's `row_num` uses for evaluable formulas).
+#[derive(Debug, Clone, Copy)]
+pub struct CubicRow {
+    pub section_ix: i64,
+    pub row_ix: i64,
+    /// The previous row's endpoint — the Bézier's start.
+    pub start: (f64, f64),
+    /// The row's own endpoint.
+    pub end: (f64, f64),
+    /// The (A,B) control.
+    pub ctrl1: (f64, f64),
+    /// The (C,D) control.
+    pub ctrl2: (f64, f64),
+}
+
+impl CubicRow {
+    /// The cubic Bézier point at `t` (0..=1).
+    pub fn at(&self, t: f64) -> (f64, f64) {
+        let u = 1.0 - t;
+        let b = |a: f64, c: f64, d: f64, e: f64| {
+            u * u * u * a + 3.0 * u * u * t * c + 3.0 * u * t * t * d + t * t * t * e
+        };
+        (
+            b(self.start.0, self.ctrl1.0, self.ctrl2.0, self.end.0),
+            b(self.start.1, self.ctrl1.1, self.ctrl2.1, self.end.1),
+        )
+    }
+
+    /// The t=0.5 point — the #202 `LineMid` seat on a curved
+    /// connector (the chord midpoint is off the curve).
+    pub fn mid(&self) -> (f64, f64) {
+        self.at(0.5)
+    }
+}
+
+/// The shape's first OWN-geometry `CubicBezTo` row, resolved through
+/// `frame` (master-inherited rows stay unhanded, the #137 rule).
+pub fn cubic_row(s: &Shape, frame: &HitFrame) -> Option<CubicRow> {
+    for geo in s.sheet.sections_named("Geometry") {
+        let mut cur: Option<(f64, f64)> = None;
+        for row in &geo.rows {
+            let cell = |name: &str| -> f64 {
+                row_cell_value(row.cell(name), None, 1.0, &frame.env).unwrap_or(0.0)
+            };
+            let (x, y) = (cell("X"), cell("Y"));
+            if row.t.as_deref() == Some("CubicBezTo") {
+                let (a, b) = (cell("A"), cell("B"));
+                let (c, d) = (cell("C"), cell("D"));
+                return Some(CubicRow {
+                    section_ix: geo.ix,
+                    row_ix: row.ix,
+                    start: cur.unwrap_or((0.0, 0.0)),
+                    end: (x, y),
+                    ctrl1: (a, b),
+                    ctrl2: (c, d),
+                });
+            }
+            cur = Some((x, y));
+        }
+    }
+    None
+}
+
 /// Resolve one geometry-row cell to a number through inheritance
 /// (#179): the instance's literal, then the instance's formula
 /// against the instance env, then the MASTER's formula (evaluated in
 /// instance terms — `Width*1` means the instance's Width), then the
 /// master's cached value scaled master→instance. Omitted cells
-/// default to 0 (Visio's default) at the caller.
-fn row_cell_value(
+/// default to 0 (Visio's default) at the caller. `pub(crate)` so the
+/// #202 curve-control handles position and commit through the SAME
+/// resolution the renderer and hit walk use.
+pub(crate) fn row_cell_value(
     inst: Option<&Cell>,
     master: Option<&Cell>,
     axis_scale: f64,

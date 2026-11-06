@@ -5724,6 +5724,226 @@ fn connector_ctx_menu_sets_curved_route() {
     );
 }
 
+/// #202: a curved connector's selection carries the two Bézier
+/// control handles and seats the midpoint ON the curve (the chord
+/// midpoint hangs off it); the selection layer skips its straight
+/// begin→end chord; dragging a control CUSTOMIZES the row — the
+/// route formula is replaced with the dragged literal (the renderer
+/// prefers evaluable formulas, so keeping it would ignore the drag).
+#[test]
+fn curved_connector_curve_handles_and_control_drag() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    // Drop B lower: a diagonal chord gives the S real height so the
+    // two controls and the curve mid sit well apart on screen.
+    let bsr0 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, bsr0.center(), egui::vec2(40.0, 90.0));
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn = h.state().debug_sel().expect("connector selected").1;
+
+    // Straight: no curve row, chord kept, no control handles.
+    assert!(
+        !h.state().debug_sel_1d_curved(),
+        "a straight connector is not curved"
+    );
+    let ctrl_id = |c| dc_ui::canvas::HandleId::GeoPoint {
+        section_ix: 0,
+        row_ix: 2,
+        cell: c,
+    };
+    assert!(
+        h.state()
+            .debug_handle_screen(ctrl_id(dc_ui::canvas::GeoCell::Ctrl))
+            .is_none(),
+        "no control handles on a straight route"
+    );
+
+    // ctx ▸ Curved Connector.
+    let pos = h
+        .state()
+        .debug_shape_screen_rect_for_test(conn)
+        .map(|r| r.center())
+        .unwrap_or(asr2.center());
+    click_at(&mut h, pos, egui::PointerButton::Secondary);
+    h.run();
+    h.get_by_label_contains("Curved Connector").click();
+    h.run();
+    assert!(
+        h.state().debug_sel_1d_curved(),
+        "the curved route skips the selection chord"
+    );
+
+    // Both control handles sit at distinct points, off the begin/end
+    // line — the S's controls.
+    let ctrl = h
+        .state()
+        .debug_handle_screen(ctrl_id(dc_ui::canvas::GeoCell::Ctrl))
+        .expect("control 1 handle");
+    let ctrl2 = h
+        .state()
+        .debug_handle_screen(ctrl_id(dc_ui::canvas::GeoCell::Ctrl2))
+        .expect("control 2 handle");
+    assert!(
+        (ctrl - ctrl2).length() > 1.0,
+        "the two controls are distinct handles: {ctrl:?} vs {ctrl2:?}"
+    );
+    // The midpoint seats at the curve's t=0.5 point — for the
+    // symmetric S that crossing IS the chord midpoint (the S bisects
+    // its chord), so equality here is the on-curve seat, not a bug;
+    // after a control customization the seat follows the row.
+    let beg = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineBegin)
+        .expect("begin handle");
+    let end = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("end handle");
+    let chord_mid = beg + (end - beg) * 0.5;
+    let mid = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
+        .expect("mid handle");
+    assert!(
+        (mid - chord_mid).length() < 1.0,
+        "the symmetric S crosses the chord midpoint: {mid:?} vs {chord_mid:?}"
+    );
+
+    // Drag control 1: the row customizes — formulas replaced with the
+    // dragged literals, status note.
+    let a0 = h.state().debug_row_cell(page, conn, 0, 2, "A").expect("A");
+    drag_naturally(&mut h, ctrl, egui::vec2(20.0, 25.0));
+    h.run();
+    assert!(
+        h.state().debug_status().contains("curve control customized"),
+        "status notes the customization: {}",
+        h.state().debug_status()
+    );
+    assert!(
+        h.state()
+            .debug_row_cell_formula(page, conn, 0, 2, "A")
+            .is_none(),
+        "the route formula yields to the dragged literal"
+    );
+    let a1 = h.state().debug_row_cell(page, conn, 0, 2, "A").expect("A");
+    assert!(
+        (a0 - a1).abs() > 1e-6,
+        "A moved with the drag: {a0} → {a1}"
+    );
+}
+
+/// #202 owner rule: dragging a both-glued connector's body past the
+/// gluepoint snap radius RELEASES the glued ends (the Connect records
+/// drop, the endpoint caches move); undo restores the glue.
+#[test]
+fn connector_body_drag_releases_glue_past_snap_radius() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let glue_count = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn)
+            .count()
+    };
+    assert_eq!(glue_count(&h), 2, "drawn glued at both ends");
+    let bx0 = h
+        .state()
+        .debug_cell(page, conn, "BeginX")
+        .and_then(|(v, _)| v.parse::<f64>().ok())
+        .expect("BeginX");
+
+    // Body drag well past the 8 px snap radius.
+    let cr = h
+        .state()
+        .debug_shape_screen_rect_for_test(conn)
+        .expect("conn rect");
+    drag_naturally(&mut h, cr.center(), egui::vec2(90.0, 40.0));
+    h.run();
+    assert!(
+        h.state().debug_status().contains("released past the snap radius"),
+        "status notes the release: {}",
+        h.state().debug_status()
+    );
+    assert_eq!(
+        glue_count(&h),
+        0,
+        "both Connect records dropped with the release"
+    );
+    let bx1 = h
+        .state()
+        .debug_cell(page, conn, "BeginX")
+        .and_then(|(v, _)| v.parse::<f64>().ok())
+        .expect("BeginX");
+    assert!(
+        (bx0 - bx1).abs() > 1e-6,
+        "the begin end moved with the body: {bx0} → {bx1}"
+    );
+
+    // Undo restores the glue records and the pose.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        glue_count(&h),
+        2,
+        "undo restores the glue records"
+    );
+    let bx2 = h
+        .state()
+        .debug_cell(page, conn, "BeginX")
+        .and_then(|(v, _)| v.parse::<f64>().ok())
+        .expect("BeginX");
+    assert!(
+        (bx0 - bx2).abs() < 1e-6,
+        "undo restores the begin pose: {bx0} vs {bx2}"
+    );
+}
+
 /// The Connector Tool draws between two shapes (URS-1067) and glues
 /// both ends dynamically (URS-1091): corpus formulas on the endpoint
 /// cells, Connect records with ToPart 3, one undo step.
@@ -7767,12 +7987,13 @@ fn connector_body_drag_translates_free_connector() {
     );
 }
 
-/// A BOTH-ENDS-GLUED connector's body drag neither refuses nor breaks
-/// the glue (#172): the glue formulas re-pin the endpoints (Visio's
-/// pinned feel), and the endpoint handle still re-glues through the
-/// #108 lifecycle.
+/// A BOTH-ENDS-GLUED connector's body drag neither refuses nor
+/// half-breaks (#172 + the #202 owner rule): a drag past the
+/// gluepoint snap radius releases both ends cleanly (Connect records
+/// drop, caches move, stale formulas stay under them), and the
+/// endpoint handle still re-glues through the #108 lifecycle.
 #[test]
-fn glued_connector_body_drag_pins_and_does_not_refuse() {
+fn glued_connector_body_drag_releases_and_does_not_refuse() {
     let mut h = harness_with_blank();
     h.run();
     h.run();
@@ -7820,7 +8041,11 @@ fn glued_connector_body_drag_pins_and_does_not_refuse() {
         "the end carries its glue formula"
     );
 
-    // Body drag: applied (no refusal), the glue formulas pin the ends.
+    // Body drag past the snap radius (#202 owner rule): the glued
+    // ends RELEASE — no refusal (#172 still holds), the Connect
+    // records drop, the endpoint caches move with the body, and the
+    // stale glue formulas stay under the moved caches (the corpus
+    // release convention `commit_connector_endpoint` established).
     let mid = h
         .state()
         .debug_handle_screen(dc_ui::canvas::HandleId::LineMid)
@@ -7831,14 +8056,25 @@ fn glued_connector_body_drag_pins_and_does_not_refuse() {
         !status.contains("refused") && !status.contains("GUARD"),
         "the body drag is not refused: {status}"
     );
+    assert!(
+        status.contains("released past the snap radius"),
+        "the drag carried the ends past the radius: {status}"
+    );
     let (bx1, ex1) = (cell_of(&h, page, conn, "BeginX"), cell_of(&h, page, conn, "EndX"));
     assert!(
-        (bx1 - bx0).abs() < 1e-4 && (ex1 - ex0).abs() < 1e-4,
-        "glued ends stay pinned to their targets: {bx0:.3}→{bx1:.3} {ex0:.3}→{ex1:.3}"
+        (bx1 - bx0).abs() > 1e-4 && (ex1 - ex0).abs() > 1e-4,
+        "released ends move with the body: {bx0:.3}→{bx1:.3} {ex0:.3}→{ex1:.3}"
     );
     assert!(
-        h.state().debug_cell_formula(page, conn, "EndX").is_some(),
-        "the glue formula survived the body drag"
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "the glue formula releases with the end (the corpus release convention)"
+    );
+    assert!(
+        !h.state()
+            .debug_connects()
+            .iter()
+            .any(|(from, _, _, _, _, _)| *from == conn),
+        "the Connect records dropped with the release"
     );
 
     // Endpoint drag far away onto empty page: the glue RELEASES and

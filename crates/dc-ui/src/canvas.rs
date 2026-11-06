@@ -304,6 +304,10 @@ pub enum GeoCell {
     Y,
     Apex,
     OnCurve,
+    /// A CubicBezTo row's first control (A,B) — #202 curve handles.
+    Ctrl,
+    /// A CubicBezTo row's second control (C,D) — #202 curve handles.
+    Ctrl2,
 }
 
 /// The ArcTo sagitta implied by a pointer position (#157): |A| is the
@@ -554,6 +558,10 @@ pub fn show(
     connector_tool: bool,    // #108: the Connector Tool is active
     lasso_tool: bool, // #110: the Lasso Select tool is active
     stencil_hover: bool,
+    // #202: the selected 1D shape's geometry carries a curve row —
+    // the selection layer then skips its begin→end chord stroke (the
+    // ink is the line; a straight chord over it reads as flattened).
+    sel_line_curved: bool,
     // #177: connection-point reveal / glue highlight / glued sites,
     // computed by the app for the live endpoint position (None when
     // no endpoint gesture is live).
@@ -1135,7 +1143,12 @@ pub fn show(
         beg.zip(end)
     };
     if let Some((beg, end)) = line_handles {
-        p.line_segment([beg, end], Stroke::new(1.2, t.selection));
+        // #202: a curved connector's ink IS the line — stroking the
+        // straight begin→end chord over it reads as "the drag
+        // flattened the curve". Only all-straight rows keep the chord.
+        if !sel_line_curved {
+            p.line_segment([beg, end], Stroke::new(1.2, t.selection));
+        }
     } else if let Some(sr) = sel_rect.map(to_screen) {
         p.rect_stroke(
             sr,
@@ -1159,7 +1172,7 @@ pub fn show(
                         t.selection,
                     );
                 }
-                GeoCell::Apex | GeoCell::OnCurve => {
+                GeoCell::Apex | GeoCell::OnCurve | GeoCell::Ctrl | GeoCell::Ctrl2 => {
                     p.circle_filled(*pos, 4.0, t.selection);
                     p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
                 }

@@ -1869,7 +1869,29 @@ impl App {
         if let (Some(bx), Some(by), Some(ex), Some(ey)) =
             (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
         {
-            return vec![
+            // #202: a CubicBezTo row (the curved route) reshapes the
+            // handle set — the midpoint seats ON the curve (t=0.5;
+            // the chord midpoint hangs off it) and both Bézier
+            // controls become draggable curve handles, positioned and
+            // later committed through the same HitFrame resolution
+            // the renderer and hit walk use.
+            let msize = sh
+                .master
+                .and_then(|mid| ed.doc.master(mid))
+                .and_then(|m| m.shapes.first())
+                .map(|r| {
+                    let g = |n: &str| {
+                        ed.doc
+                            .resolve_cell(r, &[r], n)
+                            .and_then(|c| c.numeric())
+                            .unwrap_or(1.0)
+                    };
+                    (g("Width"), g("Height"))
+                })
+                .unwrap_or((1.0, 1.0));
+            let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
+            let cubic = crate::connectors::cubic_row(sh, &frame);
+            let mut out = vec![
                 Handle {
                     id: HandleId::LineBegin,
                     pos: to_page((bx, by)),
@@ -1880,9 +1902,31 @@ impl App {
                 },
                 Handle {
                     id: HandleId::LineMid,
-                    pos: to_page(((bx + ex) / 2.0, (by + ey) / 2.0)),
+                    pos: match cubic {
+                        Some(c) => frame.to_page(c.mid()),
+                        None => to_page(((bx + ex) / 2.0, (by + ey) / 2.0)),
+                    },
                 },
             ];
+            if let Some(c) = cubic {
+                out.push(Handle {
+                    id: HandleId::GeoPoint {
+                        section_ix: c.section_ix,
+                        row_ix: c.row_ix,
+                        cell: canvas::GeoCell::Ctrl,
+                    },
+                    pos: frame.to_page(c.ctrl1),
+                });
+                out.push(Handle {
+                    id: HandleId::GeoPoint {
+                        section_ix: c.section_ix,
+                        row_ix: c.row_ix,
+                        cell: canvas::GeoCell::Ctrl2,
+                    },
+                    pos: frame.to_page(c.ctrl2),
+                });
+            }
+            return out;
         }
         let Some(r) = self.sel_page_rect() else {
             return Vec::new();
@@ -1992,6 +2036,48 @@ impl App {
         out
     }
 
+    /// #202: the selected 1D shape carries a CubicBezTo row — the
+    /// selection layer then skips its straight begin→end chord (the
+    /// ink IS the line; a straight chord over the curve reads as
+    /// "the drag flattened it").
+    fn sel_1d_curved(&self) -> bool {
+        let Some(ed) = self.ed() else {
+            return false;
+        };
+        let Some((page_id, shape_id)) = self.sel else {
+            return false;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return false;
+        };
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, shape_id) else {
+            return false;
+        };
+        let Ok(chain) = shape_chain(&ed.doc, page_id, shape_id) else {
+            return false;
+        };
+        // The chord stroke only draws for line handles (1D shapes).
+        if ed.doc.resolve_cell(sh, &chain, "BeginX").is_none() {
+            return false;
+        }
+        let msize = sh
+            .master
+            .and_then(|mid| ed.doc.master(mid))
+            .and_then(|m| m.shapes.first())
+            .map(|r| {
+                let g = |n: &str| {
+                    ed.doc
+                        .resolve_cell(r, &[r], n)
+                        .and_then(|c| c.numeric())
+                        .unwrap_or(1.0)
+                };
+                (g("Width"), g("Height"))
+            })
+            .unwrap_or((1.0, 1.0));
+        let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
+        crate::connectors::cubic_row(sh, &frame).is_some()
+    }
+
     /// #137/#157: commit a geometry-handle drag — rewrite the row's
     /// X/Y (shape-local, y-up; RELATIVE rows keep their fractions,
     /// resolved ×Width/Height), an ArcTo's sagitta from the pointer,
@@ -2042,28 +2128,40 @@ impl App {
             canvas::GeoCell::X | canvas::GeoCell::Y => &["X", "Y"],
             canvas::GeoCell::Apex => &["A"],
             canvas::GeoCell::OnCurve => &["A", "B"],
+            // #202: a CubicBezTo row's two Bézier controls.
+            canvas::GeoCell::Ctrl => &["A", "B"],
+            canvas::GeoCell::Ctrl2 => &["C", "D"],
         };
-        for name in cells {
-            if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
-                .is_some()
-            {
-                self.status = format!(
-                    "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven \
-                     — edit the formula to change it"
-                );
-                return;
-            }
-            // Row-cell formulas live on the row cell itself too.
-            if row
-                .cell(name)
-                .and_then(|c| c.f.as_deref())
-                .is_some_and(|f| f != "Inh" && f != "No Formula")
-            {
-                self.status = format!(
-                    "vertex drag refused: row {row_ix}'s {name} is formula-driven \
-                     — edit the formula to change it"
-                );
-                return;
+        // #202: curve-control drags CUSTOMIZE the route — the controls
+        // are route formulas by default (`Width*0.5`…), and keeping
+        // the formula would make the renderer ignore the dragged
+        // value (it prefers evaluable formulas). So these cells are
+        // exempt from the #157 formula refusal: the drag replaces the
+        // formula with the dragged literal (a status note says so).
+        let customizes = matches!(cell, canvas::GeoCell::Ctrl | canvas::GeoCell::Ctrl2);
+        if !customizes {
+            for name in cells {
+                if dc_core::commands::effective_formula(&ed.doc, sh, &chain, &format!("Geometry{section_ix}.{name}{row_ix}"))
+                    .is_some()
+                {
+                    self.status = format!(
+                        "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven \
+                         — edit the formula to change it"
+                    );
+                    return;
+                }
+                // Row-cell formulas live on the row cell itself too.
+                if row
+                    .cell(name)
+                    .and_then(|c| c.f.as_deref())
+                    .is_some_and(|f| f != "Inh" && f != "No Formula")
+                {
+                    self.status = format!(
+                        "vertex drag refused: row {row_ix}'s {name} is formula-driven \
+                         — edit the formula to change it"
+                    );
+                    return;
+                }
             }
         }
         let scope = Scope::Shape {
@@ -2162,8 +2260,47 @@ impl App {
                     )));
                 }
             }
+            canvas::GeoCell::Ctrl | canvas::GeoCell::Ctrl2 => {
+                // #202: map the pointer through the connector's
+                // HitFrame (Pin/LocPin frame, rotation included) — NOT
+                // the bbox origin the X/Y drags use; a connector's
+                // row frame starts at its begin corner.
+                let msize = sh
+                    .master
+                    .and_then(|mid| ed.doc.master(mid))
+                    .and_then(|m| m.shapes.first())
+                    .map(|r| {
+                        let g = |n: &str| {
+                            ed.doc
+                                .resolve_cell(r, &[r], n)
+                                .and_then(|c| c.numeric())
+                                .unwrap_or(1.0)
+                        };
+                        (g("Width"), g("Height"))
+                    })
+                    .unwrap_or((1.0, 1.0));
+                let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
+                let (lx, ly) = frame.to_local(to_page);
+                for (name, v) in [(cells[0], lx), (cells[1], ly)] {
+                    // A literal write (f: None) REPLACES the cell —
+                    // the route formula yields to the dragged value.
+                    cmds.push(Box::new(dc_core::SetRowCell::new(
+                        scope.clone(),
+                        "Geometry",
+                        section_ix,
+                        dc_core::commands::RowSel::Ix(row_ix),
+                        name,
+                        cellv(v),
+                    )));
+                }
+            }
         }
         self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
+        if customizes {
+            self.status = format!(
+                "curve control customized — row {row_ix}'s route formula replaced with the dragged value"
+            );
+        }
     }
 
     /// kittest: one shape's bbox in SCREEN coords (y-down) — follows
@@ -2928,6 +3065,12 @@ impl App {
             return;
         }
         let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+        // #202 owner rule: connector glue RELEASES once the drag
+        // carries an end past the gluepoint snap radius — within it,
+        // the reroute pins the glued end back to its anchor (Visio's
+        // snap-back); past it the end detaches and moves freely.
+        let dist = dx.hypot(dy);
+        let radius = SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64;
         let scope = Scope::Shape {
             page: page_id,
             shape: shape_id,
@@ -2937,9 +3080,15 @@ impl App {
         // Endpoints: a formula-owned end (glue: PAR(PNT(...)) /
         // _WALKGLUE) is NOT written — the formula owns its value too,
         // and a moved cache would desync render from evaluation. It
-        // stays pinned to its target (Visio's feel). A free end moves
-        // as a plain value through the GUARD-waived write.
+        // stays pinned to its target (Visio's feel) UNLESS the drag
+        // carries it past the snap radius, when it releases (the
+        // Connect record drops; the endpoint cells keep their stale
+        // glue formulas under a moved cache — the corpus release
+        // convention). A free end moves as a plain value through the
+        // GUARD-waived write.
         let mut free: [bool; 2] = [true, true];
+        let mut releases: Vec<usize> = Vec::new(); // Connect indexes
+        let mut release_ends = 0usize;
         for (i, (name, v)) in [
             ("BeginX", bx + dx),
             ("BeginY", by + dy),
@@ -2959,8 +3108,49 @@ impl App {
                 cell(v),
             )));
         }
-        if !free[0] && !free[1] {
-            self.status = "connector is glued at both ends — drag an endpoint or its shapes".into();
+        if dist > radius {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id);
+            let list = page.map(|p| p.connects()).unwrap_or_default();
+            for (end, cells) in [
+                (0usize, ["BeginX", "BeginY"]),
+                (1usize, ["EndX", "EndY"]),
+            ] {
+                if free[end] {
+                    continue;
+                }
+                // Release: move the cache under the stale glue
+                // formula and drop the Connect record.
+                if let Some(idx) = list
+                    .list
+                    .iter()
+                    .position(|c| c.from_sheet == shape_id && c.from_cell == cells[0])
+                {
+                    releases.push(idx);
+                }
+                for (name, v) in [
+                    (cells[0], if end == 0 { bx + dx } else { ex + dx }),
+                    (cells[1], if end == 0 { by + dy } else { ey + dy }),
+                ] {
+                    cmds.push(Box::new(dc_core::SetGluedCell::new(
+                        scope.clone(),
+                        name,
+                        cell(v),
+                    )));
+                }
+                release_ends += 1;
+            }
+            // Highest index first: RemoveConnect plans by index, and
+            // each removal shifts the tail.
+            releases.sort_unstable_by(|a, b| b.cmp(a));
+            for idx in releases {
+                cmds.push(Box::new(dc_core::RemoveConnect::new(
+                    dc_core::ConnectsOwner::Page(page_id),
+                    idx,
+                )));
+            }
+        }
+        if !free[0] && !free[1] && release_ends == 0 {
+            self.status = "connector is glued at both ends — drag past the snap radius to release, or drag an endpoint or its shapes".into();
             return;
         }
         // The frame (Pin/Width/Height/LocPin caches) and the route
@@ -2979,6 +3169,10 @@ impl App {
             cmds.push(r);
         }
         self.apply(Macro::new(format!("move connector {shape_id}"), cmds));
+        if release_ends > 0 {
+            self.status =
+                format!("connector moved — {release_ends} glued end(s) released past the snap radius");
+        }
     }
 
     /// The Protection locks of the selected 1D shape, without the
@@ -8591,6 +8785,9 @@ impl App {
         };
         let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
         let mut mouse = self.mouse_page;
+        // #202: computed before the destructuring self-borrow the
+        // canvas call holds.
+        let sel_line_curved = self.sel_1d_curved();
         let App {
             view, ed, page_idx, ..
         } = self;
@@ -8662,6 +8859,7 @@ impl App {
             self.tool == Tool::Connector,
             self.tool == Tool::Lasso,
             armed,
+            sel_line_curved,
             &conn_fx,
             &snap_end,
             &snap_corner,
@@ -11904,6 +12102,31 @@ impl App {
             .and_then(|c| c.numeric())
     }
 
+    /// #202 tests: one geometry-row cell's FORMULA (the control-drag
+    /// customizes it away).
+    #[doc(hidden)]
+    pub fn debug_row_cell_formula(
+        &self,
+        page: i64,
+        shape: i64,
+        sec_ix: i64,
+        row_ix: i64,
+        cell: &str,
+    ) -> Option<String> {
+        let ed = self.ed.as_ref()?;
+        let page = ed.doc.pages.iter().find(|p| p.id == page)?;
+        let sh = vsdx::model::find_shape_by_id(&page.shapes, shape)?;
+        sh.sheet
+            .sections_named("Geometry")
+            .into_iter()
+            .find(|s| s.ix == sec_ix)?
+            .rows
+            .iter()
+            .find(|r| r.ix == row_ix)?
+            .cell(cell)
+            .and_then(|c| c.f.clone())
+    }
+
     /// #108 tests: the active mouse tool.
     pub fn debug_tool(&self) -> Tool {
         self.tool
@@ -12805,6 +13028,12 @@ impl App {
         Some(crate::canvas::page_to_screen(
             h.pos.0, h.pos.1, &self.view, &geom,
         ))
+    }
+    /// #202: whether the selection layer skips the 1D begin→end chord
+    /// (the selected connector carries a curve row).
+    #[doc(hidden)]
+    pub fn debug_sel_1d_curved(&self) -> bool {
+        self.sel_1d_curved()
     }
     /// The status-bar text (guard-refusal tests).
     #[doc(hidden)]

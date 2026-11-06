@@ -477,6 +477,63 @@ impl RerouteConnectors {
     }
 }
 
+/// #202: the cached Bézier-control refreshes a reroute owes a
+/// connector's CubicBezTo rows. The curved route's controls are
+/// `Width*0.5`-style formulas (`connectors::curved_row_extras`);
+/// after the frame rewrite their cached values hold the pre-drag
+/// pose. Each formula-driven control re-evaluates against the NEW
+/// signed frame (a minimal env: the frame formulas reference
+/// Width/Height); a formula the env can't evaluate (endpoints etc.)
+/// or a literal (customized) control keeps its current cell.
+fn curved_control_caches(
+    conn: &vsdx::model::Shape,
+    w_new: f64,
+    h_new: f64,
+) -> Vec<(i64, String, Cell)> {
+    let mut out = Vec::new();
+    let mut env = vsdx::formula::Env::new();
+    env.insert("Width".to_string(), w_new);
+    env.insert("Height".to_string(), h_new);
+    for g in conn.sheet.sections_named("Geometry") {
+        for r in &g.rows {
+            if r.t.as_deref() != Some("CubicBezTo") {
+                continue;
+            }
+            for name in ["A", "B", "C", "D"] {
+                let Some(c) = r.cell(name) else {
+                    continue;
+                };
+                let Some(f) = c.f.as_deref() else {
+                    continue;
+                };
+                if f == "Inh" || f == "No Formula" {
+                    continue;
+                }
+                let upper = f.to_uppercase();
+                if !["WIDTH", "HEIGHT"].iter().any(|k| upper.contains(k)) {
+                    continue;
+                }
+                if let Some(v) = vsdx::formula::eval(f, &env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                {
+                    out.push((
+                        r.ix,
+                        name.to_string(),
+                        Cell {
+                            v: Some(format!("{v:.6}")),
+                            f: Some(f.to_string()),
+                            ..Cell::default()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 impl Command for RerouteConnectors {
     fn touched(&self, doc: &Document) -> dc_core::TouchList {
         // #178: after undo spends `inner`, the cached apply-time list
@@ -504,6 +561,13 @@ impl Command for RerouteConnectors {
             conn_id: i64,
             cells: Vec<(String, f64, Option<String>)>,
             rows: Vec<(i64, f64, f64)>,
+            /// #202: CubicBezTo control-cache refreshes — (row ix,
+            /// cell name, new cell). The curved route's controls are
+            /// Width/Height FORMULAS; the frame rewrite leaves their
+            /// cached values at the pre-drag pose, and anything
+            /// reading caches (hit samples, ShapeSheet) sees the old
+            /// curve. Literal (customized) controls stay untouched.
+            row_cells: Vec<(i64, String, Cell)>,
         }
         // Both ends may glue to moved shapes (a two-shape selection
         // drag): each connector is planned ONCE from both new
@@ -825,6 +889,7 @@ impl Command for RerouteConnectors {
                     conn_id: conn.id,
                     cells,
                     rows: planned_rows,
+                    row_cells: curved_control_caches(conn, w_new, h_new),
                 });
             }
         }
@@ -876,6 +941,21 @@ impl Command for RerouteConnectors {
                     c.apply(doc)?;
                     self.inner.push(Box::new(c));
                 }
+            }
+            // #202: refresh the curved route's formula-driven control
+            // caches against the new frame (the formula is kept — the
+            // SetGluedCell pattern; a customized literal stays).
+            for (ix, name, cell) in &plan.row_cells {
+                let mut c = dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    0,
+                    dc_core::commands::RowSel::Ix(*ix),
+                    name.clone(),
+                    cell.clone(),
+                );
+                c.apply(doc)?;
+                self.inner.push(Box::new(c));
             }
         }
         // #178: capture the merged touch list while `inner` still
@@ -1552,5 +1632,192 @@ mod reroute_master_tests {
                 && r2.cell("Y").and_then(|c| c.numeric()).unwrap().abs() < 1e-9,
             "undo restores the original row snapshot (1.0, 0.0)"
         );
+    }
+
+    // ---- #202: the reroute refreshes a curved route's control caches ----
+
+    /// A synthetic connector (no master) with the #108 curved route:
+    /// `ShapeRouteStyle 16`, row 2 a `CubicBezTo` whose A/B/C/D are
+    /// the frame formulas with their authoring-time caches, begin
+    /// statically glued to shape 10's connection point.
+    fn doc_with_curved_connector() -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "2.5"),
+            ("PinY", "3.5"),
+            ("Width", "1.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        let mut conn_sec = Section {
+            name: "Connection".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        conn_sec.rows.push(Row {
+            t: None,
+            ix: 1,
+            cells: vec![
+                ("X".to_string(), VCell::value("1.0")),
+                ("Y".to_string(), VCell::value("0.5")),
+            ],
+            ..Row::default()
+        });
+        target.sheet.children.push(SheetChild::Section(conn_sec));
+
+        // (3,4) → (7,4.5); curved toggle pose: row 2 CubicBezTo with
+        // the curved_row_extras formulas and their cached values.
+        let mut conn = crate::connectors::connector_shape(11, (3.0, 4.0), (7.0, 4.5));
+        conn.sheet.set_cell("ShapeRouteStyle", VCell::value("16"));
+        {
+            let geo = conn
+                .sheet
+                .children
+                .iter_mut()
+                .find_map(|c| match c {
+                    SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                    _ => None,
+                })
+                .unwrap();
+            geo.rows[1].t = Some("CubicBezTo".into());
+            let extras = [
+                ("A", "Width*0.5", 2.0),
+                ("B", "Height*0", 0.0),
+                ("C", "Width*0.5", 2.0),
+                ("D", "Height*1", 0.5),
+            ];
+            for (name, f, v) in extras {
+                geo.rows[1].cells.push((
+                    name.to_string(),
+                    VCell {
+                        v: Some(format!("{v}")),
+                        f: Some(f.to_string()),
+                        ..VCell::default()
+                    },
+                ));
+            }
+        }
+        crate::connectors::bake_end(
+            &mut conn,
+            crate::connectors::End::Begin,
+            (3.0, 4.0),
+            &crate::connectors::static_glue_formula(10, 1),
+        );
+        ed.doc.pages[0].shapes.push(target);
+        ed.doc.pages[0].shapes.push(conn);
+        let mut list = ed.doc.pages[0].connects();
+        list.list.push(dc_core::connects::Connect::new(
+            11,
+            "BeginX",
+            crate::connectors::PART_BEGIN_X,
+            10,
+            "Connections.X1",
+            101,
+        ));
+        ed.doc.pages[0].set_connects(&list);
+        (ed, page_id)
+    }
+
+    /// #202: the reroute refreshes the Bézier control CACHES against
+    /// the new frame (A/C = new dx/2, D = new dy); a customized
+    /// literal control keeps its value.
+    #[test]
+    fn reroute_refreshes_curved_control_caches_and_keeps_literals() {
+        let (mut ed, page_id) = doc_with_curved_connector();
+        // Move the target right by 1 in: the glued begin walks from
+        // (3,4) to (4,4); the frame becomes (4,4)→(7,4.5).
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("3.5"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap()
+            .clone();
+        let cell = |n: &str| {
+            conn.sheet
+                .sections_named("Geometry")[0]
+                .rows
+                .iter()
+                .find(|r| r.ix == 2)
+                .unwrap()
+                .cell(n)
+                .and_then(|c| c.numeric())
+                .unwrap()
+        };
+        // w_new = 7−4 = 3 → A/C = 1.5; the anchor's y is 3.5 (the
+        // connection point), so h_new = 4.5−3.5 = 1 → D = 1 (was 0.5
+        // at the baked pose — a genuine re-track, not a no-op).
+        assert!((cell("A") - 1.5).abs() < 1e-6, "A cache re-tracks: {}", cell("A"));
+        assert!((cell("C") - 1.5).abs() < 1e-6, "C cache re-tracks: {}", cell("C"));
+        assert!((cell("D") - 1.0).abs() < 1e-6, "D cache re-tracks: {}", cell("D"));
+        // The formulas ride along (SetGluedCell pattern).
+        assert_eq!(
+            conn.sheet.sections_named("Geometry")[0].rows[1]
+                .cell("A")
+                .and_then(|c| c.f.as_deref()),
+            Some("Width*0.5")
+        );
+
+        // A CUSTOMIZED control (literal, formula replaced by the #202
+        // handle drag) keeps its value across reroutes.
+        let mut ed2 = ed;
+        for sh in ed2.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 11 {
+                let geo = sh
+                    .sheet
+                    .children
+                    .iter_mut()
+                    .find_map(|c| match c {
+                        SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                        _ => None,
+                    })
+                    .unwrap();
+                let r2 = geo.rows.iter_mut().find(|r| r.ix == 2).unwrap();
+                r2.cells.retain(|(n, _)| n != "A");
+                r2.cells.push(("A".to_string(), VCell::value("2.25")));
+            }
+        }
+        for sh in ed2.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.5"));
+            }
+        }
+        let mut cmd2 = RerouteConnectors::new(page_id, vec![10]);
+        cmd2.apply(&mut ed2.doc).unwrap();
+        let conn2 = ed2
+            .doc
+            .pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap();
+        let a2 = conn2
+            .sheet
+            .sections_named("Geometry")[0]
+            .rows
+            .iter()
+            .find(|r| r.ix == 2)
+            .unwrap()
+            .cell("A")
+            .and_then(|c| c.numeric())
+            .unwrap();
+        assert!((a2 - 2.25).abs() < 1e-6, "the customized literal stays: {a2}");
     }
 }
