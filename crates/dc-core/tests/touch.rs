@@ -5,9 +5,9 @@
 //! the unit layer. (The aggregate behavior — a move commit re-renders
 //! zero layers — is guarded in dc-ui's render_perf/raster_async gates.)
 
-use dc_core::commands::{AddShape, SetCell, SetRowCell, SetText};
 use dc_core::commands::RowSel;
-use dc_core::{Editor, Scope, Touched, Touch, TouchList};
+use dc_core::commands::{AddShape, SetCell, SetRowCell, SetText};
+use dc_core::{Editor, Scope, Touch, TouchList, Touched};
 
 fn doc_with_shape() -> Editor {
     let mut shape = vsdx::model::Shape {
@@ -15,8 +15,12 @@ fn doc_with_shape() -> Editor {
         type_: Some("Shape".into()),
         ..vsdx::model::Shape::default()
     };
-    shape.sheet.set_cell("PinX", vsdx::model::Cell::value("1.5"));
-    shape.sheet.set_cell("PinY", vsdx::model::Cell::value("2.5"));
+    shape
+        .sheet
+        .set_cell("PinX", vsdx::model::Cell::value("1.5"));
+    shape
+        .sheet
+        .set_cell("PinY", vsdx::model::Cell::value("2.5"));
     shape.sheet.set_cell("Width", vsdx::model::Cell::value("2"));
     let page = vsdx::model::Page {
         id: 0,
@@ -45,24 +49,25 @@ fn top_level_pin_writes_are_pure_moves_everything_else_is_ink() {
     for cell in ["PinX", "PinY"] {
         let t = touched_of(
             &ed,
-            &SetCell::new(
-                shape_scope.clone(),
-                cell,
-                vsdx::model::Cell::value("3"),
-            ),
+            &SetCell::new(shape_scope.clone(), cell, vsdx::model::Cell::value("3")),
         );
-        assert_eq!(t.shapes, vec![Touched { page: 0, shape: 1, touch: Touch::Move }], "{cell}");
+        assert_eq!(
+            t.shapes,
+            vec![Touched {
+                page: 0,
+                shape: 1,
+                touch: Touch::Move,
+                sub: None
+            }],
+            "{cell}"
+        );
     }
 
     // Any other cell on the same shape changes ink within its bounds.
     for cell in ["Width", "FillForegnd", "Angle"] {
         let t = touched_of(
             &ed,
-            &SetCell::new(
-                shape_scope.clone(),
-                cell,
-                vsdx::model::Cell::value("1"),
-            ),
+            &SetCell::new(shape_scope.clone(), cell, vsdx::model::Cell::value("1")),
         );
         assert_eq!(t.shapes[0].touch, Touch::Ink, "{cell}");
     }
@@ -74,7 +79,14 @@ fn top_level_pin_writes_are_pure_moves_everything_else_is_ink() {
     // A geometry-row cell is ink.
     let t = touched_of(
         &ed,
-        &SetRowCell::new(shape_scope, "Geometry", 0, RowSel::Ix(1), "X", vsdx::model::Cell::value("2")),
+        &SetRowCell::new(
+            shape_scope,
+            "Geometry",
+            0,
+            RowSel::Ix(1),
+            "X",
+            vsdx::model::Cell::value("2"),
+        ),
     );
     assert_eq!(t.shapes[0].touch, Touch::Ink);
 }
@@ -101,26 +113,121 @@ fn page_sheet_and_structural_edits_fall_back_to_whole_page_dirty() {
         ..vsdx::model::Shape::default()
     };
     shape.sheet.set_cell("PinX", vsdx::model::Cell::value("1"));
-    let t = touched_of(&ed, &AddShape { page: 0, parent: None, shape });
+    let t = touched_of(
+        &ed,
+        &AddShape {
+            page: 0,
+            parent: None,
+            shape,
+        },
+    );
     assert_eq!(
         t,
         TouchList {
             pages: vec![],
-            shapes: vec![Touched { page: 0, shape: 2, touch: Touch::Membership }],
+            shapes: vec![Touched {
+                page: 0,
+                shape: 2,
+                touch: Touch::Membership,
+                sub: None
+            }],
         }
     );
+}
+
+#[test]
+fn nested_cell_edits_carry_the_edited_sub_shape_id() {
+    // #219: a cell edit on a sub-shape rolls up to its top-level
+    // ancestor but NAMES the edited shape — the canvas layer store's
+    // damage-region key. A top-level edit carries no sub (its layer is
+    // its own subtree; there is nothing smaller to patch).
+    let mut group = vsdx::model::Shape {
+        id: 1,
+        type_: Some("Shape".into()),
+        ..vsdx::model::Shape::default()
+    };
+    group
+        .sheet
+        .set_cell("PinX", vsdx::model::Cell::value("1.5"));
+    group
+        .sheet
+        .set_cell("PinY", vsdx::model::Cell::value("2.5"));
+    group.sheet.set_cell("Width", vsdx::model::Cell::value("2"));
+    group
+        .sheet
+        .set_cell("Height", vsdx::model::Cell::value("2"));
+    let mut member = vsdx::model::Shape {
+        id: 2,
+        type_: Some("Shape".into()),
+        ..vsdx::model::Shape::default()
+    };
+    member
+        .sheet
+        .set_cell("PinX", vsdx::model::Cell::value("0.5"));
+    member
+        .sheet
+        .set_cell("PinY", vsdx::model::Cell::value("0.5"));
+    group.sub_shapes.push(member);
+    let page = vsdx::model::Page {
+        id: 0,
+        name: "P1".into(),
+        attrs: vec![("ID".into(), "0".into()), ("NameU".into(), "P1".into())],
+        shapes: vec![group],
+        ..vsdx::model::Page::default()
+    };
+    let ed = Editor::new(vsdx::Document {
+        pages: vec![page],
+        ..vsdx::Document::default()
+    });
+
+    let t = touched_of(
+        &ed,
+        &SetCell::new(
+            Scope::Shape { page: 0, shape: 2 },
+            "FillForegnd",
+            vsdx::model::Cell::value("2"),
+        ),
+    );
+    assert_eq!(t.shapes[0].shape, 1, "the touch rolls up to the ancestor");
+    assert_eq!(t.shapes[0].sub, Some(2), "…and names the edited sub-shape");
+
+    let t = touched_of(
+        &ed,
+        &SetText::new(Scope::Shape { page: 0, shape: 2 }, "hello"),
+    );
+    assert_eq!(t.shapes[0].sub, Some(2));
+
+    let t = touched_of(
+        &ed,
+        &SetCell::new(
+            Scope::Shape { page: 0, shape: 1 },
+            "FillForegnd",
+            vsdx::model::Cell::value("2"),
+        ),
+    );
+    assert_eq!(t.shapes[0].sub, None, "a top-level edit has no sub");
 }
 
 #[test]
 fn merge_unions_per_shape_with_the_strongest_touch_winning() {
     let mut base = TouchList {
         pages: vec![0],
-        shapes: vec![Touched { page: 0, shape: 1, touch: Touch::Move }],
+        shapes: vec![Touched {
+            page: 0,
+            shape: 1,
+            touch: Touch::Move,
+            sub: None,
+        }],
     };
     // Move + Ink on the same shape → Ink (an ink re-render subsumes).
     base.merge(TouchList {
         pages: vec![],
-        shapes: vec![Touched { page: 0, shape: 1, touch: Touch::Ink }],
+        shapes: vec![Touched {
+            page: 0,
+            shape: 1,
+            touch: Touch::Ink,
+            sub: None,
+        }],
     });
     assert_eq!(base.shapes[0].touch, Touch::Ink);
 
@@ -128,14 +235,24 @@ fn merge_unions_per_shape_with_the_strongest_touch_winning() {
     // needed re-render.
     base.merge(TouchList {
         pages: vec![],
-        shapes: vec![Touched { page: 0, shape: 1, touch: Touch::Move }],
+        shapes: vec![Touched {
+            page: 0,
+            shape: 1,
+            touch: Touch::Move,
+            sub: None,
+        }],
     });
     assert_eq!(base.shapes[0].touch, Touch::Ink);
 
     // Different shapes accumulate; pages union + dedup.
     base.merge(TouchList {
         pages: vec![0, 1],
-        shapes: vec![Touched { page: 0, shape: 2, touch: Touch::Move }],
+        shapes: vec![Touched {
+            page: 0,
+            shape: 2,
+            touch: Touch::Move,
+            sub: None,
+        }],
     });
     assert_eq!(base.shapes.len(), 2);
     assert_eq!(base.pages, vec![0, 1], "page ids sort + dedup");
@@ -155,7 +272,15 @@ fn editor_apply_and_undo_route_their_touches() {
             vsdx::model::Cell::value("9"),
         ))
         .unwrap();
-    assert_eq!(touched.shapes, vec![Touched { page: 0, shape: 1, touch: Touch::Move }]);
+    assert_eq!(
+        touched.shapes,
+        vec![Touched {
+            page: 0,
+            shape: 1,
+            touch: Touch::Move,
+            sub: None
+        }]
+    );
 
     // Undo restores the old pin — itself a pure translation, so the
     // reverse touch is also a Move (undo routes the command's own

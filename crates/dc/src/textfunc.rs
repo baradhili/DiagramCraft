@@ -58,7 +58,8 @@ impl SheetTextMeasure {
     /// The wrapped line count at `width` block inches (insets
     /// subtracted, same as the renderer).
     fn lines_at(&self, text: &str, width: f64) -> Vec<String> {
-        let face = crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
+        let face =
+            crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
         let usable = (width - self.tb.insets.0 - self.tb.insets.1).max(0.02);
         crate::svg::wrap_block_text(&face, text, self.tb.font_size, usable)
     }
@@ -70,7 +71,8 @@ impl TextMeasure for SheetTextMeasure {
     }
 
     fn text_width(&self, text: &str) -> Option<f64> {
-        let face = crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
+        let face =
+            crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
         // TEXTWIDTH = the text's bare advance width (CodeRabbit
         // cross-check against Visio's own caches: DBUML_M's
         // `TEXTWIDTH(TheText)` on 'PK\r\n' at 10 pt caches 0.17536 in
@@ -217,7 +219,10 @@ mod tests {
         // Corpus equation (CodeRabbit pass on #147): height = lines ×
         // line height + top/bottom insets (default 2×0.0555 here).
         let ins_tb = m.tb.insets.2 + m.tb.insets.3;
-        assert!((ins_tb - 0.111).abs() < 1e-9, "fixture uses default T/B insets");
+        assert!(
+            (ins_tb - 0.111).abs() < 1e-9,
+            "fixture uses default T/B insets"
+        );
         let h1 = m.text_height(&format!("{one}\r\n"), 2.0).unwrap();
         let h1_plain = m.text_height(one, 2.0).unwrap();
         assert_eq!(h1, h1_plain, "trailing CRLF adds no line (#148)");
@@ -278,8 +283,22 @@ mod tests {
         m.apply(&mut doc).unwrap();
 
         let after = &doc.pages[0].shapes[0].sheet;
-        let tw: f64 = after.cell("TxtWidth").unwrap().v.clone().unwrap().parse().unwrap();
-        let th: f64 = after.cell("TxtHeight").unwrap().v.clone().unwrap().parse().unwrap();
+        let tw: f64 = after
+            .cell("TxtWidth")
+            .unwrap()
+            .v
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let th: f64 = after
+            .cell("TxtHeight")
+            .unwrap()
+            .v
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!(
             tw > 2.0,
             "TxtWidth = MAX(Width, TEXTWIDTH) must follow the long text: {tw}"
@@ -300,8 +319,14 @@ mod tests {
         // One undo step restores text AND prior caches.
         m.undo(&mut doc).unwrap();
         let restored = &doc.pages[0].shapes[0].sheet;
-        assert_eq!(restored.cell("TxtWidth").unwrap().v, s.cell("TxtWidth").unwrap().v);
-        assert_eq!(restored.cell("TxtHeight").unwrap().v, s.cell("TxtHeight").unwrap().v);
+        assert_eq!(
+            restored.cell("TxtWidth").unwrap().v,
+            s.cell("TxtWidth").unwrap().v
+        );
+        assert_eq!(
+            restored.cell("TxtHeight").unwrap().v,
+            s.cell("TxtHeight").unwrap().v
+        );
         assert_eq!(restored.text, None);
     }
 
@@ -335,11 +360,14 @@ mod tests {
         // MAX(Width=2.0, TEXTWIDTH) so the refresh widens the block to
         // 2.0 (usable 1.8) where the same text fits on one line.
         s.sheet.set_cell("Width", Cell::value("2.0"));
-        s.sheet.set_cell("TxtWidth", Cell {
-            v: Some("1.0".into()),
-            f: Some("MAX(Width,TEXTWIDTH(TheText))".into()),
-            ..Cell::default()
-        });
+        s.sheet.set_cell(
+            "TxtWidth",
+            Cell {
+                v: Some("1.0".into()),
+                f: Some("MAX(Width,TEXTWIDTH(TheText))".into()),
+                ..Cell::default()
+            },
+        );
         doc.pages.push(vsdx::model::Page {
             id: 0,
             shapes: vec![s],
@@ -350,8 +378,22 @@ mod tests {
         let mut m = text_edit_macro(&doc, &scope, text);
         m.apply(&mut doc).unwrap();
         let after = &doc.pages[0].shapes[0].sheet;
-        let th: f64 = after.cell("TxtHeight").unwrap().v.clone().unwrap().parse().unwrap();
-        let tw: f64 = after.cell("TxtWidth").unwrap().v.clone().unwrap().parse().unwrap();
+        let th: f64 = after
+            .cell("TxtHeight")
+            .unwrap()
+            .v
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let tw: f64 = after
+            .cell("TxtWidth")
+            .unwrap()
+            .v
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!((tw - 2.0).abs() < 1e-9, "MAX(Width, TEXTWIDTH) = {tw}");
         let chain: [&Shape; 0] = [];
         let shape = &doc.pages[0].shapes[0];

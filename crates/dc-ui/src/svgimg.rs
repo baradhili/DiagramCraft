@@ -173,8 +173,12 @@ fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> Strin
     // Liberation) resolve their vendored faces on every machine — the
     // measurement pin in `dc::textmetrics` mirrors exactly this set.
     let embedded_only = |name: &str| {
-        const VENDORED: [&str; 4] =
-            ["Carlito", "Liberation Sans", "Liberation Serif", "Liberation Mono"];
+        const VENDORED: [&str; 4] = [
+            "Carlito",
+            "Liberation Sans",
+            "Liberation Serif",
+            "Liberation Mono",
+        ];
         VENDORED
             .iter()
             .find(|v| v.eq_ignore_ascii_case(name))
@@ -280,18 +284,37 @@ pub fn render_tree(
     // Widest texture we ever allocate (kittest caps at 2048; GPUs
     // allow more but upscaling a 2048px raster is fine on screen).
     const MAX_TEX: u32 = 2048;
-    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
     let size = tree.size();
     let aspect = size.height().max(1e-3) / size.width().max(1e-3);
     let w = target_width.ceil().clamp(1.0, MAX_TEX as f32) as u32;
     let h = ((target_width * aspect).ceil().max(1.0)) as u32;
     let (w, h) = (w, h.min(MAX_TEX));
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
-        .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;
     let t = resvg::usvg::Transform::from_scale(
         w as f32 / size.width().max(1e-3),
         h as f32 / size.height().max(1e-3),
     );
+    render_tree_transform(tree, t, w, h, kind)
+}
+
+/// Render a parsed tree through an explicit transform into a
+/// `w`×`h` pixmap — [`render_tree`]'s inner half, exposed for the
+/// #219 damage-region patcher: the patch renders the SAME
+/// (post-edit, full-layer) tree with [`render_tree`]'s own scale for
+/// the existing texture's dimensions, post-translated by an INTEGER
+/// pixel offset. An integer shift moves the sample grid by whole
+/// pixels, so the patch's pixels are bit-identical to the
+/// corresponding region of a full re-render at the same size — the
+/// regression test in `layers` pins that identity.
+pub fn render_tree_transform(
+    tree: &resvg::usvg::Tree,
+    t: resvg::usvg::Transform,
+    w: u32,
+    h: u32,
+    kind: crate::perf::Kind,
+) -> anyhow::Result<ColorImage> {
+    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
+        .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;
     resvg::render(tree, t, &mut pixmap.as_mut());
     let data: &[u8] = pixmap.data();
     Ok(ColorImage::from_rgba_unmultiplied(
@@ -585,11 +608,9 @@ mod tests {
         let tail = ">Hamburg fi 51</text></svg>";
         let arial_chain =
             format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
-        let explicit_liberation =
-            format!(r#"{head} font-family="Liberation Sans"{tail}"#);
+        let explicit_liberation = format!(r#"{head} font-family="Liberation Sans"{tail}"#);
         let explicit_carlito = format!(r#"{head} font-family="Carlito"{tail}"#);
-        let calibri_chain =
-            format!(r#"{head} font-family="Calibri, Carlito, sans-serif"{tail}"#);
+        let calibri_chain = format!(r#"{head} font-family="Calibri, Carlito, sans-serif"{tail}"#);
         let bare = format!(r#"{head}{tail}"#);
         let a = rasterize(&arial_chain, 200.0, crate::perf::Kind::Page).unwrap();
         let l = rasterize(&explicit_liberation, 200.0, crate::perf::Kind::Page).unwrap();
@@ -597,7 +618,10 @@ mod tests {
         let d = rasterize(&calibri_chain, 200.0, crate::perf::Kind::Page).unwrap();
         let c = rasterize(&bare, 200.0, crate::perf::Kind::Page).unwrap();
         assert_eq!(a.size, l.size);
-        assert_eq!(a.pixels, l.pixels, "Arial chain == vendored Liberation Sans");
+        assert_eq!(
+            a.pixels, l.pixels,
+            "Arial chain == vendored Liberation Sans"
+        );
         assert_ne!(
             a.pixels, b.pixels,
             "Liberation and Carlito are different faces — the chain must not silently fall to Carlito"
@@ -646,30 +670,49 @@ mod tests {
         // Same key three times — the third inside the same ±0.25 ppi
         // bucket — one build.
         for &ppi in &[96.0f32, 96.0, 96.05] {
-            cache.get(&ctx, &mut pool, 4.0, "page1", 1, ppi, &mut build).unwrap().unwrap();
+            cache
+                .get(&ctx, &mut pool, 4.0, "page1", 1, ppi, &mut build)
+                .unwrap()
+                .unwrap();
         }
         assert_eq!(calls.get(), 1, "cached gets must not rebuild the SVG");
         // Version bump → rebuild (the SVG may have changed).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 96.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 2, 96.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 2);
         // New ppi bucket, same version → NO rebuild: the parsed tree is
         // reused and only re-rendered (#91).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 300.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 2, 300.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 2, "a bucket change must not re-serialize");
         // Another page part builds under its own key.
-        cache.get(&ctx, &mut pool, 4.0, "page2", 2, 300.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page2", 2, 300.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 3);
         // The v1 page1 entry was evicted by the retain on the v2 get, so
         // asking for it again rebuilds (eviction policy unchanged, #90).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 1, 96.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 1, 96.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 4);
         // A failed build inserts nothing: the very next get retries.
         let mut failing = || -> anyhow::Result<String> {
             calls.set(calls.get() + 1);
             Err(anyhow::anyhow!("boom"))
         };
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing)
+            .is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing)
+            .is_err());
         assert_eq!(calls.get(), 6, "failed builds are not cached");
         assert!(
             cache.id_for("badpage", 1, 96.0).is_none(),
@@ -681,8 +724,12 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok("<not-svg".into())
         };
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable)
+            .is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable)
+            .is_err());
         assert_eq!(calls.get(), 8, "failed parses are not cached");
     }
 
@@ -703,7 +750,10 @@ mod tests {
             tiny_svg()
         };
         for &ppi in &[96.0f32, 192.0, 300.0] {
-            cache.get(&ctx, &mut pool, 4.0, "page1", 7, ppi, &mut build).unwrap().unwrap();
+            cache
+                .get(&ctx, &mut pool, 4.0, "page1", 7, ppi, &mut build)
+                .unwrap()
+                .unwrap();
         }
         assert_eq!(calls.get(), 1, "three buckets, one build+parse");
         // Each bucket rasterized at its own width: 4 in × ppi.

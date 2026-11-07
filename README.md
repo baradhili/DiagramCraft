@@ -34,7 +34,7 @@ How can you help?
 
 1. Create issues - it gives me and my agent a way to track what could be fixed
 
-2. Close issues - there are plenty now and I only have so much token quota 
+2. Close issues - there are plenty now and I only have so much token quota
 
 2. Create PR - awesome! - but please keep the PRs on a narrow feature (no 10000 line PRs please!) and make sure they are at least checked by CodeRabbit - or better Greptile
 
@@ -210,8 +210,7 @@ for Graphviz layout (untracked sample, like all of `Sample/`).
 
 - Plugin architecture: out-of-tree diagram sources, shape mappers, and command packs with a stable API over `dc-core`.
 
-- Language import-renderers with **configurable shape mapping** (bind language node/edge types to masters/stencil shapes): **d2**, **Graphviz DOT** (synergy: GraphVizio is a Graphviz add-in — 
-  
+- Language import-renderers with **configurable shape mapping** (bind language node/edge types to masters/stencil shapes): **d2**, **Graphviz DOT** (synergy: GraphVizio is a Graphviz add-in —
   its public behavior is a useful oracle), and **Mermaid**.
 
 ## License

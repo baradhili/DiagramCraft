@@ -185,12 +185,8 @@ pub fn show_overlay(
     };
     let wrap_width = (screen.width() - m_left as f32 - m_right as f32).max(8.0);
     let build_job = |text: &str| {
-        let mut job = egui::text::LayoutJob::simple(
-            text.to_owned(),
-            font_id.clone(),
-            color,
-            wrap_width,
-        );
+        let mut job =
+            egui::text::LayoutJob::simple(text.to_owned(), font_id.clone(), color, wrap_width);
         job.halign = halign;
         job.keep_trailing_whitespace = true;
         for section in &mut job.sections {
@@ -296,13 +292,11 @@ fn overlay_font(
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let key = (font.unwrap_or_default().to_string(), bold, italic);
     let hit = cache.lock().unwrap().get(&key).cloned();
-    let style_name = |bold: bool, italic: bool| {
-        match (bold, italic) {
-            (false, false) => "regular",
-            (true, false) => "bold",
-            (false, true) => "italic",
-            (true, true) => "bolditalic",
-        }
+    let style_name = |bold: bool, italic: bool| match (bold, italic) {
+        (false, false) => "regular",
+        (true, false) => "bold",
+        (false, true) => "italic",
+        (true, true) => "bolditalic",
     };
     let (family, ascent, name, data) = match hit {
         Some(r) => r,
@@ -327,10 +321,8 @@ fn overlay_font(
                 // the editor still renders (and stays
                 // metric-compatible with the raster).
                 None => {
-                    let name: Arc<str> = Arc::from(format!(
-                        "dc-canvas-carlito-{}",
-                        style_name(bold, italic)
-                    ));
+                    let name: Arc<str> =
+                        Arc::from(format!("dc-canvas-carlito-{}", style_name(bold, italic)));
                     let ttf: &[u8] = match (bold, italic) {
                         (false, false) => {
                             include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf")

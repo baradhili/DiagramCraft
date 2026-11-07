@@ -46,6 +46,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | newpage | file-document-plus-outline |
 | theme | palette |
 | fit | fit-to-screen |
+| magnify-expand | magnify-expand |
 | zoomin | magnify-plus |
 | zoomout | magnify-minus |
 | grid | grid |

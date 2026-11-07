@@ -527,7 +527,10 @@ mod tests {
             "accent lines must read on dark surfaces"
         );
         assert_ne!(dark.accent_band, dark.accent, "band vs line accent split");
-        assert_eq!(dark.accent_band, ACCENT, "the chrome band stays grey (#154)");
+        assert_eq!(
+            dark.accent_band, ACCENT,
+            "the chrome band stays grey (#154)"
+        );
         assert_eq!(
             light.selection, HIGHLIGHT,
             "the selection frame is the highlight blue (#154)"
@@ -572,5 +575,4 @@ mod tests {
             );
         }
     }
-
 }

@@ -63,15 +63,13 @@ fn add_rect_geometry(sheet: &mut Sheet, w: f64, h: f64, f: Option<&str>) {
             ..Row::default()
         });
     }
-    sheet
-        .children
-        .push(SheetChild::Section(Section {
-            name: "Geometry".into(),
-            ix: 0,
-            attrs: vec![("N".into(), "Geometry".into()), ("IX".into(), "0".into())],
-            rows,
-            ..Section::default()
-        }));
+    sheet.children.push(SheetChild::Section(Section {
+        name: "Geometry".into(),
+        ix: 0,
+        attrs: vec![("N".into(), "Geometry".into()), ("IX".into(), "0".into())],
+        rows,
+        ..Section::default()
+    }));
 }
 
 /// Build the editor: blank document (detached from its source package —
@@ -160,10 +158,7 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
             ("NameU".into(), "TaskG".into()),
             ("Name".into(), "TaskG".into()),
         ],
-        children: vec![IndexChild::Rel(vec![(
-            "r:id".into(),
-            "rId9".into(),
-        )])],
+        children: vec![IndexChild::Rel(vec![("r:id".into(), "rId9".into())])],
         shapes: vec![mroot],
         part: "visio/masters/master10.xml".into(),
         ..Master::default()

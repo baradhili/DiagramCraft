@@ -22,6 +22,7 @@ pub enum Action {
     ZoomOut,
     Zoom100,
     FitPage,
+    ZoomSelection,
     ToggleGrid,
     ToggleRulers,
     ToggleComments,
@@ -43,6 +44,7 @@ pub enum Action {
     SelectByType,
     LassoTool,
     ConnPointTool,
+    FreeformTool,
     FormatPainter,
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.
@@ -155,6 +157,7 @@ pub enum Icon {
     NewPage,
     Theme,
     Fit,
+    ZoomSelection,
     ZoomIn,
     ZoomOut,
     Grid,
@@ -233,6 +236,7 @@ impl Icon {
             Icon::NewPage => "newpage",
             Icon::Theme => "theme",
             Icon::Fit => "fit",
+            Icon::ZoomSelection => "magnify-expand",
             Icon::ZoomIn => "zoomin",
             Icon::ZoomOut => "zoomout",
             Icon::Grid => "grid",
@@ -1026,6 +1030,24 @@ impl Icon {
                     Stroke::new(1.8, blue),
                 );
             }
+            Icon::ZoomSelection => {
+                // The magnify-expand glyph: magnifier over frame corners.
+                p.circle_stroke(
+                    c + Vec2::new(-1.5, -1.5),
+                    4.5,
+                    Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, 1.5), c + Vec2::new(5.5, 5.5)],
+                    Stroke::new(2.4, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                let s = Stroke::new(1.6, accent_ink);
+                for (dx, dy) in [(-8.0, -8.0), (6.0, -8.0), (-8.0, 6.0), (6.0, 6.0)] {
+                    let q = c + Vec2::new(dx, dy);
+                    p.line_segment([q, q + Vec2::new(3.0, 0.0)], s);
+                    p.line_segment([q, q + Vec2::new(0.0, 3.0)], s);
+                }
+            }
             Icon::Grid => {
                 for i in -1..=1 {
                     let t = i as f32;
@@ -1155,8 +1177,14 @@ impl Icon {
                 };
                 p.line_segment([c + a, c + b], Stroke::new(1.6, gray));
                 for v in [a, b] {
-                    p.line_segment([c + v + Vec2::new(-2.0, 4.0), c + v], Stroke::new(1.2, gray));
-                    p.line_segment([c + v + Vec2::new(-2.0, -4.0), c + v], Stroke::new(1.2, gray));
+                    p.line_segment(
+                        [c + v + Vec2::new(-2.0, 4.0), c + v],
+                        Stroke::new(1.2, gray),
+                    );
+                    p.line_segment(
+                        [c + v + Vec2::new(-2.0, -4.0), c + v],
+                        Stroke::new(1.2, gray),
+                    );
                 }
             }
             Icon::Connector => {
@@ -1211,10 +1239,7 @@ impl Icon {
                     gray,
                 );
                 p.line_segment(
-                    [
-                        c + Vec2::new(-4.5, 4.0),
-                        c + Vec2::new(0.0, 8.5),
-                    ],
+                    [c + Vec2::new(-4.5, 4.0), c + Vec2::new(0.0, 8.5)],
                     Stroke::new(3.0, gray),
                 );
                 p.line_segment(
@@ -1505,12 +1530,10 @@ const CONTENT_H: f32 = 74.0;
 const LABEL_H: f32 = 18.0;
 
 fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
-    let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| {
-        match c {
-            ButtonClick::None => {}
-            ButtonClick::Single => on_action(b.action),
-            ButtonClick::Double => on_action(b.action.double_click_action()),
-        }
+    let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| match c {
+        ButtonClick::None => {}
+        ButtonClick::Single => on_action(b.action),
+        ButtonClick::Double => on_action(b.action.double_click_action()),
     };
     match col {
         Col::Big(b) => {

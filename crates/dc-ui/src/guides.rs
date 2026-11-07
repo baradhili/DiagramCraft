@@ -49,12 +49,7 @@ pub fn is_guide(s: &Shape) -> bool {
 /// Begin/End when the shape carries them, else its pins (a guide
 /// point). `None` for anything unresolvable.
 fn endpoints(get: impl Fn(&str) -> Option<f64>) -> Option<((f64, f64), (f64, f64))> {
-    match (
-        get("BeginX"),
-        get("BeginY"),
-        get("EndX"),
-        get("EndY"),
-    ) {
+    match (get("BeginX"), get("BeginY"), get("EndX"), get("EndY")) {
         (Some(bx), Some(by), Some(ex), Some(ey)) => Some(((bx, by), (ex, ey))),
         _ => get("PinX")
             .zip(get("PinY"))
@@ -80,7 +75,11 @@ pub fn classify(begin: (f64, f64), end: (f64, f64)) -> GuideKind {
 /// stored coordinates are the guide's Begin point: the constrained
 /// axis for line guides (the other field is the line's start on the
 /// free axis — unused), both for points.
-pub fn guide_info(id: i64, s: &Shape, get: impl Fn(&str) -> Option<f64> + Copy) -> Option<GuideInfo> {
+pub fn guide_info(
+    id: i64,
+    s: &Shape,
+    get: impl Fn(&str) -> Option<f64> + Copy,
+) -> Option<GuideInfo> {
     if !is_guide(s) {
         return None;
     }
@@ -97,11 +96,7 @@ pub fn guide_info(id: i64, s: &Shape, get: impl Fn(&str) -> Option<f64> + Copy) 
 /// guide's line for line guides (distance on the constrained axis),
 /// Euclidean for points. Guides sit above shapes in hit priority
 /// (Visio: clicking on a guide grabs it, over any shape).
-pub fn guide_hit(
-    guides: &[GuideInfo],
-    p: (f64, f64),
-    threshold_in: f64,
-) -> Option<&GuideInfo> {
+pub fn guide_hit(guides: &[GuideInfo], p: (f64, f64), threshold_in: f64) -> Option<&GuideInfo> {
     let mut best: Option<(&GuideInfo, f64)> = None;
     for g in guides {
         let d = match g.kind {
@@ -185,7 +180,7 @@ pub fn glue_formula(guide_id: i64, axis: &str) -> String {
 pub fn glue_dependents(
     shapes: &[Shape],
     guide_id: i64,
-) -> Vec<(i64, Vec<( &'static str, &'static str)>)> {
+) -> Vec<(i64, Vec<(&'static str, &'static str)>)> {
     let pin_x = format!("Sheet.{guide_id}!PinX");
     let pin_y = format!("Sheet.{guide_id}!PinY");
     let mut out = Vec::new();
@@ -195,8 +190,7 @@ pub fn glue_dependents(
         }
         let mut axes: Vec<(&'static str, &'static str)> = Vec::new();
         for (cell, formula) in [("PinX", &pin_x), ("PinY", &pin_y)] {
-            if s
-                .sheet
+            if s.sheet
                 .cell(cell)
                 .and_then(|c| c.f.as_deref())
                 .is_some_and(|f| f.contains(formula.as_str()))

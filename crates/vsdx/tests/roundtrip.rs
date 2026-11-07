@@ -521,14 +521,28 @@ fn writes_fresh_document_from_model() {
     // Geometry row values survive the round trip (row order and X/Y).
     let geo = &doc2.pages[0].shapes[0].sheet.sections_named("Geometry")[0];
     assert_eq!(geo.rows.len(), 2);
-    let mv = geo.rows.iter().find(|r| r.t.as_deref() == Some("MoveTo")).unwrap();
+    let mv = geo
+        .rows
+        .iter()
+        .find(|r| r.t.as_deref() == Some("MoveTo"))
+        .unwrap();
     assert_eq!(
-        (mv.cell("X").and_then(|c| c.numeric()), mv.cell("Y").and_then(|c| c.numeric())),
+        (
+            mv.cell("X").and_then(|c| c.numeric()),
+            mv.cell("Y").and_then(|c| c.numeric())
+        ),
         (Some(0.0), Some(0.0))
     );
-    let lt = geo.rows.iter().find(|r| r.t.as_deref() == Some("LineTo")).unwrap();
+    let lt = geo
+        .rows
+        .iter()
+        .find(|r| r.t.as_deref() == Some("LineTo"))
+        .unwrap();
     assert_eq!(
-        (lt.cell("X").and_then(|c| c.numeric()), lt.cell("Y").and_then(|c| c.numeric())),
+        (
+            lt.cell("X").and_then(|c| c.numeric()),
+            lt.cell("Y").and_then(|c| c.numeric())
+        ),
         (Some(2.0), Some(0.0))
     );
     assert_eq!(doc2.stylesheets.len(), 1);

@@ -475,6 +475,578 @@ impl RerouteConnectors {
             touched_cache: dc_core::TouchList::default(),
         }
     }
+
+    /// The connectors this reroute would rewrite, discovered READ-ONLY
+    /// against `doc` — the static half of apply's pass 1: the glue
+    /// records of the moved shapes plus the #179 also-list, then the
+    /// #174 chain-aware connector test, the FixedRoute bail and the
+    /// resolvable-endpoint check. `touched()` names them BEFORE apply
+    /// so the layer store can harvest their PRE-reroute bounds (#236);
+    /// apply's attach-resolution half can still drop one, which only
+    /// leaves an unused harvest entry.
+    fn candidate_connectors(&self, doc: &Document) -> Vec<i64> {
+        use dc_core::connects::ConnectsHost;
+        use std::collections::BTreeMap;
+        let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
+            return Vec::new();
+        };
+        let connects = page.connects();
+        let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> = BTreeMap::new();
+        for c in &connects.list {
+            if !self.moved.contains(&c.to_sheet) {
+                continue;
+            }
+            by_connector.entry(c.from_sheet).or_default().push(c);
+        }
+        for id in &self.also {
+            if !by_connector.contains_key(id) {
+                by_connector.insert(
+                    *id,
+                    connects
+                        .list
+                        .iter()
+                        .filter(|c| c.from_sheet == *id)
+                        .collect(),
+                );
+            }
+        }
+        by_connector
+            .into_keys()
+            .filter(|conn_id| {
+                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, *conn_id) else {
+                    return false;
+                };
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, *conn_id) else {
+                    return false;
+                };
+                if !crate::connectors::is_connector_in(doc, &chain, conn) {
+                    return false;
+                }
+                if conn
+                    .sheet
+                    .cell("FixedRoute")
+                    .and_then(|v| v.numeric())
+                    .is_some_and(|v| v == 1.0)
+                {
+                    return false;
+                }
+                let get = |n: &str| doc.resolve_cell(conn, &chain, n).and_then(|v| v.numeric());
+                let (Some(_), Some(_), Some(_), Some(_)) =
+                    (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+                else {
+                    return false;
+                };
+                true
+            })
+            .collect()
+    }
+}
+
+/// #202: the cached Bézier-control refreshes a reroute owes a
+/// connector's CubicBezTo rows. The curved route's controls are
+/// `Width*0.5`-style formulas (`connectors::curved_row_extras`);
+/// after the frame rewrite their cached values hold the pre-drag
+/// pose. Each formula-driven control re-evaluates against the NEW
+/// signed frame (a minimal env: the frame formulas reference
+/// Width/Height); a formula the env can't evaluate (endpoints etc.)
+/// or a literal (customized) control keeps its current cell.
+fn curved_control_caches(
+    conn: &vsdx::model::Shape,
+    w_new: f64,
+    h_new: f64,
+) -> Vec<(i64, i64, String, Cell)> {
+    let mut out = Vec::new();
+    let mut env = vsdx::formula::Env::new();
+    env.insert("Width".to_string(), w_new);
+    env.insert("Height".to_string(), h_new);
+    for g in conn.sheet.sections_named("Geometry") {
+        for r in &g.rows {
+            if r.t.as_deref() != Some("CubicBezTo") {
+                continue;
+            }
+            for name in ["A", "B", "C", "D"] {
+                let Some(c) = r.cell(name) else {
+                    continue;
+                };
+                let Some(f) = c.f.as_deref() else {
+                    continue;
+                };
+                if f == "Inh" || f == "No Formula" {
+                    continue;
+                }
+                let upper = f.to_uppercase();
+                if !["WIDTH", "HEIGHT"].iter().any(|k| upper.contains(k)) {
+                    continue;
+                }
+                if let Some(v) = vsdx::formula::eval(f, &env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                {
+                    out.push((
+                        g.ix,
+                        r.ix,
+                        name.to_string(),
+                        Cell {
+                            v: Some(format!("{v:.6}")),
+                            f: Some(f.to_string()),
+                            ..Cell::default()
+                        },
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The formula an instance geometry-row cell inherits through
+/// `F="Inh"`: the MASTER row cell's formula (same section ordinal,
+/// same row IX — the pairing `render_all_geometry` uses). `None` when
+/// the cell carries its own formula, is a plain literal, or the
+/// master row cell has no formula of its own.
+fn inherited_geo_formula(
+    doc: &Document,
+    conn: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    section_ordinal: usize,
+    row_ix: i64,
+    name: &str,
+) -> Option<String> {
+    let c = conn
+        .sheet
+        .sections_named("Geometry")
+        .get(section_ordinal)?
+        .rows
+        .iter()
+        .find(|r| r.ix == row_ix)?
+        .cell(name)?;
+    if c.f.as_deref() != Some("Inh") {
+        return None;
+    }
+    let mr = doc
+        .instance_source(conn, chain)?
+        .sheet
+        .sections_named("Geometry")
+        .get(section_ordinal)?
+        .rows
+        .iter()
+        .find(|r| r.ix == row_ix)?;
+    let f = mr.cell(name)?.f.as_deref()?;
+    (f != "Inh" && f != "No Formula").then(|| f.to_string())
+}
+
+/// The corpus Line-arc pattern (#226 evidence): instance geometry
+/// rows carry `F="Inh"` caches whose formulas live on the MASTER row
+/// (`X=Width*1`, `Y=Height/2`), and the renderer reads the instance
+/// cache as a literal (`row_cell_value`'s inherited rule). A reroute
+/// must refresh those caches against the NEW frame — the row-level
+/// twin of the #175 XForm cache refresh. Only cells MATERIALIZED on
+/// the instance row refresh (an unmaterialized cell evaluates live
+/// from the master in the renderer's merge); the cell keeps its
+/// `F="Inh"` (a reroute never rewrites a formula), and a no-op cache
+/// is left byte-stable.
+fn inherited_row_caches(
+    doc: &Document,
+    conn: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    w_new: f64,
+    h_new: f64,
+) -> Vec<(i64, i64, String, Cell)> {
+    let mut env = vsdx::formula::Env::new();
+    env.insert("Width".to_string(), w_new);
+    env.insert("Height".to_string(), h_new);
+    let Some(src) = doc.instance_source(conn, chain) else {
+        return Vec::new();
+    };
+    let src_secs = src.sheet.sections_named("Geometry");
+    let mut out = Vec::new();
+    for (si, g) in conn.sheet.sections_named("Geometry").into_iter().enumerate() {
+        let Some(sg) = src_secs.get(si) else { continue };
+        for r in &g.rows {
+            let Some(mr) = sg.rows.iter().find(|m| m.ix == r.ix) else {
+                continue;
+            };
+            for name in ["X", "Y", "A", "B", "C", "D", "E"] {
+                let Some(c) = r.cell(name) else {
+                    continue;
+                };
+                if c.f.as_deref() != Some("Inh") {
+                    continue;
+                }
+                let Some(f) = mr.cell(name).and_then(|m| m.f.as_deref()) else {
+                    continue;
+                };
+                if f == "Inh" || f == "No Formula" {
+                    continue;
+                }
+                let upper = f.to_uppercase();
+                if !["WIDTH", "HEIGHT"].iter().any(|k| upper.contains(k)) {
+                    continue;
+                }
+                let Some(v) = vsdx::formula::eval(f, &env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                else {
+                    continue;
+                };
+                if c.numeric().is_some_and(|old| (old - v).abs() < 1e-9) {
+                    continue;
+                }
+                out.push((
+                    g.ix,
+                    r.ix,
+                    name.to_string(),
+                    Cell {
+                        v: Some(format!("{v:.6}")),
+                        f: Some("Inh".into()),
+                        ..Cell::default()
+                    },
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The per-connector frame+rows plan at ONE endpoint pair — the
+/// shared core of the commit-time [`RerouteConnectors`] and the live
+/// endpoint-drag preview (what you drag is exactly what lands).
+/// Endpoint cells are the caller's (the glue engine owns them); the
+/// plan covers the frame-cache writes, the route-row rewrites, and
+/// the curve-control / inherited-row cache refreshes.
+pub struct FramePlan {
+    /// XForm cache writes: (cell, value, keep-formula) — `Some(f)`
+    /// writes through SetGluedCell (formula kept), `None` is a plain
+    /// literal.
+    pub cells: Vec<(String, f64, Option<String>)>,
+    /// Literal route-row rewrites: (row ix, x, y).
+    pub rows: Vec<(i64, f64, f64)>,
+    /// Curve-control and inherited-row cache refreshes:
+    /// (section ix, row ix, cell name, cell).
+    pub row_cells: Vec<(i64, i64, String, Cell)>,
+}
+
+/// Plan [`FramePlan`] for one connector at `beg`→`endp` (post-move
+/// page-space endpoints).
+pub fn plan_connector_frame(
+    doc: &Document,
+    conn: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    beg: (f64, f64),
+    endp: (f64, f64),
+    pre_end: (f64, f64),
+) -> FramePlan {
+    let get = |n: &str| doc.resolve_cell(conn, chain, n).and_then(|v| v.numeric());
+    let mut cells: Vec<(String, f64, Option<String>)> = Vec::new();
+
+    // Frame + route once, from both new endpoints.
+    let style = get("ShapeRouteStyle")
+        .map(|v| format!("{}", v as i64))
+        .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+    let pts = crate::connectors::route(&style, beg, endp);
+    let rows = crate::connectors::route_rows(beg, &pts);
+    // #175: a derived cell whose effective formula
+    // REFERENCES the endpoints/sizes must have its cached V
+    // refreshed — the renderer reads the cache, and skipping
+    // it (the #174 rule) left the XForm of the OLD geometry
+    // under moved endpoints. The write goes through
+    // SetGluedCell (GUARD-waived, formula kept); a
+    // formula-free cell stays a plain SetCell; a CONSTANT
+    // guard (Height=GUARD(0.19685DL), Angle=GUARD(0DA))
+    // does not depend on the endpoints and is skipped.
+    let eff = |n: &str| dc_core::commands::effective_formula(doc, conn, chain, n);
+    let formula_tracks = |n: &str| -> Option<String> {
+        let f = eff(n)?;
+        let u = f.to_uppercase();
+        ["BEGINX", "ENDX", "BEGINY", "ENDY", "WIDTH", "HEIGHT"]
+            .iter()
+            .any(|k| u.contains(k))
+            .then_some(f)
+    };
+    let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
+    // #176: a master-based connector whose geometry is
+    // LINE-only (MoveTo/LineTo — the corpus line master's
+    // own rows are the begin-corner frame (0,0)→(W,H))
+    // reroutes by REWRITING its frame to span the new
+    // endpoints. Its instance rows are a literal snapshot
+    // of the authoring pose (a horizontal band's midline
+    // `LineTo(Width, H/2)` with `Height = GUARD(0.2DL)`);
+    // translating those in-frame (#175) keeps the ink on
+    // the old midline, detached from the moved shape
+    // whenever the endpoints differ in y. Curves keep the
+    // #175 translation — rewriting an arc's rows to the
+    // route polyline would destroy the curve.
+    let line_frame = conn.master.is_some()
+        && conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .is_some_and(|g| {
+                g.rows.iter().all(|r| {
+                    matches!(r.t.as_deref(), None | Some("MoveTo") | Some("LineTo"))
+                })
+            });
+    // #226 (MisterDiagram parity evidence): the CHORD-frame
+    // masters — a master-based curve connector whose
+    // inherited geometry rows derive their coordinates from
+    // the frame (the Line-arc corpus master's
+    // `EllipticalArcTo X=Width*1, Y=Height/2`) frames its
+    // rows on the BEGIN→END chord: the frame width is the
+    // chord, the direction lives in Angle, Height stays the
+    // master's own 0. Route-frame connectors (the dynamic
+    // master's guarded zero angle, the synthetic
+    // begin-corner rows) keep the signed-delta model.
+    let chord_frame = conn.master.is_some()
+        && !line_frame
+        && conn
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .enumerate()
+            .any(|(si, g)| {
+                g.rows.iter().any(|r| {
+                    ["X", "Y"].iter().any(|n| {
+                        inherited_geo_formula(doc, conn, chain, si, r.ix, n)
+                            .is_some_and(|f| {
+                                let u = f.to_uppercase();
+                                ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
+                            })
+                    })
+                })
+            });
+    // LocPin derives from the EFFECTIVE size: when Height is
+    // a constant guard the band keeps its height, so LocPinY
+    // stays half the kept height — except a line_frame
+    // connector, whose band guard is overridden so the
+    // frame spans the endpoints.
+    let h_eff = if formula_tracks("Height").is_some() || line_frame {
+        h_new
+    } else {
+        get("Height").unwrap_or(h_new)
+    };
+    let w_eff = if formula_tracks("Width").is_some() || line_frame {
+        w_new
+    } else {
+        get("Width").unwrap_or(w_new)
+    };
+    // Frame values: a formula-tracked cell evaluates its
+    // EFFECTIVE formula against the NEW endpoints (the chord
+    // master's `Width=SQRT((EndX-BeginX)^2+…)` is the chord,
+    // not the signed dx the defaults below assume); an
+    // unevaluable formula falls back to the signed value.
+    // The env grows as each cell resolves so downstream
+    // formulas (`LocPinX=Width*0.5`) see the post-write
+    // frame — Width/Height resolve first for that.
+    let mut frame_env = vsdx::formula::Env::new();
+    frame_env.insert("BeginX".to_string(), beg.0);
+    frame_env.insert("BeginY".to_string(), beg.1);
+    frame_env.insert("EndX".to_string(), endp.0);
+    frame_env.insert("EndY".to_string(), endp.1);
+    for (n, v) in [
+        ("Width", w_new),
+        ("Height", h_new),
+        ("PinX", (beg.0 + endp.0) / 2.0),
+        ("PinY", (beg.1 + endp.1) / 2.0),
+        ("LocPinX", w_eff / 2.0),
+        ("LocPinY", h_eff / 2.0),
+    ] {
+        match formula_tracks(n) {
+            Some(f) => {
+                let v = vsdx::formula::eval(&f, &frame_env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(v);
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, Some(f)));
+            }
+            // A frame dim with no formula anywhere: rewrite
+            // it only when the INSTANCE carries its own
+            // cell. An inherited master literal (the
+            // Line-arc Height=0, no instance cell) stays
+            // inherited — materializing a literal over it
+            // corrupts the master link and stretches the
+            // band (#226 ownership: a reroute writes only
+            // what the connector owns).
+            None if eff(n).is_none() && conn.sheet.cell(n).is_some() => {
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, None));
+            }
+            // #176: a line_frame connector refreshes every
+            // frame cell through its guard (the formula is
+            // kept, the cached V drives the render) — a
+            // skipped constant guard would hold the old
+            // band pose under the new endpoints.
+            None if line_frame => {
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, eff(n)));
+            }
+            // Constant guard or otherwise static: skipped —
+            // the frame keeps the current effective value.
+            None => {
+                frame_env.insert(n.to_string(), get(n).unwrap_or(v));
+            }
+        }
+    }
+    // The chord frame rotates with the endpoints; a route
+    // frame keeps its guarded or zero angle. The instance's
+    // own Angle cache refreshes behind its marker (Inh
+    // stays Inh — a reroute never rewrites a formula).
+    if chord_frame {
+        let angle = (endp.1 - beg.1).atan2(endp.0 - beg.0);
+        // The frame angle lives on the INSTANCE cache (the corpus
+        // master has no Angle cell; a style cascade may carry an
+        // ATAN2 default — that is the style's formula, not the
+        // connector's own, and materializing it onto the instance
+        // would rewrite ownership (#226: a reroute never rewrites a
+        // formula)). Refresh the cache behind the instance's own
+        // marker; a connector with its OWN Angle formula keeps it.
+        let own_f = conn
+            .sheet
+            .cell("Angle")
+            .and_then(|c| c.f.clone())
+            .filter(|f| f != "Inh" && f != "No Formula");
+        match own_f {
+            Some(f) => cells.push(("Angle".into(), angle, Some(f))),
+            None if conn.sheet.cell("Angle").is_some() => {
+                cells.push(("Angle".into(), angle, Some("Inh".into())));
+            }
+            None => {}
+        }
+    }
+    // #174/#175: only rewrite route rows the connector
+    // ALREADY has — SetRowCell materializes missing rows,
+    // which would grow a 2-row arc master (MoveTo +
+    // EllipticalArcTo) into a 4-row elbow polyline.
+    let existing: Vec<i64> = {
+        let mut v: Vec<i64> = conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| g.rows.iter().map(|r| r.ix).collect::<Vec<_>>())
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    };
+    let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() && !line_frame {
+        // #175: a MASTER-based CURVE connector's rows are
+        // its own frame (an arc's EllipticalArcTo) —
+        // translating the EXISTING literal coordinates by
+        // the endpoint's page delta, per axis, keeps the
+        // curve; only where that axis's size tracks the
+        // endpoints. Rows whose cells carry formulas
+        // evaluate against the refreshed caches in the
+        // renderer and are left to it.
+        let dx = if formula_tracks("Width").is_some() {
+            endp.0 - pre_end.0
+        } else {
+            0.0
+        };
+        let dy = if formula_tracks("Height").is_some() {
+            endp.1 - pre_end.1
+        } else {
+            0.0
+        };
+        // A row cell is translatable only when it is a
+        // plain literal — including an `F="Inh"` cache
+        // whose MASTER row cell is a literal too. An
+        // inherited cache whose master formula derives it
+        // from the frame (the Line-arc `Width*1`) refreshes
+        // as a cache below; translating the stale literal
+        // by the page delta would double-move the row and
+        // strip the marker (#226).
+        let literal = |r: &vsdx::model::Row, name: &str| -> Option<f64> {
+            let c = r.cell(name)?;
+            match c.f.as_deref() {
+                None => c.numeric(),
+                Some("Inh") | Some("No Formula") => {
+                    let tracks =
+                        inherited_geo_formula(doc, conn, chain, 0, r.ix, name)
+                            .is_some_and(|f| {
+                                let u = f.to_uppercase();
+                                ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
+                            });
+                    (!tracks).then(|| c.numeric()).flatten()
+                }
+                Some(_) => None,
+            }
+        };
+        conn.sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| {
+                g.rows
+                    .iter()
+                    .filter(|r| (2..=4).contains(&r.ix))
+                    .filter_map(|r| {
+                        let x = literal(r, "X")?;
+                        let y = literal(r, "Y")?;
+                        Some((r.ix, x + dx, y + dy))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        // The begin-corner corpus frame: the planned route,
+        // filtered to rows the connector has; a connector
+        // with fewer rows than the route frame puts the
+        // ENDPOINT on its LAST row. Synthetic connectors
+        // AND (#176) line-geometry master instances — whose
+        // band snapshot rows must be rewritten to span the
+        // new endpoints, with the MoveTo reset to (0,0) so
+        // the frame's origin is the begin point.
+        let mut planned: Vec<(i64, f64, f64)> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
+            .filter(|(ix, _, _)| existing.contains(ix))
+            .collect();
+        let max_ix = existing
+            .iter()
+            .copied()
+            .filter(|ix| (2..=4).contains(ix))
+            .max();
+        if let (Some(last), Some(max_ix)) = (planned.last_mut(), max_ix) {
+            if max_ix < 4 {
+                *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
+            }
+        }
+        if line_frame && existing.contains(&1) {
+            planned.insert(0, (1, 0.0, 0.0));
+        }
+        planned
+    };
+    // The post-write frame the row-cache refreshes evaluate
+    // against: the planned value when the frame loop
+    // rewrote the dim, the current effective value when it
+    // deliberately skipped (constant guard, inherited
+    // literal).
+    let post_dim = |name: &str, fallback: f64| -> f64 {
+        cells
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, v, _)| *v)
+            .unwrap_or_else(|| get(name).unwrap_or(fallback))
+    };
+    let (w_post, h_post) = (post_dim("Width", w_new), post_dim("Height", h_new));
+    let mut row_cells = curved_control_caches(conn, w_post, h_post);
+    if chord_frame {
+        // The chord-frame rows' inherited caches
+        // (`X=Width*1`, `Y=Height/2`) re-evaluate against
+        // the new frame — the arc's end lands on the moved
+        // endpoint (the #175 rule, one level down). The
+        // sagitta controls (`Controls.Row_1`) don't
+        // reference the frame and stay.
+        row_cells.extend(inherited_row_caches(doc, conn, chain, w_post, h_post));
+    }
+
+    FramePlan {
+        cells,
+        rows: planned_rows,
+        row_cells,
+    }
 }
 
 impl Command for RerouteConnectors {
@@ -484,7 +1056,33 @@ impl Command for RerouteConnectors {
         // re-raster them (Ink), or their textures keep the dragged
         // raster under the restored bounding box.
         if self.inner.is_empty() {
-            return self.touched_cache.clone();
+            if !self.touched_cache.shapes.is_empty() || !self.touched_cache.pages.is_empty() {
+                return self.touched_cache.clone();
+            }
+            // Pre-apply (#236): the apply-time list does not exist yet
+            // (apply builds it), so discover the candidate connectors
+            // read-only and name each one's Ink touch — with `sub` on
+            // a NESTED connector, the layer store harvests its
+            // pre-reroute bounds and pairs them against the post state
+            // for a damage-region patch. Top-level connectors stay
+            // sub-less: a reroute resizes the connector's own frame,
+            // so its whole texture re-renders either way.
+            let mut all = dc_core::TouchList::default();
+            for conn_id in self.candidate_connectors(doc) {
+                let Some(root) = dc_core::scope::top_level_ancestor(doc, self.page, conn_id) else {
+                    continue;
+                };
+                all.merge(dc_core::TouchList {
+                    pages: vec![],
+                    shapes: vec![dc_core::Touched {
+                        page: self.page,
+                        shape: root,
+                        touch: dc_core::Touch::Ink,
+                        sub: (root != conn_id).then_some(conn_id),
+                    }],
+                });
+            }
+            return all;
         }
         let mut all = dc_core::TouchList::default();
         for c in &self.inner {
@@ -504,6 +1102,14 @@ impl Command for RerouteConnectors {
             conn_id: i64,
             cells: Vec<(String, f64, Option<String>)>,
             rows: Vec<(i64, f64, f64)>,
+            /// #202: CubicBezTo control-cache refreshes — (section
+            /// ix, row ix, cell name, new cell). The curved route's
+            /// controls are
+            /// Width/Height FORMULAS; the frame rewrite leaves their
+            /// cached values at the pre-drag pose, and anything
+            /// reading caches (hit samples, ShapeSheet) sees the old
+            /// curve. Literal (customized) controls stay untouched.
+            row_cells: Vec<(i64, i64, String, Cell)>,
         }
         // Both ends may glue to moved shapes (a two-shape selection
         // drag): each connector is planned ONCE from both new
@@ -517,8 +1123,7 @@ impl Command for RerouteConnectors {
                 return Ok(());
             };
             let connects = page.connects();
-            let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> =
-                BTreeMap::new();
+            let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> = BTreeMap::new();
             for c in &connects.list {
                 if !self.moved.contains(&c.to_sheet) {
                     continue;
@@ -543,10 +1148,7 @@ impl Command for RerouteConnectors {
             }
             let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
                 let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
-                let g = |n: &str| {
-                    doc.resolve_cell(t, &ch, n)
-                        .and_then(|v| v.numeric())
-                };
+                let g = |n: &str| doc.resolve_cell(t, &ch, n).and_then(|v| v.numeric());
                 let (px, py) = (g("PinX")?, g("PinY")?);
                 let (w, h) = (g("Width").unwrap_or(1.0), g("Height").unwrap_or(1.0));
                 let (lx, ly) = (
@@ -557,12 +1159,10 @@ impl Command for RerouteConnectors {
                 Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
             };
             for (conn_id, recs) in by_connector {
-                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, conn_id)
-                else {
+                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, conn_id) else {
                     continue;
                 };
-                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id)
-                else {
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id) else {
                     continue;
                 };
                 // #174: chain-aware — master-based connectors (every
@@ -580,10 +1180,7 @@ impl Command for RerouteConnectors {
                 {
                     continue;
                 }
-                let get = |n: &str| {
-                    doc.resolve_cell(conn, &chain, n)
-                        .and_then(|v| v.numeric())
-                };
+                let get = |n: &str| doc.resolve_cell(conn, &chain, n).and_then(|v| v.numeric());
                 let (Some(bx), Some(by), Some(ex), Some(ey)) =
                     (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
                 else {
@@ -613,9 +1210,7 @@ impl Command for RerouteConnectors {
                         trect(target).and_then(|(rx, ry, _, _)| {
                             let find = |sheet: &vsdx::model::Sheet| -> Option<(f64, f64)> {
                                 for sec in sheet.sections_named("Connection") {
-                                    if let Some(row) =
-                                        sec.rows.iter().find(|r| r.ix == row_ix)
-                                    {
+                                    if let Some(row) = sec.rows.iter().find(|r| r.ix == row_ix) {
                                         if let (Some(x), Some(y)) = (
                                             row.cell("X").and_then(|v| v.numeric()),
                                             row.cell("Y").and_then(|v| v.numeric()),
@@ -635,8 +1230,7 @@ impl Command for RerouteConnectors {
                             })
                         })
                     } else {
-                        trect(target)
-                            .map(|r| crate::connectors::attach_point(r, other))
+                        trect(target).map(|r| crate::connectors::attach_point(r, other))
                     };
                     let Some(attach) = attach else { continue };
                     match end {
@@ -650,181 +1244,17 @@ impl Command for RerouteConnectors {
                 if end_cells.is_empty() && !self.also.contains(&conn_id) {
                     continue;
                 }
-                // Frame + route once, from both new endpoints.
-                let style = get("ShapeRouteStyle")
-                    .map(|v| format!("{}", v as i64))
-                    .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
-                let pts = crate::connectors::route(&style, beg, endp);
-                let rows = crate::connectors::route_rows(beg, &pts);
+                // Frame + route once, from both new endpoints — the
+                // shared planner (the live endpoint-drag preview plans
+                // through the same function).
+                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, (ex, ey));
                 let mut cells = end_cells;
-                // #175: a derived cell whose effective formula
-                // REFERENCES the endpoints/sizes must have its cached V
-                // refreshed — the renderer reads the cache, and skipping
-                // it (the #174 rule) left the XForm of the OLD geometry
-                // under moved endpoints. The write goes through
-                // SetGluedCell (GUARD-waived, formula kept); a
-                // formula-free cell stays a plain SetCell; a CONSTANT
-                // guard (Height=GUARD(0.19685DL), Angle=GUARD(0DA))
-                // does not depend on the endpoints and is skipped.
-                let eff = |n: &str| {
-                    dc_core::commands::effective_formula(doc, conn, &chain, n)
-                };
-                let formula_tracks = |n: &str| -> Option<String> {
-                    let f = eff(n)?;
-                    let u = f.to_uppercase();
-                    ["BEGINX", "ENDX", "BEGINY", "ENDY", "WIDTH", "HEIGHT"]
-                        .iter()
-                        .any(|k| u.contains(k))
-                        .then_some(f)
-                };
-                let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
-                // #176: a master-based connector whose geometry is
-                // LINE-only (MoveTo/LineTo — the corpus line master's
-                // own rows are the begin-corner frame (0,0)→(W,H))
-                // reroutes by REWRITING its frame to span the new
-                // endpoints. Its instance rows are a literal snapshot
-                // of the authoring pose (a horizontal band's midline
-                // `LineTo(Width, H/2)` with `Height = GUARD(0.2DL)`);
-                // translating those in-frame (#175) keeps the ink on
-                // the old midline, detached from the moved shape
-                // whenever the endpoints differ in y. Curves keep the
-                // #175 translation — rewriting an arc's rows to the
-                // route polyline would destroy the curve.
-                let line_frame = conn.master.is_some()
-                    && conn.sheet.sections_named("Geometry").first().is_some_and(|g| {
-                        g.rows.iter().all(|r| {
-                            matches!(r.t.as_deref(), None | Some("MoveTo") | Some("LineTo"))
-                        })
-                    });
-                // LocPin derives from the EFFECTIVE size: when Height is
-                // a constant guard the band keeps its height, so LocPinY
-                // stays half the kept height — except a line_frame
-                // connector, whose band guard is overridden so the
-                // frame spans the endpoints.
-                let h_eff = if formula_tracks("Height").is_some() || line_frame {
-                    h_new
-                } else {
-                    get("Height").unwrap_or(h_new)
-                };
-                let w_eff = if formula_tracks("Width").is_some() || line_frame {
-                    w_new
-                } else {
-                    get("Width").unwrap_or(w_new)
-                };
-                for (n, v) in [
-                    ("PinX", (beg.0 + endp.0) / 2.0),
-                    ("PinY", (beg.1 + endp.1) / 2.0),
-                    ("Width", w_new),
-                    ("Height", h_new),
-                    ("LocPinX", w_eff / 2.0),
-                    ("LocPinY", h_eff / 2.0),
-                ] {
-                    match formula_tracks(n) {
-                        None if eff(n).is_none() => {
-                            cells.push((n.to_string(), v, None));
-                        }
-                        Some(f) => {
-                            cells.push((n.to_string(), v, Some(f)));
-                        }
-                        // #176: a line_frame connector refreshes every
-                        // frame cell through its guard (the formula is
-                        // kept, the cached V drives the render) — a
-                        // skipped constant guard would hold the old
-                        // band pose under the new endpoints.
-                        None if line_frame => {
-                            cells.push((n.to_string(), v, eff(n)));
-                        }
-                        // Constant guard or otherwise static: skip.
-                        None => {}
-                    }
-                }
-                // #174/#175: only rewrite route rows the connector
-                // ALREADY has — SetRowCell materializes missing rows,
-                // which would grow a 2-row arc master (MoveTo +
-                // EllipticalArcTo) into a 4-row elbow polyline.
-                let existing: Vec<i64> = {
-                    let mut v: Vec<i64> = conn
-                        .sheet
-                        .sections_named("Geometry")
-                        .first()
-                        .map(|g| g.rows.iter().map(|r| r.ix).collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    v.sort_unstable();
-                    v
-                };
-                let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() && !line_frame {
-                    // #175: a MASTER-based CURVE connector's rows are
-                    // its own frame (an arc's EllipticalArcTo) —
-                    // translating the EXISTING literal coordinates by
-                    // the endpoint's page delta, per axis, keeps the
-                    // curve; only where that axis's size tracks the
-                    // endpoints. Rows whose cells carry formulas
-                    // evaluate against the refreshed caches in the
-                    // renderer and are left to it.
-                    let dx = if formula_tracks("Width").is_some() {
-                        endp.0 - ex
-                    } else {
-                        0.0
-                    };
-                    let dy = if formula_tracks("Height").is_some() {
-                        endp.1 - ey
-                    } else {
-                        0.0
-                    };
-                    let literal = |c: Option<&vsdx::Cell>| -> Option<f64> {
-                        let c = c?;
-                        let literal = c
-                            .f
-                            .as_deref()
-                            .is_none_or(|f| f == "Inh" || f == "No Formula");
-                        literal.then(|| c.numeric())?
-                    };
-                    conn.sheet
-                        .sections_named("Geometry")
-                        .first()
-                        .map(|g| {
-                            g.rows
-                                .iter()
-                                .filter(|r| (2..=4).contains(&r.ix))
-                                .filter_map(|r| {
-                                    let x = literal(r.cell("X"))?;
-                                    let y = literal(r.cell("Y"))?;
-                                    Some((r.ix, x + dx, y + dy))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    // The begin-corner corpus frame: the planned route,
-                    // filtered to rows the connector has; a connector
-                    // with fewer rows than the route frame puts the
-                    // ENDPOINT on its LAST row. Synthetic connectors
-                    // AND (#176) line-geometry master instances — whose
-                    // band snapshot rows must be rewritten to span the
-                    // new endpoints, with the MoveTo reset to (0,0) so
-                    // the frame's origin is the begin point.
-                    let mut planned: Vec<(i64, f64, f64)> = rows
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
-                        .filter(|(ix, _, _)| existing.contains(ix))
-                        .collect();
-                    let max_ix =
-                        existing.iter().copied().filter(|ix| (2..=4).contains(ix)).max();
-                    if let (Some(last), Some(max_ix)) = (planned.last_mut(), max_ix) {
-                        if max_ix < 4 {
-                            *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
-                        }
-                    }
-                    if line_frame && existing.contains(&1) {
-                        planned.insert(0, (1, 0.0, 0.0));
-                    }
-                    planned
-                };
+                cells.extend(plan.cells);
                 plans.push(Plan {
                     conn_id: conn.id,
                     cells,
-                    rows: planned_rows,
+                    rows: plan.rows,
+                    row_cells: plan.row_cells,
                 });
             }
         }
@@ -876,6 +1306,21 @@ impl Command for RerouteConnectors {
                     c.apply(doc)?;
                     self.inner.push(Box::new(c));
                 }
+            }
+            // #202: refresh the curved route's formula-driven control
+            // caches against the new frame (the formula is kept — the
+            // SetGluedCell pattern; a customized literal stays).
+            for (sec_ix, row_ix, name, cell) in &plan.row_cells {
+                let mut c = dc_core::SetRowCell::new(
+                    scope.clone(),
+                    "Geometry",
+                    *sec_ix,
+                    dc_core::commands::RowSel::Ix(*row_ix),
+                    name.clone(),
+                    cell.clone(),
+                );
+                c.apply(doc)?;
+                self.inner.push(Box::new(c));
             }
         }
         // #178: capture the merged touch list while `inner` still
@@ -969,12 +1414,15 @@ mod tests {
         use crate::group_fixture::taskg_editor;
         let (mut ed, page, [root, sub, icon]) = taskg_editor();
         let num = |ed: &dc_core::Editor, id: i64, k: &str| {
-            vsdx::model::find_shape_by_id(&ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, id)
-                .unwrap()
-                .sheet
-                .cell(k)
-                .and_then(|c| c.numeric())
-                .unwrap_or(f64::NAN)
+            vsdx::model::find_shape_by_id(
+                &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes,
+                id,
+            )
+            .unwrap()
+            .sheet
+            .cell(k)
+            .and_then(|c| c.numeric())
+            .unwrap_or(f64::NAN)
         };
 
         // Resize 1×0.5 → 1.3×0.7 the way the app commits it.
@@ -996,28 +1444,66 @@ mod tests {
         let (w1, h1) = (1.3f64, 0.7f64);
 
         // Sub caches scaled with the group.
-        assert!((num(&ed, sub, "Width") - kx).abs() < 1e-3, "sub Width: {}", num(&ed, sub, "Width"));
-        assert!((num(&ed, sub, "PinX") - 0.5 * kx).abs() < 1e-3, "sub PinX: {}", num(&ed, sub, "PinX"));
+        assert!(
+            (num(&ed, sub, "Width") - kx).abs() < 1e-3,
+            "sub Width: {}",
+            num(&ed, sub, "Width")
+        );
+        assert!(
+            (num(&ed, sub, "PinX") - 0.5 * kx).abs() < 1e-3,
+            "sub PinX: {}",
+            num(&ed, sub, "PinX")
+        );
         // Sub geometry row caches scaled too.
         let s = vsdx::model::find_shape_by_id(
-            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, sub).unwrap();
+            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes,
+            sub,
+        )
+        .unwrap();
         let geo = &s.sheet.sections_named("Geometry")[0];
-        let far_x = geo.rows.iter()
-            .find(|r| r.ix == 3).unwrap()
-            .cell("X").and_then(|c| c.numeric()).unwrap();
-        assert!((far_x - 1.0 * kx).abs() < 1e-3, "sub geometry X scaled: {far_x}");
+        let far_x = geo
+            .rows
+            .iter()
+            .find(|r| r.ix == 3)
+            .unwrap()
+            .cell("X")
+            .and_then(|c| c.numeric())
+            .unwrap();
+        assert!(
+            (far_x - 1.0 * kx).abs() < 1e-3,
+            "sub geometry X scaled: {far_x}"
+        );
 
         // The Txt block followed, including the cells the User
         // indirection hides: TxtPinX = GUARD(User.TxtPinX) with
         // User.TxtPinX = Width/2 must re-center.
-        assert!((num(&ed, root, "TxtWidth") - w1).abs() < 1e-3, "TxtWidth: {}", num(&ed, root, "TxtWidth"));
-        assert!((num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3, "TxtPinX: {}", num(&ed, root, "TxtPinX"));
-        assert!((num(&ed, root, "TxtPinY") - h1 / 2.0).abs() < 1e-3, "TxtPinY: {}", num(&ed, root, "TxtPinY"));
-        assert!((num(&ed, root, "TxtLocPinX") - w1 / 2.0).abs() < 1e-3, "TxtLocPinX: {}", num(&ed, root, "TxtLocPinX"));
+        assert!(
+            (num(&ed, root, "TxtWidth") - w1).abs() < 1e-3,
+            "TxtWidth: {}",
+            num(&ed, root, "TxtWidth")
+        );
+        assert!(
+            (num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3,
+            "TxtPinX: {}",
+            num(&ed, root, "TxtPinX")
+        );
+        assert!(
+            (num(&ed, root, "TxtPinY") - h1 / 2.0).abs() < 1e-3,
+            "TxtPinY: {}",
+            num(&ed, root, "TxtPinY")
+        );
+        assert!(
+            (num(&ed, root, "TxtLocPinX") - w1 / 2.0).abs() < 1e-3,
+            "TxtLocPinX: {}",
+            num(&ed, root, "TxtLocPinX")
+        );
         // Refreshed cells keep F='Inh' — a later resize must refresh
         // them again, not meet frozen literals.
         let s = vsdx::model::find_shape_by_id(
-            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes, root).unwrap();
+            &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes,
+            root,
+        )
+        .unwrap();
         assert_eq!(s.sheet.cell("TxtPinX").unwrap().f.as_deref(), Some("Inh"));
 
         // The fixed-size icon kept its GUARD'ed size and X offset, while
@@ -1025,30 +1511,56 @@ mod tests {
         // User.IconY = Height - User.InfoPanelHeight/2 re-evaluated at
         // the new height (the instance's cached User.IconY must not
         // freeze it).
-        assert!((num(&ed, icon, "Width") - 0.157480).abs() < 1e-6, "icon Width: {}", num(&ed, icon, "Width"));
-        assert!((num(&ed, icon, "PinX") - 0.1).abs() < 1e-6, "icon PinX: {}", num(&ed, icon, "PinX"));
-        assert!((num(&ed, icon, "PinY") - (h1 - 0.1)).abs() < 1e-3, "icon PinY: {}", num(&ed, icon, "PinY"));
+        assert!(
+            (num(&ed, icon, "Width") - 0.157480).abs() < 1e-6,
+            "icon Width: {}",
+            num(&ed, icon, "Width")
+        );
+        assert!(
+            (num(&ed, icon, "PinX") - 0.1).abs() < 1e-6,
+            "icon PinX: {}",
+            num(&ed, icon, "PinX")
+        );
+        assert!(
+            (num(&ed, icon, "PinY") - (h1 - 0.1)).abs() < 1e-3,
+            "icon PinY: {}",
+            num(&ed, icon, "PinY")
+        );
 
         // A SECOND resize refreshes again (the Inh markers survived).
-        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![
-            Box::new(SetCell::new(
-                Scope::Shape { page, shape: root },
-                "Width",
-                Cell::value("1.56"),
-            )),
-        ];
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![Box::new(SetCell::new(
+            Scope::Shape { page, shape: root },
+            "Width",
+            Cell::value("1.56"),
+        ))];
         cmds.extend(group_cache_refresh(&ed.doc, page, root, 1.56 / w1, 1.0));
         ed.apply(dc_core::Macro::new("resize shape", cmds)).unwrap();
-        assert!((num(&ed, root, "TxtPinX") - 0.78).abs() < 1e-3, "second refresh: {}", num(&ed, root, "TxtPinX"));
+        assert!(
+            (num(&ed, root, "TxtPinX") - 0.78).abs() < 1e-3,
+            "second refresh: {}",
+            num(&ed, root, "TxtPinX")
+        );
 
         // Each undo restores one resize's whole refresh; two undos
         // return to the authored caches.
         ed.undo().unwrap();
-        assert!((num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3, "undo #1");
+        assert!(
+            (num(&ed, root, "TxtPinX") - w1 / 2.0).abs() < 1e-3,
+            "undo #1"
+        );
         ed.undo().unwrap();
-        assert!((num(&ed, sub, "Width") - 1.0).abs() < 1e-6, "undo restored sub cache");
-        assert!((num(&ed, root, "TxtPinX") - 0.5).abs() < 1e-6, "undo restored TxtPinX");
-        assert!((num(&ed, icon, "PinY") - 0.4).abs() < 1e-6, "undo restored icon PinY");
+        assert!(
+            (num(&ed, sub, "Width") - 1.0).abs() < 1e-6,
+            "undo restored sub cache"
+        );
+        assert!(
+            (num(&ed, root, "TxtPinX") - 0.5).abs() < 1e-6,
+            "undo restored TxtPinX"
+        );
+        assert!(
+            (num(&ed, icon, "PinY") - 0.4).abs() < 1e-6,
+            "undo restored icon PinY"
+        );
     }
 }
 
@@ -1103,14 +1615,12 @@ mod reroute_master_tests {
             ..Row::default()
         });
         target.sheet.children.push(SheetChild::Section(connections));
-        let mut conn_rows = vec![
-            Row {
-                t: Some("MoveTo".into()),
-                ix: 1,
-                cells: vec![vc("X", "0"), vc("Y", "0")],
-                ..Row::default()
-            },
-        ];
+        let mut conn_rows = vec![Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            cells: vec![vc("X", "0"), vc("Y", "0")],
+            ..Row::default()
+        }];
         if arc {
             conn_rows.push(Row {
                 t: Some("EllipticalArcTo".into()),
@@ -1237,22 +1747,14 @@ mod reroute_master_tests {
         }
         let mut cmd = RerouteConnectors::new(page_id, vec![10]);
         cmd.apply(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
         let ex = conn.sheet.cell("EndX").and_then(|c| c.numeric()).unwrap();
         assert!(
             (ex - 3.0).abs() < 1e-6,
             "static glue follows the connection point: EndX {ex} (want 3.0)"
         );
         cmd.undo(&mut ed.doc).unwrap();
-        let ex = ed
-            .doc
-            .pages[0]
+        let ex = ed.doc.pages[0]
             .shapes
             .iter()
             .find(|s| s.id == 11)
@@ -1276,13 +1778,7 @@ mod reroute_master_tests {
         }
         let mut cmd = RerouteConnectors::new(page_id, vec![10]);
         cmd.apply(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
         let ex = conn.sheet.cell("EndX").and_then(|c| c.numeric()).unwrap();
         assert!(
             (ex - 3.0).abs() < 1e-6,
@@ -1303,13 +1799,7 @@ mod reroute_master_tests {
         }
         let mut cmd = RerouteConnectors::new(page_id, vec![10]);
         cmd.apply(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
         let geo = conn.sheet.sections_named("Geometry").remove(0);
         assert_eq!(
             geo.rows.len(),
@@ -1335,7 +1825,9 @@ mod reroute_master_tests {
             (c.v.clone(), c.f.clone())
         };
         assert!(
-            pinx_v.as_deref().is_some_and(|v| (v.parse::<f64>().unwrap() - 2.0).abs() < 1e-6),
+            pinx_v
+                .as_deref()
+                .is_some_and(|v| (v.parse::<f64>().unwrap() - 2.0).abs() < 1e-6),
             "PinX cache = (B+E)/2 = 2.0: {pinx_v:?}"
         );
         assert!(
@@ -1408,19 +1900,8 @@ mod reroute_master_tests {
         }
         let mut cmd = RerouteConnectors::new_including(page_id, vec![11]);
         cmd.apply(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
-        let cell = |n: &str| {
-            conn.sheet
-                .cell(n)
-                .and_then(|c| c.numeric())
-                .unwrap()
-        };
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
+        let cell = |n: &str| conn.sheet.cell(n).and_then(|c| c.numeric()).unwrap();
         // The guarded caches refresh through their GUARDs; the band
         // guard is overridden so the frame spans the endpoints
         // (dx = 2, dy = −1 — begin (1, 6), end (3, 5)).
@@ -1446,9 +1927,7 @@ mod reroute_master_tests {
             pinx.f
         );
         cmd.undo(&mut ed.doc).unwrap();
-        let h = ed
-            .doc
-            .pages[0]
+        let h = ed.doc.pages[0]
             .shapes
             .iter()
             .find(|s| s.id == 11)
@@ -1485,13 +1964,7 @@ mod reroute_master_tests {
         }
         let mut cmd = RerouteConnectors::new(page_id, vec![10]);
         cmd.apply(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
         let cell = |n: &str| conn.sheet.cell(n).and_then(|c| c.numeric()).unwrap();
         // The band guard is OVERRIDDEN: Height's cached V spans the
         // endpoints (dy = −1), the GUARD formula is kept for the file.
@@ -1536,13 +2009,7 @@ mod reroute_master_tests {
             "origin + last row = the END point on the moved target"
         );
         cmd.undo(&mut ed.doc).unwrap();
-        let conn = ed
-            .doc
-            .pages[0]
-            .shapes
-            .iter()
-            .find(|s| s.id == 11)
-            .unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
         // Full restore: the band pose AND its rows come back.
         assert!((conn.sheet.cell("Height").unwrap().numeric().unwrap() - 0.2).abs() < 1e-9);
         let geo = conn.sheet.sections_named("Geometry").remove(0);
@@ -1552,5 +2019,801 @@ mod reroute_master_tests {
                 && r2.cell("Y").and_then(|c| c.numeric()).unwrap().abs() < 1e-9,
             "undo restores the original row snapshot (1.0, 0.0)"
         );
+    }
+
+    // ---- #202: the reroute refreshes a curved route's control caches ----
+
+    /// A synthetic connector (no master) with the #108 curved route:
+    /// `ShapeRouteStyle 16`, row 2 a `CubicBezTo` whose A/B/C/D are
+    /// the frame formulas with their authoring-time caches, begin
+    /// statically glued to shape 10's connection point.
+    fn doc_with_curved_connector() -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "2.5"),
+            ("PinY", "3.5"),
+            ("Width", "1.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        let mut conn_sec = Section {
+            name: "Connection".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        conn_sec.rows.push(Row {
+            t: None,
+            ix: 1,
+            cells: vec![
+                ("X".to_string(), VCell::value("1.0")),
+                ("Y".to_string(), VCell::value("0.5")),
+            ],
+            ..Row::default()
+        });
+        target.sheet.children.push(SheetChild::Section(conn_sec));
+
+        // (3,4) → (7,4.5); curved toggle pose: row 2 CubicBezTo with
+        // the curved_row_extras formulas and their cached values.
+        let mut conn = crate::connectors::connector_shape(11, (3.0, 4.0), (7.0, 4.5));
+        conn.sheet.set_cell("ShapeRouteStyle", VCell::value("16"));
+        {
+            let geo = conn
+                .sheet
+                .children
+                .iter_mut()
+                .find_map(|c| match c {
+                    SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                    _ => None,
+                })
+                .unwrap();
+            geo.rows[1].t = Some("CubicBezTo".into());
+            let extras = [
+                ("A", "Width*0.5", 2.0),
+                ("B", "Height*0", 0.0),
+                ("C", "Width*0.5", 2.0),
+                ("D", "Height*1", 0.5),
+            ];
+            for (name, f, v) in extras {
+                geo.rows[1].cells.push((
+                    name.to_string(),
+                    VCell {
+                        v: Some(format!("{v}")),
+                        f: Some(f.to_string()),
+                        ..VCell::default()
+                    },
+                ));
+            }
+        }
+        crate::connectors::bake_end(
+            &mut conn,
+            crate::connectors::End::Begin,
+            (3.0, 4.0),
+            &crate::connectors::static_glue_formula(10, 1),
+        );
+        ed.doc.pages[0].shapes.push(target);
+        ed.doc.pages[0].shapes.push(conn);
+        let mut list = ed.doc.pages[0].connects();
+        list.list.push(dc_core::connects::Connect::new(
+            11,
+            "BeginX",
+            crate::connectors::PART_BEGIN_X,
+            10,
+            "Connections.X1",
+            101,
+        ));
+        ed.doc.pages[0].set_connects(&list);
+        (ed, page_id)
+    }
+
+    /// #202: the reroute refreshes the Bézier control CACHES against
+    /// the new frame (A/C = new dx/2, D = new dy); a customized
+    /// literal control keeps its value.
+    #[test]
+    fn reroute_refreshes_curved_control_caches_and_keeps_literals() {
+        let (mut ed, page_id) = doc_with_curved_connector();
+        // Move the target right by 1 in: the glued begin walks from
+        // (3,4) to (4,4); the frame becomes (4,4)→(7,4.5).
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("3.5"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed.doc.pages[0]
+            .shapes
+            .iter()
+            .find(|s| s.id == 11)
+            .unwrap()
+            .clone();
+        let cell = |n: &str| {
+            conn.sheet.sections_named("Geometry")[0]
+                .rows
+                .iter()
+                .find(|r| r.ix == 2)
+                .unwrap()
+                .cell(n)
+                .and_then(|c| c.numeric())
+                .unwrap()
+        };
+        // w_new = 7−4 = 3 → A/C = 1.5; the anchor's y is 3.5 (the
+        // connection point), so h_new = 4.5−3.5 = 1 → D = 1 (was 0.5
+        // at the baked pose — a genuine re-track, not a no-op).
+        assert!(
+            (cell("A") - 1.5).abs() < 1e-6,
+            "A cache re-tracks: {}",
+            cell("A")
+        );
+        assert!(
+            (cell("C") - 1.5).abs() < 1e-6,
+            "C cache re-tracks: {}",
+            cell("C")
+        );
+        assert!(
+            (cell("D") - 1.0).abs() < 1e-6,
+            "D cache re-tracks: {}",
+            cell("D")
+        );
+        // The formulas ride along (SetGluedCell pattern).
+        assert_eq!(
+            conn.sheet.sections_named("Geometry")[0].rows[1]
+                .cell("A")
+                .and_then(|c| c.f.as_deref()),
+            Some("Width*0.5")
+        );
+
+        // A CUSTOMIZED control (literal, formula replaced by the #202
+        // handle drag) keeps its value across reroutes.
+        let mut ed2 = ed;
+        for sh in ed2.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 11 {
+                let geo = sh
+                    .sheet
+                    .children
+                    .iter_mut()
+                    .find_map(|c| match c {
+                        SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                        _ => None,
+                    })
+                    .unwrap();
+                let r2 = geo.rows.iter_mut().find(|r| r.ix == 2).unwrap();
+                r2.cells.retain(|(n, _)| n != "A");
+                r2.cells.push(("A".to_string(), VCell::value("2.25")));
+            }
+        }
+        for sh in ed2.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("4.5"));
+            }
+        }
+        let mut cmd2 = RerouteConnectors::new(page_id, vec![10]);
+        cmd2.apply(&mut ed2.doc).unwrap();
+        let conn2 = ed2.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
+        let a2 = conn2.sheet.sections_named("Geometry")[0]
+            .rows
+            .iter()
+            .find(|r| r.ix == 2)
+            .unwrap()
+            .cell("A")
+            .and_then(|c| c.numeric())
+            .unwrap();
+        assert!(
+            (a2 - 2.25).abs() < 1e-6,
+            "the customized literal stays: {a2}"
+        );
+    }
+
+    // ---- #203: a SPLINE-authored connector reroutes without flattening ----
+
+    /// A master whose root is a spline connector (ObjType 2 on the
+    /// master, SplineStart+2 SplineKnot rows) — the corpus
+    /// connector-carried-spline shape.
+    fn doc_with_spline_connector() -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "2.5"),
+            ("PinY", "3.5"),
+            ("Width", "1.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        // The connector master root: ObjType 2 + spline rows.
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("ObjType", VCell::value("2"));
+        let spline_row = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), VCell::value(x)),
+                ("Y".to_string(), VCell::value(y)),
+            ],
+            ..Row::default()
+        };
+        let mut sec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        sec.rows = vec![
+            spline_row(1, "MoveTo", "0", "0"),
+            spline_row(2, "SplineStart", "0.5", "0.3"),
+            spline_row(3, "SplineKnot", "0.8", "0.6"),
+            spline_row(4, "SplineKnot", "1.0", "1.0"),
+        ];
+        // A/B/C on SplineStart + A on SplineKnot (the knot values).
+        sec.rows[1]
+            .cells
+            .push(("A".to_string(), VCell::value("0.3")));
+        sec.rows[1].cells.push(("B".to_string(), VCell::value("0")));
+        sec.rows[1].cells.push(("C".to_string(), VCell::value("1")));
+        sec.rows[1].cells.push(("D".to_string(), VCell::value("3")));
+        sec.rows[2]
+            .cells
+            .push(("A".to_string(), VCell::value("0.6")));
+        root.sheet.children.push(SheetChild::Section(sec));
+        let mut m = vsdx::Master::default();
+        m.shapes.push(root);
+        ed.doc.masters.push(m);
+
+        // The instance: 1D frame over the master, master_shape 1, with
+        // its own spline-row SNAPSHOT (Visio saves the routed arc/curve
+        // pair on the instance — the corpus pattern from utilisation
+        // master5 instances).
+        let mut conn = Shape {
+            id: 11,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            master_shape: Some(1),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("BeginX", "1.0"),
+            ("BeginY", "1.0"),
+            ("EndX", "2.0"),
+            ("EndY", "2.0"),
+            ("PinX", "1.5"),
+            ("PinY", "1.5"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.5"),
+        ] {
+            conn.sheet.set_cell(n, VCell::value(v));
+        }
+        // The corpus tracking guards: Width/Height derive from the
+        // endpoints (the #175 translate gate fires on them).
+        conn.sheet.set_cell(
+            "Width",
+            VCell {
+                v: Some("1.0".into()),
+                f: Some("GUARD(Abs(EndX-BeginX))".into()),
+                ..VCell::default()
+            },
+        );
+        conn.sheet.set_cell(
+            "Height",
+            VCell {
+                v: Some("1.0".into()),
+                f: Some("GUARD(Abs(EndY-BeginY))".into()),
+                ..VCell::default()
+            },
+        );
+        let mut isec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        let irow = |ix: i64, t: &str, x: &str, y: &str| Row {
+            t: Some(t.into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), VCell::value(x)),
+                ("Y".to_string(), VCell::value(y)),
+            ],
+            ..Row::default()
+        };
+        isec.rows = vec![
+            irow(1, "MoveTo", "0", "0"),
+            irow(2, "SplineStart", "0.5", "0.3"),
+            irow(3, "SplineKnot", "0.8", "0.6"),
+            irow(4, "SplineKnot", "1.0", "1.0"),
+        ];
+        isec.rows[1]
+            .cells
+            .push(("A".to_string(), VCell::value("0.3")));
+        isec.rows[1]
+            .cells
+            .push(("B".to_string(), VCell::value("0")));
+        isec.rows[1]
+            .cells
+            .push(("C".to_string(), VCell::value("1")));
+        isec.rows[1]
+            .cells
+            .push(("D".to_string(), VCell::value("3")));
+        isec.rows[2]
+            .cells
+            .push(("A".to_string(), VCell::value("0.6")));
+        conn.sheet
+            .children
+            .push(SheetChild::Section(std::mem::take(&mut isec)));
+        ed.doc.pages[0].shapes.push(target);
+        ed.doc.pages[0].shapes.push(conn);
+        (ed, page_id)
+    }
+
+    /// #203: a spline connector's rows survive a reroute — the types
+    /// stay SplineStart/SplineKnot (never flattened to lines) and the
+    /// LITERAL cells translate by the endpoint delta (#175), so the
+    /// curve re-tracks with the moved endpoint.
+    #[test]
+    fn reroute_keeps_spline_connector_rows() {
+        let (mut ed, page_id) = doc_with_spline_connector();
+        // The END is dynamically glued to the target (ToPart 3 — the
+        // walkglue record); moving the TARGET drives the reroute the
+        // way the canvas does (the corpus flow).
+        {
+            use dc_core::connects::ConnectsHost;
+            let mut list = ed.doc.pages[0].connects();
+            list.list.push(dc_core::connects::Connect::new(
+                11,
+                "EndX",
+                crate::connectors::PART_END_X,
+                10,
+                "PinX",
+                crate::connectors::PART_WALKGLUE,
+            ));
+            ed.doc.pages[0].set_connects(&list);
+        }
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("3.5"));
+                sh.sheet.set_cell("PinY", VCell::value("4.5"));
+            }
+        }
+        let mut cmd = RerouteConnectors::new(page_id, vec![10]);
+        cmd.apply(&mut ed.doc).unwrap();
+        let conn = ed.doc.pages[0].shapes.iter().find(|s| s.id == 11).unwrap();
+        let geo = conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| g.rows.clone())
+            .unwrap_or_default();
+        if geo.is_empty() {
+            // Instance carries no own rows — the master's spline rows
+            // render through inheritance; nothing to flatten.
+            return;
+        }
+        let types: Vec<&str> = geo.iter().map(|r| r.t.as_deref().unwrap_or("")).collect();
+        assert!(
+            types.contains(&"SplineStart") && types.contains(&"SplineKnot"),
+            "the spline rows survive the reroute: {types:?}"
+        );
+        // The LITERAL end knot translates by the endpoint delta
+        // (+1, +1): master (1.0, 1.0) → instance cached (2.0, 2.0).
+        let last = geo.iter().rfind(|r| r.t.as_deref() == Some("SplineKnot"));
+        let Some(last) = last else {
+            panic!("a SplineKnot row exists");
+        };
+        let (lx, ly) = (
+            last.cell("X").and_then(|c| c.numeric()).unwrap_or(-9.0),
+            last.cell("Y").and_then(|c| c.numeric()).unwrap_or(-9.0),
+        );
+        // The END knot is the frame's (W, H) corner: it MUST have
+        // translated with the walked endpoint (not stay at the
+        // authored (1, 1)).
+        let ex_new = conn
+            .sheet
+            .cell("EndX")
+            .and_then(|c| c.numeric())
+            .unwrap_or(0.0);
+        let ey_new = conn
+            .sheet
+            .cell("EndY")
+            .and_then(|c| c.numeric())
+            .unwrap_or(0.0);
+        assert!(
+            ((lx - (ex_new - 2.0 + 1.0)).abs() < 1e-6 && (ly - (ey_new - 2.0 + 1.0)).abs() < 1e-6),
+            "the literal spline end translated with the endpoint: ({lx}, {ly})"
+        );
+    }
+
+    /// #236: the pre-apply `touched()` names a NESTED candidate
+    /// connector with its `sub` (apply builds its list only during
+    /// apply, so the pre half used to be empty and every nested
+    /// reroute fell back to a full re-render), and the store pipeline
+    /// — harvest → apply → pair — lands a bounded old∪new damage rect
+    /// for it.
+    #[test]
+    fn reroute_pre_apply_touched_harvests_a_nested_connectors_damage() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        // Wrap the connector in a group. The group's frame math is
+        // irrelevant to the damage pipeline: the pairing resolves
+        // whatever ink the document actually carries.
+        let page = &mut ed.doc.pages[0];
+        let at = page.shapes.iter().position(|s| s.id == 11).unwrap();
+        let conn = page.shapes.remove(at);
+        let mut group = vsdx::model::Shape {
+            id: 20,
+            type_: Some("Group".into()),
+            ..vsdx::model::Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "0"),
+            ("PinY", "0"),
+            ("Width", "5"),
+            ("Height", "3"),
+            ("LocPinX", "0"),
+            ("LocPinY", "0"),
+        ] {
+            group.sheet.set_cell(n, VCell::value(v));
+        }
+        group.sub_shapes.push(conn);
+        page.shapes.push(group);
+
+        // Pre-apply: the candidate discovery names the nested connector.
+        let cmd = RerouteConnectors::new(page_id, vec![10]);
+        let pre_touched = cmd.touched(&ed.doc);
+        assert!(
+            pre_touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 20 && t.sub == Some(11) && t.touch == dc_core::Touch::Ink),
+            "pre-apply touched names the nested connector: {pre_touched:?}"
+        );
+
+        // The store pipeline: harvest → apply → pair.
+        let mut layers = crate::layers::ShapeLayers::default();
+        layers.set_page(page_id);
+        let pre = layers.harvest_pre_damage(&ed.doc, &pre_touched);
+        assert!(
+            pre.iter().any(|(p, top, s, b)| {
+                *p == page_id
+                    && *top == 20
+                    && *s == 11
+                    && matches!(b, crate::layers::SubBound::Bounded(_))
+            }),
+            "the harvest pins the connector's pre bounds: {pre:?}"
+        );
+        let (_, touched) = ed.apply(RerouteConnectors::new(page_id, vec![10])).unwrap();
+        assert!(
+            touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 20 && t.sub == Some(11)),
+            "post-apply touched names the nested connector: {touched:?}"
+        );
+        layers.touch_damage(&ed.doc, &touched, &pre, page_id);
+        assert!(
+            !layers.pending_full_for_test(20),
+            "the nested reroute's damage is bounded — no forced full re-render"
+        );
+        let d = layers.pending_damage_for_test(20).expect("bounded damage");
+        assert!(d.2 > 0.0 && d.3 > 0.0, "the damage rect is real: {d:?}");
+    }
+
+    // ---- #226: the chord-frame Line-arc corpus master ------------------
+    //
+    // utilisation.vsdx's "Line-arc connector" master frames its rows on
+    // the BEGIN→END chord: `Width=SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)`,
+    // `MoveTo(Width*0, Height/2)` + `EllipticalArcTo(Width*1, Height/2,
+    // A=Controls.Row_1, B=Controls.Row_1.Y)`, Height a literal 0. The
+    // instances carry those row cells as `F="Inh"` caches (Visio's
+    // instancing) with NO Y cell — the renderer reads the instance
+    // cache as a literal (`row_cell_value`), so a reroute that only
+    // translates literal rows left the arc's end at the pre-drag pose
+    // while the endpoint handles moved on.
+
+    /// The Line-arc master + one instance authored at (1,6)→(3,6)
+    /// (chord 2.0, sagitta 1.0/0.2), no glue records.
+    fn doc_with_line_arc_connector() -> (dc_core::Editor, i64) {
+        let mut ed = dc_core::Editor::new_blank();
+        let page_id = ed.doc.pages[0].id;
+        let guarded = |f: &str| VCell {
+            f: Some(f.into()),
+            ..VCell::default()
+        };
+        let cached_inh = |v: &str| VCell {
+            v: Some(v.into()),
+            f: Some("Inh".into()),
+            ..VCell::default()
+        };
+        // Master root: ObjType 2 + the chord-frame XForm formulas; the
+        // master's own V values are its canvas pose (authoring chord
+        // 2.0, sagitta A=1.0 B=0.2).
+        let mut root = Shape {
+            id: 1,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        root.sheet.set_cell("ObjType", VCell::value("2"));
+        root.sheet.set_cell("PinX", guarded("(BeginX+EndX)/2"));
+        root.sheet.set_cell("PinY", guarded("(BeginY+EndY)/2"));
+        root
+            .sheet
+            .set_cell("Width", guarded("SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)"));
+        root.sheet.set_cell("Height", VCell::value("0"));
+        root.sheet.set_cell("LocPinX", guarded("Width*0.5"));
+        root.sheet.set_cell("LocPinY", guarded("Height*0.5"));
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        geo.rows.push(Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            cells: vec![
+                ("X".to_string(), guarded("Width*0")),
+                ("Y".to_string(), guarded("Height/2")),
+            ],
+            ..Row::default()
+        });
+        geo.rows.push(Row {
+            t: Some("EllipticalArcTo".into()),
+            ix: 2,
+            cells: vec![
+                ("X".to_string(), guarded("Width*1")),
+                ("Y".to_string(), guarded("Height/2")),
+                ("A".to_string(), guarded("Controls.Row_1")),
+                ("B".to_string(), guarded("Controls.Row_1.Y")),
+            ],
+            ..Row::default()
+        });
+        root.sheet.children.push(SheetChild::Section(geo));
+        let mut m = vsdx::Master::default();
+        m.shapes.push(root);
+        ed.doc.masters.push(m);
+        // Instance: `F="Inh"` caches from the authoring pose, a literal
+        // endpoint pair, geometry rows WITHOUT their Y cells (the
+        // corpus instances drop fully-inherited row cells).
+        let mut conn = Shape {
+            id: 11,
+            type_: Some("Shape".into()),
+            master: Some(0),
+            ..Shape::default()
+        };
+        conn.sheet.set_cell("BeginX", VCell::value("1.0"));
+        conn.sheet.set_cell("BeginY", VCell::value("6.0"));
+        conn.sheet.set_cell("EndX", VCell::value("3.0"));
+        conn.sheet.set_cell("EndY", VCell::value("6.0"));
+        conn.sheet.set_cell("PinX", cached_inh("2.0"));
+        conn.sheet.set_cell("PinY", cached_inh("6.0"));
+        conn.sheet.set_cell("Width", cached_inh("2.0"));
+        conn.sheet.set_cell("LocPinX", cached_inh("1.0"));
+        conn.sheet.set_cell("Angle", cached_inh("0"));
+        let mut geo = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        geo.rows.push(Row {
+            t: Some("MoveTo".into()),
+            ix: 1,
+            cells: vec![("X".to_string(), cached_inh("0"))],
+            ..Row::default()
+        });
+        geo.rows.push(Row {
+            t: Some("EllipticalArcTo".into()),
+            ix: 2,
+            cells: vec![
+                ("X".to_string(), cached_inh("2.0")),
+                ("A".to_string(), cached_inh("1.0")),
+                ("B".to_string(), cached_inh("0.2")),
+            ],
+            ..Row::default()
+        });
+        conn.sheet.children.push(SheetChild::Section(geo));
+        ed.doc.pages[0].shapes.push(conn);
+        (ed, page_id)
+    }
+
+    fn geo_row_of(ed: &dc_core::Editor, page_id: i64, id: i64, ix: i64) -> Row {
+        vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page_id).unwrap().shapes,
+            id,
+        )
+        .unwrap()
+        .sheet
+        .sections_named("Geometry")[0]
+        .rows
+        .iter()
+        .find(|r| r.ix == ix)
+        .unwrap()
+        .clone()
+    }
+
+    /// The endpoint-drag commit: an arc connector's END moved to
+    /// (3.5, 6.2) — a diagonal drag. The arc's end row rides the new
+    /// chord frame (X=Width*1 re-evaluated behind its Inh marker), the
+    /// sagitta stays, the inherited master Height stays inherited, and
+    /// the frame caches (width/pin/angle) match the endpoints.
+    #[test]
+    fn reroute_tracks_a_line_arc_connectors_inherited_end_row() {
+        let (mut ed, page_id) = doc_with_line_arc_connector();
+        let scope = Scope::Shape { page: page_id, shape: 11 };
+        for (n, v) in [("EndX", "3.5"), ("EndY", "6.2")] {
+            ed.apply(SetCell::new(scope.clone(), n, VCell::value(v)))
+                .unwrap();
+        }
+        let mut cmd = RerouteConnectors::new_including(page_id, vec![11]);
+        cmd.apply(&mut ed.doc).unwrap();
+
+        let chord = 2.5f64.hypot(0.2);
+        let conn = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page_id).unwrap().shapes,
+            11,
+        )
+        .unwrap();
+        // The arc's END row rides the new chord — behind its marker.
+        let end_row = geo_row_of(&ed, page_id, 11, 2);
+        let x = end_row.cell("X").unwrap();
+        assert!(
+            (x.numeric().unwrap() - chord).abs() < 1e-6,
+            "end row X {}",
+            x.v.clone().unwrap()
+        );
+        assert_eq!(x.f.as_deref(), Some("Inh"), "the Inh marker survives");
+        // The sagitta controls stay frame-local (not dragged along).
+        assert!((end_row.cell("A").unwrap().numeric().unwrap() - 1.0).abs() < 1e-9);
+        assert!((end_row.cell("B").unwrap().numeric().unwrap() - 0.2).abs() < 1e-9);
+        // The begin row is Width*0 — already 0, byte-stable.
+        let begin_row = geo_row_of(&ed, page_id, 11, 1);
+        assert_eq!(begin_row.cell("X").unwrap().v.as_deref(), Some("0"));
+        assert_eq!(begin_row.cell("X").unwrap().f.as_deref(), Some("Inh"));
+        // No Y materialized on either row (the master merge serves it).
+        assert!(begin_row.cell("Y").is_none() && end_row.cell("Y").is_none());
+        // The inherited master Height stays inherited.
+        assert!(conn.sheet.cell("Height").is_none());
+        // Frame caches match the new endpoints.
+        let g = |n: &str| conn.sheet.cell(n).and_then(|c| c.numeric()).unwrap();
+        assert!((g("Width") - chord).abs() < 1e-6, "Width {}", g("Width"));
+        assert!((g("PinX") - 2.25).abs() < 1e-6);
+        assert!((g("PinY") - 6.1).abs() < 1e-6);
+        assert!((g("LocPinX") - chord / 2.0).abs() < 1e-6);
+        // The chord frame rotates with the drag, behind its marker.
+        let angle = conn.sheet.cell("Angle").unwrap();
+        assert!(
+            (angle.numeric().unwrap() - 0.2f64.atan2(2.5)).abs() < 1e-6,
+            "Angle {}",
+            angle.v.clone().unwrap()
+        );
+        assert_eq!(angle.f.as_deref(), Some("Inh"));
+        // Undo restores the pre-drag caches exactly.
+        cmd.undo(&mut ed.doc).unwrap();
+        let conn = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page_id).unwrap().shapes,
+            11,
+        )
+        .unwrap();
+        assert_eq!(
+            geo_row_of(&ed, page_id, 11, 2).cell("X").unwrap().v.as_deref(),
+            Some("2.0")
+        );
+        assert_eq!(conn.sheet.cell("Angle").unwrap().v.as_deref(), Some("0"));
+    }
+
+    /// The #226 W4 witness shape: a glued END tracks its target. The
+    /// begin end is static-glued to a connection point; moving the
+    /// target re-resolves the attach, re-derives the chord frame, and
+    /// refreshes the arc's inherited end-row cache — while BeginX
+    /// carries the glue formula untouched.
+    #[test]
+    fn reroute_moves_a_glued_line_arc_connector_with_its_target() {
+        let (mut ed, page_id) = doc_with_line_arc_connector();
+        // Target rect pin (2,6), 2x1, connection row 0 at its left edge
+        // mid-height → page (1,6) = the arc's begin.
+        let mut target = Shape {
+            id: 10,
+            type_: Some("Shape".into()),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "2.0"),
+            ("PinY", "6.0"),
+            ("Width", "2.0"),
+            ("Height", "1.0"),
+            ("LocPinX", "1.0"),
+            ("LocPinY", "0.5"),
+        ] {
+            target.sheet.set_cell(n, VCell::value(v));
+        }
+        let mut connections = Section {
+            name: "Connection".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        connections.rows.push(Row {
+            ix: 1,
+            cells: vec![vc("X", "0"), vc("Y", "0.5")],
+            ..Row::default()
+        });
+        target.sheet.children.push(SheetChild::Section(connections));
+        ed.doc.pages[0].shapes.push(target);
+        // The begin end is static-glued (the corpus pattern: the glue
+        // formula lives on the instance endpoint cells).
+        let glue = crate::connectors::static_glue_formula(10, 1);
+        {
+            let conn = ed
+                .doc
+                .pages[0]
+                .shapes
+                .iter_mut()
+                .find(|s| s.id == 11)
+                .unwrap();
+            for n in ["BeginX", "BeginY"] {
+                conn.sheet.set_cell(
+                    n,
+                    VCell {
+                        v: Some(if n == "BeginX" { "1.0" } else { "6.0" }.into()),
+                        f: Some(glue.clone()),
+                        ..VCell::default()
+                    },
+                );
+            }
+        }
+        let mut list = ed.doc.pages[0].connects();
+        list.list.push(dc_core::connects::Connect::new(
+            11,
+            "BeginX",
+            crate::connectors::PART_BEGIN_X,
+            10,
+            "Connections.X1",
+            101,
+        ));
+        ed.doc.pages[0].set_connects(&list);
+        // Move the target by (-0.3, -0.5): the begin attach walks to
+        // (0.7, 5.5); the end stays at (3, 6).
+        for sh in ed.doc.pages[0].shapes.iter_mut() {
+            if sh.id == 10 {
+                sh.sheet.set_cell("PinX", VCell::value("1.7"));
+                sh.sheet.set_cell("PinY", VCell::value("5.5"));
+            }
+        }
+        ed.apply(RerouteConnectors::new(page_id, vec![10])).unwrap();
+
+        let chord = 2.3f64.hypot(0.5);
+        let conn = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page_id).unwrap().shapes,
+            11,
+        )
+        .unwrap();
+        // The glue cache followed its target, formula kept.
+        let bx = conn.sheet.cell("BeginX").unwrap();
+        assert_eq!(bx.v.as_deref().map(|v| v.parse::<f64>().unwrap()), Some(0.7));
+        assert!(
+            bx.f.as_deref().is_some_and(|f| f.contains("PAR(PNT")),
+            "the static glue formula stays: {:?}",
+            bx.f
+        );
+        // The arc's end row rides the new chord; the sagitta stays.
+        let end_row = geo_row_of(&ed, page_id, 11, 2);
+        assert!((end_row.cell("X").unwrap().numeric().unwrap() - chord).abs() < 1e-6);
+        assert!((end_row.cell("A").unwrap().numeric().unwrap() - 1.0).abs() < 1e-9);
+        // The chord frame rotated toward the moved target.
+        let angle = conn.sheet.cell("Angle").unwrap();
+        assert!((angle.numeric().unwrap() - 0.5f64.atan2(2.3)).abs() < 1e-6);
+        // The inherited master Height stays inherited.
+        assert!(conn.sheet.cell("Height").is_none());
     }
 }

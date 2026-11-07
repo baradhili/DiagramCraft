@@ -211,8 +211,7 @@ fn main() -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let pkg = vsdx::Package::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let pkg = vsdx::Package::open(path).with_context(|| format!("opening {}", path.display()))?;
     println!("OPC package: {}", path.display());
     for name in pkg.part_names() {
         let ct = pkg.content_type_of(name).unwrap_or_default();
