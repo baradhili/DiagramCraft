@@ -710,6 +710,345 @@ fn inherited_row_caches(
     out
 }
 
+/// The per-connector frame+rows plan at ONE endpoint pair — the
+/// shared core of the commit-time [`RerouteConnectors`] and the live
+/// endpoint-drag preview (what you drag is exactly what lands).
+/// Endpoint cells are the caller's (the glue engine owns them); the
+/// plan covers the frame-cache writes, the route-row rewrites, and
+/// the curve-control / inherited-row cache refreshes.
+pub struct FramePlan {
+    /// XForm cache writes: (cell, value, keep-formula) — `Some(f)`
+    /// writes through SetGluedCell (formula kept), `None` is a plain
+    /// literal.
+    pub cells: Vec<(String, f64, Option<String>)>,
+    /// Literal route-row rewrites: (row ix, x, y).
+    pub rows: Vec<(i64, f64, f64)>,
+    /// Curve-control and inherited-row cache refreshes:
+    /// (section ix, row ix, cell name, cell).
+    pub row_cells: Vec<(i64, i64, String, Cell)>,
+}
+
+/// Plan [`FramePlan`] for one connector at `beg`→`endp` (post-move
+/// page-space endpoints).
+pub fn plan_connector_frame(
+    doc: &Document,
+    conn: &vsdx::model::Shape,
+    chain: &[&vsdx::model::Shape],
+    beg: (f64, f64),
+    endp: (f64, f64),
+    pre_end: (f64, f64),
+) -> FramePlan {
+    let get = |n: &str| doc.resolve_cell(conn, chain, n).and_then(|v| v.numeric());
+    let mut cells: Vec<(String, f64, Option<String>)> = Vec::new();
+
+    // Frame + route once, from both new endpoints.
+    let style = get("ShapeRouteStyle")
+        .map(|v| format!("{}", v as i64))
+        .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
+    let pts = crate::connectors::route(&style, beg, endp);
+    let rows = crate::connectors::route_rows(beg, &pts);
+    // #175: a derived cell whose effective formula
+    // REFERENCES the endpoints/sizes must have its cached V
+    // refreshed — the renderer reads the cache, and skipping
+    // it (the #174 rule) left the XForm of the OLD geometry
+    // under moved endpoints. The write goes through
+    // SetGluedCell (GUARD-waived, formula kept); a
+    // formula-free cell stays a plain SetCell; a CONSTANT
+    // guard (Height=GUARD(0.19685DL), Angle=GUARD(0DA))
+    // does not depend on the endpoints and is skipped.
+    let eff = |n: &str| dc_core::commands::effective_formula(doc, conn, chain, n);
+    let formula_tracks = |n: &str| -> Option<String> {
+        let f = eff(n)?;
+        let u = f.to_uppercase();
+        ["BEGINX", "ENDX", "BEGINY", "ENDY", "WIDTH", "HEIGHT"]
+            .iter()
+            .any(|k| u.contains(k))
+            .then_some(f)
+    };
+    let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
+    // #176: a master-based connector whose geometry is
+    // LINE-only (MoveTo/LineTo — the corpus line master's
+    // own rows are the begin-corner frame (0,0)→(W,H))
+    // reroutes by REWRITING its frame to span the new
+    // endpoints. Its instance rows are a literal snapshot
+    // of the authoring pose (a horizontal band's midline
+    // `LineTo(Width, H/2)` with `Height = GUARD(0.2DL)`);
+    // translating those in-frame (#175) keeps the ink on
+    // the old midline, detached from the moved shape
+    // whenever the endpoints differ in y. Curves keep the
+    // #175 translation — rewriting an arc's rows to the
+    // route polyline would destroy the curve.
+    let line_frame = conn.master.is_some()
+        && conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .is_some_and(|g| {
+                g.rows.iter().all(|r| {
+                    matches!(r.t.as_deref(), None | Some("MoveTo") | Some("LineTo"))
+                })
+            });
+    // #226 (MisterDiagram parity evidence): the CHORD-frame
+    // masters — a master-based curve connector whose
+    // inherited geometry rows derive their coordinates from
+    // the frame (the Line-arc corpus master's
+    // `EllipticalArcTo X=Width*1, Y=Height/2`) frames its
+    // rows on the BEGIN→END chord: the frame width is the
+    // chord, the direction lives in Angle, Height stays the
+    // master's own 0. Route-frame connectors (the dynamic
+    // master's guarded zero angle, the synthetic
+    // begin-corner rows) keep the signed-delta model.
+    let chord_frame = conn.master.is_some()
+        && !line_frame
+        && conn
+            .sheet
+            .sections_named("Geometry")
+            .iter()
+            .enumerate()
+            .any(|(si, g)| {
+                g.rows.iter().any(|r| {
+                    ["X", "Y"].iter().any(|n| {
+                        inherited_geo_formula(doc, conn, chain, si, r.ix, n)
+                            .is_some_and(|f| {
+                                let u = f.to_uppercase();
+                                ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
+                            })
+                    })
+                })
+            });
+    // LocPin derives from the EFFECTIVE size: when Height is
+    // a constant guard the band keeps its height, so LocPinY
+    // stays half the kept height — except a line_frame
+    // connector, whose band guard is overridden so the
+    // frame spans the endpoints.
+    let h_eff = if formula_tracks("Height").is_some() || line_frame {
+        h_new
+    } else {
+        get("Height").unwrap_or(h_new)
+    };
+    let w_eff = if formula_tracks("Width").is_some() || line_frame {
+        w_new
+    } else {
+        get("Width").unwrap_or(w_new)
+    };
+    // Frame values: a formula-tracked cell evaluates its
+    // EFFECTIVE formula against the NEW endpoints (the chord
+    // master's `Width=SQRT((EndX-BeginX)^2+…)` is the chord,
+    // not the signed dx the defaults below assume); an
+    // unevaluable formula falls back to the signed value.
+    // The env grows as each cell resolves so downstream
+    // formulas (`LocPinX=Width*0.5`) see the post-write
+    // frame — Width/Height resolve first for that.
+    let mut frame_env = vsdx::formula::Env::new();
+    frame_env.insert("BeginX".to_string(), beg.0);
+    frame_env.insert("BeginY".to_string(), beg.1);
+    frame_env.insert("EndX".to_string(), endp.0);
+    frame_env.insert("EndY".to_string(), endp.1);
+    for (n, v) in [
+        ("Width", w_new),
+        ("Height", h_new),
+        ("PinX", (beg.0 + endp.0) / 2.0),
+        ("PinY", (beg.1 + endp.1) / 2.0),
+        ("LocPinX", w_eff / 2.0),
+        ("LocPinY", h_eff / 2.0),
+    ] {
+        match formula_tracks(n) {
+            Some(f) => {
+                let v = vsdx::formula::eval(&f, &frame_env)
+                    .ok()
+                    .and_then(|v| v.as_f64())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(v);
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, Some(f)));
+            }
+            // A frame dim with no formula anywhere: rewrite
+            // it only when the INSTANCE carries its own
+            // cell. An inherited master literal (the
+            // Line-arc Height=0, no instance cell) stays
+            // inherited — materializing a literal over it
+            // corrupts the master link and stretches the
+            // band (#226 ownership: a reroute writes only
+            // what the connector owns).
+            None if eff(n).is_none() && conn.sheet.cell(n).is_some() => {
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, None));
+            }
+            // #176: a line_frame connector refreshes every
+            // frame cell through its guard (the formula is
+            // kept, the cached V drives the render) — a
+            // skipped constant guard would hold the old
+            // band pose under the new endpoints.
+            None if line_frame => {
+                frame_env.insert(n.to_string(), v);
+                cells.push((n.to_string(), v, eff(n)));
+            }
+            // Constant guard or otherwise static: skipped —
+            // the frame keeps the current effective value.
+            None => {
+                frame_env.insert(n.to_string(), get(n).unwrap_or(v));
+            }
+        }
+    }
+    // The chord frame rotates with the endpoints; a route
+    // frame keeps its guarded or zero angle. The instance's
+    // own Angle cache refreshes behind its marker (Inh
+    // stays Inh — a reroute never rewrites a formula).
+    if chord_frame {
+        let angle = (endp.1 - beg.1).atan2(endp.0 - beg.0);
+        // The frame angle lives on the INSTANCE cache (the corpus
+        // master has no Angle cell; a style cascade may carry an
+        // ATAN2 default — that is the style's formula, not the
+        // connector's own, and materializing it onto the instance
+        // would rewrite ownership (#226: a reroute never rewrites a
+        // formula)). Refresh the cache behind the instance's own
+        // marker; a connector with its OWN Angle formula keeps it.
+        let own_f = conn
+            .sheet
+            .cell("Angle")
+            .and_then(|c| c.f.clone())
+            .filter(|f| f != "Inh" && f != "No Formula");
+        match own_f {
+            Some(f) => cells.push(("Angle".into(), angle, Some(f))),
+            None if conn.sheet.cell("Angle").is_some() => {
+                cells.push(("Angle".into(), angle, Some("Inh".into())));
+            }
+            None => {}
+        }
+    }
+    // #174/#175: only rewrite route rows the connector
+    // ALREADY has — SetRowCell materializes missing rows,
+    // which would grow a 2-row arc master (MoveTo +
+    // EllipticalArcTo) into a 4-row elbow polyline.
+    let existing: Vec<i64> = {
+        let mut v: Vec<i64> = conn
+            .sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| g.rows.iter().map(|r| r.ix).collect::<Vec<_>>())
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    };
+    let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() && !line_frame {
+        // #175: a MASTER-based CURVE connector's rows are
+        // its own frame (an arc's EllipticalArcTo) —
+        // translating the EXISTING literal coordinates by
+        // the endpoint's page delta, per axis, keeps the
+        // curve; only where that axis's size tracks the
+        // endpoints. Rows whose cells carry formulas
+        // evaluate against the refreshed caches in the
+        // renderer and are left to it.
+        let dx = if formula_tracks("Width").is_some() {
+            endp.0 - pre_end.0
+        } else {
+            0.0
+        };
+        let dy = if formula_tracks("Height").is_some() {
+            endp.1 - pre_end.1
+        } else {
+            0.0
+        };
+        // A row cell is translatable only when it is a
+        // plain literal — including an `F="Inh"` cache
+        // whose MASTER row cell is a literal too. An
+        // inherited cache whose master formula derives it
+        // from the frame (the Line-arc `Width*1`) refreshes
+        // as a cache below; translating the stale literal
+        // by the page delta would double-move the row and
+        // strip the marker (#226).
+        let literal = |r: &vsdx::model::Row, name: &str| -> Option<f64> {
+            let c = r.cell(name)?;
+            match c.f.as_deref() {
+                None => c.numeric(),
+                Some("Inh") | Some("No Formula") => {
+                    let tracks =
+                        inherited_geo_formula(doc, conn, chain, 0, r.ix, name)
+                            .is_some_and(|f| {
+                                let u = f.to_uppercase();
+                                ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
+                            });
+                    (!tracks).then(|| c.numeric()).flatten()
+                }
+                Some(_) => None,
+            }
+        };
+        conn.sheet
+            .sections_named("Geometry")
+            .first()
+            .map(|g| {
+                g.rows
+                    .iter()
+                    .filter(|r| (2..=4).contains(&r.ix))
+                    .filter_map(|r| {
+                        let x = literal(r, "X")?;
+                        let y = literal(r, "Y")?;
+                        Some((r.ix, x + dx, y + dy))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    } else {
+        // The begin-corner corpus frame: the planned route,
+        // filtered to rows the connector has; a connector
+        // with fewer rows than the route frame puts the
+        // ENDPOINT on its LAST row. Synthetic connectors
+        // AND (#176) line-geometry master instances — whose
+        // band snapshot rows must be rewritten to span the
+        // new endpoints, with the MoveTo reset to (0,0) so
+        // the frame's origin is the begin point.
+        let mut planned: Vec<(i64, f64, f64)> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
+            .filter(|(ix, _, _)| existing.contains(ix))
+            .collect();
+        let max_ix = existing
+            .iter()
+            .copied()
+            .filter(|ix| (2..=4).contains(ix))
+            .max();
+        if let (Some(last), Some(max_ix)) = (planned.last_mut(), max_ix) {
+            if max_ix < 4 {
+                *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
+            }
+        }
+        if line_frame && existing.contains(&1) {
+            planned.insert(0, (1, 0.0, 0.0));
+        }
+        planned
+    };
+    // The post-write frame the row-cache refreshes evaluate
+    // against: the planned value when the frame loop
+    // rewrote the dim, the current effective value when it
+    // deliberately skipped (constant guard, inherited
+    // literal).
+    let post_dim = |name: &str, fallback: f64| -> f64 {
+        cells
+            .iter()
+            .find(|(n, _, _)| n == name)
+            .map(|(_, v, _)| *v)
+            .unwrap_or_else(|| get(name).unwrap_or(fallback))
+    };
+    let (w_post, h_post) = (post_dim("Width", w_new), post_dim("Height", h_new));
+    let mut row_cells = curved_control_caches(conn, w_post, h_post);
+    if chord_frame {
+        // The chord-frame rows' inherited caches
+        // (`X=Width*1`, `Y=Height/2`) re-evaluate against
+        // the new frame — the arc's end lands on the moved
+        // endpoint (the #175 rule, one level down). The
+        // sagitta controls (`Controls.Row_1`) don't
+        // reference the frame and stay.
+        row_cells.extend(inherited_row_caches(doc, conn, chain, w_post, h_post));
+    }
+
+    FramePlan {
+        cells,
+        rows: planned_rows,
+        row_cells,
+    }
+}
+
 impl Command for RerouteConnectors {
     fn touched(&self, doc: &Document) -> dc_core::TouchList {
         // #178: after undo spends `inner`, the cached apply-time list
@@ -905,300 +1244,17 @@ impl Command for RerouteConnectors {
                 if end_cells.is_empty() && !self.also.contains(&conn_id) {
                     continue;
                 }
-                // Frame + route once, from both new endpoints.
-                let style = get("ShapeRouteStyle")
-                    .map(|v| format!("{}", v as i64))
-                    .unwrap_or_else(|| crate::connectors::ROUTE_RIGHT_ANGLE.into());
-                let pts = crate::connectors::route(&style, beg, endp);
-                let rows = crate::connectors::route_rows(beg, &pts);
+                // Frame + route once, from both new endpoints — the
+                // shared planner (the live endpoint-drag preview plans
+                // through the same function).
+                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, (ex, ey));
                 let mut cells = end_cells;
-                // #175: a derived cell whose effective formula
-                // REFERENCES the endpoints/sizes must have its cached V
-                // refreshed — the renderer reads the cache, and skipping
-                // it (the #174 rule) left the XForm of the OLD geometry
-                // under moved endpoints. The write goes through
-                // SetGluedCell (GUARD-waived, formula kept); a
-                // formula-free cell stays a plain SetCell; a CONSTANT
-                // guard (Height=GUARD(0.19685DL), Angle=GUARD(0DA))
-                // does not depend on the endpoints and is skipped.
-                let eff = |n: &str| dc_core::commands::effective_formula(doc, conn, &chain, n);
-                let formula_tracks = |n: &str| -> Option<String> {
-                    let f = eff(n)?;
-                    let u = f.to_uppercase();
-                    ["BEGINX", "ENDX", "BEGINY", "ENDY", "WIDTH", "HEIGHT"]
-                        .iter()
-                        .any(|k| u.contains(k))
-                        .then_some(f)
-                };
-                let (w_new, h_new) = (endp.0 - beg.0, endp.1 - beg.1);
-                // #176: a master-based connector whose geometry is
-                // LINE-only (MoveTo/LineTo — the corpus line master's
-                // own rows are the begin-corner frame (0,0)→(W,H))
-                // reroutes by REWRITING its frame to span the new
-                // endpoints. Its instance rows are a literal snapshot
-                // of the authoring pose (a horizontal band's midline
-                // `LineTo(Width, H/2)` with `Height = GUARD(0.2DL)`);
-                // translating those in-frame (#175) keeps the ink on
-                // the old midline, detached from the moved shape
-                // whenever the endpoints differ in y. Curves keep the
-                // #175 translation — rewriting an arc's rows to the
-                // route polyline would destroy the curve.
-                let line_frame = conn.master.is_some()
-                    && conn
-                        .sheet
-                        .sections_named("Geometry")
-                        .first()
-                        .is_some_and(|g| {
-                            g.rows.iter().all(|r| {
-                                matches!(r.t.as_deref(), None | Some("MoveTo") | Some("LineTo"))
-                            })
-                        });
-                // #226 (MisterDiagram parity evidence): the CHORD-frame
-                // masters — a master-based curve connector whose
-                // inherited geometry rows derive their coordinates from
-                // the frame (the Line-arc corpus master's
-                // `EllipticalArcTo X=Width*1, Y=Height/2`) frames its
-                // rows on the BEGIN→END chord: the frame width is the
-                // chord, the direction lives in Angle, Height stays the
-                // master's own 0. Route-frame connectors (the dynamic
-                // master's guarded zero angle, the synthetic
-                // begin-corner rows) keep the signed-delta model.
-                let chord_frame = conn.master.is_some()
-                    && !line_frame
-                    && conn
-                        .sheet
-                        .sections_named("Geometry")
-                        .iter()
-                        .enumerate()
-                        .any(|(si, g)| {
-                            g.rows.iter().any(|r| {
-                                ["X", "Y"].iter().any(|n| {
-                                    inherited_geo_formula(doc, conn, &chain, si, r.ix, n)
-                                        .is_some_and(|f| {
-                                            let u = f.to_uppercase();
-                                            ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
-                                        })
-                                })
-                            })
-                        });
-                // LocPin derives from the EFFECTIVE size: when Height is
-                // a constant guard the band keeps its height, so LocPinY
-                // stays half the kept height — except a line_frame
-                // connector, whose band guard is overridden so the
-                // frame spans the endpoints.
-                let h_eff = if formula_tracks("Height").is_some() || line_frame {
-                    h_new
-                } else {
-                    get("Height").unwrap_or(h_new)
-                };
-                let w_eff = if formula_tracks("Width").is_some() || line_frame {
-                    w_new
-                } else {
-                    get("Width").unwrap_or(w_new)
-                };
-                // Frame values: a formula-tracked cell evaluates its
-                // EFFECTIVE formula against the NEW endpoints (the chord
-                // master's `Width=SQRT((EndX-BeginX)^2+…)` is the chord,
-                // not the signed dx the defaults below assume); an
-                // unevaluable formula falls back to the signed value.
-                // The env grows as each cell resolves so downstream
-                // formulas (`LocPinX=Width*0.5`) see the post-write
-                // frame — Width/Height resolve first for that.
-                let mut frame_env = vsdx::formula::Env::new();
-                frame_env.insert("BeginX".to_string(), beg.0);
-                frame_env.insert("BeginY".to_string(), beg.1);
-                frame_env.insert("EndX".to_string(), endp.0);
-                frame_env.insert("EndY".to_string(), endp.1);
-                for (n, v) in [
-                    ("Width", w_new),
-                    ("Height", h_new),
-                    ("PinX", (beg.0 + endp.0) / 2.0),
-                    ("PinY", (beg.1 + endp.1) / 2.0),
-                    ("LocPinX", w_eff / 2.0),
-                    ("LocPinY", h_eff / 2.0),
-                ] {
-                    match formula_tracks(n) {
-                        Some(f) => {
-                            let v = vsdx::formula::eval(&f, &frame_env)
-                                .ok()
-                                .and_then(|v| v.as_f64())
-                                .filter(|v| v.is_finite())
-                                .unwrap_or(v);
-                            frame_env.insert(n.to_string(), v);
-                            cells.push((n.to_string(), v, Some(f)));
-                        }
-                        // A frame dim with no formula anywhere: rewrite
-                        // it only when the INSTANCE carries its own
-                        // cell. An inherited master literal (the
-                        // Line-arc Height=0, no instance cell) stays
-                        // inherited — materializing a literal over it
-                        // corrupts the master link and stretches the
-                        // band (#226 ownership: a reroute writes only
-                        // what the connector owns).
-                        None if eff(n).is_none() && conn.sheet.cell(n).is_some() => {
-                            frame_env.insert(n.to_string(), v);
-                            cells.push((n.to_string(), v, None));
-                        }
-                        // #176: a line_frame connector refreshes every
-                        // frame cell through its guard (the formula is
-                        // kept, the cached V drives the render) — a
-                        // skipped constant guard would hold the old
-                        // band pose under the new endpoints.
-                        None if line_frame => {
-                            frame_env.insert(n.to_string(), v);
-                            cells.push((n.to_string(), v, eff(n)));
-                        }
-                        // Constant guard or otherwise static: skipped —
-                        // the frame keeps the current effective value.
-                        None => {
-                            frame_env.insert(n.to_string(), get(n).unwrap_or(v));
-                        }
-                    }
-                }
-                // The chord frame rotates with the endpoints; a route
-                // frame keeps its guarded or zero angle. The instance's
-                // own Angle cache refreshes behind its marker (Inh
-                // stays Inh — a reroute never rewrites a formula).
-                if chord_frame {
-                    let angle = (endp.1 - beg.1).atan2(endp.0 - beg.0);
-                    match formula_tracks("Angle") {
-                        Some(f) => cells.push(("Angle".into(), angle, Some(f))),
-                        None if conn.sheet.cell("Angle").is_some() => {
-                            cells.push(("Angle".into(), angle, Some("Inh".into())));
-                        }
-                        None => {}
-                    }
-                }
-                // #174/#175: only rewrite route rows the connector
-                // ALREADY has — SetRowCell materializes missing rows,
-                // which would grow a 2-row arc master (MoveTo +
-                // EllipticalArcTo) into a 4-row elbow polyline.
-                let existing: Vec<i64> = {
-                    let mut v: Vec<i64> = conn
-                        .sheet
-                        .sections_named("Geometry")
-                        .first()
-                        .map(|g| g.rows.iter().map(|r| r.ix).collect::<Vec<_>>())
-                        .unwrap_or_default();
-                    v.sort_unstable();
-                    v
-                };
-                let planned_rows: Vec<(i64, f64, f64)> = if conn.master.is_some() && !line_frame {
-                    // #175: a MASTER-based CURVE connector's rows are
-                    // its own frame (an arc's EllipticalArcTo) —
-                    // translating the EXISTING literal coordinates by
-                    // the endpoint's page delta, per axis, keeps the
-                    // curve; only where that axis's size tracks the
-                    // endpoints. Rows whose cells carry formulas
-                    // evaluate against the refreshed caches in the
-                    // renderer and are left to it.
-                    let dx = if formula_tracks("Width").is_some() {
-                        endp.0 - ex
-                    } else {
-                        0.0
-                    };
-                    let dy = if formula_tracks("Height").is_some() {
-                        endp.1 - ey
-                    } else {
-                        0.0
-                    };
-                    // A row cell is translatable only when it is a
-                    // plain literal — including an `F="Inh"` cache
-                    // whose MASTER row cell is a literal too. An
-                    // inherited cache whose master formula derives it
-                    // from the frame (the Line-arc `Width*1`) refreshes
-                    // as a cache below; translating the stale literal
-                    // by the page delta would double-move the row and
-                    // strip the marker (#226).
-                    let literal = |r: &vsdx::model::Row, name: &str| -> Option<f64> {
-                        let c = r.cell(name)?;
-                        match c.f.as_deref() {
-                            None => c.numeric(),
-                            Some("Inh") | Some("No Formula") => {
-                                let tracks =
-                                    inherited_geo_formula(doc, conn, &chain, 0, r.ix, name)
-                                        .is_some_and(|f| {
-                                            let u = f.to_uppercase();
-                                            ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
-                                        });
-                                (!tracks).then(|| c.numeric()).flatten()
-                            }
-                            Some(_) => None,
-                        }
-                    };
-                    conn.sheet
-                        .sections_named("Geometry")
-                        .first()
-                        .map(|g| {
-                            g.rows
-                                .iter()
-                                .filter(|r| (2..=4).contains(&r.ix))
-                                .filter_map(|r| {
-                                    let x = literal(r, "X")?;
-                                    let y = literal(r, "Y")?;
-                                    Some((r.ix, x + dx, y + dy))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default()
-                } else {
-                    // The begin-corner corpus frame: the planned route,
-                    // filtered to rows the connector has; a connector
-                    // with fewer rows than the route frame puts the
-                    // ENDPOINT on its LAST row. Synthetic connectors
-                    // AND (#176) line-geometry master instances — whose
-                    // band snapshot rows must be rewritten to span the
-                    // new endpoints, with the MoveTo reset to (0,0) so
-                    // the frame's origin is the begin point.
-                    let mut planned: Vec<(i64, f64, f64)> = rows
-                        .iter()
-                        .enumerate()
-                        .map(|(i, (x, y))| ((i + 2) as i64, *x, *y))
-                        .filter(|(ix, _, _)| existing.contains(ix))
-                        .collect();
-                    let max_ix = existing
-                        .iter()
-                        .copied()
-                        .filter(|ix| (2..=4).contains(ix))
-                        .max();
-                    if let (Some(last), Some(max_ix)) = (planned.last_mut(), max_ix) {
-                        if max_ix < 4 {
-                            *last = (max_ix, endp.0 - beg.0, endp.1 - beg.1);
-                        }
-                    }
-                    if line_frame && existing.contains(&1) {
-                        planned.insert(0, (1, 0.0, 0.0));
-                    }
-                    planned
-                };
-                // The post-write frame the row-cache refreshes evaluate
-                // against: the planned value when the frame loop
-                // rewrote the dim, the current effective value when it
-                // deliberately skipped (constant guard, inherited
-                // literal).
-                let post_dim = |name: &str, fallback: f64| -> f64 {
-                    cells
-                        .iter()
-                        .find(|(n, _, _)| n == name)
-                        .map(|(_, v, _)| *v)
-                        .unwrap_or_else(|| get(name).unwrap_or(fallback))
-                };
-                let (w_post, h_post) = (post_dim("Width", w_new), post_dim("Height", h_new));
-                let mut row_cells = curved_control_caches(conn, w_post, h_post);
-                if chord_frame {
-                    // The chord-frame rows' inherited caches
-                    // (`X=Width*1`, `Y=Height/2`) re-evaluate against
-                    // the new frame — the arc's end lands on the moved
-                    // endpoint (the #175 rule, one level down). The
-                    // sagitta controls (`Controls.Row_1`) don't
-                    // reference the frame and stay.
-                    row_cells.extend(inherited_row_caches(doc, conn, &chain, w_post, h_post));
-                }
+                cells.extend(plan.cells);
                 plans.push(Plan {
                     conn_id: conn.id,
                     cells,
-                    rows: planned_rows,
-                    row_cells,
+                    rows: plan.rows,
+                    row_cells: plan.row_cells,
                 });
             }
         }

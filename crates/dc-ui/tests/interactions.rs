@@ -1194,6 +1194,49 @@ fn line_endpoint_drag_moves_only_that_end() {
     );
 }
 
+/// #226: an endpoint drag paints the styled ink ghost live — the
+/// bare chord line stands down while the ghost is up, and the drag's
+/// prospective pose comes from the SAME planner the release commits
+/// (asserted through the seam; the arc math is pinned by the
+/// reroute + real-file tests).
+#[test]
+fn endpoint_drag_ghosts_the_styled_ink() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.state_mut().show_doc_stencil_for_test();
+    h.run();
+    let (page, shape) = place_master(&mut h, LINE_MASTER);
+    let _ = (page, shape);
+
+    let end_handle = h
+        .state()
+        .debug_handle_screen(dc_ui::canvas::HandleId::LineEnd)
+        .expect("line endpoint handle");
+    // Stepwise drag: press, move, hold a frame — the ghost paints.
+    let b = |pos, pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    h.hover_at(end_handle);
+    h.event(b(end_handle, true));
+    h.run();
+    h.hover_at(end_handle + egui::vec2(60.0, 40.0));
+    h.run();
+    assert!(
+        h.state().debug_endpoint_ghost_for_test(),
+        "the styled endpoint ghost paints while the drag holds"
+    );
+    // Release: the ghost stands down; the commit landed the ink.
+    h.event(b(end_handle + egui::vec2(60.0, 40.0), false));
+    h.run();
+    assert!(
+        !h.state().debug_endpoint_ghost_for_test(),
+        "the ghost stands down after the release"
+    );
+}
+
 /// The 1D midpoint handle translates the whole line — both endpoints
 /// move by the same delta, their separation untouched (#59).
 #[test]

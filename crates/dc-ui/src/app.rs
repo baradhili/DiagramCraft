@@ -238,11 +238,19 @@ pub struct App {
     connpt_sel: Option<(i64, i64)>,
     /// #108: the line-jump hops painted on the last frame (test seam).
     jumps_last: usize,
+    /// #226: whether the last frame painted the styled endpoint-drag
+    /// ghost (test seam).
+    last_endpoint_ghost: bool,
     /// Guide-glue pending on the live drag (#113): the guide the
     /// snapped axis came from and which pin axes to glue. Written by
     /// `apply_drag_snap` when glue-to-guides is on, consumed by the
     /// move commit as Visio's `PinX = Sheet.N!PinX` formulas.
     drag_glue: Option<(i64, bool, bool)>,
+    /// #226: the live endpoint-drag preview — a document snapshot the
+    /// per-frame ghost mutates through the SAME planner the release
+    /// commits (what you drag is exactly what lands). Armed while a
+    /// LineBegin/LineEnd handle drag runs, dropped when it ends.
+    endpoint_preview: Option<EndpointPreview>,
     shot_frames: u32,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
@@ -502,6 +510,19 @@ struct DragState {
     group: Vec<i64>,
 }
 
+/// The #226 live endpoint-drag preview's state: the document snapshot
+/// the per-frame ghost mutates, the #175 row-translation anchor (the
+/// pre-drag END — the plan's row deltas are relative to it), and the
+/// last raster so motionless frames reuse the texture.
+struct EndpointPreview {
+    doc: vsdx::Document,
+    conn_id: i64,
+    pre_end: (f64, f64),
+    last_to: (f64, f64),
+    tex: Option<egui::TextureHandle>,
+    bbox: (f64, f64, f64, f64),
+}
+
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
         // OS light/dark (GitHub #52): detect the opening mode (gsettings
@@ -595,6 +616,7 @@ impl App {
             snap_live: Vec::new(),
             conn_fx_last: crate::connectors::ConnPointFx::default(),
             drag_glue: None,
+            endpoint_preview: None,
             tool: Tool::Pointer,
             align_to_page: false,
             selby_open: false,
@@ -619,6 +641,7 @@ impl App {
             painter_sticky: false,
             connpt_sel: None,
             jumps_last: 0,
+            last_endpoint_ghost: false,
             shot_frames: 0,
             dialog: None,
             canvas_rect: Rect::NOTHING,
@@ -1897,6 +1920,22 @@ impl App {
                 .unwrap_or((1.0, 1.0));
             let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
             let cubic = crate::connectors::cubic_row(sh, &frame);
+            // #226: the arc masters (the corpus Line-arc connector) seat
+            // the midpoint ON the rendered curve the same way — the
+            // quadratic's t=0.5 through the same resolution the ink
+            // draws with. Both mids are shape-local.
+            let master_root = sh
+                .master
+                .and_then(|mid| ed.doc.master(mid))
+                .and_then(|m| m.shapes.first());
+            let arc = crate::connectors::arc_row(sh, master_root, &frame);
+            let mid_pos = if let Some(c) = cubic.as_ref() {
+                frame.to_page(c.mid())
+            } else if let Some(a) = arc.as_ref() {
+                frame.to_page(a.mid())
+            } else {
+                to_page(((bx + ex) / 2.0, (by + ey) / 2.0))
+            };
             let mut out = vec![
                 Handle {
                     id: HandleId::LineBegin,
@@ -1908,10 +1947,7 @@ impl App {
                 },
                 Handle {
                     id: HandleId::LineMid,
-                    pos: match cubic {
-                        Some(c) => frame.to_page(c.mid()),
-                        None => to_page(((bx + ex) / 2.0, (by + ey) / 2.0)),
-                    },
+                    pos: mid_pos,
                 },
             ];
             if let Some(c) = cubic {
@@ -2115,10 +2151,13 @@ impl App {
         out
     }
 
-    /// #202: the selected 1D shape carries a CubicBezTo row — the
+    /// #202: the selected 1D shape carries a CURVE row — the
     /// selection layer then skips its straight begin→end chord (the
     /// ink IS the line; a straight chord over the curve reads as
-    /// "the drag flattened it").
+    /// "the drag flattened it"). #226: generalised past the #202
+    /// CubicBezTo check to every curve row type — the corpus Line-arc
+    /// masters shape their whole ink as one EllipticalArcTo, and the
+    /// chord-over-arc reads exactly the same way.
     fn sel_1d_curved(&self) -> bool {
         let Some(ed) = self.ed() else {
             return false;
@@ -2139,22 +2178,27 @@ impl App {
         if ed.doc.resolve_cell(sh, &chain, "BeginX").is_none() {
             return false;
         }
-        let msize = sh
+        // All-straight rows (the #176 line-frame set) keep the chord;
+        // anything else — EllipticalArcTo, CubicBezTo, splines, NURBS,
+        // polylines — is curve ink. The instance's own section when it
+        // carries one, else the master root's (what renders).
+        let straight = |t: &str| {
+            matches!(t, "" | "MoveTo" | "RelMoveTo" | "LineTo" | "RelLineTo")
+        };
+        let curved = |rows: &[vsdx::model::Row]| {
+            rows.iter()
+                .any(|r| r.t.as_deref().map(|t| !straight(t)).unwrap_or(false))
+        };
+        if let Some(g) = sh.sheet.sections_named("Geometry").first() {
+            return curved(&g.rows);
+        }
+        let master_root = sh
             .master
             .and_then(|mid| ed.doc.master(mid))
-            .and_then(|m| m.shapes.first())
-            .map(|r| {
-                let g = |n: &str| {
-                    ed.doc
-                        .resolve_cell(r, &[r], n)
-                        .and_then(|c| c.numeric())
-                        .unwrap_or(1.0)
-                };
-                (g("Width"), g("Height"))
-            })
-            .unwrap_or((1.0, 1.0));
-        let frame = crate::connectors::hit_frame(&ed.doc, &chain, sh, msize);
-        crate::connectors::cubic_row(sh, &frame).is_some()
+            .and_then(|m| m.shapes.first());
+        master_root
+            .and_then(|r| r.sheet.sections_named("Geometry").into_iter().next())
+            .is_some_and(|g| curved(&g.rows))
     }
 
     /// #137/#157: commit a geometry-handle drag — rewrite the row's
@@ -4711,8 +4755,32 @@ impl App {
         })
         .map(|(n, v)| {
             if matches!(n, "BeginX" | "BeginY" | "EndX" | "EndY") {
-                Box::new(dc_core::SetGluedCell::new(scope.clone(), n, cell(v)))
-                    as Box<dyn dc_core::Command>
+                // The ANCHORED end keeps its glue formula: a plain
+                // Cell::value write replaces the cell wholesale and
+                // un-glues it — the begin formula died on the first
+                // endpoint drag (utilisation.vsdx, #226 evidence). The
+                // glue engine updates the cache behind its formula;
+                // the DRAGGED end writes a literal (a release makes it
+                // plain, and a re-glue overwrites it with the glue
+                // formula in the same Macro).
+                let f = if (matches!(end, crate::connectors::End::End)
+                    && matches!(n, "BeginX" | "BeginY"))
+                    || (matches!(end, crate::connectors::End::Begin)
+                        && matches!(n, "EndX" | "EndY"))
+                {
+                    sh.sheet.cell(n).and_then(|c| c.f.clone())
+                } else {
+                    None
+                };
+                Box::new(dc_core::SetGluedCell::new(
+                    scope.clone(),
+                    n,
+                    vsdx::Cell {
+                        v: Some(format!("{v:.6}")),
+                        f,
+                        ..vsdx::Cell::default()
+                    },
+                )) as Box<dyn dc_core::Command>
             } else {
                 Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
             }
@@ -5088,6 +5156,140 @@ impl App {
     /// endpoints felt hard-glued and afterwards slid only along the
     /// shape's edges); Visio's endpoint drag magnetizes to connection
     /// points, and a drop off-shape stays loose.
+    /// #226: the live endpoint-drag ghost — the dragged connector's
+    /// ink re-rendered through [`plan_connector_frame`] (the SAME
+    /// planner the release commits) at the snapped pointer, so what
+    /// you drag is exactly what lands. Re-rasters only when the
+    /// snapped point moves; motionless frames reuse the texture.
+    fn endpoint_preview_quad(
+        &mut self,
+        ctx: &egui::Context,
+        page_id: i64,
+        sid: i64,
+        hid: HandleId,
+        snap: crate::canvas::SnapEndpointFn,
+        ptr_page: (f64, f64),
+    ) -> Option<crate::layers::ShapeQuad> {
+        // (Re-)arm the snapshot: the doc at gesture start, the #175
+        // row-translation anchor (the pre-drag END), no texture yet.
+        let needs_arm = self
+            .endpoint_preview
+            .as_ref()
+            .map(|p| p.conn_id != sid)
+            .unwrap_or(true);
+        if needs_arm {
+            let ed = self.ed.as_ref()?;
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+            let g = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+            let pre_end = (g("EndX")?, g("EndY")?);
+            self.endpoint_preview = Some(EndpointPreview {
+                doc: ed.doc.clone(),
+                conn_id: sid,
+                pre_end,
+                last_to: (f64::NAN, f64::NAN),
+                tex: None,
+                bbox: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+        let to = snap(true, ptr_page);
+        // The endpoint pair in DOCUMENT order: the dragged end moves
+        // to `to`, the anchored end stays at its resolved position (a
+        // glued anchor's cache already names its attach point).
+        let (beg, endp) = {
+            let ed = self.ed.as_ref()?;
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
+            let g = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+            match hid {
+                HandleId::LineEnd => ((g("BeginX")?, g("BeginY")?), to),
+                _ => (to, (g("EndX")?, g("EndY")?)),
+            }
+        };
+        let ep = self.endpoint_preview.as_mut()?;
+        if ep.last_to == to && ep.tex.is_some() {
+            let tex = ep.tex.as_ref()?;
+            return Some(crate::layers::ShapeQuad {
+                id: sid,
+                tex: tex.id(),
+                bbox: ep.bbox,
+            });
+        }
+        // A fresh connector into the snapshot each frame: the plan's
+        // frame cells are absolute but its #175 row translations are
+        // relative to the PRE-drag pose — re-planning over an
+        // already-translated clone would accumulate the delta.
+        let fresh = {
+            let ed = self.ed.as_ref()?;
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            vsdx::model::find_shape_by_id(&page.shapes, sid)?.clone()
+        };
+        let plan = {
+            let page2 = ep.doc.pages.iter_mut().find(|p| p.id == page_id)?;
+            let slot = vsdx::model::find_shape_by_id_mut(&mut page2.shapes, sid)?;
+            *slot = fresh;
+            let page2 = ep.doc.pages.iter().find(|p| p.id == page_id)?;
+            let conn = vsdx::model::find_shape_by_id(&page2.shapes, sid)?;
+            let chain2 = shape_chain(&ep.doc, page_id, sid).ok()?;
+            crate::cmd::plan_connector_frame(&ep.doc, conn, &chain2, beg, endp, ep.pre_end)
+        };
+        // Apply the plan's writes to the snapshot (plain cache writes
+        // — the renderer reads values, not formulas).
+        {
+            let page2 = ep.doc.pages.iter_mut().find(|p| p.id == page_id)?;
+            let conn = vsdx::model::find_shape_by_id_mut(&mut page2.shapes, sid)?;
+            for (n, v, _) in &plan.cells {
+                conn.sheet.set_cell(n, vsdx::Cell::value(format!("{v:.6}")));
+            }
+            for (sec_ix, row_ix, name, cell) in &plan.row_cells {
+                let _ = dc_core::commands::set_row_cell(
+                    &mut conn.sheet,
+                    "Geometry",
+                    *sec_ix,
+                    &dc_core::commands::RowSel::Ix(*row_ix),
+                    name,
+                    cell.clone(),
+                );
+            }
+            for (ix, x, y) in &plan.rows {
+                for (name, v) in [("X", *x), ("Y", *y)] {
+                    let _ = dc_core::commands::set_row_cell(
+                        &mut conn.sheet,
+                        "Geometry",
+                        0,
+                        &dc_core::commands::RowSel::Ix(*ix),
+                        name,
+                        vsdx::Cell::value(format!("{v:.6}")),
+                    );
+                }
+            }
+        }
+        // Raster the snapshot's connector through the page renderer —
+        // the full styled ink (dash, arrow, weight, color), the same
+        // pipeline the committed layer lands through.
+        let page2 = ep.doc.pages.iter().find(|p| p.id == page_id)?;
+        let bounds = dc::svg::shape_ink_bounds(&ep.doc, page2, sid)?;
+        let svg = dc::svg::render_shape_layer(&ep.doc, page2, sid, &[], bounds).ok()?;
+        let w_px = (bounds.2 * f64::from(self.view.px_per_in())).clamp(16.0, 2048.0);
+        let tree = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Page).ok()?;
+        let img = crate::svgimg::render_tree(&tree, w_px as f32, crate::perf::Kind::Page).ok()?;
+        ep.tex = Some(ctx.load_texture(
+            "endpoint-drag-preview",
+            img,
+            egui::TextureOptions::LINEAR,
+        ));
+        ep.bbox = bounds;
+        ep.last_to = to;
+        let tex = ep.tex.as_ref()?;
+        Some(crate::layers::ShapeQuad {
+            id: sid,
+            tex: tex.id(),
+            bbox: ep.bbox,
+        })
+    }
+
     fn snap_endpoint_for(&self, dragged: i64, p: (f64, f64)) -> (f64, f64) {
         let page_id = self.page_id().unwrap_or(0);
         let targets = self.snap_targets(page_id, &[dragged]);
@@ -8884,6 +9086,21 @@ impl App {
         // a re-raster (the #93 O(0)-move guarantee holds).
         let mut drag_fx = canvas::DragFx::default();
         let mut hide_layers: Vec<i64> = Vec::new();
+        // #226: an endpoint-handle drag on the selected 1D shape hides
+        // its static layer quad — the styled live ghost (built after
+        // the snap closures below) replaces it for the gesture.
+        let armed_handle_now = canvas::armed_handle(ui.ctx());
+        let endpoint_drag_live = matches!(
+            armed_handle_now,
+            Some(HandleId::LineBegin) | Some(HandleId::LineEnd)
+        ) && self.sel.is_some_and(|(p, _)| Some(p) == self.page_id());
+        if endpoint_drag_live {
+            if let Some((_, sid)) = self.sel {
+                hide_layers.push(sid);
+            }
+        } else {
+            self.endpoint_preview = None;
+        }
         let mut live_drag = false;
         if let Some(d) = self.drag.as_ref().filter(|d| d.moved) {
             if self.sel.is_some_and(|(p, _)| Some(p) == self.page_id()) {
@@ -9131,6 +9348,30 @@ impl App {
             crate::snap::corner_snap(p, &ctx, &snap_settings)
         };
         let conn_fx_seen = std::cell::RefCell::new(crate::connectors::ConnPointFx::default());
+        // #226: the live endpoint-drag ghost — the connector's styled
+        // ink re-rendered through the SHARED planner at the snapped
+        // pointer; the bare live line stands down while it paints.
+        let mut endpoint_ghost = false;
+        if endpoint_drag_live {
+            if let (Some((page_id, sid)), Some(hid)) = (self.sel, armed_handle_now) {
+                if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
+                    let ptr_page = canvas::screen_to_page(ptr, &self.view, &geom);
+                    if let Some(q) = self.endpoint_preview_quad(
+                        ui.ctx(),
+                        page_id,
+                        sid,
+                        hid,
+                        &snap_end,
+                        ptr_page,
+                    ) {
+                        drag_fx.ghosts.push(q);
+                        endpoint_ghost = true;
+                    }
+                }
+            }
+        }
+        drag_fx.endpoint_ghost = endpoint_ghost;
+        self.last_endpoint_ghost = endpoint_ghost;
         let mut mouse = self.mouse_page;
         // #202: computed before the destructuring self-borrow the
         // canvas call holds.
@@ -13095,6 +13336,12 @@ impl App {
 
     /// kittest: how many live drag ghosts the last frame drew (#96).
     #[doc(hidden)]
+    /// kittest: whether the last frame painted the styled
+    /// endpoint-drag ghost (#226).
+    pub fn debug_endpoint_ghost_for_test(&self) -> bool {
+        self.last_endpoint_ghost
+    }
+
     pub fn debug_drag_ghosts_for_test(&self) -> usize {
         self.last_drag_ghosts
     }

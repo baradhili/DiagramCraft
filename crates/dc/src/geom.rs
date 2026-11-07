@@ -20,12 +20,32 @@ pub fn is_connector(s: &Shape) -> bool {
 /// carries `ObjType=2` on its MASTER, not locally — the local-only
 /// check missed every Visio-authored connector (endpoint drags fell
 /// to the plain-1D path and were refused by the glue formulas).
+///
+/// #226 (MisterDiagram parity evidence, utilisation.vsdx): Visio also
+/// authors 1D glue connectors WITHOUT ObjType — the corpus Line-arc
+/// master marks itself with the glue engine's signature instead
+/// (`GlueType` + `BegTrigger`/`EndTrigger`, no ObjType at all). A
+/// resolved `BeginX` plus a glue trigger on either end is that
+/// signature: the endpoint cells exist (XForm1D) and the glue engine
+/// owns them. Plain 1D lines (the blank template's Line master) carry
+/// no triggers and stay out — they are not glue shapes.
 pub fn is_connector_in(doc: &vsdx::Document, chain: &[&Shape], s: &Shape) -> bool {
-    is_connector(s)
-        || doc
-            .resolve_cell(s, chain, "ObjType")
-            .and_then(|c| c.numeric())
-            .is_some_and(|v| v == 2.0)
+    if is_connector(s) {
+        return true;
+    }
+    // The #174 chain-resolved form: a master-based connector carries
+    // ObjType=2 on its MASTER.
+    if doc
+        .resolve_cell(s, chain, "ObjType")
+        .and_then(|c| c.numeric())
+        .is_some_and(|v| v == 2.0)
+    {
+        return true;
+    }
+    let resolved = |n: &str| doc.resolve_cell(s, chain, n);
+    let one_d = resolved("BeginX").is_some();
+    let glue_owned = resolved("BegTrigger").is_some() || resolved("EndTrigger").is_some();
+    one_d && glue_owned
 }
 
 /// The connector's ink as page-space segments for hit-testing (#172):
@@ -213,6 +233,122 @@ pub fn cubic_row(s: &Shape, frame: &HitFrame) -> Option<CubicRow> {
             }
             cur = Some((x, y));
         }
+    }
+    None
+}
+
+/// One shape's first `EllipticalArcTo` row — the #226 arc twin of
+/// [`CubicRow`]: the corpus Line-arc masters (utilisation.vsdx) shape
+/// their whole ink as one arc, so the `LineMid` handle must seat ON
+/// the curve, not on the begin→end chord. Resolution mirrors the hit
+/// walk's row walk (own rows + the master rows the instance dropped,
+/// ix-ordered, Rel rows as size fractions, master-section caches
+/// scaled) so the seat sits on the RENDERED curve — the renderer and
+/// hit walk draw the same quadratic through the on-curve control.
+#[derive(Debug, Clone, Copy)]
+pub struct ArcRow {
+    /// The previous row's endpoint — the arc's start.
+    pub start: (f64, f64),
+    /// The row's own endpoint.
+    pub end: (f64, f64),
+    /// The ON-curve control (the row's A/B).
+    pub on_curve: (f64, f64),
+}
+
+impl ArcRow {
+    /// The quadratic control reproducing an on-curve apex (the
+    /// renderer's degenerate-arc fallback).
+    fn ctrl(&self) -> (f64, f64) {
+        (
+            2.0 * self.on_curve.0 - (self.start.0 + self.end.0) / 2.0,
+            2.0 * self.on_curve.1 - (self.start.1 + self.end.1) / 2.0,
+        )
+    }
+
+    /// The curve point at `u` (0..=1).
+    pub fn at(&self, u: f64) -> (f64, f64) {
+        let (ctrl, v) = (self.ctrl(), 1.0 - u);
+        (
+            v * v * self.start.0 + 2.0 * v * u * ctrl.0 + u * u * self.end.0,
+            v * v * self.start.1 + 2.0 * v * u * ctrl.1 + u * u * self.end.1,
+        )
+    }
+
+    /// The t=0.5 point — the `LineMid` seat ON the curve (the chord
+    /// midpoint hangs off it).
+    pub fn mid(&self) -> (f64, f64) {
+        self.at(0.5)
+    }
+}
+
+/// The shape's first `EllipticalArcTo` row through [`HitFrame`]'s
+/// resolution; `master_root` stands in when the shape has no own
+/// Geometry (like [`geometry_hit_segments`]).
+pub fn arc_row(s: &Shape, master_root: Option<&Shape>, frame: &HitFrame) -> Option<ArcRow> {
+    let mut sections: Vec<&Section> = s.sheet.sections_named("Geometry");
+    let (own, scale) = if sections.is_empty() {
+        let root = master_root?;
+        sections = root.sheet.sections_named("Geometry");
+        let ms = frame.master_size;
+        (
+            ms,
+            if ms.0.abs() > 1e-6 && ms.1.abs() > 1e-6 {
+                (frame.size.0 / ms.0, frame.size.1 / ms.1)
+            } else {
+                (1.0, 1.0)
+            },
+        )
+    } else {
+        (frame.size, (1.0, 1.0))
+    };
+    let master_rows: Vec<&Row> = master_root
+        .and_then(|r| r.sheet.sections_named("Geometry").into_iter().next())
+        .map(|g| g.rows.iter().collect())
+        .unwrap_or_default();
+    let mut walk: Vec<(&Row, Option<&Row>)> = Vec::new();
+    for geo in &sections {
+        for row in geo.rows.iter().take(64) {
+            walk.push((row, master_rows.iter().find(|r| r.ix == row.ix).copied()));
+        }
+    }
+    for r in master_rows.iter().take(64) {
+        if !walk.iter().any(|(row, _)| row.ix == r.ix) {
+            walk.push((r, None));
+        }
+    }
+    walk.sort_by_key(|(row, _)| row.ix);
+    let cell = |row: &Row, master: Option<&Row>, name: &str| -> Option<f64> {
+        let axis = if name == "X" || name == "A" { scale.0 } else { scale.1 };
+        row_cell_value(row.cell(name), master.and_then(|m| m.cell(name)), axis, &frame.env)
+    };
+    // The hit walk's endpoint placement: Rel rows resolve ×own size,
+    // then master-section caches scale into instance units.
+    let placed = |v: (f64, f64), rel: bool| -> (f64, f64) {
+        let v = if rel { (v.0 * own.0, v.1 * own.1) } else { v };
+        if scale != (1.0, 1.0) { (v.0 * scale.0, v.1 * scale.1) } else { v }
+    };
+    let mut cur: Option<(f64, f64)> = None;
+    for (row, master) in &walk {
+        let t = row
+            .t
+            .as_deref()
+            .or(master.and_then(|m| m.t.as_deref()))
+            .unwrap_or("");
+        let (x, y) = (cell(row, *master, "X"), cell(row, *master, "Y"));
+        let rel = t.starts_with("Rel");
+        let end = match (x, y) {
+            (Some(x), Some(y)) => placed((x, y), rel),
+            _ => (0.0, 0.0),
+        };
+        if t == "EllipticalArcTo" || t == "RelEllipticalArcTo" {
+            // A/B ride `cell` alone — the hit walk applies no rel or
+            // post-scale to the on-curve control.
+            return match (cell(row, *master, "A"), cell(row, *master, "B"), cur) {
+                (Some(a), Some(b), Some(start)) => Some(ArcRow { start, end, on_curve: (a, b) }),
+                _ => None,
+            };
+        }
+        cur = Some(end);
     }
     None
 }

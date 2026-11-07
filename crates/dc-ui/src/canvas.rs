@@ -492,6 +492,16 @@ pub struct DragFx {
     /// inches y-up — painted as dashed full-canvas alignment lines and
     /// labeled gap segments while a drag is live.
     pub hints: Vec<crate::snap::Hint>,
+    /// #226: a styled endpoint-drag ghost is live — the bare
+    /// begin→end live line stands down (the ghost IS the styled ink).
+    pub endpoint_ghost: bool,
+}
+
+/// The currently armed selection handle — the app reads the same
+/// egui temp slot the canvas arms on press (#226: the live
+/// endpoint-drag preview keys off a `LineBegin`/`LineEnd` gesture).
+pub fn armed_handle(ctx: &egui::Context) -> Option<HandleId> {
+    ctx.memory(|m| m.data.get_temp::<HandleId>(egui::Id::unique("dc-handle-drag")))
 }
 
 /// The dynamic-grid hint color: Visio's blue dashed alignment aid.
@@ -1397,7 +1407,12 @@ pub fn show(
                 let snapped = snap_endpoint(true, ptr_page);
                 let sn_screen = page_to_screen(snapped.0, snapped.1, view, page);
                 if let Some((_, o)) = handles_screen.iter().find(|(id, _)| *id == other) {
-                    lines.push((*o, sn_screen));
+                    // #226: when the styled endpoint ghost paints the
+                    // whole styled ink, the bare chord stands down —
+                    // it only serves as the raster-missing fallback.
+                    if !drag.endpoint_ghost {
+                        lines.push((*o, sn_screen));
+                    }
                 }
             }
             HandleId::GeoPoint { .. } => {
