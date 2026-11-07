@@ -13,6 +13,7 @@ pub mod freeform;
 pub mod group_fixture;
 pub mod guides;
 pub mod hyperlink;
+pub mod loading;
 pub mod icontex;
 mod layers;
 pub mod os_theme;

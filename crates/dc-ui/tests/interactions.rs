@@ -809,6 +809,91 @@ fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
     h.state().debug_sel().expect("placed shape is selected")
 }
 
+/// #224: a document open parses on the worker thread and lands through
+/// the poll — the overlay/status run while in flight, and the editor
+/// arrives complete (the deterministic seam: open_file_for_test
+/// presets the dialog; frames pump the poll).
+#[test]
+fn file_open_parses_on_the_worker_and_lands() {
+    let mut h = harness_with_blank();
+    h.run();
+    let shapes_before = h.state().debug_shape_count();
+    let tmp = tempfile::tempdir().unwrap();
+    // A one-page .vsdx with a visible rectangle master.
+    use vsdx::model::*;
+    let mut doc = Document::default();
+    let mut page_sheet = Sheet::default();
+    page_sheet.set_cell("PageWidth", Cell::value("8.5"));
+    page_sheet.set_cell("PageHeight", Cell::value("11"));
+    doc.pages.push(Page {
+        id: 0,
+        name: "Page-1".into(),
+        attrs: vec![("ID".into(), "0".into()), ("NameU".into(), "Page-1".into())],
+        children: vec![IndexChild::Sheet {
+            tag: "PageSheet".into(),
+            sheet: page_sheet,
+        }],
+        part: "visio/pages/page1.xml".into(),
+        contents_attrs: vec![(
+            "xmlns".to_string(),
+            "http://schemas.microsoft.com/office/visio/2012/main".to_string(),
+        )],
+        ..Page::default()
+    });
+    let path = tmp.path().join("worker-open.vsdx");
+    vsdx::write::save(&doc, &path).unwrap();
+    h.state_mut().open_file_for_test(path);
+    // The parse is async now: pump frames until the editor lands.
+    let mut waited = 0;
+    while !h.state().debug_doc_open() {
+        waited += 1;
+        assert!(waited < 20_000, "the worker parse never landed");
+        h.run();
+        if waited % 500 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    assert_eq!(
+        h.state().debug_shape_count(),
+        shapes_before,
+        "the empty template opened (no shapes)"
+    );
+    assert!(
+        !h.state().debug_loading_for_test(),
+        "the loading state cleared on landing"
+    );
+}
+
+/// #224: the splash shows on arming and hands off to the shell after
+/// SPLASH_SECS (the headless ctors pin none; this arms it directly).
+#[test]
+fn splash_shows_then_hands_off() {
+    let mut h = harness_with_blank();
+    h.run();
+    assert!(
+        !h.state().debug_splash_active_for_test(),
+        "headless ctors pin no splash"
+    );
+    h.state_mut()
+        .debug_splash_for_test(Some(std::time::Instant::now()));
+    h.run();
+    assert!(
+        h.state().debug_splash_active_for_test(),
+        "the splash is up inside the window"
+    );
+    // Aged past the window: the next frame hands off to the shell.
+    h.state_mut().debug_splash_for_test(Some(
+        std::time::Instant::now() - std::time::Duration::from_millis(
+            (dc_ui::loading::SPLASH_SECS * 1000.0) as u64 + 200,
+        ),
+    ));
+    h.run();
+    assert!(
+        !h.state().debug_splash_active_for_test(),
+        "the splash handed off after SPLASH_SECS"
+    );
+}
+
 /// #237: with a selection active, the wheel zoom anchors on the
 /// selection's center — the selected content stays put on screen while
 /// the zoom changes. Without the selection anchor, zooming at the

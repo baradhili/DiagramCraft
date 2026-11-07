@@ -256,6 +256,14 @@ pub struct App {
     /// LineBegin/LineEnd handle drag runs, dropped when it ends.
     endpoint_preview: Option<EndpointPreview>,
     shot_frames: u32,
+    /// #224: the splash moment's start — the branded boot overlay
+    /// shows until loading::SPLASH_SECS elapse, then the shell takes
+    /// over. Headless ctors pin None so kittest never sees it.
+    splash: Option<std::time::Instant>,
+    /// #224: the in-flight file open — the parse runs on a worker
+    /// thread (the same pattern as the rfd pick); the overlay shows
+    /// and the result lands through finish_load.
+    loading: Option<(PathBuf, mpsc::Receiver<Result<vsdx::Document, String>>)>,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
     /// run on the UI thread — otherwise the eframe event loop stalls
@@ -537,6 +545,9 @@ impl App {
         let pref = crate::os_theme::detect();
         crate::theme::install_for(&cc.egui_ctx, pref);
         let mut app = App::with_doc_opt(None);
+        // #224: the branded boot moment — production only (the headless
+        // ctors stay splash-free for kittest determinism).
+        app.splash = Some(std::time::Instant::now());
         #[cfg(target_os = "linux")]
         {
             app.os_theme = Some(crate::os_theme::OsThemeWatcher::spawn());
@@ -648,6 +659,11 @@ impl App {
             jumps_last: 0,
             last_endpoint_ghost: false,
             shot_frames: 0,
+            // #224: headless default — no branded boot moment (the
+            // same ephemeral rule as the MRU adoption below). The
+            // production entry re-arms it in `App::new`.
+            splash: None,
+            loading: None,
             dialog: None,
             canvas_rect: Rect::NOTHING,
             backstage: false,
@@ -686,13 +702,16 @@ impl App {
 
     /// Open a document at `path` (headless tests, `dc-ui <file>`).
     pub fn with_doc(path: &std::path::Path) -> App {
-        App::with_doc_opt(Some(path.to_path_buf()))
+        let mut app = App::with_doc_opt(Some(path.to_path_buf()));
+        app.splash = None; // headless: no branded boot moment
+        app
     }
 
     /// A fresh blank drawing with the starter shape masters
     /// (headless tests, File → New).
     pub fn with_blank() -> App {
         let mut app = App::with_doc_opt(None);
+        app.splash = None; // headless: no branded boot moment
         app.do_new();
         app
     }
@@ -832,7 +851,7 @@ impl App {
     fn load(&mut self, path: PathBuf) {
         // Visio semantics: File→Open of a stencil lands it in the
         // Shapes pane, not the editor — the drawing stays untouched
-        // (#83).
+        // (#83). Stencil loads are small and stay synchronous.
         if path
             .extension()
             .and_then(|e| e.to_str())
@@ -841,14 +860,46 @@ impl App {
             self.open_stencil(path);
             return;
         }
-        match Editor::open(&path) {
+        let result = vsdx::parse::parse(&path).map_err(|e| format!("{e:#}"));
+        self.finish_load(path, result);
+    }
+
+    /// #224: the async open — the parse runs on a worker thread (the
+    /// same pattern as the rfd pick) so a large .vsdx never freezes the
+    /// frame loop. The overlay + status line cover the flight; the
+    /// result lands through [`App::finish_load`] on a later frame. The
+    /// parsed Document is plain data (Send); the editor — whose History
+    /// owns `Box<dyn Command>` — is built on the main thread.
+    fn begin_async_load(&mut self, path: PathBuf) {
+        if self.loading.is_some() {
+            return; // one in-flight open at a time (modal for v1)
+        }
+        let (tx, rx) = mpsc::channel();
+        let worker_path = path.clone();
+        std::thread::spawn(move || {
+            let result = vsdx::parse::parse(&worker_path).map_err(|e| format!("{e:#}"));
+            let _ = tx.send(result);
+        });
+        self.status = format!(
+            "Opening {}…",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string())
+        );
+        self.loading = Some((path, rx));
+    }
+
+    /// The shared open-completion path: the #224 worker's landing and
+    /// the synchronous callers (tests, Recent lists) all end here.
+    fn finish_load(&mut self, path: PathBuf, result: Result<vsdx::Document, String>) {
+        match result {
             Ok(ed) => {
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
                 // #192 spec: opening ADDS a document — the active one
                 // (if any) becomes an inactive session first.
                 self.stash_active_doc();
-                self.ed = Some(ed);
+                self.ed = Some(Editor::new(ed));
                 self.reload_snap_settings();
                 self.path = path;
                 self.dirty = false;
@@ -871,7 +922,39 @@ impl App {
                 self.comment_target = None;
                 self.comment_edit = None;
             }
-            Err(e) => self.status = format!("open failed: {e:#}"),
+            Err(e) => self.status = format!("open failed: {e}"),
+        }
+    }
+
+    /// #224: consume a finished file-open worker result. `Some(path)`
+    /// means still in flight (the caller draws the overlay + the
+    /// status heartbeat); the landing goes through
+    /// [`App::finish_load`].
+    fn poll_loading(&mut self) -> Option<PathBuf> {
+        let Some((path, rx)) = &self.loading else {
+            return None;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                let path = path.clone();
+                self.loading = None;
+                self.finish_load(path, result);
+                None
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                self.status = format!(
+                    "Opening {}…",
+                    path.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| path.display().to_string())
+                );
+                Some(path.clone())
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.loading = None;
+                self.status = "open failed: the load worker died".into();
+                None
+            }
         }
     }
 
@@ -1589,7 +1672,21 @@ impl App {
             return;
         };
         match dialog {
-            PendingDialog::Open(_) => self.load(path),
+            // #224: the picked-file parse — the issue's freeze point —
+            // runs on the worker; a stencil still lands in the Shapes
+            // pane synchronously (#83), and the Recent/backstage clicks
+            // keep the synchronous path.
+            PendingDialog::Open(_) => {
+                if path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("vssx"))
+                {
+                    self.open_stencil(path);
+                } else {
+                    self.begin_async_load(path);
+                }
+            }
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
             // The picked target lands in the open draft's Address
@@ -13296,6 +13393,25 @@ impl App {
     pub fn debug_view_for_test(&self) -> (f32, f32, f32) {
         (self.view.zoom, self.view.pan.x, self.view.pan.y)
     }
+
+    /// #224: arm/clear the splash moment directly (the kittest path —
+    /// `App::new`'s production splash is ctor-bound).
+    #[doc(hidden)]
+    pub fn debug_splash_for_test(&mut self, started: Option<std::time::Instant>) {
+        self.splash = started;
+    }
+
+    /// #224: whether the splash overlay is up.
+    #[doc(hidden)]
+    pub fn debug_splash_active_for_test(&self) -> bool {
+        self.splash.is_some()
+    }
+
+    /// #224: whether a file open is in flight (the worker parse).
+    #[doc(hidden)]
+    pub fn debug_loading_for_test(&self) -> bool {
+        self.loading.is_some()
+    }
     /// kittest: page names in tab order (#54).
     #[doc(hidden)]
     pub fn debug_page_names(&self) -> Vec<String> {
@@ -14326,6 +14442,25 @@ impl App {
         }
         self.confirm_new_window(&ctx);
         self.confirm_close_window(&ctx);
+
+        // #224 overlays, painted above everything: the modal loading
+        // scrim while a document parse is in flight (the poll that
+        // lands the finished editor), then the branded splash. Fixed
+        // light theme — the kit's light set. Time-driven repaints keep
+        // both animating.
+        if self.loading.is_some() {
+            let in_flight = self.poll_loading();
+            if let Some(path) = in_flight {
+                let screen = ui.input(|i| i.viewport_rect());
+                crate::loading::draw_loading(ui, screen, &path);
+            }
+        }
+        if let Some(started) = self.splash {
+            let screen = ui.input(|i| i.viewport_rect());
+            if !crate::loading::draw_splash(ui, screen, started) {
+                self.splash = None;
+            }
+        }
     }
 
     /// A close request arrived — the window's ✕ / Alt-F4 (or the
@@ -15708,11 +15843,28 @@ mod tests {
         app.dialog = Some(PendingDialog::Open(rx));
         app.poll_dialog(&ctx);
         assert!(app.dialog.is_none(), "answered dialog is consumed");
+        // #224: the parse went to the worker — the opening status
+        // shows, the poll lands the failure, the status flips.
+        assert!(
+            app.status.starts_with("Opening"),
+            "status = {}",
+            app.status
+        );
+        assert!(app.debug_loading_for_test());
+        // The worker thread races this thread — pump the poll until the
+        // result arrives (bounded; the failure path is fast).
+        for _ in 0..2000 {
+            if app.poll_loading().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
         assert!(
             app.status.starts_with("open failed"),
             "status = {}",
             app.status
         );
+        assert!(!app.debug_loading_for_test());
     }
 
     #[test]
