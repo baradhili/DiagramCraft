@@ -2955,8 +2955,7 @@ fn render_geometry(
     flush_spline_tail!();
     if !d.is_empty() {
         // Connector arrowheads: BeginArrow/EndArrow cells (0 = none, ≥1 an
-        // arrow; sizes 0–6, 2 = medium). One marker def per distinct
-        // (direction, color, weight, size), reused across shapes.
+        // arrow; sizes 0–6, 2 = medium).
         let begin_arrow = doc
             .resolve_cell(s, chain, "BeginArrow")
             .and_then(|c| cell_num(&c, &env))
@@ -2973,131 +2972,70 @@ fn render_geometry(
             .resolve_cell(s, chain, "EndArrowSize")
             .and_then(|c| cell_num(&c, &env))
             .unwrap_or(2.0);
-        let mut attrs = String::new();
-        // #72/#169/#199: per-value arrowheads — Visio 2016's
-        // Begin/EndArrow gallery, drawn from our own paths (behavior
-        // reference: the shipped Visio 2016 gallery plus the
-        // Visio-authored fixture with EndArrow 0–50 printed at 600 dpi
-        // — see Analysis/arrow-gallery-visio2016.md; artwork ours).
-        // The table lives in [`arrow_spec`], pinned from the 2026-11-06
-        // full-resolution re-read of the print: 14–22 are Visio's
-        // OPEN-head set (triangles, ring, square, diamond), 23–26 the
-        // ticks, 27/28 the crow's-foot fork, 29–38 the dimension
-        // composites (tick counts + ring/dot/diamond), 39/40 the double
-        // triangles, 46–50 bare ends. Unmapped values fall back to the
-        // filled triangle; per-value size variants share the family
-        // glyph. Sizes ride markerUnits=strokeWidth (LineWeight) times
-        // the ArrowSize factor.
-        let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
-            if arrow < 0.5 || (46.0..=50.5).contains(&arrow) {
-                return;
-            }
-            let scale = 2.5 + sz.max(0.0) * 1.5;
-            let kind = arrow.round() as i64;
-            let id = format!(
-                "dc-ah{}k{:x}",
-                if begin { 'b' } else { 'e' },
-                fnv(&format!("{kind}|{line_weight:.5}|{scale:.2}|{line_color}"))
-            );
-            if !out_all.contains(&format!(r#"id="{id}""#)) {
-                let Some((parts, tip, box_w)) = arrow_spec(kind) else {
-                    return;
-                };
-                let mirror_x = |d: &str| -> String {
-                    // "M0,0 L10,5" → every x mirrored about box_w/2's
-                    // frame (x → box_w - x), keeping command letters.
-                    let mut m = String::new();
-                    for tok in d.split(' ') {
-                        let head: String = tok.chars().take_while(|c| c.is_alphabetic()).collect();
-                        let rest = &tok[head.len()..];
-                        if rest.is_empty() {
-                            m.push_str(tok);
-                        } else {
-                            let nums: Vec<String> = rest
-                                .split(',')
-                                .enumerate()
-                                .map(|(i, n)| {
-                                    // Only mirror the X of each x,y pair.
-                                    if i % 2 == 0 {
-                                        n.parse::<f64>()
-                                            .map(|v| format!("{}", box_w - v))
-                                            .unwrap_or_else(|_| n.to_string())
-                                    } else {
-                                        n.to_string()
-                                    }
-                                })
-                                .collect();
-                            m.push_str(&head);
-                            m.push_str(&nums.join(","));
-                        }
-                        m.push(' ');
-                    }
-                    m.trim_end().to_string()
-                };
-                // Composite heads are several parts sharing one marker:
-                // paths mirror for begin markers, circles mirror their
-                // center about the same frame.
-                let mut body = String::new();
-                for part in parts {
-                    let c = &line_color;
-                    if let Some((cx, cy, r)) = part.circle {
-                        let cx = if begin { box_w - cx } else { cx };
-                        body += &if part.filled {
-                            format!(
-                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#
-                            )
-                        } else {
-                            format!(
-                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
-                            )
-                        };
-                    } else {
-                        let d = if begin {
-                            mirror_x(part.d)
-                        } else {
-                            part.d.to_string()
-                        };
-                        body += &if part.filled {
-                            format!(r#"<path d="{d}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#)
-                        } else {
-                            format!(
-                                r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
-                            )
-                        };
-                    }
-                }
-                let _ = writeln!(
-                    out_all,
-                    r#"<defs><marker id="{id}" viewBox="0 0 {w} 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto">{body}</marker></defs>"#,
-                    w = box_w,
-                    rx = if begin { 0.0 } else { tip },
-                );
-            }
-            // Begin markers mirror their parts (paths and circle
-            // centers) so the head faces the path start; orient=auto
-            // supplies the direction.
-            if begin {
-                attrs.push_str(&format!(r#" marker-start="url(#{id})""#));
+        // #185/#170: physical per-value arrow geometry. The head unit is
+        // LineWeight + C[EndArrowSize] (C = [1.44, 1.8, 2.52, 3.24, 3.96,
+        // 9, 18] pt — witnessed across all 45 types and sizes 0–6), each
+        // gallery kind draws at its measured proportions in that unit
+        // ([`GALLERY`]), and the shaft trims back by the per-kind
+        // setback ([`arrow_setback`]) so hollow heads keep their
+        // interiors clear. Evidence: the owner-authored 600 dpi print
+        // (Sample/test files/arrows.vsdx + arrows.png — the
+        // authoritative oracle) cross-checked against the #223 parity
+        // witnesses; see Analysis/arrow-gallery-visio2016.md.
+        let kind = |a: f64| -> Option<i64> {
+            if a < 0.5 || (46.0..=50.5).contains(&a) {
+                None
             } else {
-                attrs.push_str(&format!(r#" marker-end="url(#{id})""#));
+                Some(a.round() as i64)
             }
         };
-        marker(true, begin_arrow, bsz, out);
-        marker(false, end_arrow, esz, out);
-        let _ = writeln!(
-            out,
-            r#"<path d="{}" {style}{attrs}/>"#,
-            escape_attr(d.trim()),
-            style = style,
-            attrs = attrs
-        );
+        // Zero-weight exception (the SVG rule): the head draws with the
+        // 0.75 pt nominal pen, so its unit is C[size] + 0.75 pt.
+        let head_weight = if line_weight > 0.0 {
+            line_weight
+        } else {
+            0.75 / 72.0
+        };
+        let head_unit = |sz: f64| -> f64 {
+            let i = (sz.round() as i64).clamp(0, 6) as usize;
+            head_weight + ARROW_SIZE_PT[i] / 72.0
+        };
+        let end_setback = kind(end_arrow).map_or(0.0, |k| arrow_setback(k) * head_unit(esz));
+        let begin_setback = kind(begin_arrow)
+            .map_or(0.0, |k| arrow_begin_setback(arrow_setback(k) * head_unit(bsz)));
+        // The shaft stops at (or under) the head's rear; the heads
+        // themselves anchor at the ORIGINAL endpoints, so the trim must
+        // not move them. Closed loops and multi-subpath data trim
+        // never (Visio gives them no heads either — #227 tracks that).
+        let shaft = if end_setback > 0.0 || begin_setback > 0.0 {
+            trim_path(&d, begin_setback, end_setback)
+        } else {
+            d.clone()
+        };
+        let _ = writeln!(out, r#"<path d="{}" {style}/>"#, escape_attr(shaft.trim()));
+        // Heads as inline translate·rotate·scale groups of the
+        // unit-space parts (begin faces outward along the reversed
+        // start tangent, end along the end tangent) — no marker defs,
+        // so the size law holds without markerUnits scaling.
+        if let Some((begin, end)) = path_frames(&d) {
+            if let Some(k) = kind(begin_arrow) {
+                emit_arrow_head(out, k, bsz, head_weight, &line_color, begin.0, begin.1);
+            }
+            if let Some(k) = kind(end_arrow) {
+                emit_arrow_head(out, k, esz, head_weight, &line_color, end.0, end.1);
+            }
+        }
     }
 }
 
-/// One drawable piece of a marker head (#199): a path — filled when
-/// `filled`, stroked (fill="none") otherwise — or a circle (filled
-/// dot vs open ring). Composite heads (the dimension set's tick +
-/// glyph rows) are just several parts in one marker.
+/// One drawable piece of an arrow head (#199, #185): a path — filled
+/// when `filled`, stroked (fill="none") otherwise — or a circle
+/// (filled dot vs open ring). Composite heads (the dimension set's
+/// tick + glyph rows) are just several parts in one head.
+/// Coordinates live in MARKER UNITS with the tip at the origin, +x
+/// pointing PAST the tip (the body extends into -x) and +y down; the
+/// head frame is placed with a translate·rotate·scale group, so the
+/// same table serves both ends without mirroring.
 struct HeadPart {
     d: &'static str,
     circle: Option<(f64, f64, f64)>,
@@ -3140,194 +3078,726 @@ const fn dot(cx: f64, cy: f64, r: f64) -> HeadPart {
     }
 }
 
-/// The Visio 2016 Begin/EndArrow gallery, pinned from the owner-
-/// authored fixture printed at 600 dpi (Analysis/
-/// arrow-gallery-visio2016.md, 2026-11-06 re-read; artwork ours —
-/// reimplemented from the observed glyphs, no Microsoft assets).
-/// Returns `(parts, tip_x, box_w)`: paths point along +x with the
-/// shaft on y=5 in a 10-high viewBox, and `tip_x` anchors the marker
-/// on the line end (refX). `None` = no head (the bare ends 46–50).
-/// Per-value size variants share one glyph (see the analysis's open
-/// refinements).
-/// The gallery: (EndArrow value, parts, tip_x, box_w). A const table
-/// so every parts slice is 'static.
-const GALLERY: &[(i64, &[HeadPart], f64, f64)] = &[
-    // 1 — narrow open V (unfilled 2-prong).
-    (1, &[sp("M0,1 L7,5 L0,9")], 7.0, 7.0),
-    // 2 — small filled triangle.
-    (2, &[fp("M0,1.5 L8,5 L0,8.5 z")], 8.0, 8.0),
-    // 3 — open wide V.
-    (3, &[sp("M0,0 L9,5 L0,10")], 9.0, 9.0),
-    // 4 — the classic filled triangle (the corpus default).
-    (4, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
-    // 5 — filled triangle, wide (curved-in base).
-    (5, &[fp("M0,0 L11,5 L0,10 Q4,5 0,0 z")], 11.0, 11.0),
-    // 6 — narrow filled triangle, long.
-    (6, &[fp("M0,1 L12,5 L0,9 z")], 12.0, 12.0),
-    // 7 — open fork (curved concave-back barbs).
-    (7, &[sp("M0,0 Q2.5,3.5 9,5 Q2.5,6.5 0,10")], 9.0, 9.0),
-    // 8 — filled stealth dart (concave back).
-    (8, &[fp("M0,0 L10,5 L0,10 L3,5 z")], 10.0, 10.0),
-    // 9 — the slanted dimension tick (line passes through).
-    (9, &[sp("M2,-1 L6,9")], 8.0, 8.0),
-    // 10 — the filled circle (dot at the end).
-    (10, &[dot(5.0, 5.0, 5.0)], 10.0, 10.0),
-    // 11 — the filled square.
-    (11, &[fp("M2,0 L10,0 L10,10 L2,10 z")], 10.0, 10.0),
-    // 12 — the open double chevron (shaft passes through).
-    (12, &[sp("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10")], 12.0, 12.0),
-    // 13 — single filled triangle, plain base (NOT a double — the
-    // #169 report).
-    (13, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
-    // 14–19 — Visio's open-head set: large→medium triangles, concave
-    // bases, then the open barbs.
-    (14, &[sp("M0,0 L10,5 L0,10")], 10.0, 10.0),
-    (15, &[sp("M0,1.5 L7.5,5 L0,8.5")], 7.5, 7.5),
-    (16, &[sp("M0,0.5 L9,5 L0,9.5")], 9.0, 9.0),
-    (17, &[sp("M0,1 L8.4,5 L0,9")], 8.4, 8.4),
-    (18, &[sp("M0,0 L9,5 L0,10 Q3,5 0,0")], 9.0, 9.0),
-    (19, &[sp("M0,0 Q4,4 9,5 Q4,6 0,10")], 9.0, 9.0),
-    // 20 — the open circle (ring).
-    (20, &[ring(4.5, 5.0, 4.2)], 9.0, 9.0),
-    // 21 — the open square.
-    (21, &[sp("M1,0 L9,0 L9,10 L1,10 z")], 9.0, 9.0),
-    // 22 — the open diamond.
-    (22, &[sp("M0,5 L5,0 L10,5 L5,10 z")], 10.0, 10.0),
-    // 23 — single slanted tick (line passes through).
-    (23, &[sp("M2,-1 L6,9")], 8.0, 8.0),
-    // 24 — single perpendicular tick.
-    (24, &[sp("M4,-1 L4,11")], 7.0, 7.0),
-    // 25 — double perpendicular tick.
-    (25, &[sp("M2.5,-1 L2.5,11 M6,-1 L6,11")], 9.5, 9.5),
-    // 26 — triple perpendicular tick.
-    (26, &[sp("M1,-1 L1,11 M4,-1 L4,11 M7,-1 L7,11")], 10.5, 10.5),
+/// The Visio 2016 Begin/EndArrow gallery in unit space (#185): every
+/// kind at its measured proportions in the head unit
+/// LineWeight + C[EndArrowSize]. Pinned against the owner-authored
+/// 600 dpi print (`Sample/test files/arrows.png` — the fixture
+/// `arrows.vsdx` carries EndArrow = n per labeled line; the print is
+/// the authoritative oracle) and cross-checked against the #223
+/// parity witnesses; artwork ours, no Microsoft assets.
+///
+/// Geometry conventions: the tip sits at the origin, the body
+/// extends into -x, +y is down. Per-kind proportions are the
+/// measured ones — triangles 2 units tall with per-kind lengths
+/// (2/15: 1, 3/4/16: 2, 12/13/14: 3), ticks/bars 1.5 tall, circles
+/// r 0.75 (the 35–37 dots 0.825), the diamond 4.5 × 2.25 — and the
+/// 5/6/8/18 rears are circular arcs (concave for 5/8, convex —
+/// centered at the tip, R = √5 — for 6/18) emitted as exact cubic
+/// approximations (k = 4/3·(√5−2)). Corrections the print forced
+/// against the earlier table: 12 is ONE wide open V (len 3) and 43
+/// is the double chevron (len 4); 10/11/20/21 straddle the tip
+/// centered; 9's tick leans "/" through the tip while 23's leans
+/// "\" behind it.
+const GALLERY: &[(i64, &[HeadPart])] = &[
+    // 1 — narrow open V (unfilled 2-prong), len 1.
+    (1, &[sp("M-1,-1 L0,0 L-1,1")]),
+    // 2 — small filled triangle, len 1.
+    (2, &[fp("M0,0 L-1,-1 L-1,1 Z")]),
+    // 3 — open wide V, len 2.
+    (3, &[sp("M-2,-1 L0,0 L-2,1")]),
+    // 4 — the classic filled triangle (the corpus default), len 2.
+    (4, &[fp("M0,0 L-2,-1 L-2,1 Z")]),
+    // 5 — filled triangle, concave circular rear (the stealth-dart
+    // family; the native SVG alias 8→5 and the print agree).
+    (
+        5,
+        &[fp("M0,0 L-2,-1 C-1.68524,-0.37049 -1.68524,0.37049 -2,1 Z")],
+    ),
+    // 6 — filled triangle with a convex rear arc centered at the
+    // tip: reads "long" next to 4's flat base.
+    (
+        6,
+        &[fp("M0,0 L-2,-1 C-2.31476,-0.37049 -2.31476,0.37049 -2,1 Z")],
+    ),
+    // 7 — open fork (curved barbs).
+    (7, &[sp("M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1")]),
+    // 8 — the stealth dart: the concave-rear dart (the 5 glyph).
+    (
+        8,
+        &[fp("M0,0 L-2,-1 C-1.68524,-0.37049 -1.68524,0.37049 -2,1 Z")],
+    ),
+    // 9 — the slanted dimension tick: 45° through the tip ("/").
+    (9, &[sp("M1,-1 L-1,1")]),
+    // 10 — the filled circle, centered ON the endpoint.
+    (10, &[dot(0.0, 0.0, 0.75)]),
+    // 11 — the filled square, centered ON the endpoint.
+    (11, &[fp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")]),
+    // 12 — ONE wide open V (len 3; the old "double chevron" label
+    // was a print misread).
+    (12, &[sp("M-3,-1 L0,0 L-3,1")]),
+    // 13 — single filled triangle, plain base, len 3 (NOT a double —
+    // the #169 report).
+    (13, &[fp("M0,0 L-3,-1 L-3,1 Z")]),
+    // 14–18 — the open-head set: CLOSED triangle outlines whose
+    // interiors stay hollow (the shaft trims at the base).
+    (14, &[sp("M0,0 L-3,-1 L-3,1 Z")]),
+    (15, &[sp("M0,0 L-1,-1 L-1,1 Z")]),
+    (16, &[sp("M0,0 L-2,-1 L-2,1 Z")]),
+    // 17 — open triangle, concave rear (cubic through ±0.33).
+    (17, &[sp("M0,0 L-2,-1 C-1.55,-0.33 -1.55,0.33 -2,1 Z")]),
+    // 18 — open triangle, convex rear arc (centered at the tip).
+    (
+        18,
+        &[sp("M0,0 L-2,-1 C-2.31476,-0.37049 -2.31476,0.37049 -2,1 Z")],
+    ),
+    // 19 — open barbed head: curved barbs closed by a concave rear.
+    (
+        19,
+        &[sp(
+            "M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1 C-1.55,0.3 -1.55,-0.3 -2,-1 Z",
+        )],
+    ),
+    // 20 — the open ring, centered ON the endpoint.
+    (20, &[ring(0.0, 0.0, 0.75)]),
+    // 21 — the open square, centered ON the endpoint.
+    (21, &[sp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")]),
+    // 22 — the open diamond, 4.5 × 2.25.
+    (22, &[sp("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z")]),
+    // 23 — single slanted tick: 45° behind the tip ("\"), shaft
+    // through.
+    (23, &[sp("M-2.9,-1 L-0.9,1")]),
+    // 24–26 — perpendicular ticks at 1.5 + 0.75·i behind the tip.
+    (24, &[sp("M-1.5,-0.75 L-1.5,0.75")]),
+    (
+        25,
+        &[sp("M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75")],
+    ),
+    (
+        26,
+        &[sp(
+            "M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75",
+        )],
+    ),
     // 27 — the three-pronged open fork (crow's foot).
-    (27, &[sp("M0,0 L8,5 L0,10 M8,5 L1,5")], 8.0, 8.0),
+    (27, &[sp("M0,-0.75 L-1.5,0 L0,0.75")]),
     // 28 — crow's-foot fork + perpendicular tick behind it.
-    (
-        28,
-        &[sp("M2,0 L10,5 L2,10 M10,5 L3,5"), sp("M0.5,-1 L0.5,11")],
-        10.0,
-        10.0,
-    ),
-    // 29 — open fork barbs, then the open ring at the tip.
-    (
-        29,
-        &[sp("M0,0 L4,5 L0,10"), ring(7.2, 5.0, 2.8)],
-        10.0,
-        10.0,
-    ),
-    // 30 — open ring, then a perpendicular tick toward the tip.
-    (30, &[ring(3.2, 5.0, 3.0), sp("M8,-1 L8,11")], 11.0, 11.0),
-    // 31 — perpendicular tick, then the open ring at the tip.
-    (
-        31,
-        &[sp("M1.5,-1 L1.5,11"), ring(7.2, 5.0, 3.2)],
-        10.8,
-        10.8,
-    ),
-    // 32 — double tick + open ring.
+    (28, &[sp("M0,-0.75 L-1.5,0 L0,0.75"), sp("M-2,-0.75 L-2,0.75")]),
+    // 29 — crow's-foot fork, then the open ring at 2.25.
+    (29, &[sp("M0,-0.75 L-1.5,0 L0,0.75"), ring(-2.25, 0.0, 0.75)]),
+    // 30 — open ring at 2.25, then a tick toward the tip.
+    (30, &[ring(-2.25, 0.0, 0.75), sp("M-0.75,-0.75 L-0.75,0.75")]),
+    // 31–33 — 1–3 ticks behind an open ring at the tip.
+    (31, &[sp("M-2.25,-0.75 L-2.25,0.75"), ring(-0.75, 0.0, 0.75)]),
     (
         32,
-        &[sp("M1,-1 L1,11 M3.5,-1 L3.5,11"), ring(7.6, 5.0, 3.0)],
-        10.8,
-        10.8,
+        &[
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75"),
+            ring(-0.75, 0.0, 0.75),
+        ],
     ),
-    // 33 — triple tick + open ring.
     (
         33,
         &[
-            sp("M0.5,-1 L0.5,11 M2.8,-1 L2.8,11 M5,-1 L5,11"),
-            ring(8.2, 5.0, 2.9),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75 M-3.75,-0.75 L-3.75,0.75"),
+            ring(-0.75, 0.0, 0.75),
         ],
-        11.3,
-        11.3,
     ),
-    // 34 — open diamond, then the open ring at the tip.
+    // 34 — open diamond (1.5–6) + open ring at the tip.
     (
         34,
-        &[sp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), ring(9.6, 5.0, 2.4)],
-        12.0,
-        12.0,
+        &[
+            ring(-0.75, 0.0, 0.75),
+            sp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
+        ],
     ),
-    // 35 — perpendicular tick + filled dot.
-    (35, &[sp("M1.5,-1 L1.5,11"), dot(7.4, 5.0, 3.4)], 11.0, 11.0),
-    // 36 — double tick + filled dot.
+    // 35–37 — 1–3 ticks behind a filled 0.825-radius dot at the tip.
+    (35, &[dot(-0.75, 0.0, 0.825), sp("M-2.25,-0.75 L-2.25,0.75")]),
     (
         36,
-        &[sp("M0.8,-1 L0.8,11 M3.2,-1 L3.2,11"), dot(7.8, 5.0, 3.3)],
-        11.3,
-        11.3,
+        &[
+            dot(-0.75, 0.0, 0.825),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75"),
+        ],
     ),
-    // 37 — triple tick + filled dot.
     (
         37,
         &[
-            sp("M0.4,-1 L0.4,11 M2.6,-1 L2.6,11 M4.8,-1 L4.8,11"),
-            dot(8.4, 5.0, 3.2),
+            dot(-0.75, 0.0, 0.825),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75 M-3.75,-0.75 L-3.75,0.75"),
         ],
-        11.8,
-        11.8,
     ),
-    // 38 — filled diamond, then the filled dot at the tip.
+    // 38 — filled diamond (1.5–6) + the filled dot.
     (
         38,
-        &[fp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), dot(9.6, 5.0, 2.6)],
-        12.2,
-        12.2,
+        &[
+            dot(-0.75, 0.0, 0.825),
+            fp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
+        ],
     ),
     // 39 — double filled triangle (two solid heads).
-    (
-        39,
-        &[fp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
-        10.0,
-        10.0,
-    ),
+    (39, &[fp("M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z")]),
     // 40 — double open triangle (two hollow heads).
+    (40, &[sp("M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z")]),
+    // 41 — the open ring (front edge at the tip).
+    (41, &[ring(-0.75, 0.0, 0.75)]),
+    // 42 — the filled dot (front edge at the tip).
+    (42, &[dot(-0.75, 0.0, 0.75)]),
+    // 43 — the open double chevron (two 2-unit V's, len 4; each V is
+    // corner→apex→corner so no base edge closes it).
     (
-        40,
-        &[sp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
-        10.0,
-        10.0,
+        43,
+        &[sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1")],
     ),
-    // 41 — the open ring (line ends at it).
-    (41, &[ring(4.3, 5.0, 4.0)], 8.5, 8.5),
-    // 42 — the filled dot (line ends at it).
-    (42, &[dot(4.5, 5.0, 4.5)], 9.0, 9.0),
-    // 43 — open double chevron, large (shaft passes through).
-    (43, &[sp("M0,0 L7,5 L0,10 M7,0 L14,5 L7,10")], 14.0, 14.0),
-    // 44 — perpendicular tick + open chevron at the tip.
-    (
-        44,
-        &[sp("M1,-1 L1,11"), sp("M3.5,0 L10,5 L3.5,10")],
-        10.0,
-        10.0,
-    ),
-    // 45 — perpendicular tick + open double chevron.
+    // 44 — perpendicular tick behind a single open V.
+    (44, &[sp("M-2,-1 L0,0 L-2,1"), sp("M-3,-0.75 L-3,0.75")]),
+    // 45 — perpendicular tick behind the double chevron.
     (
         45,
         &[
-            sp("M0.8,-1 L0.8,11"),
-            sp("M3.2,0 L6.8,5 L3.2,10 M6.8,0 L10.4,5 L6.8,10"),
+            sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1"),
+            sp("M-5,-0.75 L-5,0.75"),
         ],
-        10.4,
-        10.4,
     ),
 ];
 
-/// The unmapped-value fallback: the filled triangle.
-const FALLBACK_TRIANGLE: &[HeadPart] = &[fp("M0,0 L10,5 L0,10 z")];
-fn arrow_spec(kind: i64) -> Option<(&'static [HeadPart], f64, f64)> {
-    // 46–50 — no head: Visio draws bare ends past the gallery.
+/// The unmapped-value fallback: the classic filled triangle.
+const FALLBACK_TRIANGLE: &[HeadPart] = &[fp("M0,0 L-2,-1 L-2,1 Z")];
+
+/// The gallery lookup: `None` = no head (values 46–50 print bare
+/// line ends); unmapped values fall back to the filled triangle.
+fn arrow_spec(kind: i64) -> Option<&'static [HeadPart]> {
     if (46..=50).contains(&kind) {
         return None;
     }
-    for (k, parts, tip, w) in GALLERY.iter().copied() {
-        if k == kind {
-            return Some((parts, tip, w));
+    Some(
+        GALLERY
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or(FALLBACK_TRIANGLE, |(_, parts)| *parts),
+    )
+}
+
+/// EndArrowSize 0–6, in points: the physical head unit is
+/// LineWeight + C[size] — witnessed across all 45 head types and
+/// sizes 0–6, independent of export scale, group resize, drawing
+/// scale and dash pattern (#185).
+const ARROW_SIZE_PT: [f64; 7] = [1.44, 1.8, 2.52, 3.24, 3.96, 9.0, 18.0];
+
+/// Per-kind shaft setback in head units (#185): how far back from the
+/// line end the shaft stops. Closed/hollow heads trim to their rear
+/// (the measured values ARE the glyph rear extents); pass-through
+/// heads — the open V/barbs (1, 3, 7), the ticks (9, 23–26), the
+/// crow's-foot set (27/28), the chevrons (12, 43–45) — ride 0 and the
+/// shaft runs beneath them to the tip. Filled heads trim under their
+/// own fill, so the value only has to reach covered ground.
+fn arrow_setback(kind: i64) -> f64 {
+    match kind {
+        2 | 15 => 1.0,
+        4 | 16 => 2.0,
+        5 | 8 | 17 => 1.75,
+        6 | 18 => 2.25,
+        10 | 11 | 20 | 21 | 42 => 0.75,
+        13 | 14 | 29 | 30 => 3.0,
+        19 => 1.65,
+        22 => 4.5,
+        31..=33 | 35..=37 | 41 => 1.5,
+        34 | 38 => 6.0,
+        39 | 40 => 4.0,
+        _ => 0.0,
+    }
+}
+
+/// The BEGIN head's setback: the end setback minus max(1% of it,
+/// 0.36 pt) — Visio's begin end trims marginally less — floored at
+/// zero (#185).
+fn arrow_begin_setback(end_setback: f64) -> f64 {
+    (end_setback - (end_setback * 0.01).max(0.36 / 72.0)).max(0.0)
+}
+
+fn path_command_arity(c: char) -> Option<usize> {
+    match c {
+        'M' | 'L' => Some(2),
+        'Q' => Some(4),
+        'C' => Some(6),
+        'A' => Some(7),
+        _ => None,
+    }
+}
+
+/// Parse emitted path data into (letter, floats) commands; None when
+/// anything deviates from the emitter's strict absolute M/L/Q/C/A
+/// shape (the caller keeps the untrimmed path).
+fn parse_path_commands(d: &str) -> Option<Vec<(char, Vec<f64>)>> {
+    let mut cmds: Vec<(char, Vec<f64>)> = Vec::new();
+    let mut cur: Option<(char, Vec<f64>)> = None;
+    for tok in d.split_whitespace() {
+        let mut chars = tok.chars();
+        let first = chars.next().unwrap_or(' ');
+        if chars.count() == 0 && first.is_ascii_alphabetic() {
+            if let Some((c, f)) = cur.take() {
+                if path_command_arity(c) != Some(f.len()) {
+                    return None;
+                }
+                cmds.push((c, f));
+            }
+            cur = Some((first, Vec::new()));
+        } else {
+            cur.as_mut()?.1.push(tok.parse::<f64>().ok()?);
         }
     }
-    Some((FALLBACK_TRIANGLE, 10.0, 10.0))
+    if let Some((c, f)) = cur.take() {
+        if path_command_arity(c) != Some(f.len()) {
+            return None;
+        }
+        cmds.push((c, f));
+    }
+    Some(cmds)
+}
+
+/// One drawing segment: (letter, params, start, end). `M` resets the
+/// current point without drawing.
+type PathSeg = (char, Vec<f64>, (f64, f64), (f64, f64));
+
+fn path_segments(cmds: &[(char, Vec<f64>)]) -> Option<Vec<PathSeg>> {
+    let mut segs: Vec<PathSeg> = Vec::new();
+    let mut cur: Option<(f64, f64)> = None;
+    for (c, f) in cmds {
+        match c {
+            'M' => cur = Some((f[0], f[1])),
+            'L' | 'Q' | 'C' | 'A' => {
+                let s = cur?;
+                let e = match c {
+                    'Q' => (f[2], f[3]),
+                    'C' => (f[4], f[5]),
+                    'A' => (f[5], f[6]),
+                    _ => (f[0], f[1]),
+                };
+                segs.push((*c, f.clone(), s, e));
+                cur = Some(e);
+            }
+            _ => return None,
+        }
+    }
+    Some(segs)
+}
+
+/// An SVG arc's center-form parameters: (rx, ry, φ rad, θ1, Δθ,
+/// center). `s` is the arc's start point, `f` the full A parameters.
+type ArcGeo = (f64, f64, f64, f64, f64, (f64, f64));
+
+fn arc_geo(f: &[f64], s: (f64, f64)) -> Option<ArcGeo> {
+    let (mut rx, mut ry) = (f[0], f[1]);
+    if rx <= 0.0 || ry <= 0.0 {
+        return None;
+    }
+    let phi = f[2].to_radians();
+    let (sp, cp) = phi.sin_cos();
+    let e = (f[5], f[6]);
+    let (dx2, dy2) = ((s.0 - e.0) / 2.0, (s.1 - e.1) / 2.0);
+    let x1 = cp * dx2 + sp * dy2;
+    let y1 = -sp * dx2 + cp * dy2;
+    let lam = x1 * x1 / (rx * rx) + y1 * y1 / (ry * ry);
+    if lam > 1.0 {
+        let r = lam.sqrt();
+        rx *= r;
+        ry *= r;
+    }
+    let den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
+    if den <= 1e-18 {
+        return None; // coincident endpoints
+    }
+    let num = rx * rx * ry * ry - den;
+    let sign = if f[3] != f[4] { 1.0 } else { -1.0 };
+    let co = sign * (num / den).max(0.0).sqrt();
+    let (cxp, cyp) = (co * rx * y1 / ry, -co * ry * x1 / rx);
+    let center = (
+        cp * cxp - sp * cyp + (s.0 + e.0) / 2.0,
+        sp * cxp + cp * cyp + (s.1 + e.1) / 2.0,
+    );
+    let th1 = ((y1 - cyp) / ry).atan2((x1 - cxp) / rx);
+    let mut dth = ((-y1 - cyp) / ry).atan2((-x1 - cxp) / rx) - th1;
+    if f[4] == 0.0 && dth > 0.0 {
+        dth -= std::f64::consts::TAU;
+    }
+    if f[4] != 0.0 && dth < 0.0 {
+        dth += std::f64::consts::TAU;
+    }
+    Some((rx, ry, phi, th1, dth, center))
+}
+
+/// The point and tangent direction at parameter t ∈ [0, 1] of an arc.
+fn arc_point_tangent(g: &ArcGeo, t: f64) -> ((f64, f64), (f64, f64)) {
+    let (rx, ry, phi, th1, dth, c) = *g;
+    let th = th1 + t * dth;
+    let (st, ct) = th.sin_cos();
+    let (sp, cp) = phi.sin_cos();
+    let p = (
+        c.0 + cp * rx * ct - sp * ry * st,
+        c.1 + sp * rx * ct + cp * ry * st,
+    );
+    let dir = (-cp * rx * st - sp * ry * ct, -sp * rx * st + cp * ry * ct);
+    let dir = if dth < 0.0 { (-dir.0, -dir.1) } else { dir };
+    (p, dir)
+}
+
+/// Chord length of a sample polyline.
+fn polyline_length(samples: &[(f64, f64)]) -> f64 {
+    samples
+        .windows(2)
+        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+        .sum()
+}
+
+/// Polyline approximation of one segment (16 chords) for arc-length
+/// walks.
+fn segment_samples(c: char, f: &[f64], s: (f64, f64)) -> Vec<(f64, f64)> {
+    match c {
+        'L' => vec![s, (f[0], f[1])],
+        'Q' => (0..=16)
+            .map(|i| {
+                let t = i as f64 / 16.0;
+                let mt = 1.0 - t;
+                (
+                    mt * mt * s.0 + 2.0 * mt * t * f[0] + t * t * f[2],
+                    mt * mt * s.1 + 2.0 * mt * t * f[1] + t * t * f[3],
+                )
+            })
+            .collect(),
+        'C' => (0..=16)
+            .map(|i| {
+                let t = i as f64 / 16.0;
+                let mt = 1.0 - t;
+                (
+                    mt * mt * mt * s.0
+                        + 3.0 * mt * mt * t * f[0]
+                        + 3.0 * mt * t * t * f[2]
+                        + t * t * t * f[4],
+                    mt * mt * mt * s.1
+                        + 3.0 * mt * mt * t * f[1]
+                        + 3.0 * mt * t * t * f[3]
+                        + t * t * t * f[5],
+                )
+            })
+            .collect(),
+        'A' => arc_geo(f, s)
+            .map(|g| {
+                (0..=16)
+                    .map(|i| arc_point_tangent(&g, i as f64 / 16.0).0)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![s, (f[5], f[6])]),
+        _ => vec![s, s],
+    }
+}
+
+/// Parameter t for the arc-length `target` along a segment's sample
+/// polyline (exact for lines, sub-chord for curves).
+fn sample_time_at_length(samples: &[(f64, f64)], target: f64) -> f64 {
+    let n = samples.len().saturating_sub(1) as f64;
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for i in 0..samples.len() - 1 {
+        let (a, b) = (samples[i], samples[i + 1]);
+        let l = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if l <= 0.0 {
+            continue;
+        }
+        if acc + l >= target {
+            let frac = ((target - acc) / l).clamp(0.0, 1.0);
+            return (i as f64 + frac) / n;
+        }
+        acc += l;
+    }
+    1.0
+}
+
+fn quad_at(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), t: f64) -> (f64, f64) {
+    let mt = 1.0 - t;
+    (
+        mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0,
+        mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1,
+    )
+}
+
+fn cubic_at(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    t: f64,
+) -> (f64, f64) {
+    let mt = 1.0 - t;
+    (
+        mt * mt * mt * p0.0 + 3.0 * mt * mt * t * p1.0 + 3.0 * mt * t * t * p2.0
+            + t * t * t * p3.0,
+        mt * mt * mt * p0.1 + 3.0 * mt * mt * t * p1.1 + 3.0 * mt * t * t * p2.1
+            + t * t * t * p3.1,
+    )
+}
+
+/// The point at parameter t on one segment (t=0 start, t=1 end).
+fn segment_point(c: char, f: &[f64], s: (f64, f64), t: f64) -> (f64, f64) {
+    match c {
+        'Q' => quad_at(s, (f[0], f[1]), (f[2], f[3]), t),
+        'C' => cubic_at(s, (f[0], f[1]), (f[2], f[3]), (f[4], f[5]), t),
+        'A' => arc_geo(f, s).map_or(s, |g| arc_point_tangent(&g, t).0),
+        _ => (s.0 + (f[0] - s.0) * t, s.1 + (f[1] - s.1) * t),
+    }
+}
+
+/// Quadratic restricted to [t1, t2] → (start, control, end); the
+/// control comes from B'(t1)·(t2−t1)/2.
+fn quad_sub(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    t1: f64,
+    t2: f64,
+) -> ((f64, f64), (f64, f64), (f64, f64)) {
+    let h = t2 - t1;
+    let start = quad_at(p0, p1, p2, t1);
+    let end = quad_at(p0, p1, p2, t2);
+    let d = (
+        (1.0 - t1) * (p1.0 - p0.0) + t1 * (p2.0 - p1.0),
+        (1.0 - t1) * (p1.1 - p0.1) + t1 * (p2.1 - p1.1),
+    );
+    (start, (start.0 + d.0 * h, start.1 + d.1 * h), end)
+}
+
+/// Cubic restricted to [t1, t2] → (start, c1, c2, end); the handles
+/// come from C'(t1)·(t2−t1)/3 and −C'(t2)·(t2−t1)/3.
+type CubicSub = ((f64, f64), (f64, f64), (f64, f64), (f64, f64));
+
+/// One head frame: an anchor point and its direction angle (radians).
+type HeadFrame = ((f64, f64), f64);
+
+/// Cubic restricted to [t1, t2] → (start, c1, c2, end); the handles
+/// come from C'(t1)·(t2−t1)/3 and −C'(t2)·(t2−t1)/3.
+fn cubic_sub(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    t1: f64,
+    t2: f64,
+) -> CubicSub {
+    let h = t2 - t1;
+    let start = cubic_at(p0, p1, p2, p3, t1);
+    let end = cubic_at(p0, p1, p2, p3, t2);
+    let deriv = |t: f64| {
+        let mt = 1.0 - t;
+        (
+            mt * mt * (p1.0 - p0.0) + 2.0 * mt * t * (p2.0 - p1.0) + t * t * (p3.0 - p2.0),
+            mt * mt * (p1.1 - p0.1) + 2.0 * mt * t * (p2.1 - p1.1) + t * t * (p3.1 - p2.1),
+        )
+    };
+    let d1 = deriv(t1);
+    let d2 = deriv(t2);
+    (
+        start,
+        (start.0 + d1.0 * h, start.1 + d1.1 * h),
+        (end.0 - d2.0 * h, end.1 - d2.1 * h),
+        end,
+    )
+}
+
+/// Trim one open contour of an emitted path by physical lengths at
+/// each end (#185): `begin` off the start, `end` off the end, in user
+/// units. Only a single open contour trims — closed loops and
+/// multi-subpath data come back untouched (Visio gives them no
+/// arrowheads either), and a cut that would consume the whole path
+/// keeps the original. Curves split exactly (Blossom
+/// re-parameterization for Q/C, the angular subrange for A); the cut
+/// parameter comes from a 16-sample chord walk, exact for lines.
+fn trim_path(d: &str, begin: f64, end: f64) -> String {
+    let keep = |d: &str| d.to_string();
+    let Some(cmds) = parse_path_commands(d) else {
+        return keep(d);
+    };
+    let Some(segs) = path_segments(&cmds) else {
+        return keep(d);
+    };
+    if segs.is_empty() || cmds.iter().filter(|(c, _)| *c == 'M').count() != 1 {
+        return keep(d);
+    }
+    let start = segs[0].2;
+    let last_end = segs[segs.len() - 1].3;
+    if ((last_end.0 - start.0).powi(2) + (last_end.1 - start.1).powi(2)).sqrt() < 1e-9 {
+        return keep(d); // closed loop
+    }
+    let polys: Vec<Vec<(f64, f64)>> = segs
+        .iter()
+        .map(|(c, f, s, _)| segment_samples(*c, f, *s))
+        .collect();
+    let lens: Vec<f64> = polys.iter().map(|p| polyline_length(p)).collect();
+    let total: f64 = lens.iter().sum();
+    let cut_end = total - end;
+    if cut_end <= begin + 1e-9 {
+        return keep(d); // nothing remains
+    }
+    let fmt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, p.1);
+    let mut out_d = String::new();
+    let mut offset = 0.0;
+    for (i, (c, f, s, _)) in segs.iter().enumerate() {
+        let len = lens[i];
+        let seg_start = offset;
+        offset += len;
+        let a = begin.max(seg_start);
+        let b = cut_end.min(offset);
+        if b <= a + 1e-12 {
+            continue;
+        }
+        let poly = &polys[i];
+        let t1 = sample_time_at_length(poly, a - seg_start);
+        let t2 = sample_time_at_length(poly, b - seg_start);
+        if out_d.is_empty() {
+            out_d = format!("M {}", fmt(segment_point(*c, f, *s, t1)));
+        }
+        match c {
+            'L' => {
+                out_d += &format!(
+                    " L {}",
+                    fmt((s.0 + (f[0] - s.0) * t2, s.1 + (f[1] - s.1) * t2))
+                );
+            }
+            'Q' => {
+                let (_, p1, p2) = quad_sub(*s, (f[0], f[1]), (f[2], f[3]), t1, t2);
+                out_d += &format!(" Q {} {}", fmt(p1), fmt(p2));
+            }
+            'C' => {
+                let (_, p1, p2, p3) =
+                    cubic_sub(*s, (f[0], f[1]), (f[2], f[3]), (f[4], f[5]), t1, t2);
+                out_d += &format!(" C {} {} {}", fmt(p1), fmt(p2), fmt(p3));
+            }
+            'A' => {
+                if let Some(g) = arc_geo(f, *s) {
+                    let (p, _) = arc_point_tangent(&g, t2);
+                    let large = ((t2 - t1) * g.4.abs() > std::f64::consts::PI) as u8;
+                    out_d += &format!(
+                        " A {:.5} {:.5} {:.4} {} {} {}",
+                        g.0,
+                        g.1,
+                        f[2],
+                        large,
+                        f[4] as u8,
+                        fmt(p)
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if out_d.is_empty() {
+        return keep(d);
+    }
+    out_d
+}
+
+/// A segment's start tangent (the true curve tangent where the
+/// segment has one).
+fn seg_start_tangent(c: char, f: &[f64], s: (f64, f64)) -> Option<(f64, f64)> {
+    let d = match c {
+        'A' => arc_geo(f, s).map(|g| arc_point_tangent(&g, 0.0).1)?,
+        _ => (f[0] - s.0, f[1] - s.1),
+    };
+    (d.0 * d.0 + d.1 * d.1 > 1e-18).then_some(d)
+}
+
+/// A segment's end tangent.
+fn seg_end_tangent(c: char, f: &[f64], s: (f64, f64)) -> Option<(f64, f64)> {
+    let d = match c {
+        'L' => (f[0] - s.0, f[1] - s.1),
+        'Q' => (f[2] - f[0], f[3] - f[1]),
+        'C' => (f[4] - f[2], f[5] - f[3]),
+        'A' => arc_geo(f, s).map(|g| arc_point_tangent(&g, 1.0).1)?,
+        _ => return None,
+    };
+    (d.0 * d.0 + d.1 * d.1 > 1e-18).then_some(d)
+}
+
+/// The path's two head frames: the BEGIN tip with its OUTWARD
+/// direction (the reversed start tangent) and the END tip with the
+/// travel direction. True segment tangents where available, the
+/// chord otherwise; needs two distinct points. `M`-only or malformed
+/// data returns None (the caller skips the heads but keeps the
+/// shaft).
+fn path_frames(d: &str) -> Option<(HeadFrame, HeadFrame)> {
+    let cmds = parse_path_commands(d)?;
+    let segs = path_segments(&cmds)?;
+    let eps = 1e-12;
+    let first = segs.first()?;
+    let last = segs.last()?;
+    let begin = seg_start_tangent(first.0, &first.1, first.2)
+        .or_else(|| {
+            let (dx, dy) = (first.3 .0 - first.2 .0, first.3 .1 - first.2 .1);
+            (dx * dx + dy * dy > eps).then_some((dx, dy))
+        })
+        .map(|d| (first.2, (-d.1).atan2(-d.0)))?;
+    let end = seg_end_tangent(last.0, &last.1, last.2)
+        .or_else(|| {
+            let (dx, dy) = (last.3 .0 - last.2 .0, last.3 .1 - last.2 .1);
+            (dx * dx + dy * dy > eps).then_some((dx, dy))
+        })
+        .map(|d| (last.3, d.1.atan2(d.0)))?;
+    Some((begin, end))
+}
+
+/// Emit one arrow head at `tip` facing along `dir` (radians; the +x
+/// of the head frame): a translate·rotate·scale group of the
+/// unit-space gallery parts. Open parts stroke with the head pen
+/// (the line weight, or the 0.75 pt zero-weight nominal) with round
+/// caps/joins like the print; filled parts fill only — the print
+/// shows no pen inflation on filled glyphs (#185).
+fn emit_arrow_head(
+    out: &mut String,
+    kind: i64,
+    sz: f64,
+    weight: f64,
+    color: &str,
+    tip: (f64, f64),
+    dir: f64,
+) {
+    let i = (sz.round() as i64).clamp(0, 6) as usize;
+    let unit = weight + ARROW_SIZE_PT[i] / 72.0;
+    if !unit.is_finite() || unit <= 0.0 {
+        return;
+    }
+    let Some(parts) = arrow_spec(kind) else {
+        return;
+    };
+    // The group scales unit-space geometry by `unit`; open strokes
+    // divide the pen back out so the ink is `weight` wide on paper.
+    let pen = weight / unit;
+    let mut body = String::new();
+    for part in parts {
+        if let Some((cx, cy, r)) = part.circle {
+            body += &if part.filled {
+                format!(r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}"/>"#)
+            } else {
+                format!(
+                    r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{pen:.5}"/>"#
+                )
+            };
+        } else if part.filled {
+            body += &format!(r#"<path d="{}" fill="{color}"/>"#, part.d);
+        } else {
+            body += &format!(
+                r#"<path d="{}" fill="none" stroke="{color}" stroke-width="{pen:.5}" stroke-linecap="round" stroke-linejoin="round"/>"#,
+                part.d
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        r#"<g class="dc-ah" transform="translate({:.5} {:.5}) rotate({:.4}) scale({:.5})">{}</g>"#,
+        tip.0 + 0.0, // normalize -0.0
+        tip.1 + 0.0,
+        dir.to_degrees() + 0.0,
+        unit,
+        body
+    );
 }
 /// Tiny FNV-1a for stable marker-id hashing (no external deps).
 fn fnv(s: &str) -> u64 {
@@ -4264,11 +4734,12 @@ mod tests {
         s
     }
 
-    /// #72 + #199: arrowheads render per value — each gallery entry
-    /// emits its own marker matching the 600 dpi Visio print (the
-    /// 2026-11-06 re-read: open heads 14–22 stroke, the dimension set
-    /// composes ticks with rings/dots), the head scales with
-    /// LineWeight (markerUnits=strokeWidth), and 0 emits none.
+    /// #72 + #199 + #185: arrowheads render per value at their
+    /// measured physical sizes — each gallery entry emits its own
+    /// head group matching the 600 dpi Visio print (open heads 14–22
+    /// stroke, the dimension set composes ticks with rings/dots, 12
+    /// is the single wide V, 43 the double chevron), the head scales
+    /// with the LineWeight + C[size] unit law, and 0/46–50 emit none.
     #[test]
     fn arrow_heads_render_per_value_and_scale() {
         let doc = Document::default();
@@ -4307,55 +4778,63 @@ mod tests {
             render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
             out
         };
-        // 0 = no marker at all.
+        // 0 = no head at all.
         let none = line_with(&[("EndArrow", "0")]);
-        assert!(!none.contains("marker"), "value 0 emits no head: {none}");
-        // Each gallery value emits a marker with its own kind id and
-        // the expected body shape (#169 + the #199 re-read: pinned to
-        // the Visio print's glyphs).
+        assert!(!none.contains("dc-ah"), "value 0 emits no head: {none}");
+        // Each gallery value emits a head group with its own unit-space
+        // shape (#169 + #199 + the #185 print re-measure).
         for (v, needle) in [
-            (1, "M0,1 L7,5 L0,9"),
-            (2, "M0,1.5 L8,5 L0,8.5 z"),
-            (3, "M0,0 L9,5 L0,10"),
-            (4, "M0,0 L10,5 L0,10 z"),
-            (5, "Q4,5"),
-            (6, "M0,1 L12,5 L0,9 z"),
-            (7, "Q2.5,3.5 9,5"),
-            (8, "L3,5 z"),
-            (9, "M2,-1 L6,9"),
-            (11, "M2,0 L10,0 L10,10 L2,10 z"),
-            (12, "M6,0 L12,5 L6,10"),
-            (13, "M0,0 L10,5 L0,10 z"),
-            (14, "M0,0 L10,5 L0,10"),
-            (15, "M0,1.5 L7.5,5 L0,8.5"),
-            (22, "M0,5 L5,0 L10,5 L5,10 z"),
-            (25, "M2.5,-1 L2.5,11 M6,-1 L6,11"),
-            (27, "M0,0 L8,5 L0,10 M8,5 L1,5"),
-            (35, "M1.5,-1 L1.5,11"),
-            (40, "M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z"),
-            (43, "M0,0 L7,5 L0,10 M7,0 L14,5 L7,10"),
+            (1, "M-1,-1 L0,0 L-1,1"),
+            (2, "M0,0 L-1,-1 L-1,1 Z"),
+            (3, "M-2,-1 L0,0 L-2,1"),
+            (4, "M0,0 L-2,-1 L-2,1 Z"),
+            (5, "C-1.68524,-0.37049"),
+            (6, "C-2.31476,-0.37049"),
+            (9, "M1,-1 L-1,1"),
+            (11, "M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z"),
+            (12, "M-3,-1 L0,0 L-3,1"),
+            (13, "M0,0 L-3,-1 L-3,1 Z"),
+            (14, "M0,0 L-3,-1 L-3,1 Z"),
+            (15, "M0,0 L-1,-1 L-1,1 Z"),
+            (22, "M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z"),
+            (25, "M-2.25,-0.75 L-2.25,0.75"),
+            (27, "M0,-0.75 L-1.5,0 L0,0.75"),
+            (40, "M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z"),
+            (43, "M-4,-1 L-2,0 L-4,1"),
+            (45, "M-5,-0.75 L-5,0.75"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(
-                out.contains("dc-ahek"),
-                "value {v} emits a kind-tagged marker: {out}"
+                out.contains("dc-ah"),
+                "value {v} emits a head group: {out}"
             );
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
-        // The dots/rings are circle elements (10 filled, 20/41 rings).
-        for (v, ring) in [(10i64, false), (20, true), (41, true)] {
+        // The dots/rings are circle elements (10/42 filled, 20/41
+        // rings; the 35–37 dots carry the measured 0.825 radius).
+        for (v, ring) in [(10i64, false), (20, true), (41, true), (42, false)] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(out.contains("<circle"), "value {v} is a circle: {out}");
-            // Rings stroke unfilled; the dot fills. (The shape's own
-            // white path fill means the marker part decides it.)
-            let head = out.split("<marker").nth(1).expect("marker def");
+            let head = out.split(r#"class="dc-ah""#).nth(1).expect("head group");
             assert_eq!(head.contains("fill=\"none\""), ring, "value {v}: {out}");
         }
+        let dot35 = line_with(&[("EndArrow", "35")]);
+        assert!(
+            dot35.contains(r#"r="0.825""#) && dot35.contains("M-2.25,-0.75 L-2.25,0.75"),
+            "value 35 composes tick + 0.825 dot: {dot35}"
+        );
+        // 8 shares the stealth-dart glyph with 5 (the native SVG alias;
+        // the print's concave rear agrees).
+        let a5 = line_with(&[("EndArrow", "5")]);
+        let a8 = line_with(&[("EndArrow", "8")]);
+        let d5 = a5.split(r#"class="dc-ah""#).nth(1).expect("5");
+        let d8 = a8.split(r#"class="dc-ah""#).nth(1).expect("8");
+        assert_eq!(d5, d8, "8 renders the 5 glyph");
         // #169 regression: 13 is a SINGLE head — one closed triangle —
         // and the other filled singles (2, 4) never stack.
         for v in [2i64, 4, 13] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            let closes = out.matches(" z").count();
+            let closes = out.matches(" Z").count();
             assert!(closes <= 1, "value {v} must not stack triangles: {out}");
         }
         // #199: the open heads 14–22 stroke (fill="none"), never fill;
@@ -4368,34 +4847,59 @@ mod tests {
             );
         }
         let d39 = line_with(&[("EndArrow", "39")]);
-        assert_eq!(d39.matches(" z").count(), 2, "39 stacks two: {d39}");
+        assert_eq!(d39.matches(" Z").count(), 2, "39 stacks two: {d39}");
         let d40 = line_with(&[("EndArrow", "40")]);
-        assert_eq!(d40.matches(" z").count(), 2, "40 stacks two: {d40}");
+        assert_eq!(d40.matches(" Z").count(), 2, "40 stacks two: {d40}");
         assert!(d40.contains("fill=\"none\""), "40 is the open double");
         // #158: past the gallery, Visio draws a bare end (fixture
         // values 46–50 print no head).
         for v in 46..=50i64 {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            assert!(!out.contains("marker"), "value {v} emits no head: {out}");
+            assert!(!out.contains("dc-ah"), "value {v} emits no head: {out}");
         }
-        // 35 is the dimension composite: tick + filled dot.
-        let dbl = line_with(&[("EndArrow", "35")]);
+        // The unit law (#185): the head scales by LineWeight + C[size]
+        // — size 1 (C=1.8 pt) at a 0.05 in pen gives 0.075 in.
+        let heavy = line_with(&[
+            ("EndArrow", "1"),
+            ("EndArrowSize", "1"),
+            ("LineWeight", "0.05"),
+        ]);
         assert!(
-            dbl.contains("M1.5,-1 L1.5,11") && dbl.contains("<circle"),
-            "value 35 composes tick + dot: {dbl}"
+            heavy.contains("scale(0.07500)"),
+            "the head rides LineWeight + C[size]: {heavy}"
         );
-        // Weight scaling: the head rides stroke width.
-        let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
-        assert!(
-            heavy.contains("markerUnits=\"strokeWidth\""),
-            "the head rides stroke width: {heavy}"
-        );
-        // Begin markers mirror: the begin open V faces -x.
+        // Begin + end heads face outward/along the travel: the
+        // diagonal runs to (1, -1) in the y-down frame, so the end
+        // head points at -45° and the begin head outward at 135°.
         let both = line_with(&[("BeginArrow", "1"), ("EndArrow", "1")]);
-        assert!(both.contains("dc-ahbk"), "the begin head carries its id");
         assert!(
-            both.contains("M7,1 L0,5 L7,9"),
-            "the begin V mirrors: {both}"
+            both.contains("rotate(-45.0000)"),
+            "end head along the travel: {both}"
+        );
+        assert!(
+            both.contains("rotate(135.0000)"),
+            "begin head faces outward: {both}"
+        );
+        // The shaft trims at the head's rear (setback 2 × unit for the
+        // classic triangle), the head anchoring at the ORIGINAL end.
+        let unit = 0.75 / 72.0 + 2.52 / 72.0;
+        let t = (2.0f64.sqrt() - 2.0 * unit) / 2.0f64.sqrt();
+        let trimmed = line_with(&[("EndArrow", "4")]);
+        assert!(
+            trimmed.contains(&format!("L {:.5} -{:.5}", t, t)),
+            "the shaft stops at the setback: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("translate(1.00000"),
+            "the head keeps the original endpoint: {trimmed}"
+        );
+        // The begin setback is the end setback minus max(1%, 0.36 pt).
+        let both4 = line_with(&[("BeginArrow", "4"), ("EndArrow", "4")]);
+        let begin_setback = 2.0 * unit - (2.0 * unit * 0.01).max(0.36 / 72.0);
+        let bt = begin_setback / 2.0f64.sqrt();
+        assert!(
+            both4.contains(&format!("M {:.5} -{:.5}", bt, bt)),
+            "the begin trim is the smaller one: {both4}"
         );
     }
 
@@ -6020,15 +6524,17 @@ mod tests {
         assert!(skipped.contains("<g transform"), "geometry keeps rendering");
     }
 
-    /// #199: the gallery matches the 600 dpi Visio print (the 2026-11-06
-    /// re-read in Analysis/arrow-gallery-visio2016.md) — the open-head
-    /// set 14–22 strokes instead of filling, the dimension set composes
-    /// ticks with rings/dots, and the bare ends 46–50 have no head.
+    /// #199 + #185: the gallery matches the 600 dpi Visio print (the
+    /// authoritative oracle in Analysis/arrow-gallery-visio2016.md) —
+    /// the open-head set 14–22 strokes instead of filling, the
+    /// dimension set composes ticks with rings/dots, 12 is the single
+    /// wide V while 43 is the double chevron, the rear arcs of
+    /// 5/6/8/18 are circular, and the bare ends 46–50 have no head.
     #[test]
     fn arrow_gallery_matches_the_visio_print() {
         // The open heads 14–22: stroked paths, never filled.
         for kind in [14, 15, 16, 17, 18, 19, 20, 21, 22] {
-            let Some((parts, _, _)) = arrow_spec(kind) else {
+            let Some(parts) = arrow_spec(kind) else {
                 panic!("arrow {kind} should exist");
             };
             assert!(
@@ -6036,41 +6542,67 @@ mod tests {
                 "arrow {kind} is an open head"
             );
         }
-        // 22 is the stroked diamond.
-        let (parts, _, _) = arrow_spec(22).unwrap();
-        assert!(parts[0].d.contains("L5,0 L10,5"), "diamond profile");
+        // 22 is the stroked diamond (4.5 × 2.25 units).
+        let parts = arrow_spec(22).unwrap();
+        assert!(parts[0].d.contains("L-2.25,-1.125 L-4.5,0"), "diamond profile");
+        // 12 is ONE wide open V; 43 is the double chevron (the print
+        // correction — the old table had the two swapped up).
+        let v12 = arrow_spec(12).unwrap();
+        assert_eq!(v12[0].d, "M-3,-1 L0,0 L-3,1", "12 is the single wide V");
+        let v43 = arrow_spec(43).unwrap();
+        assert_eq!(v43[0].d.matches('M').count(), 2, "43 is the double chevron");
+        // The 5/6/8/18 rears are circular arcs (exact cubic handles);
+        // 5/8 concave, 6/18 convex.
+        for kind in [5, 8, 6, 18] {
+            let parts = arrow_spec(kind).unwrap();
+            assert!(
+                parts.iter().all(|p| p.d.contains('C')),
+                "arrow {kind} carries the circular rear arc"
+            );
+        }
+        let concave = arrow_spec(5).unwrap()[0].d;
+        let convex = arrow_spec(6).unwrap()[0].d;
+        assert!(concave.contains("C-1.68524"), "5 bows toward the tip");
+        assert!(convex.contains("C-2.31476"), "6 bows away from the tip");
         // 39/40: double triangles — filled vs stroked.
-        let (filled, _, _) = arrow_spec(39).unwrap();
+        let filled = arrow_spec(39).unwrap();
         assert!(filled.iter().all(|p| p.filled));
         assert_eq!(filled[0].d.matches('M').count(), 2, "two heads");
-        let (open, _, _) = arrow_spec(40).unwrap();
+        let open = arrow_spec(40).unwrap();
         assert!(open.iter().all(|p| !p.filled));
         // 20/41: rings; 42: a filled dot.
         for kind in [20, 41] {
-            let (parts, _, _) = arrow_spec(kind).unwrap();
+            let parts = arrow_spec(kind).unwrap();
             assert!(parts.iter().all(|p| p.circle.is_some() && !p.filled));
         }
-        let (dot_parts, _, _) = arrow_spec(42).unwrap();
+        let dot_parts = arrow_spec(42).unwrap();
         assert!(dot_parts[0].circle.is_some() && dot_parts[0].filled);
         // 25/26: two / three tick strokes in one part.
-        let (t2, _, _) = arrow_spec(25).unwrap();
+        let t2 = arrow_spec(25).unwrap();
         assert_eq!(t2[0].d.matches('M').count(), 2);
-        let (t3, _, _) = arrow_spec(26).unwrap();
+        let t3 = arrow_spec(26).unwrap();
         assert_eq!(t3[0].d.matches('M').count(), 3);
-        // 35: a tick part plus a filled-dot part (composite).
-        let (comp, _, _) = arrow_spec(35).unwrap();
+        // 35: a filled-dot part plus a tick part (composite).
+        let comp = arrow_spec(35).unwrap();
         assert_eq!(comp.len(), 2);
-        assert!(!comp[0].filled && comp[0].circle.is_none());
-        assert!(comp[1].filled && comp[1].circle.is_some());
+        assert!(comp[0].filled && comp[0].circle.is_some());
+        assert!(!comp[1].filled && comp[1].circle.is_none());
+        // 9 leans "/" through the tip; 23 leans "\" behind it (the
+        // print's two slanted ticks oppose).
+        assert_eq!(arrow_spec(9).unwrap()[0].d, "M1,-1 L-1,1");
+        assert_eq!(arrow_spec(23).unwrap()[0].d, "M-2.9,-1 L-0.9,1");
         // 46–50: bare ends.
         for kind in [46, 47, 48, 49, 50] {
             assert!(arrow_spec(kind).is_none(), "arrow {kind} is bare");
         }
     }
 
-    /// #199 smoke: a line with EndArrow renders the marker from the
-    /// verified table — the open diamond 22 strokes, the classic
-    /// triangle 4 fills, and the bare end 46 carries no marker.
+    /// #199 + #185 smoke: a line with EndArrow renders the head from
+    /// the verified table at its measured size — the open diamond 22
+    /// strokes with its shaft trimmed to the rear, the classic
+    /// triangle 4 fills with the shaft under its fill, the zero-weight
+    /// line uses the C[size] + 0.75 pt unit, and the bare end 46
+    /// carries no head.
     #[test]
     fn arrow_markers_render_from_the_verified_table() {
         let fixture = |kind: i64| -> String {
@@ -6115,20 +6647,94 @@ mod tests {
             doc.pages.push(page);
             render_page(&doc, &doc.pages[0]).expect("render")
         };
-        // The open diamond 22 strokes (fill="none" inside its marker).
+        // The unit at the default 0.75 pt pen, size 2: 0.75/72 +
+        // 2.52/72 = 0.045417 in.
+        let unit = 0.75 / 72.0 + 2.52 / 72.0;
+        // The open diamond 22 strokes, and its 4.5-unit setback trims
+        // the shaft to 2 − 4.5·unit.
         let open22 = fixture(22);
-        assert!(open22.contains("marker-end"), "marker attached: {open22}");
-        assert!(open22.contains("M0,5 L5,0 L10,5 L5,10 z"));
+        assert!(open22.contains("dc-ah"), "head attached: {open22}");
+        assert!(open22.contains("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z"));
         assert!(open22.contains("fill=\"none\" stroke=\"#000000\""));
-        // The classic triangle 4 fills.
-        let classic4 = fixture(4);
+        let cut = 2.0 - 4.5 * unit;
         assert!(
-            classic4.contains("marker-end"),
-            "marker attached: {classic4}"
+            open22.contains(&format!("{cut:.5}")),
+            "the shaft trims at the diamond's rear: {open22}"
         );
-        assert!(classic4.contains("<path d=\"M0,0 L10,5 L0,10 z\" fill=\"#000000\""));
-        // The bare end 46 carries no marker at all.
+        // The classic triangle 4 fills; its 2-unit setback hides under
+        // the fill (trim to 2 − 2·unit).
+        let classic4 = fixture(4);
+        assert!(classic4.contains("dc-ah"), "head attached: {classic4}");
+        assert!(classic4.contains("<path d=\"M0,0 L-2,-1 L-2,1 Z\" fill=\"#000000\"/>"));
+        assert!(classic4.contains(&format!("{:.5}", 2.0 - 2.0 * unit)));
+        // The bare end 46 carries no head at all.
         let bare46 = fixture(46);
-        assert!(!bare46.contains("marker-end"), "bare ends carry no marker");
+        assert!(!bare46.contains("dc-ah"), "bare ends carry no head");
+    }
+
+    /// #185: the shaft trim — a straight line shortens from each end
+    /// by the physical setbacks, closed loops and multi-subpath data
+    /// stay untouched, a cut that would consume the path keeps the
+    /// original, a quadratic splits exactly onto the original curve,
+    /// and an arc sub-span lands on the cut angle.
+    #[test]
+    fn trim_path_cuts_open_contours_only_and_exactly() {
+        // Straight line: symmetric and one-sided trims.
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.1, 0.1),
+            "M 0.10000 0.00000 L 0.90000 0.00000"
+        );
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.0, 0.25),
+            "M 0.00000 0.00000 L 0.75000 0.00000"
+        );
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.25, 0.0),
+            "M 0.25000 0.00000 L 1.00000 0.00000"
+        );
+        // A closed loop never trims.
+        let closed = "M 0 0 L 1 0 L 1 1 L 0 0";
+        assert_eq!(trim_path(closed, 0.1, 0.1), closed);
+        // Multi-subpath data never trims.
+        let multi = "M 0 0 L 1 0 M 2 0 L 3 0";
+        assert_eq!(trim_path(multi, 0.1, 0.1), multi);
+        // A cut that would consume the whole path keeps the original.
+        assert_eq!(trim_path("M 0 0 L 1 0 ", 0.6, 0.6), "M 0 0 L 1 0 ");
+        // Malformed data comes back untouched.
+        assert_eq!(trim_path("garbage", 1.0, 1.0), "garbage");
+        // A quadratic splits exactly: the trimmed sub-curve's endpoint
+        // is the original at the cut parameter, and its own middle is
+        // the original at half the kept span.
+        let q = "M 0 0 Q 1 2 2 0 ";
+        let samples = segment_samples('Q', &[1.0, 2.0, 2.0, 0.0], (0.0, 0.0));
+        let total = polyline_length(&samples);
+        let t_cut = sample_time_at_length(&samples, total - 0.5);
+        let trimmed = trim_path(q, 0.0, 0.5);
+        let expected_end = quad_at((0.0, 0.0), (1.0, 2.0), (2.0, 0.0), t_cut);
+        assert!(
+            trimmed.contains(&format!("{:.5} {:.5}", expected_end.0, expected_end.1)),
+            "the cut lands on the curve: {trimmed}"
+        );
+        let q_part = trimmed.split("Q ").nth(1).expect("sub-quadratic");
+        let nums: Vec<f64> = q_part.split_whitespace().map(|v| v.parse().unwrap()).collect();
+        let got = quad_at((0.0, 0.0), (nums[0], nums[1]), (nums[2], nums[3]), 0.5);
+        let want = quad_at((0.0, 0.0), (1.0, 2.0), (2.0, 0.0), t_cut * 0.5);
+        assert!(
+            (got.0 - want.0).abs() < 1e-4 && (got.1 - want.1).abs() < 1e-4,
+            "the sub-quadratic tracks the original: {got:?} vs {want:?}"
+        );
+        // An arc sub-span: trimming a semicircle by a quarter of its
+        // length lands the endpoint at the 270° point (1, -1), small
+        // arc, sweep preserved.
+        let a = "M 0 0 A 1 1 0 0 1 2 0 ";
+        let trimmed = trim_path(a, 0.0, std::f64::consts::PI / 2.0);
+        let a_part = trimmed.split("A ").nth(1).expect("sub-arc");
+        let nums: Vec<f64> = a_part.split_whitespace().map(|v| v.parse().unwrap()).collect();
+        assert!(
+            (nums[5] - 1.0).abs() < 5e-3 && (nums[6] + 1.0).abs() < 5e-3,
+            "the arc cut lands at the quarter point: {trimmed}"
+        );
+        assert_eq!(nums[3], 0.0, "the quarter arc is not large");
+        assert_eq!(nums[4], 1.0, "the sweep survives the split");
     }
 }

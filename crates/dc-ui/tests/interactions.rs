@@ -3652,8 +3652,8 @@ fn format_pane_edits_cells_for_whole_selection() {
         h.state()
             .debug_page_svg()
             .unwrap_or_default()
-            .contains("dc-ahek"),
-        "the canvas renders the arrowhead marker"
+            .contains("dc-ah"),
+        "the canvas renders the arrowhead head group"
     );
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();
