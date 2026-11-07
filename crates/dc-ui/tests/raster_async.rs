@@ -215,7 +215,11 @@ fn far_off_screen_layers_release_their_textures() {
     // the page bottom (ids 2..=40).
     let path = fixture(tmp.path(), 40, 1);
     let mut h = mount(App::with_doc(&path));
-    pump_until(&mut h, |a| a.debug_layer_count_for_test() == 40, "all 40 layers");
+    pump_until(
+        &mut h,
+        |a| a.debug_layer_count_for_test() == 40,
+        "all 40 layers",
+    );
     let center = h.state().debug_canvas_rect().center();
     h.hover_at(center);
     h.step();
@@ -235,7 +239,10 @@ fn far_off_screen_layers_release_their_textures() {
         h.step();
     }
     let kept = h.state().debug_layer_count_for_test();
-    assert!(kept < 40, "off-screen layers must release their textures (kept {kept}/40)");
+    assert!(
+        kept < 40,
+        "off-screen layers must release their textures (kept {kept}/40)"
+    );
     assert!(
         h.state().debug_layer_tex_id_for_test(1).is_some(),
         "the zoom-focus shape keeps its texture"
@@ -252,5 +259,9 @@ fn far_off_screen_layers_release_their_textures() {
         });
         h.step();
     }
-    pump_until(&mut h, |a| a.debug_layer_count_for_test() == 40, "all 40 layers back");
+    pump_until(
+        &mut h,
+        |a| a.debug_layer_count_for_test() == 40,
+        "all 40 layers back",
+    );
 }

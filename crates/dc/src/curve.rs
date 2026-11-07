@@ -31,10 +31,17 @@ pub struct NurbsFormula {
 /// text is not a NURBS function (e.g. `Themed`) or the argument list
 /// is truncated.
 pub fn parse_nurbs(text: &str) -> Option<NurbsFormula> {
-    let inner = text.trim().strip_prefix("NURBS")?.trim().strip_prefix("(")?;
+    let inner = text
+        .trim()
+        .strip_prefix("NURBS")?
+        .trim()
+        .strip_prefix("(")?;
     let inner = inner.strip_suffix(")")?;
     let mut args: Vec<f64> = Vec::new();
-    for tok in inner.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
+    for tok in inner
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+    {
         args.push(tok.parse::<f64>().ok()?);
     }
     if args.len() < 4 {
@@ -194,9 +201,7 @@ impl SplineData {
         let mut ys: Vec<f64> = (0..=d)
             .map(|i| self.points[k - d + i].1 * self.weights[k - d + i])
             .collect();
-        let mut ws: Vec<f64> = (0..=d)
-            .map(|i| self.weights[k - d + i])
-            .collect();
+        let mut ws: Vec<f64> = (0..=d).map(|i| self.weights[k - d + i]).collect();
         for r in 1..=d {
             for j in (r..=d).rev() {
                 let i = k - d + j;
@@ -223,7 +228,10 @@ impl SplineData {
 /// rewrites the E cell with the moved group coordinates (the data
 /// lives IN the formula, so the customization stays a formula).
 pub fn render_nurbs(f: &NurbsFormula) -> String {
-    let mut s = format!("NURBS({}, {}, {}, {}", f.last_knot, f.degree, f.x_type, f.y_type);
+    let mut s = format!(
+        "NURBS({}, {}, {}, {}",
+        f.last_knot, f.degree, f.x_type, f.y_type
+    );
     for (x, y, k, w) in &f.points {
         s.push_str(&format!(", {},{},{},{}", x, y, k, w));
     }
@@ -373,6 +381,9 @@ mod tests {
         assert_eq!(f.points.len(), 2);
         assert_eq!(f.points[0], (0.4447472312476, 0.96240845000249, 0.0, 1.0));
         assert!(parse_nurbs("Themed").is_none());
-        assert!(parse_nurbs("NURBS(1, 3, 0, 0, 1, 2, 3)").is_none(), "truncated group");
+        assert!(
+            parse_nurbs("NURBS(1, 3, 0, 0, 1, 2, 3)").is_none(),
+            "truncated group"
+        );
     }
 }

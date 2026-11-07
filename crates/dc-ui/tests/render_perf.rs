@@ -41,14 +41,22 @@ fn mount(app: App) -> Harness<'static, App> {
 
 /// Print one scenario's stage deltas as a fixed-width table row block.
 fn report(label: &str, d: &[Stat], wall: std::time::Duration) {
-    let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap_or(0);
+    let frames = d
+        .iter()
+        .find(|s| s.stage == "frame")
+        .map(|s| s.count)
+        .unwrap_or(0);
     println!("-- {label} (frames: {frames}, wall: {wall:.0?})");
     for s in d {
         if s.count == 0 || s.stage == "frame" {
             continue;
         }
         let per_call_us = s.ns as f64 / s.count as f64 / 1000.0;
-        let per_frame_us = if frames > 0 { s.ns as f64 / frames as f64 / 1000.0 } else { 0.0 };
+        let per_frame_us = if frames > 0 {
+            s.ns as f64 / frames as f64 / 1000.0
+        } else {
+            0.0
+        };
         println!(
             "   {:<14} n={:<4} total={:>9.1}ms  per-call={:>8.1}µs  per-frame={:>8.1}µs",
             s.stage,
@@ -105,7 +113,10 @@ fn pump_settled(h: &mut Harness<'_, App>) {
         let d = perf::diff(&before, &perf::snapshot());
         let busy = d.iter().any(|s| s.stage != "frame" && s.count > 0);
         quiet = if busy { 0 } else { quiet + 1 };
-        assert!(frames < 400, "the fill/settle never went quiet ({frames} frames)");
+        assert!(
+            frames < 400,
+            "the fill/settle never went quiet ({frames} frames)"
+        );
     }
 }
 
@@ -138,7 +149,11 @@ fn render_perf_stage_split() {
         for _ in 0..20 {
             h.run();
         }
-        report("idle x20", &perf::diff(&base, &perf::snapshot()), t.elapsed());
+        report(
+            "idle x20",
+            &perf::diff(&base, &perf::snapshot()),
+            t.elapsed(),
+        );
 
         // --- plain shape drag: preview-only move frames + one
         //     mutation frame on release ---
@@ -151,17 +166,28 @@ fn render_perf_stage_split() {
             h.run();
         }
         let mid = perf::snapshot();
-        report("shape drag x8 (preview frames)", &perf::diff(&base, &mid), t.elapsed());
+        report(
+            "shape drag x8 (preview frames)",
+            &perf::diff(&base, &mid),
+            t.elapsed(),
+        );
         let t = Instant::now();
         release(&mut h, center + egui::vec2(32.0, -24.0)); // commits MoveShape
-        report("drag release (mutation frame)", &perf::diff(&mid, &perf::snapshot()), t.elapsed());
+        report(
+            "drag release (mutation frame)",
+            &perf::diff(&mid, &perf::snapshot()),
+            t.elapsed(),
+        );
 
         // --- resize-handle drag: preview-only move frames (the resize
         //     commits once on release, like the move drag — verified
         //     against the handle_drag_done handler), then the commit
         //     frame pays the full-page re-raster ---
         h.state().debug_sel().expect("shape selected after drag");
-        let corners = h.state().debug_sel_corners().expect("handles for selection");
+        let corners = h
+            .state()
+            .debug_sel_corners()
+            .expect("handles for selection");
         press(&mut h, corners[1]); // top-right corner
         let base = perf::snapshot();
         let t = Instant::now();
@@ -170,10 +196,18 @@ fn render_perf_stage_split() {
             h.run();
         }
         let mid = perf::snapshot();
-        report("resize-handle drag x4 (preview frames)", &perf::diff(&base, &mid), t.elapsed());
+        report(
+            "resize-handle drag x4 (preview frames)",
+            &perf::diff(&base, &mid),
+            t.elapsed(),
+        );
         let t = Instant::now();
         release(&mut h, corners[1] + egui::vec2(32.0, -20.0));
-        report("resize commit (mutation frame)", &perf::diff(&mid, &perf::snapshot()), t.elapsed());
+        report(
+            "resize commit (mutation frame)",
+            &perf::diff(&mid, &perf::snapshot()),
+            t.elapsed(),
+        );
 
         // --- zoom bucket: a fresh harness mounted at 200% pays the new
         //     bucket's raster (same work a mid-session bucket change
@@ -187,7 +221,11 @@ fn render_perf_stage_split() {
         for _ in 0..6 {
             h2.run();
         }
-        report("open at 200% zoom (new bucket raster)", &perf::snapshot(), t.elapsed());
+        report(
+            "open at 200% zoom (new bucket raster)",
+            &perf::snapshot(),
+            t.elapsed(),
+        );
 
         // --- zoom sweep (#91/#93/#124): one harness, several bucket
         //     crossings without a model change — layers re-RENDER at
@@ -211,7 +249,11 @@ fn render_perf_stage_split() {
                 h3.run();
             }
         }
-        report("zoom sweep x4 buckets (tree reuse)", &perf::diff(&base, &perf::snapshot()), t.elapsed());
+        report(
+            "zoom sweep x4 buckets (tree reuse)",
+            &perf::diff(&base, &perf::snapshot()),
+            t.elapsed(),
+        );
     }
     println!("\n(done)");
 }
@@ -241,7 +283,11 @@ fn move_and_resize_commits_are_flat(n: usize, tmp: &std::path::Path) {
     let d = perf::diff(&base, &perf::snapshot());
     for s in &d {
         if s.stage.starts_with("page/") {
-            assert_eq!(s.count, 0, "{} ran {}× for a move (n={})", s.stage, s.count, n);
+            assert_eq!(
+                s.count, 0,
+                "{} ran {}× for a move (n={})",
+                s.stage, s.count, n
+            );
         }
     }
 
@@ -255,7 +301,13 @@ fn move_and_resize_commits_are_flat(n: usize, tmp: &std::path::Path) {
     release(&mut h, corners[1] + egui::vec2(16.0, -12.0));
     let d = perf::diff(&base, &perf::snapshot());
     for s in &d {
-        for stage in ["page/svg", "page/resolve", "page/parse", "page/render", "page/upload"] {
+        for stage in [
+            "page/svg",
+            "page/resolve",
+            "page/parse",
+            "page/render",
+            "page/upload",
+        ] {
             if s.stage == stage {
                 assert_eq!(
                     s.count, 1,
@@ -297,7 +349,11 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
                 );
             }
         }
-        let frames = d.iter().find(|s| s.stage == "frame").map(|s| s.count).unwrap();
+        let frames = d
+            .iter()
+            .find(|s| s.stage == "frame")
+            .map(|s| s.count)
+            .unwrap();
         assert_eq!(frames, 20);
     }
 
@@ -314,9 +370,16 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
         pump_settled(&mut h); // first fills + the whole fit-settle
         let d = perf::snapshot();
         let count = |stage: &str| {
-            d.iter().find(|s| s.stage == stage).map(|s| s.count).unwrap_or(0)
+            d.iter()
+                .find(|s| s.stage == stage)
+                .map(|s| s.count)
+                .unwrap_or(0)
         };
-        assert_eq!(count("page/parse"), 40, "each visible shape parses exactly once across the fit-settle");
+        assert_eq!(
+            count("page/parse"),
+            40,
+            "each visible shape parses exactly once across the fit-settle"
+        );
         assert!(
             count("page/render") >= 40,
             "the settled re-bucket re-renders (from trees), not re-parses"
@@ -351,7 +414,10 @@ fn idle_frames_are_free_and_commits_scale_with_the_shape() {
         }
         let d = perf::diff(&base, &perf::snapshot());
         let count = |stage: &str| {
-            d.iter().find(|s| s.stage == stage).map(|s| s.count).unwrap_or(0)
+            d.iter()
+                .find(|s| s.stage == stage)
+                .map(|s| s.count)
+                .unwrap_or(0)
         };
         assert_eq!(
             count("page/parse"),

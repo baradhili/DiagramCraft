@@ -321,11 +321,7 @@ pub enum GeoCell {
 /// The ArcTo sagitta implied by a pointer position (#157): |A| is the
 /// arc's height over the chord, positive bulging RIGHT of travel
 /// (the renderer's own convention). Pure page/local-agnostic math.
-pub fn arc_sagitta_from_pointer(
-    cur: (f64, f64),
-    end: (f64, f64),
-    p: (f64, f64),
-) -> f64 {
+pub fn arc_sagitta_from_pointer(cur: (f64, f64), end: (f64, f64), p: (f64, f64)) -> f64 {
     let d = (end.0 - cur.0, end.1 - cur.1);
     let len = d.0.hypot(d.1).max(1e-9);
     let right = (d.1 / len, -d.0 / len); // rot90 CW: right of travel
@@ -557,15 +553,15 @@ pub fn show(
     layers: &[crate::layers::ShapeQuad],
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
-    member_hl: &[Rect], // #156: selected container's members (page-inches, y-down)
+    member_hl: &[Rect],       // #156: selected container's members (page-inches, y-down)
     handles: &[Handle],       // grab points for the primary selection
-    drag: &DragFx,           // live gesture feedback (#96)
-    guides: &[GuideFx],      // #113: guide overlay, above ink
-    jumps: &[JumpFx],        // #108: line-jump hops, above ink
+    drag: &DragFx,            // live gesture feedback (#96)
+    guides: &[GuideFx],       // #113: guide overlay, above ink
+    jumps: &[JumpFx],         // #108: line-jump hops, above ink
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
-    connector_tool: bool,    // #108: the Connector Tool is active
-    lasso_tool: bool, // #110: the Lasso Select tool is active
-    freeform_tool: bool, // #132: the Freeform tool is active
+    connector_tool: bool,     // #108: the Connector Tool is active
+    lasso_tool: bool,         // #110: the Lasso Select tool is active
+    freeform_tool: bool,      // #132: the Freeform tool is active
     stencil_hover: bool,
     // #202: the selected 1D shape's geometry carries a curve row —
     // the selection layer then skips its begin→end chord stroke (the
@@ -673,7 +669,10 @@ pub fn show(
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(sr.width() * view.px_per_in(), sr.height() * view.px_per_in()),
+            Vec2::new(
+                sr.width() * view.px_per_in(),
+                sr.height() * view.px_per_in(),
+            ),
         )
     });
     let autoc_arrows: Option<Vec<(Rect, (f64, f64))>> = sel_screen.map(|sr| {
@@ -695,9 +694,9 @@ pub fn show(
             .find(|(r, _)| r.contains(pos))
             .map(|(_, d)| *d)
     };
-    let hover_in_sel = resp.hover_pos().is_some_and(|p| {
-        sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some()
-    });
+    let hover_in_sel = resp
+        .hover_pos()
+        .is_some_and(|p| sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some());
 
     // Stable literal ids are intended for the drag-state memory keys.
     let mem_handle = egui::Id::unique("dc-handle-drag");
@@ -727,8 +726,7 @@ pub fn show(
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
             } else if let Some(dir) = arrow_at(p) {
-                ui.ctx()
-                    .memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
+                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
             } else if connector_tool {
                 // The Connector Tool (#108) owns the gesture: press
                 // anywhere (on a shape = glue start), release on the
@@ -821,7 +819,8 @@ pub fn show(
     let mut guide_live: Option<(GuideSource, (f64, f64))> = None;
     if let Some(src) = guide_armed {
         if primary_released || !ui.input(|i| i.pointer.primary_down()) {
-            ui.ctx().memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
             if primary_released {
                 if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                     let page_pos = screen_to_page(p, view, page);
@@ -872,9 +871,7 @@ pub fn show(
     // release selects every shape the trail touches or encloses. A
     // near-zero-length trail is just a click on empty page — the click
     // path handles selection.
-    let lasso_armed = ui
-        .ctx()
-        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
+    let lasso_armed = ui.ctx().memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
     if let Some(mut trail) = lasso_armed {
         if primary_released || !ui.input(|i| i.pointer.primary_down()) {
             ui.ctx()
@@ -1087,7 +1084,11 @@ pub fn show(
     // ink, below the selection chrome. A selected guide draws solid;
     // a live ruler-drag preview follows the pointer.
     let draw_guide = |g: GuideFx, live: bool| {
-        let color = if g.selected { Color32::from_rgb(0x00, 0x6D, 0x7D) } else { GUIDE };
+        let color = if g.selected {
+            Color32::from_rgb(0x00, 0x6D, 0x7D)
+        } else {
+            GUIDE
+        };
         match g.vertical {
             Some(true) => {
                 let x = page_to_screen(g.x, 0.0, view, page).x;
@@ -1220,7 +1221,10 @@ pub fn show(
                         t.selection,
                     );
                 }
-                GeoCell::Apex | GeoCell::OnCurve | GeoCell::Ctrl | GeoCell::Ctrl2
+                GeoCell::Apex
+                | GeoCell::OnCurve
+                | GeoCell::Ctrl
+                | GeoCell::Ctrl2
                 | GeoCell::NurbsPt(_) => {
                     p.circle_filled(*pos, 4.0, t.selection);
                     p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
@@ -1290,13 +1294,10 @@ pub fn show(
     let mut outlines: Vec<Rect> = drag.outlines.clone();
     let mut lines: Vec<(Pos2, Pos2)> = drag.lines.clone();
     let mut handle_ghosts: Vec<crate::layers::ShapeQuad> = Vec::new();
-    if let (Some(hid), Some(ptr)) = (
-        armed_handle,
-        ui.input(|i| i.pointer.interact_pos()),
-    ) {
+    if let (Some(hid), Some(ptr)) = (armed_handle, ui.input(|i| i.pointer.interact_pos())) {
         let ptr_page = screen_to_page(ptr, view, page); // y-up inches
-        // The primary's landed layer quad (matched by bbox center —
-        // the ink bbox and the selection rect share it).
+                                                        // The primary's landed layer quad (matched by bbox center —
+                                                        // the ink bbox and the selection rect share it).
         let primary_quad = sel_rect.and_then(|sr| {
             let (cx, cy) = (sr.center().x as f64, sr.center().y as f64);
             layers.iter().find(|q| {
@@ -1323,12 +1324,7 @@ pub fn show(
                             ui.ctx()
                                 .memory(|m| m.data.get_temp::<Pos2>(mem_start))
                                 .map(|st| screen_to_page(st, view, page))
-                                .map(|st| {
-                                    (
-                                        o.0 + ptr_page.0 - st.0,
-                                        o.1 + ptr_page.1 - st.1,
-                                    )
-                                })
+                                .map(|st| (o.0 + ptr_page.0 - st.0, o.1 + ptr_page.1 - st.1))
                         })
                         .unwrap_or(ptr_page);
                     let ptr_page = snap_resize(corner_page).unwrap_or(ptr_page);
@@ -1498,11 +1494,7 @@ pub fn show(
     if let Some(q) = fx.glue_target {
         // The live glue target: Visio's filled green square.
         let c = page_to_screen(q.0, q.1, view, page);
-        p.rect_filled(
-            Rect::from_center_size(c, Vec2::splat(9.0)),
-            1.5,
-            GLUE,
-        );
+        p.rect_filled(Rect::from_center_size(c, Vec2::splat(9.0)), 1.5, GLUE);
         p.rect_stroke(
             Rect::from_center_size(c, Vec2::splat(9.0)),
             1.5,
@@ -1521,7 +1513,12 @@ pub fn show(
         // square ring in the selection color — Delete removes it.
         let c = page_to_screen(q.0, q.1, view, page);
         let r = Rect::from_center_size(c, Vec2::splat(10.0));
-        p.rect_stroke(r, 0.0, Stroke::new(2.0, t.selection), egui::StrokeKind::Middle);
+        p.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(2.0, t.selection),
+            egui::StrokeKind::Middle,
+        );
         let d = 2.5;
         for (a, b) in [
             (c - Vec2::new(d, d), c + Vec2::new(d, d)),
@@ -1538,10 +1535,16 @@ pub fn show(
             crate::snap::Hint::Align { vertical, at } => {
                 let (a, b) = if vertical {
                     let x = page_to_screen(at, 0.0, view, page).x;
-                    (Pos2::new(x, canvas_r.top()), Pos2::new(x, canvas_r.bottom()))
+                    (
+                        Pos2::new(x, canvas_r.top()),
+                        Pos2::new(x, canvas_r.bottom()),
+                    )
                 } else {
                     let y = page_to_screen(0.0, at, view, page).y;
-                    (Pos2::new(canvas_r.left(), y), Pos2::new(canvas_r.right(), y))
+                    (
+                        Pos2::new(canvas_r.left(), y),
+                        Pos2::new(canvas_r.right(), y),
+                    )
                 };
                 dashed(&p, a, b, HINT);
             }
@@ -1604,11 +1607,7 @@ pub fn show(
     // above the ink, never exported.
     for r in member_hl {
         let sr = to_screen(*r);
-        p.rect_filled(
-            sr,
-            1.0,
-            Color32::from_rgba_premultiplied(46, 117, 182, 36),
-        );
+        p.rect_filled(sr, 1.0, Color32::from_rgba_premultiplied(46, 117, 182, 36));
         p.rect_stroke(
             sr,
             1.0,
@@ -1642,11 +1641,7 @@ pub fn show(
                         Stroke::new(1.0, Color32::from_rgb(0x2e, 0x75, 0xb6)),
                     )
                 };
-                p.add(egui::Shape::convex_polygon(
-                    vec![tip, b1, b2],
-                    fill,
-                    stroke,
-                ));
+                p.add(egui::Shape::convex_polygon(vec![tip, b1, b2], fill, stroke));
             }
         }
     }
@@ -1898,20 +1893,21 @@ mod tests {
         // A trail far away does not.
         assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0, 1e-6));
         // A sample inside selects.
-        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0, 1e-6));
+        assert!(lasso_hits_rect(
+            &[(0.0, 5.0), (1.5, 1.5)],
+            1.0,
+            1.0,
+            2.0,
+            1.0,
+            1e-6
+        ));
     }
 
     #[test]
     fn lasso_loop_selects_the_enclosed() {
         // A loop around the rect without any sample inside or segment
         // crossing: the enclosed center (2, 1.5) selects.
-        let loop_trail = [
-            (0.0, 0.0),
-            (5.0, 0.0),
-            (5.0, 4.0),
-            (0.0, 4.0),
-            (0.0, 0.0),
-        ];
+        let loop_trail = [(0.0, 0.0), (5.0, 0.0), (5.0, 4.0), (0.0, 4.0), (0.0, 0.0)];
         assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
         // The same loop does not select a shape outside it.
         assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0, 1e-6));

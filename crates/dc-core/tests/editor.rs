@@ -580,7 +580,6 @@ fn remove_page_undo_restores_it() {
     assert_eq!(ed.doc.pages[0].part, "visio/pages/page1.xml");
 }
 
-
 /// #137: a geometry vertex edit is one reversible row-cell pair —
 /// SetRowCell on a synthetic polyline's row, single undo restores.
 #[test]
@@ -597,8 +596,8 @@ fn geometry_row_cell_edit_single_undo() {
             s.set_cell("PinY", Cell::value("5"));
             s.set_cell("Width", Cell::value("2"));
             s.set_cell("Height", Cell::value("2"));
-            s.children.push(vsdx::model::SheetChild::Section(
-                vsdx::model::Section {
+            s.children
+                .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
                     name: "Geometry".into(),
                     ix: 0,
                     rows: vec![
@@ -622,8 +621,7 @@ fn geometry_row_cell_edit_single_undo() {
                         },
                     ],
                     ..vsdx::model::Section::default()
-                },
-            ));
+                }));
             s
         },
         ..vsdx::model::Shape::default()
@@ -676,8 +674,11 @@ fn geometry_row_cell_edit_single_undo() {
             Cell::value("0.5"),
         )),
     ];
-    ed.apply(dc_core::Macro::new("move vertex", std::mem::take(&mut cmds)))
-        .unwrap();
+    ed.apply(dc_core::Macro::new(
+        "move vertex",
+        std::mem::take(&mut cmds),
+    ))
+    .unwrap();
     assert_eq!(row_y(&ed), 0.5, "the vertex moved");
     ed.undo().unwrap();
     assert_eq!(row_y(&ed), 2.0, "one undo restored the vertex");
@@ -732,7 +733,13 @@ fn container_delete_cleans_membership_rows() {
     })
     .unwrap();
     let cid = dc_core::commands::next_shape_id(&ed.doc, page0);
-    ed.apply(add_container(page0, cid, &[50, 51], (1.0, 4.0, 4.0, 3.0), "Panel"))
+    ed.apply(add_container(
+        page0,
+        cid,
+        &[50, 51],
+        (1.0, 4.0, 4.0, 3.0),
+        "Panel",
+    ))
     .unwrap();
 
     // Styled band (#138 §2): two geometry sections — the band filled,
@@ -764,10 +771,14 @@ fn container_delete_cleans_membership_rows() {
     }
 
     // Delete with cleanup folded in (the GUI's delete_one shape):
-    let mut cmds: Vec<Box<dyn dc_core::Command>> =
-        vec![Box::new(RemoveShape::new(page0, cid))];
-    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid]));
-    ed.apply(dc_core::Macro::new("delete container", cmds)).unwrap();
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = vec![Box::new(RemoveShape::new(page0, cid))];
+    cmds.extend(dc_core::container_membership_cleanup(
+        &ed.doc,
+        page0,
+        &[cid],
+    ));
+    ed.apply(dc_core::Macro::new("delete container", cmds))
+        .unwrap();
     let rows = |ed: &dc_core::Editor| {
         ed.doc.pages[0]
             .shapes
@@ -807,30 +818,41 @@ fn container_delete_cleans_membership_rows() {
     for id in [cid, 50, 51] {
         cmds.push(Box::new(RemoveShape::new(page0, id)));
     }
-    cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page0, &[cid, 50, 51]));
-    ed.apply(dc_core::Macro::new("delete container + members", cmds)).unwrap();
+    cmds.extend(dc_core::container_membership_cleanup(
+        &ed.doc,
+        page0,
+        &[cid, 50, 51],
+    ));
+    ed.apply(dc_core::Macro::new("delete container + members", cmds))
+        .unwrap();
     assert!(
-        ed.doc.pages[0].shapes.iter().all(|s| ![cid, 50, 51].contains(&s.id)),
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .all(|s| ![cid, 50, 51].contains(&s.id)),
         "the container and both members are gone, no error"
     );
     ed.undo().unwrap();
-    assert_eq!(rows(&ed), 2, "undo brings back container, members, and rows");
+    assert_eq!(
+        rows(&ed),
+        2,
+        "undo brings back container, members, and rows"
+    );
 
     // #95 branch review: into_group with the parent among the members
     // refuses BEFORE any mutation — nothing detaches.
     let g1 = dc_core::commands::next_shape_id(&ed.doc, page0);
-    ed.apply(dc_core::commands::GroupShapes::new(page0, vec![50, 51])).unwrap();
-    let bad = dc_core::commands::GroupShapes::into_group(
-        page0,
-        vec![50, g1],
-        g1,
-        (0.0, 0.0),
-    );
+    ed.apply(dc_core::commands::GroupShapes::new(page0, vec![50, 51]))
+        .unwrap();
+    let bad = dc_core::commands::GroupShapes::into_group(page0, vec![50, g1], g1, (0.0, 0.0));
     let err = ed.apply(bad).unwrap_err();
     assert!(err.to_string().contains("own member"), "{err}");
     // 50 and 51 stay nested inside g1 (top-level holds only g1).
     assert!(
-        ed.doc.pages[0].shapes.iter().all(|s| ![50, 51].contains(&s.id)),
+        ed.doc.pages[0]
+            .shapes
+            .iter()
+            .all(|s| ![50, 51].contains(&s.id)),
         "50 and 51 stayed grouped inside {g1} — nothing mutated"
     );
     assert!(
@@ -896,7 +918,8 @@ fn scale_group_members_scales_literals_guards_and_nesting() {
     // Double the width, halve the height.
     let cmds = scale_group_members(&doc, 0, 10, 2.0, 0.5);
     let mut ed = dc_core::Editor::new(doc);
-    ed.apply(dc_core::Macro::new("scale members", cmds)).unwrap();
+    ed.apply(dc_core::Macro::new("scale members", cmds))
+        .unwrap();
 
     let page = &ed.doc.pages[0];
     let cell = |sid: i64, n: &str| {
@@ -908,7 +931,11 @@ fn scale_group_members_scales_literals_guards_and_nesting() {
             .unwrap()
     };
     // Member 1: GUARDed Width keeps 2; everything else scales.
-    assert_eq!(cell(1, "Width"), 2.0, "the GUARDed size keeps its dimension");
+    assert_eq!(
+        cell(1, "Width"),
+        2.0,
+        "the GUARDed size keeps its dimension"
+    );
     assert_eq!(cell(1, "Height"), 0.5, "the free size axis scales");
     assert_eq!(cell(1, "PinX"), 2.0, "position scales under the guard");
     assert_eq!(cell(1, "PinY"), 0.25);
@@ -916,7 +943,11 @@ fn scale_group_members_scales_literals_guards_and_nesting() {
     // SAME factors (once — the no-scale convention means the child
     // group's Width scaling does not propagate on its own).
     assert_eq!(cell(2, "Width"), 4.0, "the nested group's frame scales");
-    assert_eq!(cell(3, "Width"), 4.0, "the nested member scales exactly once");
+    assert_eq!(
+        cell(3, "Width"),
+        4.0,
+        "the nested member scales exactly once"
+    );
     assert_eq!(cell(3, "PinY"), 0.25);
 
     // One undo reverts every member edit.
@@ -933,7 +964,6 @@ fn scale_group_members_scales_literals_guards_and_nesting() {
     assert_eq!(cell(1, "PinX"), 1.0, "one undo restored the members");
     assert_eq!(cell(3, "Width"), 2.0);
 }
-
 
 /// #68: a new page's PageSheet is seeded from its source — size
 /// always, the scale cells only when the source carries them — with
@@ -997,7 +1027,11 @@ fn add_page_seeds_sheet_setup_from_source() {
         "the default source is the last page"
     );
     ed.undo().unwrap();
-    assert_eq!(ed.doc.pages.len(), 2, "undo removes the seeded page cleanly");
+    assert_eq!(
+        ed.doc.pages.len(),
+        2,
+        "undo removes the seeded page cleanly"
+    );
     ed.redo().unwrap();
     assert_eq!(ed.doc.pages.len(), 3, "redo brings it back");
     assert_eq!(
@@ -1943,7 +1977,10 @@ fn push_1d_line(ed: &mut Editor) -> f64 {
 }
 
 fn sheet_num(s: &vsdx::model::Shape, k: &str) -> f64 {
-    s.sheet.cell(k).and_then(|c| c.numeric()).unwrap_or(f64::NAN)
+    s.sheet
+        .cell(k)
+        .and_then(|c| c.numeric())
+        .unwrap_or(f64::NAN)
 }
 
 #[test]
@@ -1958,10 +1995,19 @@ fn group_converts_1d_endpoints_to_the_group_frame_and_back() {
     // rect runs (4 − w/2, 6)-(4 + w/2, 6) → x0 = 4 − w/2, y0 = 5.
     let x0 = 4.0 - w / 2.0;
     ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
-    let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
+    let g = ed.doc.pages[0]
+        .shapes
+        .iter()
+        .find(|s| s.sub_shapes.len() == 2)
+        .unwrap();
     let gid = g.id;
     let line = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
-    for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
+    for (cell, page_val) in [
+        ("BeginX", 2.0),
+        ("BeginY", 5.25),
+        ("EndX", 6.0),
+        ("EndY", 6.75),
+    ] {
         let off = if cell.ends_with('X') { x0 } else { 5.0 };
         assert!(
             (sheet_num(line, cell) - (page_val - off)).abs() < 1e-9,
@@ -1974,8 +2020,16 @@ fn group_converts_1d_endpoints_to_the_group_frame_and_back() {
     // Ungroup (group unmoved): endpoints return to page values.
     ed.apply(UngroupShape::new(0, gid)).unwrap();
     let line = ed.doc.pages[0].shapes.iter().find(|s| s.id == 7).unwrap();
-    for (cell, page_val) in [("BeginX", 2.0), ("BeginY", 5.25), ("EndX", 6.0), ("EndY", 6.75)] {
-        assert!((sheet_num(line, cell) - page_val).abs() < 1e-9, "{cell} restored");
+    for (cell, page_val) in [
+        ("BeginX", 2.0),
+        ("BeginY", 5.25),
+        ("EndX", 6.0),
+        ("EndY", 6.75),
+    ] {
+        assert!(
+            (sheet_num(line, cell) - page_val).abs() < 1e-9,
+            "{cell} restored"
+        );
     }
 }
 
@@ -1987,18 +2041,28 @@ fn ungroup_restores_endpoints_moved_with_the_group() {
     let mut ed = ed;
     push_1d_line(&mut ed);
     ed.apply(GroupShapes::new(0, vec![1, 7])).unwrap();
-    let g = ed.doc.pages[0].shapes.iter().find(|s| s.sub_shapes.len() == 2).unwrap();
+    let g = ed.doc.pages[0]
+        .shapes
+        .iter()
+        .find(|s| s.sub_shapes.len() == 2)
+        .unwrap();
     let gid = g.id;
     let (gpx, gpy) = (sheet_num(g, "PinX"), sheet_num(g, "PinY"));
     // Move the group through the command layer, not by poking its sheet.
     ed.apply(SetCell::new(
-        Scope::Shape { page: 0, shape: gid },
+        Scope::Shape {
+            page: 0,
+            shape: gid,
+        },
         "PinX",
         vsdx::model::Cell::value(format!("{}", gpx + 2.0)),
     ))
     .unwrap();
     ed.apply(SetCell::new(
-        Scope::Shape { page: 0, shape: gid },
+        Scope::Shape {
+            page: 0,
+            shape: gid,
+        },
         "PinY",
         vsdx::model::Cell::value(format!("{}", gpy + 1.0)),
     ))
@@ -2046,7 +2110,10 @@ fn ungroup_composes_a_rotated_group_angle_into_members() {
     let m7 = g.sub_shapes.iter().find(|s| s.id == 7).unwrap();
     let (b_local, begin_y_local) = (sheet_num(m7, "BeginX"), sheet_num(m7, "BeginY"));
     ed.apply(SetCell::new(
-        Scope::Shape { page: 0, shape: gid },
+        Scope::Shape {
+            page: 0,
+            shape: gid,
+        },
         "Angle",
         vsdx::model::Cell::value(format!("{}", std::f64::consts::FRAC_PI_2)),
     ))
@@ -2082,9 +2149,7 @@ fn grouping_refuses_a_formula_driven_endpoint_without_mutating() {
     push_1d_line(&mut ed);
     // A formula-driven endpoint cannot be offset: grouping refuses and
     // the document is untouched.
-    let line = ed
-        .doc
-        .pages[0]
+    let line = ed.doc.pages[0]
         .shapes
         .iter_mut()
         .find(|s| s.id == 7)
@@ -2367,15 +2432,26 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
     // 1) First drop imports a re-keyed copy (+1 master) and places the
     //    instance referencing the document-local copy.
     let src = stencil_master("{S1}", "Star");
-    ed.apply(dc_core::place_master_from_stencil(&ed.doc, 0, &src, (3.0, 3.0)))
-        .unwrap();
+    ed.apply(dc_core::place_master_from_stencil(
+        &ed.doc,
+        0,
+        &src,
+        (3.0, 3.0),
+    ))
+    .unwrap();
     assert_eq!(ed.doc.masters.len(), 2, "first drop imports the master");
     assert_eq!(page_shapes(&ed), 3);
     {
         let imported = ed.doc.masters.last().unwrap();
-        assert_ne!(imported.id, 7, "fresh document-local id (stencil id 7 collides)");
+        assert_ne!(
+            imported.id, 7,
+            "fresh document-local id (stencil id 7 collides)"
+        );
         assert_eq!(imported.id, 8);
-        assert_eq!(imported.part, "visio/masters/master2.xml", "document-unique part");
+        assert_eq!(
+            imported.part, "visio/masters/master2.xml",
+            "document-unique part"
+        );
         assert!(
             imported
                 .children
@@ -2383,7 +2459,11 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
                 .all(|c| !matches!(c, IndexChild::Rel(_))),
             "the stencil's borrowed Rel child is dropped"
         );
-        assert_eq!(imported.name_u.as_deref(), Some("Star"), "NameU travels verbatim");
+        assert_eq!(
+            imported.name_u.as_deref(),
+            Some("Star"),
+            "NameU travels verbatim"
+        );
         assert_eq!(
             imported
                 .attrs
@@ -2396,11 +2476,20 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
     }
     let imported_id = ed.doc.masters.last().unwrap().id;
     let placed = ed.doc.pages[0].shapes.last().unwrap();
-    assert_eq!(placed.master, Some(imported_id), "the instance references the local copy");
+    assert_eq!(
+        placed.master,
+        Some(imported_id),
+        "the instance references the local copy"
+    );
 
     // 2) A second drop of the same master dedupes: reuse, no new master.
-    ed.apply(dc_core::place_master_from_stencil(&ed.doc, 0, &src, (5.0, 5.0)))
-        .unwrap();
+    ed.apply(dc_core::place_master_from_stencil(
+        &ed.doc,
+        0,
+        &src,
+        (5.0, 5.0),
+    ))
+    .unwrap();
     assert_eq!(ed.doc.masters.len(), 2, "re-drop reuses the imported copy");
     assert_eq!(page_shapes(&ed), 4);
     let second = ed.doc.pages[0].shapes.last().unwrap();
@@ -2421,7 +2510,11 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
     ed.redo().unwrap();
     assert_eq!(ed.doc.masters.len(), 2);
     assert_eq!(page_shapes(&ed), 4);
-    assert_eq!(ed.doc.masters.last().unwrap().id, 8, "redo re-imports with the same id");
+    assert_eq!(
+        ed.doc.masters.last().unwrap().id,
+        8,
+        "redo re-imports with the same id"
+    );
 
     // 5) Save → reload keeps the imported master and its part.
     let out = tmp.path().join("placed.vsdx");
@@ -2433,7 +2526,9 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
         "the imported master's part was materialized: {names:?}"
     );
     let rels = String::from_utf8(
-        pkg.part("visio/masters/_rels/masters.xml.rels").unwrap().to_vec(),
+        pkg.part("visio/masters/_rels/masters.xml.rels")
+            .unwrap()
+            .to_vec(),
     )
     .unwrap();
     assert!(
@@ -2441,9 +2536,20 @@ fn place_from_stencil_imports_dedupes_and_undoes_as_one() {
         "masters.xml.rels gained the imported master's relationship: {rels}"
     );
     let reloaded = Editor::open(&out).unwrap();
-    assert_eq!(reloaded.doc.masters.len(), 2, "reload keeps the imported master");
-    assert_eq!(reloaded.doc.masters.last().unwrap().name_u.as_deref(), Some("Star"));
-    assert_eq!(reloaded.doc.pages[0].shapes.len(), 4, "placed shapes survive");
+    assert_eq!(
+        reloaded.doc.masters.len(),
+        2,
+        "reload keeps the imported master"
+    );
+    assert_eq!(
+        reloaded.doc.masters.last().unwrap().name_u.as_deref(),
+        Some("Star")
+    );
+    assert_eq!(
+        reloaded.doc.pages[0].shapes.len(),
+        4,
+        "placed shapes survive"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2471,7 +2577,10 @@ fn refused_commands_never_mutate_or_push_history() {
     // Unknown shape scope.
     assert!(ed
         .apply(dc_core::commands::SetCell::new(
-            dc_core::Scope::Shape { page: page0, shape: 99 },
+            dc_core::Scope::Shape {
+                page: page0,
+                shape: 99
+            },
             "PinX",
             vsdx::model::Cell::value("1"),
         ))
@@ -2543,7 +2652,10 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
 
     // Plain value write: refused, cell untouched, no history entry.
     let err = ed.apply(dc_core::commands::SetCell::new(
-        dc_core::Scope::Shape { page: page0, shape: 1 },
+        dc_core::Scope::Shape {
+            page: page0,
+            shape: 1,
+        },
         "Width",
         vsdx::model::Cell::value("3"),
     ));
@@ -2564,7 +2676,10 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
         ..Default::default()
     };
     ed.apply(dc_core::commands::SetCell::new(
-        dc_core::Scope::Shape { page: page0, shape: 1 },
+        dc_core::Scope::Shape {
+            page: page0,
+            shape: 1,
+        },
         "Width",
         f,
     ))
@@ -2578,7 +2693,10 @@ fn set_cell_refuses_plain_value_writes_to_guarded_cells() {
         ..Default::default()
     };
     ed.apply(dc_core::commands::SetCell::new(
-        dc_core::Scope::Shape { page: page0, shape: 1 },
+        dc_core::Scope::Shape {
+            page: page0,
+            shape: 1,
+        },
         "Width",
         inh,
     ))
@@ -2596,7 +2714,8 @@ fn set_cell_refuses_through_an_inh_snapshot_behind_a_master_guard() {
     let page0 = ed.doc.pages[0].id;
     {
         // Instance shape 2 (master-backed): a cached Width snapshot.
-        let sh = vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.first_mut().unwrap().shapes, 2);
+        let sh =
+            vsdx::model::find_shape_by_id_mut(&mut ed.doc.pages.first_mut().unwrap().shapes, 2);
         let mut snap = vsdx::model::Cell::value("1");
         snap.f = Some("Inh".into());
         sh.unwrap().sheet.set_cell("Width", snap);
@@ -2608,11 +2727,17 @@ fn set_cell_refuses_through_an_inh_snapshot_behind_a_master_guard() {
         root.sheet.set_cell("Width", g);
     }
     let err = ed.apply(dc_core::commands::SetCell::new(
-        dc_core::Scope::Shape { page: page0, shape: 2 },
+        dc_core::Scope::Shape {
+            page: page0,
+            shape: 2,
+        },
         "Width",
         vsdx::model::Cell::value("9"),
     ));
-    assert!(err.is_err(), "the master GUARD behind an Inh snapshot must refuse");
+    assert!(
+        err.is_err(),
+        "the master GUARD behind an Inh snapshot must refuse"
+    );
     assert_eq!(
         ed.doc.pages[0]
             .shapes
@@ -2635,22 +2760,22 @@ fn set_cell_refuses_locked_axes_via_protection_rows() {
     // Author LockHeight in the Protection section (instance side).
     {
         let sh = &mut ed.doc.pages[0].shapes[0];
-        sh.sheet.children.push(vsdx::model::SheetChild::Section(
-            vsdx::model::Section {
+        sh.sheet
+            .children
+            .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
                 name: "Protection".into(),
                 rows: vec![vsdx::model::Row {
-                    cells: vec![(
-                        "LockHeight".into(),
-                        vsdx::model::Cell::value("1"),
-                    )],
+                    cells: vec![("LockHeight".into(), vsdx::model::Cell::value("1"))],
                     ..vsdx::model::Row::default()
                 }],
                 ..vsdx::model::Section::default()
-            },
-        ));
+            }));
     }
 
-    let scope = dc_core::Scope::Shape { page: page0, shape: 1 };
+    let scope = dc_core::Scope::Shape {
+        page: page0,
+        shape: 1,
+    };
     // The locked axis refuses.
     assert!(ed
         .apply(dc_core::commands::SetCell::new(
@@ -2693,7 +2818,10 @@ fn master_side_guards_and_locks_protect_instances() {
     }
     assert!(ed
         .apply(dc_core::commands::SetCell::new(
-            dc_core::Scope::Shape { page: page0, shape: 2 },
+            dc_core::Scope::Shape {
+                page: page0,
+                shape: 2
+            },
             "Width",
             vsdx::model::Cell::value("9"),
         ))
@@ -2702,11 +2830,15 @@ fn master_side_guards_and_locks_protect_instances() {
     {
         let m = ed.doc.masters.iter_mut().find(|m| m.id == 7).unwrap();
         let root = m.shapes.first_mut().unwrap();
-        root.sheet.set_cell("LockWidth", vsdx::model::Cell::value("1"));
+        root.sheet
+            .set_cell("LockWidth", vsdx::model::Cell::value("1"));
     }
     assert!(ed
         .apply(dc_core::commands::SetCell::new(
-            dc_core::Scope::Shape { page: page0, shape: 2 },
+            dc_core::Scope::Shape {
+                page: page0,
+                shape: 2
+            },
             "Width",
             vsdx::model::Cell::value("9"),
         ))

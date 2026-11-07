@@ -937,9 +937,11 @@ impl Document {
     /// `SnapAngles`, `Protect*` — stay verbatim.
     pub fn set_doc_snap_glue(&mut self, s: DocSnapGlue) {
         let dg = if s.dynamic_grid { "1" } else { "0" };
-        if let Some(ix) = self.items.iter().position(|it| {
-            matches!(it, DocItem::Raw(r) if r.name == "DocumentSettings")
-        }) {
+        if let Some(ix) = self
+            .items
+            .iter()
+            .position(|it| matches!(it, DocItem::Raw(r) if r.name == "DocumentSettings"))
+        {
             if let DocItem::Raw(r) = &mut self.items[ix] {
                 r.inner = set_settings_child(&r.inner, "GlueSettings", &s.glue.to_string());
                 r.inner = set_settings_child(&r.inner, "SnapSettings", &s.snap.to_string());
@@ -1013,10 +1015,8 @@ mod snap_glue_tests {
 
     #[test]
     fn setting_patches_only_the_three_children() {
-        let mut doc = doc_with_settings(
-            vec![("TopPage".to_string(), "0".to_string())],
-            CORPUS_INNER,
-        );
+        let mut doc =
+            doc_with_settings(vec![("TopPage".to_string(), "0".to_string())], CORPUS_INNER);
         let before = doc
             .items
             .iter()
@@ -1051,7 +1051,9 @@ mod snap_glue_tests {
         assert!(g < s && s < d, "corpus child order: {}", after.inner);
         assert!(after.inner.contains("<GlueSettings>0</GlueSettings>"));
         assert!(after.inner.contains("<SnapSettings>65847</SnapSettings>"));
-        assert!(after.inner.contains("<DynamicGridEnabled>0</DynamicGridEnabled>"));
+        assert!(after
+            .inner
+            .contains("<DynamicGridEnabled>0</DynamicGridEnabled>"));
         // And reading back yields exactly what was written.
         let read = doc.doc_snap_glue().unwrap();
         assert_eq!(read.snap, 65847);
@@ -1084,7 +1086,8 @@ mod snap_glue_tests {
         // An element with only a later-order child: the missing
         // GlueSettings/SnapSettings must land before SnapExtensions,
         // and DynamicGridEnabled after it.
-        let mut inner = String::from("<SnapExtensions>34</SnapExtensions><ProtectStyles>0</ProtectStyles>");
+        let mut inner =
+            String::from("<SnapExtensions>34</SnapExtensions><ProtectStyles>0</ProtectStyles>");
         inner = set_settings_child(&inner, "GlueSettings", "1");
         inner = set_settings_child(&inner, "SnapSettings", "2");
         inner = set_settings_child(&inner, "DynamicGridEnabled", "0");

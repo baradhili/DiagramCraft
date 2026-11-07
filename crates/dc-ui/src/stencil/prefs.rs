@@ -56,10 +56,7 @@ impl StencilPrefs {
     /// kittest (#105): a non-persisting prefs value with the given
     /// content.
     #[doc(hidden)]
-    pub fn for_test(
-        default_open: Vec<String>,
-        categories: Option<Vec<String>>,
-    ) -> StencilPrefs {
+    pub fn for_test(default_open: Vec<String>, categories: Option<Vec<String>>) -> StencilPrefs {
         StencilPrefs {
             default_open,
             categories,
@@ -75,8 +72,8 @@ impl StencilPrefs {
     /// file, so a readable-but-unwritable existing config survives
     /// (CodeRabbit).
     pub fn open() -> StencilPrefs {
-        let Some(path) = crate::recent::config_base()
-            .map(|b| b.join("diagramcraft").join("stencils.json"))
+        let Some(path) =
+            crate::recent::config_base().map(|b| b.join("diagramcraft").join("stencils.json"))
         else {
             return StencilPrefs::ephemeral();
         };
@@ -128,9 +125,7 @@ impl StencilPrefs {
     fn persist_to(&self, path: &std::path::Path) -> bool {
         let mut cats = serde_json::Value::Null;
         if let Some(c) = &self.categories {
-            cats = serde_json::Value::Array(
-                c.iter().map(|s| serde_json::json!(s)).collect(),
-            );
+            cats = serde_json::Value::Array(c.iter().map(|s| serde_json::json!(s)).collect());
         }
         let text = serde_json::json!({
             "version": 1,

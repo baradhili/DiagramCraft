@@ -62,9 +62,15 @@ impl HitFrame {
     /// Local (row-space, post-Rel scaling) → page: the renderer's
     /// transform in y-up coordinates.
     pub fn to_page(&self, p: (f64, f64)) -> (f64, f64) {
-        let (dx, dy) = ((p.0 - self.loc_pin.0) * self.flip.0, (p.1 - self.loc_pin.1) * self.flip.1);
+        let (dx, dy) = (
+            (p.0 - self.loc_pin.0) * self.flip.0,
+            (p.1 - self.loc_pin.1) * self.flip.1,
+        );
         let (sn, cs) = self.angle.sin_cos();
-        (self.pin.0 + dx * cs - dy * sn, self.pin.1 + dx * sn + dy * cs)
+        (
+            self.pin.0 + dx * cs - dy * sn,
+            self.pin.1 + dx * sn + dy * cs,
+        )
     }
 
     /// Page → local: the exact inverse of [`HitFrame::to_page`] — the
@@ -130,8 +136,16 @@ pub fn hit_frame(
         master_size,
         angle: get("Angle").unwrap_or(0.0),
         flip: (
-            if get("FlipX").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
-            if get("FlipY").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+            if get("FlipX").unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+            if get("FlipY").unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
         ),
         env,
     }
@@ -224,10 +238,9 @@ pub fn row_cell_value(
             .filter(|v| v.is_finite())
     };
     let literal = |c: &Cell| -> Option<f64> {
-        let plain = c
-            .f
-            .as_deref()
-            .is_none_or(|f| f == "Inh" || f == "No Formula");
+        let plain =
+            c.f.as_deref()
+                .is_none_or(|f| f == "Inh" || f == "No Formula");
         plain.then(|| c.numeric()).flatten()
     };
     if let Some(c) = inst {
@@ -324,10 +337,10 @@ pub fn geometry_hit_segments(
     };
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut cur: Option<(f64, f64)> = None; // shape-local
-    // #188: the spline accumulator — SplineStart opens, SplineKnot
-    // rows extend, anything else flushes; NURBSTo rows evaluate
-    // standalone. The flattened samples ARE the hit polyline, so
-    // hit-testing agrees with the rendered ink (crate::curve::flatten).
+                                            // #188: the spline accumulator — SplineStart opens, SplineKnot
+                                            // rows extend, anything else flushes; NURBSTo rows evaluate
+                                            // standalone. The flattened samples ARE the hit polyline, so
+                                            // hit-testing agrees with the rendered ink (crate::curve::flatten).
     let mut spline_acc: Option<crate::curve::SplineAcc> = None;
     const MAX_ROWS: usize = 64;
     // The ordered walk: the instance's rows, then master-only rows
@@ -345,18 +358,18 @@ pub fn geometry_hit_segments(
     }
     walk.sort_by_key(|(row, _)| row.ix);
     for (row, master) in walk.iter().take(MAX_ROWS) {
-        let t = row.t.as_deref().or(master.and_then(|m| m.t.as_deref())).unwrap_or("");
+        let t = row
+            .t
+            .as_deref()
+            .or(master.and_then(|m| m.t.as_deref()))
+            .unwrap_or("");
         // Omitted geometry cells default to 0 (the corpus arcs omit Y
         // and inherit it); a row nothing resolves is still walked as a
         // 0-coordinate row — never dropped (#179).
         let x = cell(row, *master, "X").unwrap_or(0.0);
         let y = cell(row, *master, "Y").unwrap_or(0.0);
         let rel = t.starts_with("Rel");
-        let end = if rel {
-            (x * own.0, y * own.1)
-        } else {
-            (x, y)
-        };
+        let end = if rel { (x * own.0, y * own.1) } else { (x, y) };
         // Master-section cached literals are in master units.
         let end = if scale != (1.0, 1.0) {
             (end.0 * scale.0, end.1 * scale.1)
@@ -379,7 +392,10 @@ pub fn geometry_hit_segments(
                         (c0.0 + end.0) / 2.0 + d.1 / len * a,
                         (c0.1 + end.1) / 2.0 - d.0 / len * a,
                     );
-                    let ctrl = (2.0 * mid.0 - (c0.0 + end.0) / 2.0, 2.0 * mid.1 - (c0.1 + end.1) / 2.0);
+                    let ctrl = (
+                        2.0 * mid.0 - (c0.0 + end.0) / 2.0,
+                        2.0 * mid.1 - (c0.1 + end.1) / 2.0,
+                    );
                     for u in [0.25, 0.5, 0.75] {
                         pts.push(to_page(quad(c0, ctrl, end, u)));
                     }
@@ -392,7 +408,10 @@ pub fn geometry_hit_segments(
                 let a = cell(row, *master, "A");
                 let b = cell(row, *master, "B");
                 if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
-                    let ctrl = (2.0 * a - (c0.0 + end.0) / 2.0, 2.0 * b - (c0.1 + end.1) / 2.0);
+                    let ctrl = (
+                        2.0 * a - (c0.0 + end.0) / 2.0,
+                        2.0 * b - (c0.1 + end.1) / 2.0,
+                    );
                     for u in [0.25, 0.5, 0.75] {
                         pts.push(to_page(quad(c0, ctrl, end, u)));
                     }
@@ -406,7 +425,10 @@ pub fn geometry_hit_segments(
                 // last knots and the degree.
                 if let Some(acc) = spline_acc.take() {
                     if let Some(data) = acc.flush() {
-                        for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                        for p in crate::curve::SplineData::flatten(&data, 16)
+                            .into_iter()
+                            .skip(1)
+                        {
                             pts.push(to_page(p));
                         }
                     }
@@ -434,7 +456,10 @@ pub fn geometry_hit_segments(
             "NURBSTo" => {
                 if let Some(acc) = spline_acc.take() {
                     if let Some(data) = acc.flush() {
-                        for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                        for p in crate::curve::SplineData::flatten(&data, 16)
+                            .into_iter()
+                            .skip(1)
+                        {
                             pts.push(to_page(p));
                         }
                     }
@@ -449,8 +474,16 @@ pub fn geometry_hit_segments(
                     .unwrap_or_default();
                 let mut drew = false;
                 if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                    let (fx, fy) = if f.x_type == 0.0 { (own.0, 1.0) } else { (1.0, 1.0) };
-                    let (fx, fy) = if f.y_type == 0.0 { (fx, own.1) } else { (fx, fy) };
+                    let (fx, fy) = if f.x_type == 0.0 {
+                        (own.0, 1.0)
+                    } else {
+                        (1.0, 1.0)
+                    };
+                    let (fx, fy) = if f.y_type == 0.0 {
+                        (fx, own.1)
+                    } else {
+                        (fx, fy)
+                    };
                     let start = cur.unwrap_or(end);
                     let mut points = vec![start];
                     let mut knots = vec![cell(row, *master, "C").unwrap_or(0.0)];
@@ -472,7 +505,10 @@ pub fn geometry_hit_segments(
                     }
                     .sanitized();
                     if let Some(data) = built {
-                        for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                        for p in crate::curve::SplineData::flatten(&data, 16)
+                            .into_iter()
+                            .skip(1)
+                        {
                             pts.push(to_page(p));
                         }
                         cur = Some(end);
@@ -488,7 +524,10 @@ pub fn geometry_hit_segments(
                 // LineTo plus the v0.2 polyline/infinite-line chords.
                 if let Some(acc) = spline_acc.take() {
                     if let Some(data) = acc.flush() {
-                        for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                        for p in crate::curve::SplineData::flatten(&data, 16)
+                            .into_iter()
+                            .skip(1)
+                        {
                             pts.push(to_page(p));
                         }
                     }
@@ -499,7 +538,10 @@ pub fn geometry_hit_segments(
             _ => {
                 if let Some(acc) = spline_acc.take() {
                     if let Some(data) = acc.flush() {
-                        for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+                        for p in crate::curve::SplineData::flatten(&data, 16)
+                            .into_iter()
+                            .skip(1)
+                        {
                             pts.push(to_page(p));
                         }
                     }
@@ -509,7 +551,10 @@ pub fn geometry_hit_segments(
     }
     if let Some(acc) = spline_acc.take() {
         if let Some(data) = acc.flush() {
-            for p in crate::curve::SplineData::flatten(&data, 16).into_iter().skip(1) {
+            for p in crate::curve::SplineData::flatten(&data, 16)
+                .into_iter()
+                .skip(1)
+            {
                 pts.push(to_page(p));
             }
         }
@@ -547,7 +592,12 @@ pub struct Jump {
 pub const JUMP_RADIUS_IN: f64 = 0.12;
 
 /// Proper segment intersection (interior of both).
-pub fn seg_cross(a0: (f64, f64), a1: (f64, f64), b0: (f64, f64), b1: (f64, f64)) -> Option<(f64, f64)> {
+pub fn seg_cross(
+    a0: (f64, f64),
+    a1: (f64, f64),
+    b0: (f64, f64),
+    b1: (f64, f64),
+) -> Option<(f64, f64)> {
     let (r, s) = ((a1.0 - a0.0, a1.1 - a0.1), (b1.0 - b0.0, b1.1 - b0.1));
     let denom = r.0 * s.1 - r.1 * s.0;
     if denom.abs() < 1e-12 {
@@ -581,7 +631,11 @@ pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
                     // later-in-z line the hop.
                     let i_jumps = d1.1.abs() < d2.1.abs()
                         || (d1.1.abs() - d2.1.abs()).abs() < 1e-9 && lines[i].z > lines[j].z;
-                    let (jmp, und) = if i_jumps { (&lines[i], &lines[j]) } else { (&lines[j], &lines[i]) };
+                    let (jmp, und) = if i_jumps {
+                        (&lines[i], &lines[j])
+                    } else {
+                        (&lines[j], &lines[i])
+                    };
                     let (d, du) = if i_jumps { (d1, d2) } else { (d2, d1) };
                     out.push(Jump {
                         at,
@@ -727,7 +781,14 @@ mod tests {
             row(
                 "NURBSTo",
                 2,
-                vec![("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)],
+                vec![
+                    ("X", 4.0),
+                    ("Y", 2.0),
+                    ("A", 0.0),
+                    ("B", 1.0),
+                    ("C", 0.0),
+                    ("D", 1.0),
+                ],
             ),
         ];
         let nurbs_row = &mut sec.rows[1];
@@ -750,7 +811,11 @@ mod tests {
         // Segments are page space (the frame is identity here); some
         // sample must sit off the (0,0)→(4,2) chord — the interior
         // points pull the belly above it.
-        assert!(segs.len() > 8, "the NURBS hit polyline is dense: {}", segs.len());
+        assert!(
+            segs.len() > 8,
+            "the NURBS hit polyline is dense: {}",
+            segs.len()
+        );
         let off = segs
             .iter()
             .any(|(a, _)| (0.5 * a.0 + 2.0 - a.1).abs() > 0.05);
@@ -816,7 +881,13 @@ mod tests {
             ..vsdx::Page::default()
         };
         page.shapes.push(connector(1, (3.0, 1.0), 4.0, 0.0, 0.0));
-        page.shapes.push(connector(2, (3.0, 1.0), 3.0, 0.0, -std::f64::consts::FRAC_PI_4));
+        page.shapes.push(connector(
+            2,
+            (3.0, 1.0),
+            3.0,
+            0.0,
+            -std::f64::consts::FRAC_PI_4,
+        ));
         let doc = vsdx::Document::default();
         let jumps = page_jumps(&doc, &page, &[]);
         assert_eq!(jumps.len(), 1, "one crossing: {jumps:?}");

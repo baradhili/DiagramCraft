@@ -50,7 +50,10 @@ pub(crate) struct GreekCtx {
 
 impl GreekCtx {
     fn new(ppi: f32) -> Self {
-        Self { ppi, sizes: std::cell::RefCell::new(Vec::new()) }
+        Self {
+            ppi,
+            sizes: std::cell::RefCell::new(Vec::new()),
+        }
     }
 
     fn greeks(&self, size_in: f64) -> bool {
@@ -350,19 +353,34 @@ pub fn shape_ink_bounds_focused(
         // emit for this node, composed into one affine.
         let local = if top {
             let (sx, sy) = (
-                if get("FlipX").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
-                if get("FlipY").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
+                if get("FlipX").unwrap_or(0.0) != 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                },
+                if get("FlipY").unwrap_or(0.0) != 0.0 {
+                    -1.0
+                } else {
+                    1.0
+                },
             );
-            Affine::translate(get("PinX").unwrap_or(0.0), page_h - get("PinY").unwrap_or(0.0))
-                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
-                .then(&Affine::scale(sx, sy))
-                .then(&Affine::translate(
-                    -get("LocPinX").unwrap_or(width / 2.0),
-                    get("LocPinY").unwrap_or(height / 2.0),
-                ))
+            Affine::translate(
+                get("PinX").unwrap_or(0.0),
+                page_h - get("PinY").unwrap_or(0.0),
+            )
+            .then(&Affine::rotate_deg(
+                -get("Angle").unwrap_or(0.0).to_degrees(),
+            ))
+            .then(&Affine::scale(sx, sy))
+            .then(&Affine::translate(
+                -get("LocPinX").unwrap_or(width / 2.0),
+                get("LocPinY").unwrap_or(height / 2.0),
+            ))
         } else {
             Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
-                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
+                .then(&Affine::rotate_deg(
+                    -get("Angle").unwrap_or(0.0).to_degrees(),
+                ))
                 .then(&Affine::translate(
                     -get("LocPinX").unwrap_or(width / 2.0),
                     get("LocPinY").unwrap_or(height / 2.0),
@@ -383,8 +401,10 @@ pub fn shape_ink_bounds_focused(
             u.union((
                 xs.iter().cloned().fold(f64::INFINITY, f64::min),
                 ys.iter().cloned().fold(f64::INFINITY, f64::min),
-                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - xs.iter().cloned().fold(f64::INFINITY, f64::min),
-                ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ys.iter().cloned().fold(f64::INFINITY, f64::min),
+                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                    - xs.iter().cloned().fold(f64::INFINITY, f64::min),
+                ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                    - ys.iter().cloned().fold(f64::INFINITY, f64::min),
             ));
         };
         box_union(0.0, -height, width, 0.0, &a, u);
@@ -609,7 +629,16 @@ pub fn render_shape_layer_opts(
         ph = bh * PX_PER_IN,
     );
     if !hidden_member(shape) {
-        render_shape(doc, shape, page_h, &[], &page.part, skip_text, greek.as_ref(), &mut svg);
+        render_shape(
+            doc,
+            shape,
+            page_h,
+            &[],
+            &page.part,
+            skip_text,
+            greek.as_ref(),
+            &mut svg,
+        );
     }
     let _ = writeln!(svg, "</svg>");
     let sizes = greek.map(|g| g.sizes.into_inner()).unwrap_or_default();
@@ -716,11 +745,7 @@ const JUMP_UNDER_EXT_IN: f64 = 1.0 / 96.0;
 /// page-up (`canvas.rs`'s screen-up flip, computed here in page
 /// space so rotated jumpers stay correct).
 fn append_jump(svg: &mut String, page_h: f64, j: &crate::geom::Jump) {
-    let (r, w, uw) = (
-        crate::geom::JUMP_RADIUS_IN,
-        j.weight,
-        j.under_weight,
-    );
+    let (r, w, uw) = (crate::geom::JUMP_RADIUS_IN, j.weight, j.under_weight);
     let sy = |y: f64| page_h - y;
     let pt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, sy(p.1));
     let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
@@ -855,12 +880,7 @@ impl Affine {
     /// chains, which carry non-zero scales).
     pub fn invert(&self) -> Affine {
         let det = self.a * self.d - self.b * self.c;
-        let (a, b, c, d) = (
-            self.d / det,
-            -self.b / det,
-            -self.c / det,
-            self.a / det,
-        );
+        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
         Affine {
             a,
             b,
@@ -892,9 +912,8 @@ fn level_affine(doc: &Document, chain: &[&Shape], idx: usize, page_h: f64) -> Af
         get("LocPinY").unwrap_or(height / 2.0),
     );
     let deg = -get("Angle").unwrap_or(0.0).to_degrees();
-    let t = Affine::translate(px, if idx == 0 { page_h - py } else { -py }).then(&Affine::rotate_deg(
-        deg,
-    ));
+    let t = Affine::translate(px, if idx == 0 { page_h - py } else { -py })
+        .then(&Affine::rotate_deg(deg));
     // Flip scale exists only at the page root (group-local rendering
     // applies no flip of its own).
     let t = if idx == 0 {
@@ -1085,7 +1104,18 @@ fn render_shape<'a>(
     }
     mirror_master(doc, s, &chain, width, height, greek, out);
 
-    emit_text(doc, s, &chain, width, height, sx, sy, skip_text == Some(s.id), greek, out);
+    emit_text(
+        doc,
+        s,
+        &chain,
+        width,
+        height,
+        sx,
+        sy,
+        skip_text == Some(s.id),
+        greek,
+        out,
+    );
     let _ = writeln!(out, "</g>");
 }
 
@@ -1139,7 +1169,18 @@ fn render_shape_local<'a>(
     mirror_master(doc, s, &chain, width, height, greek, out);
     // Group-local rendering applies no flip scale of its own, so the text
     // needs no flip compensation here.
-    emit_text(doc, s, &chain, width, height, 1.0, 1.0, skip_text == Some(s.id), greek, out);
+    emit_text(
+        doc,
+        s,
+        &chain,
+        width,
+        height,
+        1.0,
+        1.0,
+        skip_text == Some(s.id),
+        greek,
+        out,
+    );
     let _ = writeln!(out, "</g>");
 }
 
@@ -1626,7 +1667,10 @@ pub(crate) fn resolve_text_block(
     TextBlock {
         pin: (tx, ty),
         size: (tw, th),
-        loc_pin: (get("TxtLocPinX").unwrap_or(tw / 2.0), get("TxtLocPinY").unwrap_or(th / 2.0)),
+        loc_pin: (
+            get("TxtLocPinX").unwrap_or(tw / 2.0),
+            get("TxtLocPinY").unwrap_or(th / 2.0),
+        ),
         angle,
         insets: (ins_l, ins_r, ins_t, ins_b),
         line_height,
@@ -1819,7 +1863,11 @@ fn emit_text(
     } else {
         (wrap_block_text(&face, text, size, usable_w), Vec::new())
     };
-    let n_lines = if greeked { bar_widths.len() } else { lines.len() } as f64;
+    let n_lines = if greeked {
+        bar_widths.len()
+    } else {
+        lines.len()
+    } as f64;
     let total_h = n_lines * line_h;
 
     // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
@@ -2189,7 +2237,8 @@ fn render_all_geometry(
                         // again (#203 review). Cached master-unit
                         // numerics are master-unit and keep placed().
                         let sv = if proportional {
-                            scell.f
+                            scell
+                                .f
                                 .as_deref()
                                 .and_then(|f| vsdx::formula::eval(f, &env).ok())
                                 .and_then(|v| v.as_f64())
@@ -3266,13 +3315,13 @@ fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
     // stroke-width units (Analysis/line-patterns-visio2016.md). 0/1
     // stay None (0 hides the line entirely at the call site).
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 4.0], // dash
-        3 => &[1.0, 4.0], // dot
-        4 => &[8.0, 4.0, 1.0, 4.0], // dash-dot
-        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0], // dash-dot-dot
-        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0], // dash-dash-dot
-        7 => &[20.0, 4.0, 8.0, 4.0], // long + short dash
-        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0], // long + 2 short dashes
+        2 => &[8.0, 4.0],                         // dash
+        3 => &[1.0, 4.0],                         // dot
+        4 => &[8.0, 4.0, 1.0, 4.0],               // dash-dot
+        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0],     // dash-dot-dot
+        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0],     // dash-dash-dot
+        7 => &[20.0, 4.0, 8.0, 4.0],              // long + short dash
+        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0],    // long + 2 short dashes
         9 => &[4.0, 2.0], // short dash (the corpus legend "long dash" label was wrong)
         10 => &[1.0, 2.0], // fine dot
         11 => &[4.0, 2.0, 1.0, 2.0], // short dash-dot
@@ -3523,10 +3572,7 @@ fn quote_family(name: &str) -> String {
     if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         name.to_string()
     } else {
-        format!(
-            "'{}'",
-            name.replace('\\', "\\\\").replace('\'', "\\'")
-        )
+        format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
     }
 }
 
@@ -3918,10 +3964,7 @@ mod tests {
         let arr = |p: f64| line_dasharray(p, w);
         assert_eq!(arr(2.0).as_deref(), Some("0.16000 0.08000"));
         assert_eq!(arr(3.0).as_deref(), Some("0.02000 0.08000"));
-        assert_eq!(
-            arr(4.0).as_deref(),
-            Some("0.16000 0.08000 0.02000 0.08000")
-        );
+        assert_eq!(arr(4.0).as_deref(), Some("0.16000 0.08000 0.02000 0.08000"));
         assert_eq!(
             arr(5.0).as_deref(),
             Some("0.16000 0.08000 0.02000 0.08000 0.02000 0.08000")
@@ -3949,7 +3992,10 @@ mod tests {
             arr(13.0).as_deref(),
             Some("0.08000 0.04000 0.08000 0.04000 0.02000 0.04000")
         );
-        assert_eq!(arr(14.0).as_deref(), Some("0.20000 0.04000 0.08000 0.04000"));
+        assert_eq!(
+            arr(14.0).as_deref(),
+            Some("0.20000 0.04000 0.08000 0.04000")
+        );
         assert_eq!(
             arr(15.0).as_deref(),
             Some("0.20000 0.04000 0.08000 0.04000 0.08000 0.04000")
@@ -3968,7 +4014,10 @@ mod tests {
             arr(20.0).as_deref(),
             Some("0.32000 0.16000 0.32000 0.16000 0.02000 0.16000")
         );
-        assert_eq!(arr(21.0).as_deref(), Some("0.80000 0.16000 0.32000 0.16000"));
+        assert_eq!(
+            arr(21.0).as_deref(),
+            Some("0.80000 0.16000 0.32000 0.16000")
+        );
         assert_eq!(
             arr(22.0).as_deref(),
             Some("0.80000 0.16000 0.32000 0.16000 0.32000 0.16000")
@@ -4181,10 +4230,7 @@ mod tests {
             emit("4").contains(r##"fill="#0000FF""##),
             "an index Char.Color resolves through the palette table"
         );
-        assert!(
-            emit("2").contains(r##"fill="#FF0000""##),
-            "index 2 is red"
-        );
+        assert!(emit("2").contains(r##"fill="#FF0000""##), "index 2 is red");
         // No Color cell: the built-in default is black.
         let mut s = Shape::default();
         s.sheet.text = Some("plain".into());
@@ -4193,7 +4239,10 @@ mod tests {
         let chain = [&s];
         let mut out = String::new();
         emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
-        assert!(out.contains(r##"fill="#000000""##), "default text is black: {out}");
+        assert!(
+            out.contains(r##"fill="#000000""##),
+            "default text is black: {out}"
+        );
     }
 
     #[test]
@@ -4319,7 +4368,8 @@ mod tests {
     #[test]
     fn text_greeks_below_the_pixel_threshold() {
         let doc = Document::default();
-        let tiny = |size: &str| { // sizes floor at 0.02 in in resolve_text_block
+        let tiny = |size: &str| {
+            // sizes floor at 0.02 in in resolve_text_block
             let mut s = Shape::default();
             s.sheet.children.push(SheetChild::Section(Section {
                 name: "Character".into(),
@@ -4337,8 +4387,22 @@ mod tests {
         let chain = [&s];
         let ctx = GreekCtx::new(96.0);
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, Some(&ctx), &mut out);
-        assert!(out.contains(r##"fill="#7f7f7f""##), "greek bars emitted: {out}");
+        emit_text(
+            &doc,
+            &s,
+            &chain,
+            2.0,
+            1.0,
+            1.0,
+            1.0,
+            false,
+            Some(&ctx),
+            &mut out,
+        );
+        assert!(
+            out.contains(r##"fill="#7f7f7f""##),
+            "greek bars emitted: {out}"
+        );
         assert!(!out.contains("<text"), "no glyph node when greeked: {out}");
         assert!(!out.contains("<tspan"), "no tspan when greeked: {out}");
         assert_eq!(ctx.sizes.into_inner(), vec![0.02]);
@@ -4349,10 +4413,28 @@ mod tests {
         let chain = [&s];
         let ctx = GreekCtx::new(96.0);
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, Some(&ctx), &mut out);
+        emit_text(
+            &doc,
+            &s,
+            &chain,
+            2.0,
+            1.0,
+            1.0,
+            1.0,
+            false,
+            Some(&ctx),
+            &mut out,
+        );
         assert!(out.contains("tiny text"), "glyph path unchanged: {out}");
-        assert!(!out.contains("#7f7f7f"), "no bars above the threshold: {out}");
-        assert_eq!(greeked_count(&[0.13889], 96.0), 0, "13 px text does not greek");
+        assert!(
+            !out.contains("#7f7f7f"),
+            "no bars above the threshold: {out}"
+        );
+        assert_eq!(
+            greeked_count(&[0.13889], 96.0),
+            0,
+            "13 px text does not greek"
+        );
 
         // No greek context (export/print/thumbnails): glyphs regardless
         // of size — greeking never enters those paths.
@@ -4370,10 +4452,7 @@ mod tests {
         let mut total = Mat::identity();
         for cmd in list.split(')').filter(|s| !s.trim().is_empty()) {
             let body = cmd.trim().split('(').nth(1).unwrap_or("");
-            let n: Vec<f64> = body
-                .split(',')
-                .map(|v| v.trim().parse().unwrap())
-                .collect();
+            let n: Vec<f64> = body.split(',').map(|v| v.trim().parse().unwrap()).collect();
             let m = if cmd.trim().starts_with("translate") {
                 Mat::translate(n[0], n[1])
             } else if cmd.trim().starts_with("scale") {
@@ -4716,7 +4795,12 @@ mod tests {
         g.id = 9;
         g.type_ = Some("Group".into());
         let mut m = unit_member();
-        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+        for (n, v) in [
+            ("PinX", 1.0),
+            ("PinY", 1.0),
+            ("Width", 1.0),
+            ("Height", 1.0),
+        ] {
             m.sheet.set_cell(
                 n,
                 Cell {
@@ -4726,7 +4810,10 @@ mod tests {
             );
         }
         let chain = vec![&g, &m];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((0.5, 2.5, 1.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((0.5, 2.5, 1.0, 1.0))
+        );
     }
 
     #[test]
@@ -4747,7 +4834,12 @@ mod tests {
         g.id = 9;
         g.type_ = Some("Group".into());
         let mut m = unit_member();
-        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+        for (n, v) in [
+            ("PinX", 1.0),
+            ("PinY", 1.0),
+            ("Width", 1.0),
+            ("Height", 1.0),
+        ] {
             m.sheet.set_cell(
                 n,
                 Cell {
@@ -4757,7 +4849,10 @@ mod tests {
             );
         }
         let chain = vec![&g, &m];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((3.5, 3.5, 1.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((3.5, 3.5, 1.0, 1.0))
+        );
     }
 
     #[test]
@@ -4801,7 +4896,10 @@ mod tests {
             ("Height", 1.0),
         ]);
         let chain = vec![&s];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((2.0, 3.5, 2.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((2.0, 3.5, 2.0, 1.0))
+        );
     }
 
     // ---- #93: per-shape layer bounds + renderer ----
@@ -4951,7 +5049,14 @@ mod tests {
                 geo_row(
                     2,
                     "SplineStart",
-                    &[("X", 1.0), ("Y", 1.5), ("A", 0.3), ("B", 0.0), ("C", 1.0), ("D", 3.0)],
+                    &[
+                        ("X", 1.0),
+                        ("Y", 1.5),
+                        ("A", 0.3),
+                        ("B", 0.0),
+                        ("C", 1.0),
+                        ("D", 3.0),
+                    ],
                 ),
                 geo_row(3, "SplineKnot", &[("X", 2.5), ("Y", 0.4), ("A", 0.6)]),
                 geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
@@ -4964,12 +5069,7 @@ mod tests {
             &mut nurbs_u,
             vec![
                 geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
-                nurbs_row(
-                    2,
-                    4.0,
-                    2.0,
-                    "NURBS(1, 3, 0, 0, 1.2,1.6,0,1, 2.8,0.2,0,1)",
-                ),
+                nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,1, 2.8,0.2,0,1)"),
             ],
         );
         // 3. NURBS rational: the same geometry with the middle
@@ -4979,21 +5079,15 @@ mod tests {
             &mut nurbs_r,
             vec![
                 geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
-                nurbs_row(
-                    2,
-                    4.0,
-                    2.0,
-                    "NURBS(1, 3, 0, 0, 1.2,1.6,0,2, 2.8,0.2,0,1)",
-                ),
+                nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,2, 2.8,0.2,0,1)"),
             ],
         );
         let (doc, page) = page_fixture(vec![spline, nurbs_u, nurbs_r]);
         let svg = render_page(&doc, &page).unwrap();
 
-        let regenerate =
-            std::env::var("UPDATE_SPLINE_GOLDENS").is_ok();
-        let golden_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/goldens/spline_nurbs.svg");
+        let regenerate = std::env::var("UPDATE_SPLINE_GOLDENS").is_ok();
+        let golden_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/spline_nurbs.svg");
         if regenerate {
             let _ = std::fs::create_dir_all(golden_path.parent().unwrap());
             std::fs::write(&golden_path, &svg).unwrap();
@@ -5032,11 +5126,20 @@ mod tests {
             shapes,
             ..Page::default()
         };
-        (Document { pages: vec![page.clone()], ..Document::default() }, page)
+        (
+            Document {
+                pages: vec![page.clone()],
+                ..Document::default()
+            },
+            page,
+        )
     }
 
     fn shape_at(id: i64, pin: (f64, f64), w: f64, h: f64, angle_deg: f64) -> Shape {
-        let mut sh = Shape { id, ..Shape::default() };
+        let mut sh = Shape {
+            id,
+            ..Shape::default()
+        };
         for (n, v) in [
             ("PinX", pin.0),
             ("PinY", pin.1),
@@ -5137,7 +5240,14 @@ mod tests {
                 geo_row(
                     2,
                     "SplineStart",
-                    &[("X", 1.0), ("Y", 1.5), ("A", 0.4), ("B", 0.0), ("C", 1.0), ("D", 3.0)],
+                    &[
+                        ("X", 1.0),
+                        ("Y", 1.5),
+                        ("A", 0.4),
+                        ("B", 0.0),
+                        ("C", 1.0),
+                        ("D", 3.0),
+                    ],
                 ),
                 geo_row(3, "SplineKnot", &[("X", 2.0), ("Y", 0.5), ("A", 0.6)]),
                 geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
@@ -5178,7 +5288,18 @@ mod tests {
             &mut s,
             vec![
                 geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
-                geo_row(2, "NURBSTo", &[("X", 4.0), ("Y", 2.0), ("A", 0.0), ("B", 1.0), ("C", 0.0), ("D", 1.0)]),
+                geo_row(
+                    2,
+                    "NURBSTo",
+                    &[
+                        ("X", 4.0),
+                        ("Y", 2.0),
+                        ("A", 0.0),
+                        ("B", 1.0),
+                        ("C", 0.0),
+                        ("D", 1.0),
+                    ],
+                ),
             ],
         );
         // The E cell with its formula text.
@@ -5205,7 +5326,10 @@ mod tests {
         let (doc, page) = page_fixture(vec![s]);
         let svg = render_page(&doc, &page).unwrap();
         let segments = svg.match_indices("L ").count();
-        assert!(segments > 8, "the NURBS flattens to many segments: {segments}");
+        assert!(
+            segments > 8,
+            "the NURBS flattens to many segments: {segments}"
+        );
         // Interior points (0.35·4=1.4, 0.9·2=1.8) and (2.6, 0.2) pull
         // the curve off the (0,0)→(4,2) chord; some emitted point must
         // sit off it (chord: y = 0.5x).
@@ -5229,7 +5353,13 @@ mod tests {
         // 2×1 shape rotated 90° about its pin (the Angle cell is
         // radians, like render_shape reads it): the ink swaps extents —
         // a plain W×H box (what master_bbox computes) would clip it.
-        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, std::f64::consts::FRAC_PI_2)]);
+        let (doc, page) = page_fixture(vec![shape_at(
+            1,
+            (4.0, 5.0),
+            2.0,
+            1.0,
+            std::f64::consts::FRAC_PI_2,
+        )]);
         let (x, y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
         assert!((w - (1.0 + 2.0 * PAD)).abs() < 1e-9, "w={w}");
         assert!((h - (2.0 + 2.0 * PAD)).abs() < 1e-9, "h={h}");
@@ -5244,7 +5374,9 @@ mod tests {
         // edge (local pin 2.5 of a 2-wide box) and whose text block is
         // wider than the shape: the union must cover both.
         let mut group = shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0);
-        group.sub_shapes.push(shape_at(2, (2.5, 0.8), 1.0, 1.0, 0.0));
+        group
+            .sub_shapes
+            .push(shape_at(2, (2.5, 0.8), 1.0, 1.0, 0.0));
         group.sheet.text = Some("hello".into());
         group.sheet.set_cell("TxtWidth", Cell::value("3"));
         let (doc, page) = page_fixture(vec![group]);
@@ -5274,7 +5406,10 @@ mod tests {
         hidden_shape.sheet.set_cell("LayerMember", Cell::value("2"));
         let (doc, page) = page_fixture(vec![hidden_shape]);
         let svg = render_shape_layer(&doc, &page, 1, &[2], bounds).unwrap();
-        assert!(!svg.contains("<g transform"), "hidden root must not draw: {svg}");
+        assert!(
+            !svg.contains("<g transform"),
+            "hidden root must not draw: {svg}"
+        );
     }
 
     /// GitHub #22: the shared TextBlock resolution must agree with the
@@ -5358,19 +5493,30 @@ mod tests {
         let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0)]);
         let (x, y, w, h) = text_block_page_rect(&doc, &page, 1).unwrap();
         // Shape rect: pin (4,5) center → (3, 4.5)..(5, 5.5), y-up.
-        assert!((x - 3.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!(
+            (x - 3.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9,
+            "x={x} y={y}"
+        );
         assert!((w - 2.0).abs() < 1e-9 && (h - 1.0).abs() < 1e-9);
 
         // Off-center pin: TxtPin (1.5, 0.25) with a centered 1×0.5
         // block → shape-local (1.0, 0.0)..(2.0, 0.5) → page
         // (4.0, 4.5)..(5.0, 5.0) (pin − LocPin = (3.0, 4.5) offset).
         let mut sh = shape_at(2, (4.0, 5.0), 2.0, 1.0, 0.0);
-        for (n, v) in [("TxtPinX", 1.5), ("TxtPinY", 0.25), ("TxtWidth", 1.0), ("TxtHeight", 0.5)] {
+        for (n, v) in [
+            ("TxtPinX", 1.5),
+            ("TxtPinY", 0.25),
+            ("TxtWidth", 1.0),
+            ("TxtHeight", 0.5),
+        ] {
             sh.sheet.set_cell(n, Cell::value(format!("{v}")));
         }
         let (doc, page) = page_fixture(vec![sh]);
         let (x, y, w, h) = text_block_page_rect(&doc, &page, 2).unwrap();
-        assert!((x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!(
+            (x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9,
+            "x={x} y={y}"
+        );
         assert!((w - 1.0).abs() < 1e-9 && (h - 0.5).abs() < 1e-9);
     }
 
@@ -5378,7 +5524,15 @@ mod tests {
     fn text_lines(out: &str) -> Vec<String> {
         out.split("<tspan")
             .skip(1)
-            .map(|l| l.split('>').nth(1).unwrap_or("").split('<').next().unwrap_or("").to_string())
+            .map(|l| {
+                l.split('>')
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
             .collect()
     }
 
@@ -5484,7 +5638,8 @@ mod tests {
         let mut s = Shape::default();
         s.sheet.text = Some("a  b".into());
         s.sheet.set_cell("Width", Cell::value("2.0"));
-        s.sheet.set_cell("TxtWidth", Cell::value(format!("{usable:.6}")));
+        s.sheet
+            .set_cell("TxtWidth", Cell::value(format!("{usable:.6}")));
         s.sheet.set_cell("LeftMargin", Cell::value("0"));
         s.sheet.set_cell("RightMargin", Cell::value("0"));
         let chain = [&s];
@@ -5503,8 +5658,7 @@ mod tests {
     fn measured_wrap_splits_genuinely_overflowing_runs() {
         let doc = Document::default();
         let mut s = Shape::default();
-        s.sheet.text =
-            Some("considerable label text beyond the block".into());
+        s.sheet.text = Some("considerable label text beyond the block".into());
         s.sheet.set_cell("Width", Cell::value("0.8"));
         s.sheet.set_cell("Height", Cell::value("1.0"));
         s.sheet.set_cell("TxtWidth", Cell::value("0.8"));
@@ -5541,7 +5695,10 @@ mod tests {
         let mut out = String::new();
         emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
-        assert!(lines.len() > 1, "a 26-em-ish run cannot fit 0.3 in: {lines:?}");
+        assert!(
+            lines.len() > 1,
+            "a 26-em-ish run cannot fit 0.3 in: {lines:?}"
+        );
         assert!(
             lines.iter().all(|l| !l.is_empty()),
             "hard splits keep every line non-empty: {lines:?}"
@@ -5668,7 +5825,9 @@ mod tests {
                 id: 1,
                 ..Shape::default()
             };
-            shape.sheet.set_cell("EndArrow", Cell::value(kind.to_string()));
+            shape
+                .sheet
+                .set_cell("EndArrow", Cell::value(kind.to_string()));
             shape.sheet.children.push(SheetChild::Section(Section {
                 name: "Geometry".into(),
                 rows: vec![
@@ -5710,11 +5869,13 @@ mod tests {
         assert!(open22.contains("fill=\"none\" stroke=\"#000000\""));
         // The classic triangle 4 fills.
         let classic4 = fixture(4);
-        assert!(classic4.contains("marker-end"), "marker attached: {classic4}");
+        assert!(
+            classic4.contains("marker-end"),
+            "marker attached: {classic4}"
+        );
         assert!(classic4.contains("<path d=\"M0,0 L10,5 L0,10 z\" fill=\"#000000\""));
         // The bare end 46 carries no marker at all.
         let bare46 = fixture(46);
         assert!(!bare46.contains("marker-end"), "bare ends carry no marker");
     }
 }
-

@@ -715,7 +715,9 @@ mod tests {
         // corpus's `MAX(Width,TEXTWIDTH(TheText))` shapes evaluate
         // end to end.
         assert_eq!(
-            eval_measured("TEXTWIDTH(\"abc\")+1", &e, &m).unwrap().as_f64(),
+            eval_measured("TEXTWIDTH(\"abc\")+1", &e, &m)
+                .unwrap()
+                .as_f64(),
             Some(1.3)
         );
         let mut e2 = env();

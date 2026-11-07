@@ -45,8 +45,7 @@ struct Cell<'a> {
 /// Does a master match the "Search Shapes" filter (#86)?
 fn matches(m: &vsdx::Master, q: &str) -> bool {
     q.is_empty()
-        || m
-            .name_u
+        || m.name_u
             .as_deref()
             .map(|n| n.to_lowercase().contains(q))
             .unwrap_or(false)
@@ -248,27 +247,29 @@ impl Stencil {
                             // The full catalog's largest category holds 41
                             // stencils — cap the flyout at a scrollable
                             // height instead of running past the window.
-                            egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
-                                for b in builtin::BUILTINS
-                                    .iter()
-                                    .filter(|b| b.category == cat.as_str())
-                                {
-                                    // Either identity counts as open: the
-                                    // extracted file (#104) or the
-                                    // builtin/<slug> fallback — a
-                                    // builtin-origin entry with the
-                                    // slug's stem, however it opened.
-                                    let stem = std::ffi::OsStr::new(b.slug);
-                                    let mut open = set.iter().any(|(_, st)| {
-                                        st.origin == crate::stencil::Origin::Builtin
-                                            && st.source.file_stem() == Some(stem)
-                                    });
-                                    if ui.checkbox(&mut open, b.title).changed() {
-                                        self.request = Some(Request::ToggleBuiltin(b.slug));
-                                        ui.close();
+                            egui::ScrollArea::vertical()
+                                .max_height(420.0)
+                                .show(ui, |ui| {
+                                    for b in builtin::BUILTINS
+                                        .iter()
+                                        .filter(|b| b.category == cat.as_str())
+                                    {
+                                        // Either identity counts as open: the
+                                        // extracted file (#104) or the
+                                        // builtin/<slug> fallback — a
+                                        // builtin-origin entry with the
+                                        // slug's stem, however it opened.
+                                        let stem = std::ffi::OsStr::new(b.slug);
+                                        let mut open = set.iter().any(|(_, st)| {
+                                            st.origin == crate::stencil::Origin::Builtin
+                                                && st.source.file_stem() == Some(stem)
+                                        });
+                                        if ui.checkbox(&mut open, b.title).changed() {
+                                            self.request = Some(Request::ToggleBuiltin(b.slug));
+                                            ui.close();
+                                        }
                                     }
-                                }
-                            });
+                                });
                         });
                     }
                     ui.separator();
@@ -278,7 +279,10 @@ impl Stencil {
                     }
                     // Visio parity (#102): the document stencil is an
                     // opt-in pane entry, not a pinned one.
-                    if ui.checkbox(&mut self.doc_stencil_visible, "Document Stencil").changed() {
+                    if ui
+                        .checkbox(&mut self.doc_stencil_visible, "Document Stencil")
+                        .changed()
+                    {
                         ui.close();
                     }
                 });
@@ -347,7 +351,15 @@ impl Stencil {
                 if cells.is_empty() {
                     ui.weak("No matching shapes.");
                 } else {
-                    self.entry_grid(ui, t, &cells, cols, pool, &mut clicked, "stencil-grid-search");
+                    self.entry_grid(
+                        ui,
+                        t,
+                        &cells,
+                        cols,
+                        pool,
+                        &mut clicked,
+                        "stencil-grid-search",
+                    );
                 }
             } else {
                 // Entry "Quick Shapes" (#88): a virtual first entry
@@ -363,7 +375,15 @@ impl Stencil {
                     self.quick_expanded = !self.quick_expanded;
                 }
                 if self.quick_expanded && !quick.is_empty() {
-                    self.entry_grid(ui, t, &quick, cols, pool, &mut clicked, "stencil-grid-quick");
+                    self.entry_grid(
+                        ui,
+                        t,
+                        &quick,
+                        cols,
+                        pool,
+                        &mut clicked,
+                        "stencil-grid-quick",
+                    );
                 }
 
                 // The drawing's own masters are not pinned (#102):
@@ -479,8 +499,7 @@ impl Stencil {
                 let n = cells.len();
                 for (i, cell) in cells.iter().enumerate() {
                     let key = cell.key;
-                    let tex =
-                        self.texture(ui.ctx(), cell.serial, cell.src, cell.master.id, pool);
+                    let tex = self.texture(ui.ctx(), cell.serial, cell.src, cell.master.id, pool);
                     let armed = self.armed == Some(key);
                     // one grid cell: 64×78 (thumb + caption strip)
                     let size = Vec2::new(CELL_W, CELL_H);
@@ -594,7 +613,10 @@ impl Stencil {
             svg::render_master(src, m).unwrap_or_default()
         };
         match pool.post(
-            crate::rasterpool::RasterKey::Thumb { serial, master: master_id },
+            crate::rasterpool::RasterKey::Thumb {
+                serial,
+                master: master_id,
+            },
             crate::rasterpool::RasterJob::Parse { svg, width: 64.0 },
         ) {
             crate::rasterpool::Posted::Sync(img, _) => Some(self.insert(ctx, key, img)),
@@ -614,8 +636,8 @@ impl Stencil {
         key: (u64, i64),
         img: anyhow::Result<egui::ColorImage>,
     ) -> egui::TextureHandle {
-        let img = img
-            .unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
+        let img =
+            img.unwrap_or_else(|_| egui::ColorImage::new([64, 64], vec![Color32::GRAY; 64 * 64]));
         let (serial, master_id) = key;
         let tex = {
             let _s = crate::perf::span(crate::perf::Stage::Upload(crate::perf::Kind::Thumb));
@@ -694,8 +716,7 @@ impl Stencil {
 
 /// The document-masters entry's cells (search-filtered, id order).
 fn doc_cells<'a>(ed: &'a Editor, q: &str) -> Vec<Cell<'a>> {
-    let mut ordered: Vec<&vsdx::Master> =
-        ed.doc.masters.iter().filter(|m| matches(m, q)).collect();
+    let mut ordered: Vec<&vsdx::Master> = ed.doc.masters.iter().filter(|m| matches(m, q)).collect();
     ordered.sort_by_key(|m| m.id);
     ordered
         .into_iter()
@@ -715,7 +736,9 @@ fn doc_cells<'a>(ed: &'a Editor, q: &str) -> Vec<Cell<'a>> {
 /// every source, document set first then each open stencil in pane
 /// order, hidden masters excluded.
 fn visible_master(m: &vsdx::Master) -> bool {
-    !m.attrs.iter().any(|(k, v)| k == "Hidden" && v.trim() != "0")
+    !m.attrs
+        .iter()
+        .any(|(k, v)| k == "Hidden" && v.trim() != "0")
 }
 
 /// How many masters each source contributes to Quick Shapes (#88).
@@ -763,8 +786,12 @@ fn quick_cells<'a>(
     {
         let identity = crate::quickshapes::DOCUMENT;
         let defaults = quick_default_ids(&ed.doc);
-        let mut ordered: Vec<&vsdx::Master> =
-            ed.doc.masters.iter().filter(|m| visible_master(m)).collect();
+        let mut ordered: Vec<&vsdx::Master> = ed
+            .doc
+            .masters
+            .iter()
+            .filter(|m| visible_master(m))
+            .collect();
         ordered.sort_by_key(|m| m.id);
         for m in ordered {
             if membership.is_member(identity, m.id, defaults.contains(&m.id)) {
@@ -785,8 +812,12 @@ fn quick_cells<'a>(
         // review).
         let identity = st.source.to_str();
         let defaults = quick_default_ids(&st.doc);
-        let mut ordered: Vec<&vsdx::Master> =
-            st.doc.masters.iter().filter(|m| visible_master(m)).collect();
+        let mut ordered: Vec<&vsdx::Master> = st
+            .doc
+            .masters
+            .iter()
+            .filter(|m| visible_master(m))
+            .collect();
         ordered.sort_by_key(|m| m.id);
         for m in ordered {
             let member = match identity {

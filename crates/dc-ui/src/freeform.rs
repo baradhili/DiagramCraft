@@ -6,7 +6,7 @@
 //! shape build (the same local-frame convention the renderer and the
 //! #137 vertex handles use).
 
-use vsdx::model::{Cell, Row, Section, SheetChild, Shape};
+use vsdx::model::{Cell, Row, Section, Shape, SheetChild};
 
 /// Douglas-Peucker polyline simplification, page inches → the fewer
 /// points that still stay within `tol` of the input stroke.
@@ -110,9 +110,7 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             let run_side = side_of(mid);
             let ok = pts[i + 1..j].iter().all(|p| {
                 let dist = (p.0 - center.0).hypot(p.1 - center.1);
-                (dist - r).abs() < tol
-                    && r - dist < tol
-                    && run_side * side_of(*p) > 0.0
+                (dist - r).abs() < tol && r - dist < tol && run_side * side_of(*p) > 0.0
             });
             if !ok {
                 break;
@@ -133,7 +131,7 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             // value. A valid (minor-arc) run bulges OPPOSITE the
             // center, so the run side and the sagitta sign must
             // disagree: break when they agree.
-            if chord < 1e-9 || a.abs() > chord / 2.0  {
+            if chord < 1e-9 || a.abs() > chord / 2.0 {
                 break;
             }
             best_j = j;
@@ -219,7 +217,12 @@ pub fn build_shape(id: i64, stroke: &[(f64, f64)]) -> Option<Shape> {
         ix: 0,
         ..Section::default()
     };
-    for (n, v) in [("NoFill", "0"), ("NoLine", "0"), ("NoShow", "0"), ("NoSnap", "0")] {
+    for (n, v) in [
+        ("NoFill", "0"),
+        ("NoLine", "0"),
+        ("NoShow", "0"),
+        ("NoSnap", "0"),
+    ] {
         sec.cells.push((n.to_string(), Cell::value(v)));
     }
     let mut ix = 1i64;
@@ -267,8 +270,7 @@ mod tests {
     /// keeps the corners of a zigzag.
     #[test]
     fn simplify_keeps_corners_and_collapses_runs() {
-        let dense: Vec<(f64, f64)> =
-            (0..50).map(|i| (i as f64 * 0.02, 0.0)).collect();
+        let dense: Vec<(f64, f64)> = (0..50).map(|i| (i as f64 * 0.02, 0.0)).collect();
         assert_eq!(simplify(&dense, 0.01).len(), 2, "a straight run collapses");
         let zig = vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (2.0, 1.0)];
         let s = simplify(&zig, 0.01);
@@ -330,7 +332,9 @@ mod tests {
                 Seg::Line(a, b) => {
                     // A line segment's mid must also track the stroke.
                     let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
-                    let near = stroke.iter().any(|p| (p.0 - mid.0).hypot(p.1 - mid.1) < 0.2);
+                    let near = stroke
+                        .iter()
+                        .any(|p| (p.0 - mid.0).hypot(p.1 - mid.1) < 0.2);
                     assert!(near, "line mid tracks the stroke: {a:?}→{b:?}");
                     continue;
                 }

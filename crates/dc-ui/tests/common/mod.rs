@@ -5,7 +5,11 @@
 /// A synthetic document: `n_shapes` text-bearing rectangles on a grid
 /// (shape 1 sits at the page center so a center click selects it) and
 /// `n_masters` stencil masters, packaged as a minimal .vsdx.
-pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usize) -> std::path::PathBuf {
+pub fn many_shape_fixture(
+    dir: &std::path::Path,
+    n_shapes: usize,
+    n_masters: usize,
+) -> std::path::PathBuf {
     let rect = |id: usize, pin_x: f64, pin_y: f64, w: f64, h: f64, text: &str| {
         let (lw, lh) = (w / 2.0, h / 2.0);
         format!(
@@ -150,7 +154,10 @@ pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usi
         ("visio/masters/_rels/masters.xml.rels".into(), master_rels),
     ];
     for i in 0..n_masters {
-        parts.push((format!("visio/masters/master{}.xml", i + 1), master_body(i + 1)));
+        parts.push((
+            format!("visio/masters/master{}.xml", i + 1),
+            master_body(i + 1),
+        ));
     }
     for (name, data) in &parts {
         w.start_file(name.as_str(), opts).unwrap();

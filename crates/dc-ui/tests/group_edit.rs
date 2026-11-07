@@ -144,7 +144,10 @@ fn group_fixture(dir: &std::path::Path) -> std::path::PathBuf {
         ("visio/pages/_rels/pages.xml.rels".into(), page_rels.into()),
         ("visio/pages/page1.xml".into(), page1),
         ("visio/masters/masters.xml".into(), masters.into()),
-        ("visio/masters/_rels/masters.xml.rels".into(), master_rels.into()),
+        (
+            "visio/masters/_rels/masters.xml.rels".into(),
+            master_rels.into(),
+        ),
         ("visio/masters/master1.xml".into(), master1.into()),
     ];
     for (name, data) in &parts {
@@ -256,10 +259,7 @@ fn shift_click_at(h: &mut Harness<'_, App>, pos: egui::Pos2) {
 /// it, which the item queries use to avoid identically-named texts
 /// elsewhere (the breadcrumb's "›", ribbon buttons, the status line).
 fn click_group_flyout(h: &mut Harness<'_, App>) -> egui::Rect {
-    let menu = h
-        .state()
-        .debug_ctx_menu_rect()
-        .expect("context menu open");
+    let menu = h.state().debug_ctx_menu_rect().expect("context menu open");
     let row = h
         .get_all_by_label_contains("›")
         .filter(|n| n.rect().height() < 30.0)
@@ -349,7 +349,9 @@ fn flyout_groups_and_ungroups() {
     click_at(&mut h, c, egui::PointerButton::Secondary);
     h.run();
     let menu = click_group_flyout(&mut h);
-    flyout_item(&h, "Ungroup", menu).expect("Ungroup item").click();
+    flyout_item(&h, "Ungroup", menu)
+        .expect("Ungroup item")
+        .click();
     h.run();
     assert_eq!(h.state().debug_shape_count(), 3, "flyout Ungroup restored");
     // Ungroup leaves the first member selected (a top-level shape).
@@ -395,7 +397,10 @@ fn member_resize_handles_work_in_group_edit_mode() {
 
     // The corner handle exists in the mode (v1 suppressed all
     // handles) and dragging it grows ONLY the member.
-    let br = h.state().debug_sel_br_corner().expect("member handles in the mode");
+    let br = h
+        .state()
+        .debug_sel_br_corner()
+        .expect("member handles in the mode");
     drag_naturally(&mut h, br, egui::vec2(30.0, 20.0));
     let (w1, h1) = (h.state().debug_sel_width(), h.state().debug_sel_height());
     assert!(
@@ -411,8 +416,7 @@ fn member_resize_handles_work_in_group_edit_mode() {
     assert!(
         !grew,
         "the group's own Xform is untouched: {:?} -> {:?}",
-        group_rect_before,
-        group_rect_after
+        group_rect_before, group_rect_after
     );
 
     // One undo restores the member.
@@ -528,14 +532,20 @@ fn open_group_edit_flow() {
         "breadcrumb Close control"
     );
     assert!(
-        h.get_all_by_label_contains("Page › Panel.9").next().is_some(),
+        h.get_all_by_label_contains("Page › Panel.9")
+            .next()
+            .is_some(),
         "breadcrumb path"
     );
 
     // Clicks resolve against members only.
     let m = shape_center(&h, 10);
     click_at(&mut h, m, egui::PointerButton::Primary);
-    assert_eq!(h.state().debug_sel().map(|s| s.1), Some(10), "member selected");
+    assert_eq!(
+        h.state().debug_sel().map(|s| s.1),
+        Some(10),
+        "member selected"
+    );
     // The lone page shape is invisible to hits inside the mode.
     let out = shape_center(&h, 12);
     click_at(&mut h, out, egui::PointerButton::Primary);
@@ -545,9 +555,15 @@ fn open_group_edit_flow() {
     );
 
     // Close Group returns to the page.
-    h.get_all_by_label_contains("Close Group").next().unwrap().click();
+    h.get_all_by_label_contains("Close Group")
+        .next()
+        .unwrap()
+        .click();
     h.run();
-    assert!(h.state().debug_group_edit().is_empty(), "closed via the button");
+    assert!(
+        h.state().debug_group_edit().is_empty(),
+        "closed via the button"
+    );
 }
 
 #[test]
@@ -595,7 +611,10 @@ fn member_edit_esc_and_one_undo() {
         modifiers: egui::Modifiers::NONE,
     });
     h.run();
-    assert!(h.state().debug_group_edit().is_empty(), "Esc closed the mode");
+    assert!(
+        h.state().debug_group_edit().is_empty(),
+        "Esc closed the mode"
+    );
     assert_eq!(
         h.state().debug_cell_for_test(10, "PinX"),
         pin_after,
@@ -723,6 +742,5 @@ fn group_edit_mode_golden() {
     h.run();
     snap(&mut h, "dc_ui_group_edit_mode");
 }
-
 
 // temporary diagnostic appended to group_edit.rs

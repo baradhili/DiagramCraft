@@ -23,7 +23,10 @@ pub enum AlignKind {
 impl AlignKind {
     /// Horizontal kinds move x; vertical kinds move y.
     pub fn horizontal(self) -> bool {
-        matches!(self, AlignKind::Left | AlignKind::HCenter | AlignKind::Right)
+        matches!(
+            self,
+            AlignKind::Left | AlignKind::HCenter | AlignKind::Right
+        )
     }
 
     /// The alignment feature of a rect for this kind: the x or y
@@ -86,7 +89,14 @@ pub fn align_moves(
         .iter()
         .map(|&(id, r)| {
             let d = goal - kind.feature(r);
-            (id, if kind.horizontal() { (d, 0.0) } else { (0.0, d) })
+            (
+                id,
+                if kind.horizontal() {
+                    (d, 0.0)
+                } else {
+                    (0.0, d)
+                },
+            )
         })
         .collect()
 }
@@ -95,15 +105,11 @@ pub fn align_moves(
 /// spacing equal", URS-1161): sorted along the axis, first and last
 /// shapes stay, the gaps between all adjacent edges equalize.
 /// Returns per-shape pin deltas; `None` unless 3+ shapes.
-pub fn distribute_moves(
-    shapes: &[RectOf],
-    vertical: bool,
-) -> Option<Vec<(i64, (f64, f64))>> {
+pub fn distribute_moves(shapes: &[RectOf], vertical: bool) -> Option<Vec<(i64, (f64, f64))>> {
     if shapes.len() < 3 {
         return None;
     }
-    let extent =
-        |r: (f64, f64, f64, f64)| if vertical { (r.1, r.3) } else { (r.0, r.2) };
+    let extent = |r: (f64, f64, f64, f64)| if vertical { (r.1, r.3) } else { (r.0, r.2) };
     // order by leading edge; ids ride along for the result mapping
     let mut order: Vec<(i64, (f64, f64))> =
         shapes.iter().map(|(id, r)| (*id, extent(*r))).collect();
@@ -117,10 +123,7 @@ pub fn distribute_moves(
     for (id, (lead, size)) in &order {
         let want = cursor;
         let d = want - lead;
-        out.push((
-            *id,
-            if vertical { (0.0, d) } else { (d, 0.0) },
-        ));
+        out.push((*id, if vertical { (0.0, d) } else { (d, 0.0) }));
         cursor = want + size + gap;
     }
     Some(out)
@@ -153,7 +156,12 @@ mod tests {
     #[test]
     fn align_left_to_first_selected() {
         let shapes = [(1, r(0.0, 0.0, 1.0, 1.0)), (2, r(3.0, 1.0, 1.0, 1.0))];
-        let moves = align_moves(&shapes, AlignKind::Left, AlignTarget::FirstSelected, (8.5, 11.0));
+        let moves = align_moves(
+            &shapes,
+            AlignKind::Left,
+            AlignTarget::FirstSelected,
+            (8.5, 11.0),
+        );
         assert_eq!(moves[0], (1, (0.0, 0.0)), "first-selected anchors");
         assert_eq!(moves[1], (2, (-3.0, 0.0)));
     }
@@ -172,7 +180,12 @@ mod tests {
     fn align_vertical_centers_to_first() {
         let shapes = [(1, r(0.0, 4.0, 1.0, 2.0)), (2, r(3.0, 0.0, 1.0, 1.0))];
         // 1's vcenter = 5; 2's = 0.5 → dy = 4.5.
-        let moves = align_moves(&shapes, AlignKind::VCenter, AlignTarget::FirstSelected, (8.5, 11.0));
+        let moves = align_moves(
+            &shapes,
+            AlignKind::VCenter,
+            AlignTarget::FirstSelected,
+            (8.5, 11.0),
+        );
         assert!((moves[1].1 .1 - 4.5).abs() < 1e-9);
         assert_eq!(moves[1].1 .0, 0.0);
     }
@@ -181,7 +194,12 @@ mod tests {
     fn align_top_uses_y_up_top() {
         let shapes = [(1, r(0.0, 5.0, 1.0, 1.0)), (2, r(0.0, 0.0, 1.0, 3.0))];
         // tops: 6 vs 3 → dy = 3.
-        let moves = align_moves(&shapes, AlignKind::Top, AlignTarget::FirstSelected, (8.5, 11.0));
+        let moves = align_moves(
+            &shapes,
+            AlignKind::Top,
+            AlignTarget::FirstSelected,
+            (8.5, 11.0),
+        );
         assert!((moves[1].1 .1 - 3.0).abs() < 1e-9);
     }
 
@@ -195,8 +213,7 @@ mod tests {
             (2, r(1.5, 0.0, 1.0, 1.0)),
             (3, r(4.0, 0.0, 1.0, 1.0)),
         ];
-        let moves =
-            distribute_moves(&shapes, false).expect("3 shapes distribute");
+        let moves = distribute_moves(&shapes, false).expect("3 shapes distribute");
         let m: std::collections::HashMap<i64, f64> =
             moves.iter().map(|(id, (dx, _))| (*id, *dx)).collect();
         assert_eq!(m[&1], 0.0, "first stays");

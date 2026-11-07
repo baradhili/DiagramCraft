@@ -140,9 +140,7 @@ impl StencilSet {
     pub fn position_for(&self, source: &Path) -> Option<usize> {
         let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
         let want = canon(source);
-        self.open
-            .iter()
-            .position(|s| canon(&s.source) == want)
+        self.open.iter().position(|s| canon(&s.source) == want)
     }
 
     fn push(
@@ -237,10 +235,20 @@ mod tests {
     #[test]
     fn serials_never_repeat_across_close_and_reopen() {
         let mut set = StencilSet::default();
-        set.open_parsed(stencil_doc("A", 1), PathBuf::from("a.vssx"), "A".into(), Origin::File);
+        set.open_parsed(
+            stencil_doc("A", 1),
+            PathBuf::from("a.vssx"),
+            "A".into(),
+            Origin::File,
+        );
         let s1 = set.open[0].serial();
         assert_eq!(set.close(0), Some(s1));
-        set.open_parsed(stencil_doc("A", 2), PathBuf::from("a.vssx"), "A".into(), Origin::File);
+        set.open_parsed(
+            stencil_doc("A", 2),
+            PathBuf::from("a.vssx"),
+            "A".into(),
+            Origin::File,
+        );
         assert_ne!(
             set.open[0].serial(),
             s1,

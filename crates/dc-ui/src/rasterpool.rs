@@ -164,7 +164,12 @@ fn run(key: RasterKey, job: RasterJob) -> RasterDone {
         },
         RasterJob::Render { tree, width } => (render_tree(&tree, width, kind), None),
     };
-    RasterDone { key, image, tree, was_parse }
+    RasterDone {
+        key,
+        image,
+        tree,
+        was_parse,
+    }
 }
 
 /// A tiny fixed worker pool. Idle workers park on the work channel
@@ -342,7 +347,11 @@ mod tests {
     }
 
     fn page_key(part: &str) -> RasterKey {
-        RasterKey::Page { part: part.into(), version: 1, bucket: 384 }
+        RasterKey::Page {
+            part: part.into(),
+            version: 1,
+            bucket: 384,
+        }
     }
 
     /// Drain with a deadline: worker completions land asynchronously,
@@ -366,7 +375,10 @@ mod tests {
         let key = page_key("p1");
         match pool.post(
             key.clone(),
-            RasterJob::Parse { svg: tiny_svg(), width: 100.0 },
+            RasterJob::Parse {
+                svg: tiny_svg(),
+                width: 100.0,
+            },
         ) {
             Posted::Queued => {}
             _ => panic!("expected Queued"),
@@ -375,13 +387,13 @@ mod tests {
         assert_eq!(done.key, key);
         let img = done.image.unwrap();
         assert_eq!(img.size, [100, 100]);
-        assert!(done.tree.is_some(), "a Parse job returns the tree for #91 reuse");
+        assert!(
+            done.tree.is_some(),
+            "a Parse job returns the tree for #91 reuse"
+        );
         // The returned tree re-renders at another width (Render job).
         let tree = done.tree.unwrap();
-        match pool.post(
-            page_key("p1"),
-            RasterJob::Render { tree, width: 50.0 },
-        ) {
+        match pool.post(page_key("p1"), RasterJob::Render { tree, width: 50.0 }) {
             Posted::Queued => {}
             _ => panic!("expected Queued"),
         }
@@ -401,7 +413,10 @@ mod tests {
             assert!(matches!(
                 pool.post(
                     page_key(&format!("p{i}")),
-                    RasterJob::Parse { svg: tiny_svg(), width: 10.0 }
+                    RasterJob::Parse {
+                        svg: tiny_svg(),
+                        width: 10.0
+                    }
                 ),
                 Posted::Queued
             ));
@@ -409,7 +424,10 @@ mod tests {
         assert!(matches!(
             pool.post(
                 page_key("over"),
-                RasterJob::Parse { svg: tiny_svg(), width: 10.0 }
+                RasterJob::Parse {
+                    svg: tiny_svg(),
+                    width: 10.0
+                }
             ),
             Posted::Capped
         ));
@@ -419,7 +437,10 @@ mod tests {
         assert!(matches!(
             pool.post(
                 page_key("over"),
-                RasterJob::Parse { svg: tiny_svg(), width: 10.0 }
+                RasterJob::Parse {
+                    svg: tiny_svg(),
+                    width: 10.0
+                }
             ),
             Posted::Queued
         ));
@@ -444,7 +465,10 @@ mod tests {
         let mut pool = RasterPool::inline();
         match pool.post(
             page_key("p1"),
-            RasterJob::Parse { svg: tiny_svg(), width: 64.0 },
+            RasterJob::Parse {
+                svg: tiny_svg(),
+                width: 64.0,
+            },
         ) {
             Posted::Sync(image, tree) => {
                 assert_eq!(image.unwrap().size, [64, 64]);

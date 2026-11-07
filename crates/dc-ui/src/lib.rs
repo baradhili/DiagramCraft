@@ -3,14 +3,14 @@
 //! metric rulers) rendering through the SVG backend and editing through
 //! the dc-core command layer. No web stack.
 
+pub mod align;
 pub mod app;
 pub mod canvas;
 pub mod cmd;
-#[doc(hidden)]
-pub mod group_fixture;
-pub mod align;
 pub mod connectors;
 pub mod freeform;
+#[doc(hidden)]
+pub mod group_fixture;
 pub mod guides;
 pub mod hyperlink;
 pub mod icontex;
@@ -18,8 +18,8 @@ mod layers;
 pub mod os_theme;
 pub mod perf;
 pub mod props;
-mod rasterpool;
 pub mod quickshapes;
+mod rasterpool;
 pub mod recent;
 pub mod ribbon;
 pub mod shapesheet;

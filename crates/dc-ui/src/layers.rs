@@ -602,8 +602,12 @@ impl ShapeLayers {
             if self.tex_bytes <= self.budget_bytes {
                 break;
             }
-            let Some(entry) = self.entries.get_mut(&id) else { continue };
-            let Some(tex) = entry.tex.take() else { continue };
+            let Some(entry) = self.entries.get_mut(&id) else {
+                continue;
+            };
+            let Some(tex) = entry.tex.take() else {
+                continue;
+            };
             drop(tex);
             self.tex_bytes = self.tex_bytes.saturating_sub(entry.bytes);
             entry.bytes = 0;
@@ -625,7 +629,9 @@ impl ShapeLayers {
     /// kittest (#93): the layer texture id for a shape, if landed.
     #[doc(hidden)]
     pub fn tex_id_for_test(&self, id: i64) -> Option<TextureId> {
-        self.entries.get(&id).and_then(|e| e.tex.as_ref().map(|t| t.id()))
+        self.entries
+            .get(&id)
+            .and_then(|e| e.tex.as_ref().map(|t| t.id()))
     }
 
     /// kittest (#124 item 4): total RGBA bytes of the cached textures —
@@ -709,9 +715,9 @@ impl ShapeLayers {
         }
         self.set_page(page.id);
         let bucket = (ppi * 4.0).round().max(4.0) as u32; // ±0.25 ppi
-        // Bucket-settle state (#124 item 6.2): how many consecutive
-        // frames this exact bucket has held. First fills and content
-        // edits never wait for it; only pure re-buckets do.
+                                                          // Bucket-settle state (#124 item 6.2): how many consecutive
+                                                          // frames this exact bucket has held. First fills and content
+                                                          // edits never wait for it; only pure re-buckets do.
         if self.last_bucket != Some(bucket) {
             self.settle = 0;
         } else {
@@ -1202,19 +1208,37 @@ mod tests {
         layers.set_texture_budget_for_test(140);
         layers.entries.insert(4, entry_inflight(1, 384));
         layers.on_shape_done(&ctx, 0, 4, 1, 384, Ok(image_px(4, 4)), None);
-        assert!(layers.entries[&4].tex.is_some(), "the fresh texture survives");
-        assert!(layers.entries[&2].tex.is_none(), "the LRU texture is evicted first");
-        assert!(layers.entries[&3].tex.is_none(), "the next-LRU texture goes too");
-        assert!(layers.entries[&1].tex.is_some(), "the recently shown texture survives");
+        assert!(
+            layers.entries[&4].tex.is_some(),
+            "the fresh texture survives"
+        );
+        assert!(
+            layers.entries[&2].tex.is_none(),
+            "the LRU texture is evicted first"
+        );
+        assert!(
+            layers.entries[&3].tex.is_none(),
+            "the next-LRU texture goes too"
+        );
+        assert!(
+            layers.entries[&1].tex.is_some(),
+            "the recently shown texture survives"
+        );
         assert_eq!(layers.tex_bytes, 128, "accounting tracks the evictions");
         // Marking a texture as drawn this frame protects it: with the
         // same squeeze, shape 1 (drawn) stays and the new LRU goes.
         layers.drawn.insert(1);
         layers.entries.insert(5, entry_inflight(1, 384));
         layers.on_shape_done(&ctx, 0, 5, 1, 384, Ok(image_px(4, 4)), None);
-        assert!(layers.entries[&1].tex.is_some(), "a drawn-this-frame texture is protected");
+        assert!(
+            layers.entries[&1].tex.is_some(),
+            "a drawn-this-frame texture is protected"
+        );
         assert!(layers.entries[&4].tex.is_none(), "the new LRU goes instead");
-        assert!(layers.entries[&5].tex.is_some(), "the fresh texture survives");
+        assert!(
+            layers.entries[&5].tex.is_some(),
+            "the fresh texture survives"
+        );
     }
 
     /// #124 item 4: membership drops and page/doc clears keep the byte
@@ -1258,15 +1282,27 @@ mod tests {
         // 76.8 px em) the small block greeks, the large one doesn't.
         e.greek_sizes = Some(vec![0.02, 0.2].into());
         e.greek_count = dc::svg::greeked_count(&[0.02, 0.2], 96.0);
-        assert!(e.greek_profile_matches(96.0), "the serialized ppi matches itself");
-        assert!(e.greek_profile_matches(97.0), "no flip between 96 and 97 ppi");
+        assert!(
+            e.greek_profile_matches(96.0),
+            "the serialized ppi matches itself"
+        );
+        assert!(
+            e.greek_profile_matches(97.0),
+            "no flip between 96 and 97 ppi"
+        );
         // At 48 ppi the large block still renders (9.6 px em) and the
         // small one greeks: same profile.
-        assert!(e.greek_profile_matches(48.0), "0.02 in still greeks at 48 ppi");
+        assert!(
+            e.greek_profile_matches(48.0),
+            "0.02 in still greeks at 48 ppi"
+        );
         // At 190 ppi the small block clears 4 px (3.8 → 0.02×190=3.8
         // still greeks; 0.02×210=4.2 clears): crossing the boundary
         // flips the profile.
-        assert!(!e.greek_profile_matches(210.0), "0.02 in clears 4 px at 210 ppi");
+        assert!(
+            !e.greek_profile_matches(210.0),
+            "0.02 in clears 4 px at 210 ppi"
+        );
     }
 
     fn entry_inflight(version: u64, bucket: u32) -> Entry {

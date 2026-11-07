@@ -206,7 +206,10 @@ impl crate::Command for SetCellCache {
     }
 
     fn label(&self) -> String {
-        format!("refresh {}:{} cache = {}", self.scope, self.name, self.new_v)
+        format!(
+            "refresh {}:{} cache = {}",
+            self.scope, self.name, self.new_v
+        )
     }
 
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
@@ -276,9 +279,7 @@ impl crate::Command for SetGluedCell {
 
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
         // Only the GUARD waiver differs from SetCell (locks included).
-        if let Some(reason) =
-            protection_refusal(doc, &self.scope, &self.name, &self.new, true)
-        {
+        if let Some(reason) = protection_refusal(doc, &self.scope, &self.name, &self.new, true) {
             bail!("{reason}");
         }
         let (name, new) = (self.name.clone(), self.new.clone());
@@ -320,7 +321,6 @@ fn sub_shape(root: i64, shape: i64) -> Option<i64> {
 }
 
 impl crate::Command for SetCell {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match &self.scope {
             Scope::Shape { page, shape } => {
@@ -331,14 +331,17 @@ impl crate::Command for SetCell {
                 // translation (MoveShape and friends); anything else —
                 // including a sub-shape's pin, which moves ink WITHIN
                 // its group — is ink.
-                let move_only =
-                    root == *shape && (self.name == "PinX" || self.name == "PinY");
+                let move_only = root == *shape && (self.name == "PinX" || self.name == "PinY");
                 crate::TouchList {
                     pages: vec![],
                     shapes: vec![crate::Touched {
                         page: *page,
                         shape: root,
-                        touch: if move_only { crate::Touch::Move } else { crate::Touch::Ink },
+                        touch: if move_only {
+                            crate::Touch::Move
+                        } else {
+                            crate::Touch::Ink
+                        },
                         sub: sub_shape(root, *shape),
                     }],
                 }
@@ -428,7 +431,6 @@ pub fn effective_formula(
     f
 }
 
-
 /// Group-member scaling for a group resize (#69, #26's v1 boundary):
 /// under the no-scale rendering convention a group's size lives in
 /// its members' local cells, so resizing the group must scale each
@@ -513,10 +515,7 @@ fn scale_members_of(
                     continue;
                 };
                 cmds.push(Box::new(crate::SetCell::new(
-                    crate::Scope::Shape {
-                        page,
-                        shape: m.id,
-                    },
+                    crate::Scope::Shape { page, shape: m.id },
                     name,
                     Cell::value(format!("{:.6}", v * k)),
                 )));
@@ -533,10 +532,7 @@ fn scale_members_of(
             }
             let Some(v) = cell.numeric() else { continue };
             cmds.push(Box::new(crate::SetCell::new(
-                crate::Scope::Shape {
-                    page,
-                    shape: m.id,
-                },
+                crate::Scope::Shape { page, shape: m.id },
                 name,
                 Cell::value(format!("{:.6}", v * k)),
             )));
@@ -578,7 +574,9 @@ pub fn protection_refusal(
         if let Some(f) = effective_formula(doc, sh, &chain, name) {
             let guard = f.trim().trim_start_matches('=').trim();
             if guard.to_ascii_uppercase().starts_with("GUARD(") {
-                return Some(format!("{name} is GUARDed ({f}) — edit the formula to change it"));
+                return Some(format!(
+                    "{name} is GUARDed ({f}) — edit the formula to change it"
+                ));
             }
         }
     }
@@ -589,7 +587,9 @@ pub fn protection_refusal(
                 .map(|src| sheet_locked(&src.sheet, lock))
                 .unwrap_or(false);
         if locked {
-            return Some(format!("{lock} is set (Protection section) — {name} is locked"));
+            return Some(format!(
+                "{lock} is set (Protection section) — {name} is locked"
+            ));
         }
     }
     None
@@ -635,21 +635,22 @@ impl SetRowCell {
 }
 
 impl crate::Command for SetRowCell {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match &self.scope {
-            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
-                Some(root) => crate::TouchList {
-                    pages: vec![],
-                    shapes: vec![crate::Touched {
-                        page: *page,
-                        shape: root,
-                        touch: crate::Touch::Ink,
-                        sub: sub_shape(root, *shape),
-                    }],
-                },
-                None => crate::TouchList::page(*page),
-            },
+            Scope::Shape { page, shape } => {
+                match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                    Some(root) => crate::TouchList {
+                        pages: vec![],
+                        shapes: vec![crate::Touched {
+                            page: *page,
+                            shape: root,
+                            touch: crate::Touch::Ink,
+                            sub: sub_shape(root, *shape),
+                        }],
+                    },
+                    None => crate::TouchList::page(*page),
+                }
+            }
             Scope::PageSheet { page } => crate::TouchList::page(*page),
             _ => crate::TouchList::all_pages(doc),
         }
@@ -817,21 +818,22 @@ impl SetText {
 }
 
 impl crate::Command for SetText {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match &self.scope {
-            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
-                Some(root) => crate::TouchList {
-                    pages: vec![],
-                    shapes: vec![crate::Touched {
-                        page: *page,
-                        shape: root,
-                        touch: crate::Touch::Ink,
-                        sub: sub_shape(root, *shape),
-                    }],
-                },
-                None => crate::TouchList::page(*page),
-            },
+            Scope::Shape { page, shape } => {
+                match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                    Some(root) => crate::TouchList {
+                        pages: vec![],
+                        shapes: vec![crate::Touched {
+                            page: *page,
+                            shape: root,
+                            touch: crate::Touch::Ink,
+                            sub: sub_shape(root, *shape),
+                        }],
+                    },
+                    None => crate::TouchList::page(*page),
+                }
+            }
             Scope::PageSheet { page } => crate::TouchList::page(*page),
             _ => crate::TouchList::all_pages(doc),
         }
@@ -920,14 +922,18 @@ pub struct AddShape {
 }
 
 impl crate::Command for AddShape {
-
     fn touched(&self, _doc: &Document) -> crate::TouchList {
         // Added INTO a group: the group's content changed (Ink on its
         // root); added at top level: new membership.
         match self.parent {
             None => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: self.shape.id, touch: crate::Touch::Membership, sub: None }],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: self.shape.id,
+                    touch: crate::Touch::Membership,
+                    sub: None,
+                }],
             },
             Some(_) => crate::TouchList::page(self.page),
         }
@@ -1105,8 +1111,7 @@ impl crate::Command for ImportMaster {
             .unwrap_or(0);
         m.part = format!("visio/masters/master{next_part}.xml");
         // The stencil's rIds belong to the stencil's rels, not ours.
-        m.children
-            .retain(|c| !matches!(c, IndexChild::Rel(_)));
+        m.children.retain(|c| !matches!(c, IndexChild::Rel(_)));
         doc.masters.push(m);
         self.outcome = Some(ImportOutcome::Fresh {
             pos: doc.masters.len() - 1,
@@ -1302,21 +1307,22 @@ impl RemoveSectionRow {
 }
 
 impl crate::Command for RemoveSectionRow {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match &self.scope {
-            Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
-                Some(root) => crate::TouchList {
-                    pages: vec![],
-                    shapes: vec![crate::Touched {
-                        page: *page,
-                        shape: root,
-                        touch: crate::Touch::Ink,
-                        sub: sub_shape(root, *shape),
-                    }],
-                },
-                None => crate::TouchList::page(*page),
-            },
+            Scope::Shape { page, shape } => {
+                match crate::scope::top_level_ancestor(doc, *page, *shape) {
+                    Some(root) => crate::TouchList {
+                        pages: vec![],
+                        shapes: vec![crate::Touched {
+                            page: *page,
+                            shape: root,
+                            touch: crate::Touch::Ink,
+                            sub: sub_shape(root, *shape),
+                        }],
+                    },
+                    None => crate::TouchList::page(*page),
+                }
+            }
             Scope::PageSheet { page } => crate::TouchList::page(*page),
             _ => crate::TouchList::all_pages(doc),
         }
@@ -1499,7 +1505,6 @@ impl RemoveShape {
 }
 
 impl crate::Command for RemoveShape {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         // `removed`'s index path says where the shape lived. shape_path
         // numbers EVERY level (its doc: "the last element is the
@@ -1509,11 +1514,20 @@ impl crate::Command for RemoveShape {
         // removal — the slot now holds the successor — so a top-level
         // removal touched an unrelated sibling's Ink and never emitted
         // the removed shape's own Membership.
-        let path = self.removed.as_ref().map(|(_, p)| p.clone()).unwrap_or_default();
+        let path = self
+            .removed
+            .as_ref()
+            .map(|(_, p)| p.clone())
+            .unwrap_or_default();
         if path.len() == 1 {
             return crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: self.shape, touch: crate::Touch::Membership, sub: None }],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: self.shape,
+                    touch: crate::Touch::Membership,
+                    sub: None,
+                }],
             };
         }
         // Empty path: nothing captured yet (touched before apply) —
@@ -1612,7 +1626,6 @@ impl DuplicateShape {
 }
 
 impl crate::Command for DuplicateShape {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match crate::scope::top_level_ancestor(doc, self.page, self.shape) {
             // Top-level original ⇒ top-level clone: new membership.
@@ -1628,7 +1641,12 @@ impl crate::Command for DuplicateShape {
             // Sub-shape duplicate: the containing group's ink changed.
             Some(root) => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink, sub: None }],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: root,
+                    touch: crate::Touch::Ink,
+                    sub: None,
+                }],
             },
             None => crate::TouchList::page(self.page),
         }
@@ -1747,8 +1765,9 @@ pub fn add_container(
     // (Geometry rows are formula-authored below — the literal w/h the
     // old plain-frame rows used are gone.)
     // Heading text in the band is white.
-    sheet.children.push(vsdx::model::SheetChild::Section(
-        vsdx::model::Section {
+    sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
             name: "Character".into(),
             ix: 0,
             rows: vec![vsdx::model::Row {
@@ -1759,8 +1778,7 @@ pub fn add_container(
                 ..vsdx::model::Row::default()
             }],
             ..vsdx::model::Section::default()
-        },
-    ));
+        }));
     let container = Shape {
         id,
         name_u: Some(format!("Container.{id}")),
@@ -1781,20 +1799,15 @@ pub fn add_container(
     );
     // Section 0 — the heading band (filled). Formula rows keep it
     // glued to the container's live Width/Height.
-    let fcell = |f: &str| {
-        vsdx::model::Cell {
-            v: None,
-            f: Some(f.to_string()),
-            ..vsdx::model::Cell::default()
-        }
+    let fcell = |f: &str| vsdx::model::Cell {
+        v: None,
+        f: Some(f.to_string()),
+        ..vsdx::model::Cell::default()
     };
     let frow = |ix: i64, t: &str, x: &str, y: &str| vsdx::model::Row {
         ix,
         t: Some(t.into()),
-        cells: vec![
-            ("X".into(), fcell(x)),
-            ("Y".into(), fcell(y)),
-        ],
+        cells: vec![("X".into(), fcell(x)), ("Y".into(), fcell(y))],
         ..vsdx::model::Row::default()
     };
     container
@@ -1831,8 +1844,10 @@ pub fn add_container(
         }));
     // The base title rides on the sheet (#138: the heading text is
     // re-derived as "{title} ({member count})" by membership flows.
-    container.sheet.children.push(vsdx::model::SheetChild::Section(
-        vsdx::model::Section {
+    container
+        .sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
             name: "User".into(),
             ix: 0,
             rows: vec![vsdx::model::Row {
@@ -1844,8 +1859,7 @@ pub fn add_container(
                 ..vsdx::model::Row::default()
             }],
             ..vsdx::model::Section::default()
-        },
-    ));
+        }));
     let mut cmds: Vec<Box<dyn crate::Command>> = vec![
         Box::new(AddShape {
             page,
@@ -1915,11 +1929,7 @@ pub fn container_membership_cleanup(
 /// Undo payload for [`GroupShapes`]: member id, original z-position, and
 /// the pre-group cells of every Xform cell grouping rewrote (PinX/PinY,
 /// plus a 1D member's endpoints).
-type GroupUndo = Vec<(
-    i64,
-    usize,
-    Vec<(&'static str, Option<vsdx::model::Cell>)>,
-)>;
+type GroupUndo = Vec<(i64, usize, Vec<(&'static str, Option<vsdx::model::Cell>)>)>;
 
 /// Group top-level shapes into one `Type='Group'` shape (GitHub #26).
 /// The group's XForm is the members' union bbox with `LocPin` at its
@@ -2076,8 +2086,7 @@ impl crate::Command for GroupShapes {
                 let Some(c) = doc.resolve_cell(s, &[], name) else {
                     continue;
                 };
-                if c
-                    .f
+                if c.f
                     .as_deref()
                     .is_some_and(|f| !f.is_empty() && f != "Inh" && f != "No Formula")
                 {
@@ -2295,10 +2304,8 @@ impl crate::Command for UngroupShape {
                     m.sheet.cell(yn).and_then(|c| c.numeric()),
                 ) {
                     let (ex, ey) = to_page(x, y);
-                    m.sheet
-                        .set_cell(xn, vsdx::model::Cell::value(fmt_num(ex)));
-                    m.sheet
-                        .set_cell(yn, vsdx::model::Cell::value(fmt_num(ey)));
+                    m.sheet.set_cell(xn, vsdx::model::Cell::value(fmt_num(ex)));
+                    m.sheet.set_cell(yn, vsdx::model::Cell::value(fmt_num(ey)));
                 }
             }
             // Compose the group's rotation into the member's own Angle:
@@ -2307,7 +2314,11 @@ impl crate::Command for UngroupShape {
             // this would orbit a rotated group's members into position
             // but leave them pointing the old way.
             if ang != 0.0 {
-                let a = m.sheet.cell("Angle").and_then(|c| c.numeric()).unwrap_or(0.0);
+                let a = m
+                    .sheet
+                    .cell("Angle")
+                    .and_then(|c| c.numeric())
+                    .unwrap_or(0.0);
                 m.sheet
                     .set_cell("Angle", vsdx::model::Cell::value(fmt_num(a + ang)));
             }
@@ -2359,7 +2370,6 @@ impl ReorderShape {
 }
 
 impl crate::Command for ReorderShape {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         match crate::scope::top_level_ancestor(doc, self.page, self.shape) {
             // Z-order among top-level shapes: nothing cached depends
@@ -2367,11 +2377,21 @@ impl crate::Command for ReorderShape {
             // into the group's texture — ink.
             Some(root) if root == self.shape => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Order, sub: None }],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: root,
+                    touch: crate::Touch::Order,
+                    sub: None,
+                }],
             },
             Some(root) => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink, sub: None }],
+                shapes: vec![crate::Touched {
+                    page: self.page,
+                    shape: root,
+                    touch: crate::Touch::Ink,
+                    sub: None,
+                }],
             },
             None => crate::TouchList::page(self.page),
         }
@@ -2620,11 +2640,12 @@ pub fn new_page(doc: &Document, name: &str, source: Option<&Page>) -> Page {
                         .map(|c| vsdx::model::SheetChild::Cell(n.to_string(), c.clone()))
                 })
                 .collect();
-            let sized = cells.iter().any(|c| {
-                matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageWidth")
-            }) && cells
+            let sized = cells
                 .iter()
-                .any(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageHeight"));
+                .any(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageWidth"))
+                && cells
+                    .iter()
+                    .any(|c| matches!(c, vsdx::model::SheetChild::Cell(n, _) if n == "PageHeight"));
             if sized {
                 cells
             } else {
@@ -3262,7 +3283,6 @@ impl Macro {
 }
 
 impl crate::Command for Macro {
-
     fn touched(&self, doc: &Document) -> crate::TouchList {
         let mut all = crate::TouchList::none();
         for cmd in &self.cmds {
@@ -3297,13 +3317,9 @@ impl crate::Command for Macro {
     }
 }
 
-
 /// The top-level shape a sub-shape index path lives under: `path[0]`
 /// indexes the page's top-level list (the same convention RemoveShape
 /// captures).
 fn path_root(page: &vsdx::model::Page, path: &[usize]) -> i64 {
-    page.shapes
-        .get(path[0])
-        .map(|s| s.id)
-        .unwrap_or(-1)
+    page.shapes.get(path[0]).map(|s| s.id).unwrap_or(-1)
 }

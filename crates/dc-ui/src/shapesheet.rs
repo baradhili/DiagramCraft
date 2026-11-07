@@ -1111,7 +1111,11 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
     }
     for row in &base.rows {
         let (label, red) = row_label(name, row);
-        rows.push((label, red, merged_row(row, base_inherited, name, ix, &deeper)));
+        rows.push((
+            label,
+            red,
+            merged_row(row, base_inherited, name, ix, &deeper),
+        ));
     }
     // Row sections Visio always shows (Character/Paragraph/Tabs)
     // render even with no stored rows — one empty row of No Formula.
@@ -1746,10 +1750,13 @@ mod tests {
                 ix: gix,
                 rows: vec![Row {
                     ix: 0,
-                    cells: vec![("X".into(), Cell {
-                        v: Some(x.to_string()),
-                        ..Cell::default()
-                    })],
+                    cells: vec![(
+                        "X".into(),
+                        Cell {
+                            v: Some(x.to_string()),
+                            ..Cell::default()
+                        },
+                    )],
                     ..Row::default()
                 }],
                 ..Section::default()
@@ -1766,11 +1773,14 @@ mod tests {
             ],
             rows: vec![Row {
                 ix: 0,
-                cells: vec![("X".into(), Cell {
-                    v: Some("2".into()),
-                    f: Some("Inh".into()),
-                    ..Cell::default()
-                })],
+                cells: vec![(
+                    "X".into(),
+                    Cell {
+                        v: Some("2".into()),
+                        f: Some("Inh".into()),
+                        ..Cell::default()
+                    },
+                )],
                 ..Row::default()
             }],
             ..Section::default()

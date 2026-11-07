@@ -124,7 +124,10 @@ impl Drop for Span {
 
 /// Start timing a stage.
 pub fn span(stage: Stage) -> Span {
-    Span { stage, t: Instant::now() }
+    Span {
+        stage,
+        t: Instant::now(),
+    }
 }
 
 /// Zero every counter (test/bench use; safe mid-run).

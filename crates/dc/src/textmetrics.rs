@@ -133,10 +133,18 @@ fn build_db(embedded_only: bool) -> MetricsDb {
         db.load_system_fonts();
     }
     let pick = |bold: bool, italic: bool| -> Option<fontdb::ID> {
-        let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+        let want_style = if italic {
+            fontdb::Style::Italic
+        } else {
+            fontdb::Style::Normal
+        };
         let target = if bold { 700 } else { 400 };
         db.faces()
-            .filter(|f| f.families.iter().any(|(n, _)| n.eq_ignore_ascii_case("Carlito")))
+            .filter(|f| {
+                f.families
+                    .iter()
+                    .any(|(n, _)| n.eq_ignore_ascii_case("Carlito"))
+            })
             .filter(|f| matches!(f.style, fontdb::Style::Normal | fontdb::Style::Italic))
             .min_by_key(|f| style_rank(f, want_style, target))
             .map(|f| f.id)
@@ -188,10 +196,13 @@ pub struct ResolvedFace {
 pub fn resolve(font: Option<&str>, bold: bool, italic: bool) -> ResolvedFace {
     let m = metrics();
     let target = if bold { 700 } else { 400 };
-    let want_style = if italic { fontdb::Style::Italic } else { fontdb::Style::Normal };
+    let want_style = if italic {
+        fontdb::Style::Italic
+    } else {
+        fontdb::Style::Normal
+    };
     let installed = |family: &str| -> Option<fontdb::ID> {
-        m.db
-            .faces()
+        m.db.faces()
             .filter(|f| {
                 f.families
                     .iter()
@@ -205,7 +216,11 @@ pub fn resolve(font: Option<&str>, bold: bool, italic: bool) -> ResolvedFace {
             break; // the raster db maps generics to Carlito
         }
         if let Some(id) = installed(&name) {
-            return ResolvedFace { id, carlito: m.carlito, is_carlito: false };
+            return ResolvedFace {
+                id,
+                carlito: m.carlito,
+                is_carlito: false,
+            };
         }
     }
     let id = match (bold, italic) {
@@ -214,7 +229,11 @@ pub fn resolve(font: Option<&str>, bold: bool, italic: bool) -> ResolvedFace {
         (false, true) => m.carlito_italic,
         (true, true) => m.carlito_bold_italic,
     };
-    ResolvedFace { id, carlito: m.carlito, is_carlito: true }
+    ResolvedFace {
+        id,
+        carlito: m.carlito,
+        is_carlito: true,
+    }
 }
 
 impl ResolvedFace {
@@ -285,8 +304,7 @@ impl ResolvedFace {
         if text.is_empty() {
             return 0.0;
         }
-        type Widths =
-            std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, String), f64>>;
+        type Widths = std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID, String), f64>>;
         static WIDTHS: OnceLock<Widths> = OnceLock::new();
         let m = metrics();
         let key = (m as *const MetricsDb as usize, self.id, text.to_string());
@@ -296,9 +314,8 @@ impl ResolvedFace {
         }
         let fallback = |c: char| self.char_em(c);
         let db_key = m as *const MetricsDb as usize;
-        let width = m
-            .db
-            .with_face_data(self.id, |data, index| {
+        let width =
+            m.db.with_face_data(self.id, |data, index| {
                 shaped_face(db_key, self.id, data, index)
                     .map(|shaped| shape_width_em(&shaped, text, &fallback))
             })
@@ -351,8 +368,9 @@ fn shaped_face(
     data: &[u8],
     index: u32,
 ) -> Option<std::sync::Arc<ShapedFace>> {
-    type Faces =
-        std::sync::Mutex<std::collections::HashMap<(usize, fontdb::ID), std::sync::Arc<ShapedFace>>>;
+    type Faces = std::sync::Mutex<
+        std::collections::HashMap<(usize, fontdb::ID), std::sync::Arc<ShapedFace>>,
+    >;
     static FACES: OnceLock<Faces> = OnceLock::new();
     type Rejected = std::sync::Mutex<std::collections::HashSet<(usize, fontdb::ID)>>;
     static REJECTED: OnceLock<Rejected> = OnceLock::new();
@@ -435,10 +453,12 @@ fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64)
                 // font in here; the divergence is coverage-gap only —
                 // #146 keeps the documented per-character estimate).
                 let start = info.cluster as usize;
-                let next = infos
-                    .get(i + 1)
-                    .map_or(sub.len(), |n| n.cluster as usize);
-                let (lo, hi) = if start <= next { (start, next) } else { (next, start) };
+                let next = infos.get(i + 1).map_or(sub.len(), |n| n.cluster as usize);
+                let (lo, hi) = if start <= next {
+                    (start, next)
+                } else {
+                    (next, start)
+                };
                 let hi = hi.min(sub.len());
                 total += sub
                     .get(lo..hi)
@@ -556,7 +576,10 @@ mod tests {
         let i = resolve(Some("Certainly-Not-Installed-21"), false, true);
         assert_eq!(i.id, m.carlito_italic, "italic resolves the italic face");
         let bi = resolve(Some("Certainly-Not-Installed-21"), true, true);
-        assert_eq!(bi.id, m.carlito_bold_italic, "bold+italic resolves its corner");
+        assert_eq!(
+            bi.id, m.carlito_bold_italic,
+            "bold+italic resolves its corner"
+        );
     }
 
     /// #146: measurement SHAPES the run the way the rasterizer draws
@@ -600,7 +623,10 @@ mod tests {
     fn resolved_style(font: Option<&str>, bold: bool, italic: bool) -> (fontdb::Style, u16) {
         let m = metrics();
         let f = resolve(font, bold, italic);
-        let info = m.db.faces().find(|x| x.id == f.id).expect("resolved id is in the db");
+        let info =
+            m.db.faces()
+                .find(|x| x.id == f.id)
+                .expect("resolved id is in the db");
         (info.style, info.weight.0)
     }
 
@@ -613,10 +639,17 @@ mod tests {
     fn arial_chain_measures_liberation_and_styles_resolve() {
         let m = metrics();
         let f = resolve(Some("Arial"), false, false);
-        assert_ne!(f.id, m.carlito, "Arial resolves Liberation Sans, not Carlito");
+        assert_ne!(
+            f.id, m.carlito,
+            "Arial resolves Liberation Sans, not Carlito"
+        );
         // It measures different advances than the Carlito fallback
         // (the two designs share Arial metrics only approximately).
-        let carlito = ResolvedFace { id: m.carlito, carlito: m.carlito, is_carlito: true };
+        let carlito = ResolvedFace {
+            id: m.carlito,
+            carlito: m.carlito,
+            is_carlito: true,
+        };
         assert_ne!(
             f.width_in("measurement", 1.0),
             carlito.width_in("measurement", 1.0),

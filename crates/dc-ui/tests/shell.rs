@@ -677,9 +677,11 @@ fn inserted_page_carries_the_source_page_size() {
     // tab) seeds the same way — from the now-active Page-2.
     h.state_mut().set_tab_for_test(dc_ui::ribbon::Tab::Insert);
     h.run();
-    let add = h.get(egui_kittest::kittest::By::default()
-        .role(egui::Role::Button)
-        .label("New Page"));
+    let add = h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::Button)
+            .label("New Page"),
+    );
     add.click();
     h.run();
     assert_eq!(h.state().debug_active_page_name(), "Page-3");
