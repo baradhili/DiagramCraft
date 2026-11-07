@@ -884,16 +884,25 @@ impl App {
     }
 
     fn apply<C: dc_core::Command + 'static>(&mut self, cmd: C) {
-        if let Some(ed) = self.ed_mut() {
-            match ed.apply(cmd) {
-                Ok((label, touched)) => {
-                    self.status = label;
-                    self.dirty = true;
-                    self.version += 1; // Info thumbnail (whole page)
-                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
-                }
-                Err(e) => self.status = format!("{e:#}"),
+        // Field-disjoint borrows (ed/layers vs status): the #219
+        // damage routing needs the editor document alongside the
+        // layer store, so this site inlines page_id().
+        let Some(ed) = self.ed.as_mut() else { return };
+        // #219: capture the edited sub-shapes' PRE-edit ink bounds
+        // from the pre-apply document — the old half of each damage
+        // rect. A failed apply drops them (nothing routed).
+        let pre = self
+            .layers
+            .harvest_pre_damage(&ed.doc, &cmd.touched(&ed.doc));
+        match ed.apply(cmd) {
+            Ok((label, touched)) => {
+                let page = ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))].id;
+                self.layers.touch_damage(&ed.doc, &touched, &pre, page);
+                self.status = label;
+                self.dirty = true;
+                self.version += 1; // Info thumbnail (whole page)
             }
+            Err(e) => self.status = format!("{e:#}"),
         }
     }
 
@@ -990,13 +999,19 @@ impl App {
     }
 
     fn do_undo(&mut self) {
-        if let Some(ed) = self.ed_mut() {
+        if let Some(ed) = self.ed.as_mut() {
             match ed.undo() {
                 Ok(Some((l, touched))) => {
+                    // #219: no pre-apply harvest here — the undo pairs
+                    // against the per-transition bounds cache, which
+                    // holds exactly the state being reverted to.
+                    // (Field-disjoint borrows; page_id() is inlined.)
+                    let page =
+                        ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))].id;
+                    self.layers.touch_damage(&ed.doc, &touched, &[], page);
                     self.status = format!("undo: {l}");
                     self.dirty = true;
                     self.version += 1;
-                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                     self.restore_selection_after_history(&touched);
                 }
                 Ok(None) => self.status = "nothing to undo".into(),
@@ -1175,13 +1190,17 @@ impl App {
     }
 
     fn do_redo(&mut self) {
-        if let Some(ed) = self.ed_mut() {
+        if let Some(ed) = self.ed.as_mut() {
             match ed.redo() {
                 Ok(Some((l, touched))) => {
+                    // #219: redo pairs against the bounds cache, like
+                    // undo (field-disjoint borrows; page_id() inlined).
+                    let page =
+                        ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))].id;
+                    self.layers.touch_damage(&ed.doc, &touched, &[], page);
                     self.status = format!("redo: {l}");
                     self.dirty = true;
                     self.version += 1;
-                    self.layers.touch(&touched, self.page_id().unwrap_or(-1));
                     // Same selection mapping as undo (#136) — redo never
                     // touched the selection before, so a redo-of-delete
                     // could leave a selection pointing at a removed shape.

@@ -261,6 +261,41 @@ pub fn render_page_no_text(
     render_page_opts(doc, page, hidden, None, Some(skip_text_shape))
 }
 
+/// Union sink for the ink-bounds walk with the #219 focus gate:
+/// nodes contribute only once the walk is inside the focus subtree
+/// (always, when unfocused). `enter` arms the gate at the focus node;
+/// the walk saves/restores `inside` around each child so a later
+/// sibling of the focus never leaks into the region.
+struct Focus {
+    acc: Option<(f64, f64, f64, f64)>,
+    focus: Option<i64>,
+    inside: bool,
+}
+
+impl Focus {
+    fn enter(&mut self, id: i64) {
+        if Some(id) == self.focus {
+            self.inside = true;
+        }
+    }
+
+    fn union(&mut self, r: (f64, f64, f64, f64)) {
+        if !self.inside {
+            return;
+        }
+        self.acc = Some(match self.acc {
+            None => r,
+            Some((ax, ay, aw, ah)) => {
+                let x1 = (ax + aw).max(r.0 + r.2);
+                let y1 = (ay + ah).max(r.1 + r.3);
+                let nx = ax.min(r.0);
+                let ny = ay.min(r.1);
+                (nx, ny, x1 - nx, y1 - ny)
+            }
+        });
+    }
+}
+
 /// The ink bounds of one top-level shape's subtree, in page
 /// coordinates (inches, y-down like the SVG viewBox): the union of
 /// every node's transformed [0..w]×[-h..0] box and text box, padded to
@@ -271,20 +306,27 @@ pub fn shape_ink_bounds(
     page: &vsdx::Page,
     shape_id: i64,
 ) -> Option<(f64, f64, f64, f64)> {
+    shape_ink_bounds_focused(doc, page, shape_id, None)
+}
+
+/// [`shape_ink_bounds`] restricted to one DESCENDANT's own subtree
+/// (#219): `focus` names a sub-shape inside `shape_id`'s subtree and
+/// only that sub-shape's subtree is unioned — the damage region a
+/// localized edit re-rasters. The cell-resolution chain still runs
+/// from the top-level root, so inherited/master cells resolve exactly
+/// as the renderer resolves them. `None` is the whole-subtree bounds.
+pub fn shape_ink_bounds_focused(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    focus: Option<i64>,
+) -> Option<(f64, f64, f64, f64)> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let root = page.shapes.iter().find(|s| s.id == shape_id)?;
-    let mut acc: Option<(f64, f64, f64, f64)> = None;
-    let mut union = |r: (f64, f64, f64, f64)| {
-        acc = Some(match acc {
-            None => r,
-            Some((ax, ay, aw, ah)) => {
-                let x1 = (ax + aw).max(r.0 + r.2);
-                let y1 = (ay + ah).max(r.1 + r.3);
-                let nx = ax.min(r.0);
-                let ny = ay.min(r.1);
-                (nx, ny, x1 - nx, y1 - ny)
-            }
-        });
+    let mut u = Focus {
+        acc: None,
+        focus,
+        inside: focus.is_none(),
     };
     fn walk(
         doc: &Document,
@@ -293,7 +335,7 @@ pub fn shape_ink_bounds(
         page_h: f64,
         top: bool,
         to_page: Affine,
-        union: &mut dyn FnMut((f64, f64, f64, f64)),
+        u: &mut Focus,
     ) {
         let mut chain: Vec<&Shape> = chain.to_vec();
         chain.push(s);
@@ -329,7 +371,7 @@ pub fn shape_ink_bounds(
         let a = to_page.then(&local);
         // The node's own ink box (local y-down) — mirrored master
         // content maps into the instance box, so this bounds it too.
-        let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, union: &mut dyn FnMut((f64, f64, f64, f64))| {
+        let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, u: &mut Focus| {
             let c = [
                 a.apply(x0, y0),
                 a.apply(x1, y0),
@@ -338,14 +380,14 @@ pub fn shape_ink_bounds(
             ];
             let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
             let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
-            union((
+            u.union((
                 xs.iter().cloned().fold(f64::INFINITY, f64::min),
                 ys.iter().cloned().fold(f64::INFINITY, f64::min),
                 xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - xs.iter().cloned().fold(f64::INFINITY, f64::min),
                 ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ys.iter().cloned().fold(f64::INFINITY, f64::min),
             ));
         };
-        box_union(0.0, -height, width, 0.0, &a, union);
+        box_union(0.0, -height, width, 0.0, &a, u);
         // #202: the geometry rows' REAL extent — a curved connector's
         // arc belly leaves the begin-corner box (a 1D connector's
         // Height is 0), and a layer viewBox built from the box alone
@@ -380,11 +422,11 @@ pub fn shape_ink_bounds(
                 }
                 // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
                 // box union above; the row coordinates are y-UP.
-                let pt = |x: f64, y: f64, u: &mut dyn FnMut((f64, f64, f64, f64))| {
+                let pt = |x: f64, y: f64, u: &mut Focus| {
                     let (px, py) = a.apply(x, -y);
-                    u((px, py, 0.0, 0.0));
+                    u.union((px, py, 0.0, 0.0));
                 };
-                pt(x, y, union);
+                pt(x, y, u);
                 match t {
                     "ArcTo" | "RelArcTo" => {
                         // The apex: chord mid + A·right-of-travel.
@@ -392,7 +434,7 @@ pub fn shape_ink_bounds(
                         let (dx, dy) = (x - cur.0, y - cur.1);
                         let len = dx.hypot(dy).max(1e-9);
                         let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
-                        pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, union);
+                        pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, u);
                     }
                     "EllipticalArcTo" | "RelEllipticalArcTo" => {
                         let (mut mx, mut my) = (num("A"), num("B"));
@@ -402,9 +444,13 @@ pub fn shape_ink_bounds(
                             mx *= width;
                             my *= height;
                         }
-                        pt(mx, my, union);
+                        pt(mx, my, u);
                         // The arc's apex beyond the on-curve point.
-                        pt(2.0 * mx - (cur.0 + x) / 2.0, 2.0 * my - (cur.1 + y) / 2.0, union);
+                        pt(
+                            2.0 * mx - (cur.0 + x) / 2.0,
+                            2.0 * my - (cur.1 + y) / 2.0,
+                            u,
+                        );
                     }
                     "CubicBezTo" | "RelCubBezTo" => {
                         // (A,B) and (C,D): two control points.
@@ -416,8 +462,8 @@ pub fn shape_ink_bounds(
                             c *= width.max(1e-6);
                             d *= height.max(1e-6);
                         }
-                        pt(a, b, union);
-                        pt(c, d, union);
+                        pt(a, b, u);
+                        pt(c, d, u);
                     }
                     "QuadBezTo" | "RelQuadBezTo" => {
                         let (mut a, mut b) = (num("A"), num("B"));
@@ -425,7 +471,7 @@ pub fn shape_ink_bounds(
                             a *= width.max(1e-6);
                             b *= height.max(1e-6);
                         }
-                        pt(a, b, union);
+                        pt(a, b, u);
                     }
                     "NURBSTo" => {
                         // #188: the interior control points live in the
@@ -441,7 +487,7 @@ pub fn shape_ink_bounds(
                             let fx = if f.x_type == 0.0 { width } else { 1.0 };
                             let fy = if f.y_type == 0.0 { height } else { 1.0 };
                             for (gx, gy, _, _) in &f.points {
-                                pt(gx * fx, gy * fy, union);
+                                pt(gx * fx, gy * fy, u);
                             }
                         }
                     }
@@ -473,18 +519,29 @@ pub fn shape_ink_bounds(
                 // Rotated text: bound by the circumscribed square.
                 let side = tw.max(th);
                 let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
-                box_union(cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0, &a, union);
+                box_union(
+                    cx - side / 2.0,
+                    cy - side / 2.0,
+                    cx + side / 2.0,
+                    cy + side / 2.0,
+                    &a,
+                    u,
+                );
             } else {
                 let (x0, y0) = (tx - tlx, -(ty - tly + th));
-                box_union(x0, y0, x0 + tw, y0 + th, &a, union);
+                box_union(x0, y0, x0 + tw, y0 + th, &a, u);
             }
         }
         for sub in &s.sub_shapes {
-            walk(doc, sub, &chain, page_h, false, a, union);
+            let saved = u.inside;
+            u.enter(sub.id);
+            walk(doc, sub, &chain, page_h, false, a, u);
+            u.inside = saved;
         }
     }
-    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut union);
-    let (x, y, w, h) = acc?;
+    u.enter(root.id);
+    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut u);
+    let (x, y, w, h) = u.acc?;
     // Stroke bleed margin; then clamp to the page ± 2 in so a rogue
     // formula cannot push a layer off to infinity.
     let pad = 0.08;
@@ -5015,6 +5072,55 @@ mod tests {
         };
         sec.rows = rows;
         s.sheet.children.push(SheetChild::Section(sec));
+    }
+
+    /// #219: the focused bounds of a sub-shape's own subtree — the
+    /// damage region a localized edit re-rasters — stay inside the
+    /// whole-subtree bounds, equal the member's own box (plus the
+    /// stroke pad), and move with the member's cells.
+    #[test]
+    fn focused_bounds_scope_the_walk_to_one_subtree() {
+        let mut member = shape_at(2, (0.4, 0.3), 0.5, 0.4, 0.0);
+        push_geo(
+            &mut member,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", 0.5), ("Y", 0.0)]),
+                geo_row(3, "LineTo", &[("X", 0.5), ("Y", 0.4)]),
+                geo_row(4, "LineTo", &[("X", 0.0), ("Y", 0.4)]),
+                geo_row(5, "LineTo", &[("X", 0.0), ("Y", 0.0)]),
+            ],
+        );
+        let mut group = shape_at(1, (2.0, 2.0), 2.0, 1.5, 0.0);
+        group.type_ = Some("Group".into());
+        let mut far = shape_at(3, (1.8, 1.3), 0.4, 0.3, 0.0);
+        push_geo(
+            &mut far,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", 0.4), ("Y", 0.3)]),
+            ],
+        );
+        group.sub_shapes = vec![member, far];
+        let (doc, page) = page_fixture(vec![group]);
+
+        let whole = shape_ink_bounds(&doc, &page, 1).unwrap();
+        let focused = shape_ink_bounds_focused(&doc, &page, 1, Some(2)).unwrap();
+        // The member's box (0.5×0.4 at group-local (0.15..0.65, …))
+        // plus the same stroke-bleed pad — not the whole group.
+        assert!((focused.2 - (0.5 + 0.16)).abs() < 1e-9, "w={}", focused.2);
+        assert!((focused.3 - (0.4 + 0.16)).abs() < 1e-9, "h={}", focused.3);
+        // Containment: the focused region sits inside the subtree's.
+        assert!(focused.0 >= whole.0 - 1e-9 && focused.1 >= whole.1 - 1e-9);
+        assert!(focused.0 + focused.2 <= whole.0 + whole.2 + 1e-9);
+        assert!(focused.1 + focused.3 <= whole.1 + whole.3 + 1e-9);
+
+        // The walk is honest about WHICH member: the far sibling's
+        // focused bounds sit elsewhere.
+        let far_focus = shape_ink_bounds_focused(&doc, &page, 1, Some(3)).unwrap();
+        assert!((far_focus.0 - focused.0).abs() > 0.5);
+        // An unknown focus yields nothing.
+        assert!(shape_ink_bounds_focused(&doc, &page, 1, Some(99)).is_none());
     }
 
     /// #188: SplineStart + SplineKnot rows render the EVALUATED

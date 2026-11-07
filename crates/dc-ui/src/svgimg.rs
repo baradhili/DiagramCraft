@@ -280,18 +280,37 @@ pub fn render_tree(
     // Widest texture we ever allocate (kittest caps at 2048; GPUs
     // allow more but upscaling a 2048px raster is fine on screen).
     const MAX_TEX: u32 = 2048;
-    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
     let size = tree.size();
     let aspect = size.height().max(1e-3) / size.width().max(1e-3);
     let w = target_width.ceil().clamp(1.0, MAX_TEX as f32) as u32;
     let h = ((target_width * aspect).ceil().max(1.0)) as u32;
     let (w, h) = (w, h.min(MAX_TEX));
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
-        .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;
     let t = resvg::usvg::Transform::from_scale(
         w as f32 / size.width().max(1e-3),
         h as f32 / size.height().max(1e-3),
     );
+    render_tree_transform(tree, t, w, h, kind)
+}
+
+/// Render a parsed tree through an explicit transform into a
+/// `w`×`h` pixmap — [`render_tree`]'s inner half, exposed for the
+/// #219 damage-region patcher: the patch renders the SAME
+/// (post-edit, full-layer) tree with [`render_tree`]'s own scale for
+/// the existing texture's dimensions, post-translated by an INTEGER
+/// pixel offset. An integer shift moves the sample grid by whole
+/// pixels, so the patch's pixels are bit-identical to the
+/// corresponding region of a full re-render at the same size — the
+/// regression test in `layers` pins that identity.
+pub fn render_tree_transform(
+    tree: &resvg::usvg::Tree,
+    t: resvg::usvg::Transform,
+    w: u32,
+    h: u32,
+    kind: crate::perf::Kind,
+) -> anyhow::Result<ColorImage> {
+    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
+        .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;
     resvg::render(tree, t, &mut pixmap.as_mut());
     let data: &[u8] = pixmap.data();
     Ok(ColorImage::from_rgba_unmultiplied(

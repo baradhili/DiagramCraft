@@ -311,6 +311,14 @@ impl SetCell {
     }
 }
 
+/// #219: the edited shape's own id when it is a nested sub-shape —
+/// the canvas layer store's damage-region key (`Touched::sub`). A
+/// top-level edit renders its whole (single-shape) layer either way,
+/// so it carries no sub.
+fn sub_shape(root: i64, shape: i64) -> Option<i64> {
+    (shape != root).then_some(shape)
+}
+
 impl crate::Command for SetCell {
 
     fn touched(&self, doc: &Document) -> crate::TouchList {
@@ -331,6 +339,7 @@ impl crate::Command for SetCell {
                         page: *page,
                         shape: root,
                         touch: if move_only { crate::Touch::Move } else { crate::Touch::Ink },
+                        sub: sub_shape(root, *shape),
                     }],
                 }
             }
@@ -632,7 +641,12 @@ impl crate::Command for SetRowCell {
             Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
                 Some(root) => crate::TouchList {
                     pages: vec![],
-                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                    shapes: vec![crate::Touched {
+                        page: *page,
+                        shape: root,
+                        touch: crate::Touch::Ink,
+                        sub: sub_shape(root, *shape),
+                    }],
                 },
                 None => crate::TouchList::page(*page),
             },
@@ -809,7 +823,12 @@ impl crate::Command for SetText {
             Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
                 Some(root) => crate::TouchList {
                     pages: vec![],
-                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                    shapes: vec![crate::Touched {
+                        page: *page,
+                        shape: root,
+                        touch: crate::Touch::Ink,
+                        sub: sub_shape(root, *shape),
+                    }],
                 },
                 None => crate::TouchList::page(*page),
             },
@@ -908,7 +927,7 @@ impl crate::Command for AddShape {
         match self.parent {
             None => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: self.shape.id, touch: crate::Touch::Membership }],
+                shapes: vec![crate::Touched { page: self.page, shape: self.shape.id, touch: crate::Touch::Membership, sub: None }],
             },
             Some(_) => crate::TouchList::page(self.page),
         }
@@ -1168,6 +1187,7 @@ impl crate::Command for AddMasterInstance {
                     page: self.page,
                     shape: id,
                     touch: crate::Touch::Membership,
+                    sub: None,
                 }],
             },
             None => crate::TouchList::page(self.page),
@@ -1288,7 +1308,12 @@ impl crate::Command for RemoveSectionRow {
             Scope::Shape { page, shape } => match crate::scope::top_level_ancestor(doc, *page, *shape) {
                 Some(root) => crate::TouchList {
                     pages: vec![],
-                    shapes: vec![crate::Touched { page: *page, shape: root, touch: crate::Touch::Ink }],
+                    shapes: vec![crate::Touched {
+                        page: *page,
+                        shape: root,
+                        touch: crate::Touch::Ink,
+                        sub: sub_shape(root, *shape),
+                    }],
                 },
                 None => crate::TouchList::page(*page),
             },
@@ -1391,6 +1416,7 @@ impl crate::Command for SetSectionRowType {
                             page: *page,
                             shape: root,
                             touch: crate::Touch::Ink,
+                            sub: sub_shape(root, *shape),
                         }],
                     },
                     None => crate::TouchList::page(*page),
@@ -1487,7 +1513,7 @@ impl crate::Command for RemoveShape {
         if path.len() == 1 {
             return crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: self.shape, touch: crate::Touch::Membership }],
+                shapes: vec![crate::Touched { page: self.page, shape: self.shape, touch: crate::Touch::Membership, sub: None }],
             };
         }
         // Empty path: nothing captured yet (touched before apply) —
@@ -1510,6 +1536,7 @@ impl crate::Command for RemoveShape {
                         page: self.page,
                         shape: path_root(page, &path),
                         touch: crate::Touch::Ink,
+                        sub: None,
                     }],
                 };
             }
@@ -1595,12 +1622,13 @@ impl crate::Command for DuplicateShape {
                     page: self.page,
                     shape: self.clone.as_ref().map(|c| c.id).unwrap_or(self.shape),
                     touch: crate::Touch::Membership,
+                    sub: None,
                 }],
             },
             // Sub-shape duplicate: the containing group's ink changed.
             Some(root) => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink }],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink, sub: None }],
             },
             None => crate::TouchList::page(self.page),
         }
@@ -2339,11 +2367,11 @@ impl crate::Command for ReorderShape {
             // into the group's texture — ink.
             Some(root) if root == self.shape => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Order }],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Order, sub: None }],
             },
             Some(root) => crate::TouchList {
                 pages: vec![],
-                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink }],
+                shapes: vec![crate::Touched { page: self.page, shape: root, touch: crate::Touch::Ink, sub: None }],
             },
             None => crate::TouchList::page(self.page),
         }
