@@ -563,7 +563,12 @@ impl ShapeLayers {
                 // content edits (version moved) post immediately.
                 let rebucket_only = entry.tex.is_some() && entry.version == version;
                 if rebucket_only && !bucket_settled {
-                    // fall through to the quad push below
+                    // Keep the scaled texture this frame, but ask for
+                    // another frame so the settle counter can advance
+                    // without user input — otherwise the scaled
+                    // (blurry) texture persists until some unrelated
+                    // event repaints (#203 review).
+                    ctx.request_repaint();
                 } else if !pool.has_budget() {
                     // The cap defers the WORK, not just the post: skip
                     // before serializing so a big page's fill spreads

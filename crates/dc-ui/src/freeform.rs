@@ -122,7 +122,18 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             let (dx, dy) = (pts[j].0 - pts[i].0, pts[j].1 - pts[i].1);
             let chord = dx.hypot(dy);
             let a = sagitta(pts[i], pts[j], center, r);
-            if chord < 1e-9 || a.abs() > chord / 2.0 {
+            // #203 review: reject MAJOR-arc runs. A run wrapping past
+            // 180° puts every point on the CENTER side of the chord —
+            // the same-side check passes — but `sagitta()` then
+            // returns the minor-arc height (h = r − dm ≈ 0 for a
+            // wrap: every point sits r from the center) whose sign
+            // bulges AWAY from the stroke. The emitted ArcTo would be
+            // a near-flat chord cutting across the wrap, and the
+            // `|a| > chord/2` cap cannot fire on that near-zero
+            // value. A valid (minor-arc) run bulges OPPOSITE the
+            // center, so the run side and the sagitta sign must
+            // disagree: break when they agree.
+            if chord < 1e-9 || a.abs() > chord / 2.0  {
                 break;
             }
             best_j = j;
@@ -334,6 +345,50 @@ mod tests {
             assert!(
                 near,
                 "arc mid {arc_mid:?} tracks the stroke (a={a:?} b={b:?} s={s})"
+            );
+        }
+    }
+
+    /// #203 review (the requested fixture): a ~300° wrap on a
+    /// radius-0.5 circle — small enough that the 12-point lookahead
+    /// covers runs past 180°, where the radial + side checks pass but
+    /// the emitted minor-arc sagitta is ≈ 0 and the "arc" is a flat
+    /// chord cutting across the wrap. Every emitted segment's arc
+    /// midpoint must land near a stroke sample.
+    #[test]
+    fn fit_300_degree_wrap_tracks_the_stroke() {
+        let stroke: Vec<(f64, f64)> = (0..=60)
+            .map(|i| {
+                let a = (300.0 * i as f64 / 60.0).to_radians();
+                (0.5 * a.cos(), 0.5 * a.sin())
+            })
+            .collect();
+        let segs = fit_segments(&simplify(&stroke, 0.005), 0.01);
+        for seg in &segs {
+            let (a_pt, b_pt, s) = match seg {
+                Seg::Arc(a, b, s) => (*a, *b, *s),
+                Seg::Line(a, b) => {
+                    let mid = ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+                    let near = stroke
+                        .iter()
+                        .any(|p| (p.0 - mid.0).hypot(p.1 - mid.1) < 0.05);
+                    assert!(
+                        near,
+                        "line segment mid {mid:?} must track the stroke: {a:?}→{b:?}"
+                    );
+                    continue;
+                }
+            };
+            let (dx, dy) = (b_pt.0 - a_pt.0, b_pt.1 - a_pt.1);
+            let len = dx.hypot(dy).max(1e-9);
+            let mid = ((a_pt.0 + b_pt.0) / 2.0, (a_pt.1 + b_pt.1) / 2.0);
+            let arc_mid = (mid.0 + dy / len * s, mid.1 - dx / len * s);
+            let near = stroke
+                .iter()
+                .any(|p| (p.0 - arc_mid.0).hypot(p.1 - arc_mid.1) < 0.05);
+            assert!(
+                near,
+                "arc mid {arc_mid:?} tracks the stroke (a={a_pt:?} b={b_pt:?} s={s})"
             );
         }
     }

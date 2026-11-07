@@ -286,6 +286,7 @@ fn info_thumbnail_refreshes_after_edit() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -320,6 +321,7 @@ fn info_thumbnail_placeholder_on_render_failure() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -381,6 +383,7 @@ fn recent_entry_click_reopens() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -412,6 +415,7 @@ fn painted_shell_controls_carry_accessible_labels() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -506,6 +510,7 @@ fn page_tabs_switch_restore_selection_and_name_status() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -562,6 +567,7 @@ fn page_tab_context_menu_manages_pages() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -638,6 +644,7 @@ fn inserted_page_carries_the_source_page_size() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -691,6 +698,7 @@ fn window_title_tracks_document_and_dirty_state() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -728,6 +736,7 @@ fn page_tab_rename_edits_inline() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());

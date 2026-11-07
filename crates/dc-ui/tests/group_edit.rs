@@ -190,6 +190,10 @@ fn harness_with(dir: &std::path::Path, dark: bool) -> Harness<'static, App> {
     dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        // #203 review: the settle-gate repaint (#124 item 6.2) keeps
+        // frames alive until the zoom bucket holds — the fit-settle
+        // after open trips it, so give run() the steps it needs.
+        .with_max_steps(16)
         .build_ui_state(
             move |ui, app: &mut App| {
                 dc_ui::theme::install_for(

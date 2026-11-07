@@ -15,6 +15,10 @@ fn harness_with_blank() -> Harness<'static, App> {
     dc_ui::svgimg::pin_determinism_for_tests();
     Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        // #203 review: the settle-gate repaint (#124 item 6.2) keeps
+        // frames alive until the zoom bucket holds after open — give
+        // run() the steps it needs.
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -35,6 +39,8 @@ fn dblclick_harness_with_blank() -> Harness<'static, App> {
         .with_size(egui::vec2(1280.0, 800.0))
         .with_step_dt(0.05)
         .with_max_steps(30)
+        // #203 review: settle-gate repaint budget (see harness_with_blank).
+
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -7498,6 +7504,7 @@ fn master_based_container_recognition_and_highlight() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             move |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
