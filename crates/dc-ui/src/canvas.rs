@@ -115,6 +115,38 @@ impl View {
         self.fit_mode = false;
         self.fit_pending = false;
     }
+
+    /// Zoom so the selection fills the view (GitHub #237 — Visio's
+    /// Zoom ▸ Selected): the rect is scaled to FILL the content area
+    /// and its center lands at the content center. Unlike the #22
+    /// text-edit zoom the clamps are general — a selection larger
+    /// than the view zooms OUT to center it, and the result is
+    /// bucket-floored like [`View::apply_fit`] so the layer store's
+    /// ppi quantization never re-rasters across nudges. Leaves fit
+    /// mode; a later manual zoom is respected as always. `rect` is
+    /// page inches, y-up `(x, y, w, h)`.
+    pub fn zoom_to_selection(
+        &mut self,
+        rect: (f64, f64, f64, f64),
+        content: Vec2,
+        origin: Vec2,
+        page: &PageGeom,
+    ) {
+        let (x, y, w, h) = rect;
+        // Degenerate rects (a hairline selection) must not produce
+        // absurd zooms: floor each side at 0.25 in.
+        let w = (w as f32).max(0.25);
+        let h = (h as f32).max(0.25);
+        let zx = content.x / (w * 96.0);
+        let zy = content.y / (h * 96.0);
+        self.zoom = ((zx.min(zy) * 384.0).floor() / 384.0).clamp(0.1, 8.0);
+        let cx = x as f32 + w / 2.0;
+        let cy = page.h_in as f32 - (y as f32 + h / 2.0);
+        let ppi = self.px_per_in();
+        self.pan = origin + content / 2.0 - Vec2::new(cx * ppi, cy * ppi);
+        self.fit_mode = false;
+        self.fit_pending = false;
+    }
 }
 
 /// Page geometry in inches (y-down on screen after the flip).
@@ -619,17 +651,35 @@ pub fn show(
     // Content area origin (below/right of rulers).
     let (content_origin, content) = content_area(canvas_r, view.show_rulers);
 
-    // Wheel zoom around the hovered point — a manual zoom: leaves fit
-    // mode so later resizes keep the user's view.
+    // Wheel zoom — a manual zoom: leaves fit mode so later resizes
+    // keep the user's view. With an active selection the anchor is the
+    // selection's center (the union of the primary + multi-select
+    // rects — the selection is what the user is working on, #237);
+    // without one the hovered point anchors, as before.
     if let Some(hp) = resp.hover_pos() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             let factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
+            // The anchor's screen position uses the PRE-zoom ppi — the
+            // selection's on-screen center before this step.
+            let old_ppi = view.px_per_in();
+            let anchor = sel_rect
+                .into_iter()
+                .chain(extra_sel_rects.iter().copied())
+                .reduce(|a, b| a.union(b))
+                .map(|r| {
+                    Pos2::new(
+                        view.pan.x + r.center().x * old_ppi,
+                        view.pan.y + r.center().y * old_ppi,
+                    )
+                })
+                .unwrap_or(hp);
             let old = view.zoom;
             view.zoom = (view.zoom * factor).clamp(0.1, 8.0);
             let k = view.zoom / old;
-            // keep the point under the cursor stationary
-            view.pan = hp.to_vec2() - (hp.to_vec2() - view.pan) * k;
+            // Keep the anchor point stationary — the hovered pixel, or
+            // the selection's center when a selection is active.
+            view.pan = anchor.to_vec2() - (anchor.to_vec2() - view.pan) * k;
             view.fit_mode = false;
             out.zoom_changed = true;
         }
@@ -2024,6 +2074,97 @@ mod tests {
             (view.pan.y - (22.0 + ((600.0 - ph).max(0.0) / 2.0).max(12.0))).abs() < 0.5,
             "pan.y {}",
             view.pan.y
+        );
+    }
+
+    /// #237: zoom-to-selection fills the content with the rect and
+    /// centers it, leaves fit mode, and zooms OUT for a selection
+    /// larger than the view (general clamps, unlike the #22 text-edit
+    /// zoom that never zooms out).
+    #[test]
+    fn zoom_to_selection_fills_and_centers() {
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
+        // A 1×1 in selection: the height axis governs — 600 px / 96 =
+        // 6.25× fills exactly (the width axis would want 8.33×).
+        view.zoom_to_selection((1.0, 1.0, 1.0, 1.0), Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
+        assert!((view.zoom - 6.25).abs() < 1e-4, "fills at 6.25×: {}", view.zoom);
+        assert!(!view.fit_mode, "leaves fit mode");
+        assert!(!view.fit_pending, "no pending fit");
+        // The selection's page center sits at the content center.
+        let ppi = view.px_per_in();
+        let cx = view.pan.x + (1.5 * ppi);
+        let cy = view.pan.y + (11.0 - 1.5) * ppi;
+        assert!((cx - 400.0).abs() < 0.5, "center x on-screen: {cx}");
+        assert!((cy - 300.0).abs() < 0.5, "center y on-screen: {cy}");
+
+        // A 2×1 in rect in a 400×400 area: zx = 400/192 = 2.083, zy =
+        // 400/96 = 4.17 → fill zoom = 2.083 (the min axis fills).
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
+        view.zoom_to_selection((0.0, 0.0, 2.0, 1.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        let want = ((400.0f32 / (2.0 * 96.0)) * 384.0).floor() / 384.0;
+        assert!((view.zoom - want).abs() < 1e-4, "fill zoom: {}", view.zoom);
+        // The rect's center lands at the content center.
+        let ppi = view.px_per_in();
+        assert!((view.pan.x + 1.0 * ppi - 200.0).abs() < 0.5);
+        assert!((view.pan.y + (11.0 - 0.5) * ppi - 200.0).abs() < 0.5);
+
+        // A selection larger than the view zooms OUT to center it —
+        // the general clamp, against the text-edit zoom's ≥100 % rule.
+        let mut view = View {
+            zoom: 2.0,
+            fit_mode: false,
+            ..View::default()
+        };
+        view.zoom_to_selection((0.0, 0.0, 16.0, 20.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        assert!(
+            (view.zoom - (400.0 / (20.0 * 96.0))).abs() < 0.01,
+            "zoomed out to fit: {}",
+            view.zoom
+        );
+        // Degenerate rects floor at 0.25 in instead of absurd zooms.
+        let mut view = View::default();
+        view.zoom_to_selection((0.0, 0.0, 0.0, 0.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        assert!((view.zoom - 8.0).abs() < 1e-4, "hairline caps at 8×: {}", view.zoom);
+    }
+
+    /// #237: the wheel zoom anchors on the selection's center — the
+    /// point stays stationary across the zoom (a pure view-state
+    /// assertion over the same pan math `show` runs).
+    #[test]
+    fn wheel_anchor_math_holds_the_selection_center() {
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
+        // The selection's screen-space center (page y-down inches →
+        // screen, the mapping `show`'s wheel handler uses).
+        let sel = Rect::from_min_size(Pos2::new(4.0, 5.0), Vec2::new(1.0, 1.0));
+        let center = |v: &View| {
+            Pos2::new(
+                v.pan.x + sel.center().x * v.px_per_in(),
+                v.pan.y + sel.center().y * v.px_per_in(),
+            )
+        };
+        let before = center(&view);
+        // The handler's math: k = new/old, pan = anchor − (anchor −
+        // pan)·k.
+        let factor = 1.1;
+        let old = view.zoom;
+        view.zoom = (view.zoom * factor).clamp(0.1, 8.0);
+        let k = view.zoom / old;
+        view.pan = before.to_vec2() - (before.to_vec2() - view.pan) * k;
+        let after = center(&view);
+        assert!(
+            before.distance(after) < 0.01,
+            "the selection center is stationary: {before} vs {after}"
         );
     }
 

@@ -119,6 +119,10 @@ pub struct App {
     /// (Type 4) Prop row (#30).
     prop_add: Option<String>,
     tab: Tab,
+    /// #237: a pending zoom-to-selection (the ribbon action / Shift+Z)
+    /// — the canvas frame centers + fills the selection's union bounds
+    /// on the next pass, on the same view ledger as Fit Page.
+    zoom_selection_pending: bool,
     sel: Option<(i64, i64)>, // (page id, shape id) — primary selection
     /// Multi-selection (marquee / shift-click); includes the primary.
     sel_set: Vec<(i64, i64)>,
@@ -593,6 +597,7 @@ impl App {
             format_pane_open: false,
             fmt_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
+            zoom_selection_pending: false,
             sel: None,
             sel_set: Vec::new(),
             drag: None,
@@ -1836,6 +1841,44 @@ impl App {
             .collect()
     }
 
+    /// The selection's union bounds in page inches y-up `(x, y, w, h)`
+    /// (#237): the primary selection plus every multi-select member
+    /// (the same shape rects the selection frames draw). Selected
+    /// guides draw as their overlay and carry no frame, so they do
+    /// not zoom-target either.
+    fn sel_union_page_rect(&self) -> Option<(f64, f64, f64, f64)> {
+        let ed = self.ed.as_ref()?;
+        let (page_id, primary) = self.sel?;
+        let page = ed.doc.pages.get(self.page_idx)?;
+        let rect_of = |sid: i64| -> Option<(f64, f64, f64, f64)> {
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            if crate::guides::is_guide(sh) {
+                return None;
+            }
+            Self::shape_rect_static(&ed.doc, page_id, sh)
+        };
+        let mut acc = rect_of(primary);
+        for (p, sid) in &self.sel_set {
+            if *p != page_id {
+                continue;
+            }
+            if let Some(r) = rect_of(*sid) {
+                acc = Some(match acc {
+                    None => r,
+                    Some((ax, ay, aw, ah)) => {
+                        let (bx, by, bw, bh) = r;
+                        let x0 = ax.min(bx);
+                        let y0 = ay.min(by);
+                        let x1 = (ax + aw).max(bx + bw);
+                        let y1 = (ay + ah).max(by + bh);
+                        (x0, y0, x1 - x0, y1 - y0)
+                    }
+                });
+            }
+        }
+        acc
+    }
+
     fn sel_page_rect(&self) -> Option<Rect> {
         let ed = self.ed()?;
         let (page_id, shape_id) = self.sel?;
@@ -2591,6 +2634,11 @@ impl App {
             }
             if ctrl && i.key_pressed(egui::Key::Y) {
                 self.do_redo();
+            }
+            // #237: zoom to selection (Visio's Zoom ▸ Selected
+            // affordance). Plain Shift+Z — Ctrl+Shift+Z is redo.
+            if !kb_owned && i.modifiers.shift && !ctrl && i.key_pressed(egui::Key::Z) {
+                self.zoom_selection_pending = true;
             }
             if i.key_pressed(egui::Key::Delete) && !kb_owned {
                 // #108: the connection-point selection only owns
@@ -7098,6 +7146,9 @@ impl App {
                 self.view.fit_mode = false;
             }
             Action::FitPage => self.view.fit_pending = true,
+            // #237: zoom-to-selection defers to the canvas frame — it
+            // needs the content area + selection rects the frame owns.
+            Action::ZoomSelection => self.zoom_selection_pending = true,
             Action::ToggleGrid => self.view.show_grid = !self.view.show_grid,
             Action::ToggleRulers => self.view.show_rulers = !self.view.show_rulers,
             Action::ToggleComments => self.show_comments = !self.show_comments,
@@ -8008,6 +8059,10 @@ impl App {
                             RibbonButton::new(Icon::ZoomOut, "Zoom Out", Action::ZoomOut),
                         ]),
                         big(RibbonButton::new(Icon::Fit, "Fit Window", Action::FitPage)),
+                        big(
+                            RibbonButton::new(Icon::ZoomSelection, "Selection", Action::ZoomSelection)
+                                .tip("Zoom to selection (Shift+Z)"),
+                        ),
                         big(RibbonButton::new(Icon::ZoomIn, "100%", Action::Zoom100)),
                     ],
                 ),
@@ -9401,6 +9456,20 @@ impl App {
         // #202: computed before the destructuring self-borrow the
         // canvas call holds.
         let sel_line_curved = self.sel_1d_curved();
+        // #237: a pending zoom-to-selection centers + fills the
+        // selection's union bounds on this frame — the same view ledger
+        // the Fit Page and #22 text-edit zoom paths live on. Runs
+        // before the destructuring self-borrow and the canvas frame so
+        // the wheel anchor and the paint agree.
+        if self.zoom_selection_pending {
+            self.zoom_selection_pending = false;
+            if let Some(rect) = self.sel_union_page_rect() {
+                let (origin, content) =
+                    canvas::content_area(self.canvas_rect, self.view.show_rulers);
+                self.view
+                    .zoom_to_selection(rect, content, origin.to_vec2(), &geom);
+            }
+        }
         let App {
             view, ed, page_idx, ..
         } = self;
@@ -13221,6 +13290,11 @@ impl App {
         self.view.zoom = z.clamp(0.1, 8.0);
         self.view.fit_mode = false;
         self.view.fit_pending = false;
+    }
+
+    /// #237: the view's (zoom, pan) for zoom-behavior assertions.
+    pub fn debug_view_for_test(&self) -> (f32, f32, f32) {
+        (self.view.zoom, self.view.pan.x, self.view.pan.y)
     }
     /// kittest: page names in tab order (#54).
     #[doc(hidden)]

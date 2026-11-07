@@ -809,6 +809,79 @@ fn place_master(h: &mut Harness<'_, App>, master: i64) -> (i64, i64) {
     h.state().debug_sel().expect("placed shape is selected")
 }
 
+/// #237: with a selection active, the wheel zoom anchors on the
+/// selection's center — the selected content stays put on screen while
+/// the zoom changes. Without the selection anchor, zooming at the
+/// hovered canvas center pushes the off-center selection outward.
+#[test]
+fn wheel_zoom_anchors_on_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (_, shape) = place_master(&mut h, 2); // Rectangle
+    // Move it off the canvas center so the hovered-point anchor and
+    // the selection anchor differ.
+    let center = h.state().debug_shape_screen_rect(shape).unwrap().center();
+    drag_naturally(&mut h, center, egui::vec2(-180.0, -120.0));
+    let before = h.state().debug_shape_screen_rect(shape).unwrap();
+    let zoom0 = h.state().debug_zoom();
+    let drift = before.center().to_vec2() - h.state().debug_canvas_rect().center().to_vec2();
+    assert!(
+        drift.length() > 100.0,
+        "the shape sits off-center: {drift:?}"
+    );
+    // Wheel IN while hovering the canvas center (not the shape).
+    h.hover_at(h.state().debug_canvas_rect().center());
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Point,
+        delta: egui::vec2(0.0, 120.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.run();
+    let after = h.state().debug_shape_screen_rect(shape).unwrap();
+    assert!(
+        before.center().distance(after.center()) < 1.5,
+        "the selection center is stationary across the wheel zoom: {:?} → {:?}",
+        before.center(),
+        after.center()
+    );
+    assert!(h.state().debug_zoom() > zoom0, "the zoom changed");
+}
+
+/// #237: the zoom-to-selection affordance (Shift+Z / the View ▸ Zoom
+/// ▸ Selection button — Visio's Zoom dialog's Selected option)
+/// centers the selection and fills the view with it.
+#[test]
+fn zoom_to_selection_centers_the_selection() {
+    let mut h = harness_with_blank();
+    h.run();
+    let (_, shape) = place_master(&mut h, 2);
+    let center = h.state().debug_shape_screen_rect(shape).unwrap().center();
+    drag_naturally(&mut h, center, egui::vec2(-180.0, -120.0));
+    // Shift+Z — the keyboard affordance (Ctrl+Shift+Z is redo).
+    h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Z);
+    h.run();
+    let rect = h.state().debug_shape_screen_rect(shape).unwrap();
+    let (origin, content) =
+        dc_ui::canvas::content_area(h.state().debug_canvas_rect(), true);
+    // The selection's center sits at the content-area center.
+    assert!(
+        (rect.center().to_vec2() - (origin.to_vec2() + content / 2.0)).length() < 3.0,
+        "the selection centers in the content area: {:?} vs {:?}",
+        rect.center(),
+        origin.to_vec2() + content / 2.0
+    );
+    // The governing (smaller) axis fills the content: the bucket-
+    // floored fill zoom keeps ≥ 99 % of the axis.
+    assert!(
+        rect.height() > content.y * 0.99,
+        "fills the content height: {} vs {}",
+        rect.height(),
+        content.y
+    );
+}
+
 /// The core #59 regression: a natural press-drag-release on a shape's
 /// body MOVES it. The old plumbing armed the move on the click
 /// (release) and dropped it the next frame, so real gestures no-opped.
