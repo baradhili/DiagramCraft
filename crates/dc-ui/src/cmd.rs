@@ -475,6 +475,71 @@ impl RerouteConnectors {
             touched_cache: dc_core::TouchList::default(),
         }
     }
+
+    /// The connectors this reroute would rewrite, discovered READ-ONLY
+    /// against `doc` — the static half of apply's pass 1: the glue
+    /// records of the moved shapes plus the #179 also-list, then the
+    /// #174 chain-aware connector test, the FixedRoute bail and the
+    /// resolvable-endpoint check. `touched()` names them BEFORE apply
+    /// so the layer store can harvest their PRE-reroute bounds (#236);
+    /// apply's attach-resolution half can still drop one, which only
+    /// leaves an unused harvest entry.
+    fn candidate_connectors(&self, doc: &Document) -> Vec<i64> {
+        use dc_core::connects::ConnectsHost;
+        use std::collections::BTreeMap;
+        let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
+            return Vec::new();
+        };
+        let connects = page.connects();
+        let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> = BTreeMap::new();
+        for c in &connects.list {
+            if !self.moved.contains(&c.to_sheet) {
+                continue;
+            }
+            by_connector.entry(c.from_sheet).or_default().push(c);
+        }
+        for id in &self.also {
+            if !by_connector.contains_key(id) {
+                by_connector.insert(
+                    *id,
+                    connects
+                        .list
+                        .iter()
+                        .filter(|c| c.from_sheet == *id)
+                        .collect(),
+                );
+            }
+        }
+        by_connector
+            .into_keys()
+            .filter(|conn_id| {
+                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, *conn_id) else {
+                    return false;
+                };
+                let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, *conn_id) else {
+                    return false;
+                };
+                if !crate::connectors::is_connector_in(doc, &chain, conn) {
+                    return false;
+                }
+                if conn
+                    .sheet
+                    .cell("FixedRoute")
+                    .and_then(|v| v.numeric())
+                    .is_some_and(|v| v == 1.0)
+                {
+                    return false;
+                }
+                let get = |n: &str| doc.resolve_cell(conn, &chain, n).and_then(|v| v.numeric());
+                let (Some(_), Some(_), Some(_), Some(_)) =
+                    (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
+                else {
+                    return false;
+                };
+                true
+            })
+            .collect()
+    }
 }
 
 /// #202: the cached Bézier-control refreshes a reroute owes a
@@ -542,7 +607,33 @@ impl Command for RerouteConnectors {
         // re-raster them (Ink), or their textures keep the dragged
         // raster under the restored bounding box.
         if self.inner.is_empty() {
-            return self.touched_cache.clone();
+            if !self.touched_cache.shapes.is_empty() || !self.touched_cache.pages.is_empty() {
+                return self.touched_cache.clone();
+            }
+            // Pre-apply (#236): the apply-time list does not exist yet
+            // (apply builds it), so discover the candidate connectors
+            // read-only and name each one's Ink touch — with `sub` on
+            // a NESTED connector, the layer store harvests its
+            // pre-reroute bounds and pairs them against the post state
+            // for a damage-region patch. Top-level connectors stay
+            // sub-less: a reroute resizes the connector's own frame,
+            // so its whole texture re-renders either way.
+            let mut all = dc_core::TouchList::default();
+            for conn_id in self.candidate_connectors(doc) {
+                let Some(root) = dc_core::scope::top_level_ancestor(doc, self.page, conn_id) else {
+                    continue;
+                };
+                all.merge(dc_core::TouchList {
+                    pages: vec![],
+                    shapes: vec![dc_core::Touched {
+                        page: self.page,
+                        shape: root,
+                        touch: dc_core::Touch::Ink,
+                        sub: (root != conn_id).then_some(conn_id),
+                    }],
+                });
+            }
+            return all;
         }
         let mut all = dc_core::TouchList::default();
         for c in &self.inner {
@@ -2065,5 +2156,79 @@ mod reroute_master_tests {
             ((lx - (ex_new - 2.0 + 1.0)).abs() < 1e-6 && (ly - (ey_new - 2.0 + 1.0)).abs() < 1e-6),
             "the literal spline end translated with the endpoint: ({lx}, {ly})"
         );
+    }
+
+    /// #236: the pre-apply `touched()` names a NESTED candidate
+    /// connector with its `sub` (apply builds its list only during
+    /// apply, so the pre half used to be empty and every nested
+    /// reroute fell back to a full re-render), and the store pipeline
+    /// — harvest → apply → pair — lands a bounded old∪new damage rect
+    /// for it.
+    #[test]
+    fn reroute_pre_apply_touched_harvests_a_nested_connectors_damage() {
+        let (mut ed, page_id) = doc_with_master_connector(100, false);
+        // Wrap the connector in a group. The group's frame math is
+        // irrelevant to the damage pipeline: the pairing resolves
+        // whatever ink the document actually carries.
+        let page = &mut ed.doc.pages[0];
+        let at = page.shapes.iter().position(|s| s.id == 11).unwrap();
+        let conn = page.shapes.remove(at);
+        let mut group = vsdx::model::Shape {
+            id: 20,
+            type_: Some("Group".into()),
+            ..vsdx::model::Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "0"),
+            ("PinY", "0"),
+            ("Width", "5"),
+            ("Height", "3"),
+            ("LocPinX", "0"),
+            ("LocPinY", "0"),
+        ] {
+            group.sheet.set_cell(n, VCell::value(v));
+        }
+        group.sub_shapes.push(conn);
+        page.shapes.push(group);
+
+        // Pre-apply: the candidate discovery names the nested connector.
+        let cmd = RerouteConnectors::new(page_id, vec![10]);
+        let pre_touched = cmd.touched(&ed.doc);
+        assert!(
+            pre_touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 20 && t.sub == Some(11) && t.touch == dc_core::Touch::Ink),
+            "pre-apply touched names the nested connector: {pre_touched:?}"
+        );
+
+        // The store pipeline: harvest → apply → pair.
+        let mut layers = crate::layers::ShapeLayers::default();
+        layers.set_page(page_id);
+        let pre = layers.harvest_pre_damage(&ed.doc, &pre_touched);
+        assert!(
+            pre.iter().any(|(p, top, s, b)| {
+                *p == page_id
+                    && *top == 20
+                    && *s == 11
+                    && matches!(b, crate::layers::SubBound::Bounded(_))
+            }),
+            "the harvest pins the connector's pre bounds: {pre:?}"
+        );
+        let (_, touched) = ed.apply(RerouteConnectors::new(page_id, vec![10])).unwrap();
+        assert!(
+            touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 20 && t.sub == Some(11)),
+            "post-apply touched names the nested connector: {touched:?}"
+        );
+        layers.touch_damage(&ed.doc, &touched, &pre, page_id);
+        assert!(
+            !layers.pending_full_for_test(20),
+            "the nested reroute's damage is bounded — no forced full re-render"
+        );
+        let d = layers.pending_damage_for_test(20).expect("bounded damage");
+        assert!(d.2 > 0.0 && d.3 > 0.0, "the damage rect is real: {d:?}");
     }
 }

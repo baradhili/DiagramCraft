@@ -13,7 +13,7 @@ use dc_core::commands::{
 use dc_core::connects::{Connect, ConnectsHost, ConnectsOwner};
 use dc_core::layers::{layer_name, layer_rows};
 use dc_core::scope::{sheet as scope_sheet, Scope};
-use dc_core::{Editor, History};
+use dc_core::{Command as _, Editor, History};
 use vsdx::model::{Cell, Document, IndexChild, Shape};
 
 // ---------------------------------------------------------------------------
@@ -1540,6 +1540,163 @@ fn duplicate_shape_clones_offsets_and_undoes() {
     let shapes = &ed.doc.pages.iter().find(|p| p.id == page).unwrap().shapes;
     assert_eq!(shapes.len(), 1, "undo removes the duplicate only");
     assert_eq!(shapes[0].id, first);
+}
+
+/// #236: a duplicate of a NESTED member lands top-level (apply pushes
+/// the clone to page.shapes), so its touched() is the clone's new
+/// membership — not Ink on the containing group, which never changed.
+#[test]
+fn duplicate_nested_member_reports_membership_not_group_ink() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let group = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: None,
+        shape: Shape {
+            id: group,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let member = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: Some(group),
+        shape: Shape {
+            id: member,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+
+    let cmd = dc_core::DuplicateShape::new(page, member, (0.25, -0.25));
+    // Pre-apply (no clone yet): conservative page touch.
+    let pre = cmd.touched(&ed.doc);
+    assert!(
+        pre.shapes.is_empty() && pre.pages == vec![page],
+        "pre-apply duplicate touched stays conservative: {pre:?}"
+    );
+    let (_, touched) = ed
+        .apply(dc_core::DuplicateShape::new(page, member, (0.25, -0.25)))
+        .unwrap();
+    // The clone exists TOP-LEVEL and its touch is membership.
+    let clone_id = dc_core::commands::next_shape_id(&ed.doc, page) - 1;
+    let page_shapes = &ed.doc.pages[0].shapes;
+    assert!(
+        page_shapes.iter().any(|s| s.id == clone_id),
+        "the clone landed top-level"
+    );
+    assert!(
+        touched
+            .shapes
+            .iter()
+            .any(|t| t.shape == clone_id && t.touch == dc_core::Touch::Membership),
+        "post-apply touched is the clone's membership: {touched:?}"
+    );
+    assert!(
+        !touched
+            .shapes
+            .iter()
+            .any(|t| t.shape == group && t.touch == dc_core::Touch::Ink),
+        "the containing group's ink never changed: {touched:?}"
+    );
+}
+
+/// #236: a nested member's z-order touch names the member in `sub` —
+/// the pixels that can change are exactly where its ink overlaps the
+/// siblings it swaps with, so the layer store can patch the member's
+/// own region. (ReorderShape::apply still only reorders top-level
+/// shapes; the mapping is what the store pairs when that changes.)
+#[test]
+fn reorder_touched_names_the_nested_member() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let group = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: None,
+        shape: Shape {
+            id: group,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let member = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: Some(group),
+        shape: Shape {
+            id: member,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let touched = dc_core::ReorderShape::new(page, member, true).touched(&ed.doc);
+    assert!(
+        touched
+            .shapes
+            .iter()
+            .any(|t| t.shape == group && t.sub == Some(member) && t.touch == dc_core::Touch::Ink),
+        "nested reorder touched names the member: {touched:?}"
+    );
+}
+
+/// #236: the glue-record commands ride their connector — Ink on the
+/// connector's top-level ancestor with `sub` naming it when nested —
+/// instead of the trait default's doc-wide dirtying. Master-owned
+/// records keep the conservative default.
+#[test]
+fn connector_touch_scopes_glue_records_to_the_connector() {
+    let mut ed = Editor::new_blank();
+    let page = ed.doc.pages[0].id;
+    let group = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: None,
+        shape: Shape {
+            id: group,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let conn = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(AddShape {
+        page,
+        parent: Some(group),
+        shape: Shape {
+            id: conn,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let record = Connect::new(conn, "EndX", 3, group, "Connections.X1", 100);
+    // The record must exist for RemoveConnect's pre-apply read.
+    let mut list = ed.doc.pages[0].connects();
+    list.list.push(record.clone());
+    ed.doc.pages[0].set_connects(&list);
+    // Pre-apply RemoveConnect reads the record at its index.
+    let pre = RemoveConnect::new(ConnectsOwner::Page(page), 0).touched(&ed.doc);
+    assert!(
+        pre.shapes
+            .iter()
+            .any(|t| t.shape == group && t.sub == Some(conn) && t.touch == dc_core::Touch::Ink),
+        "page-owned record touched rides the nested connector: {pre:?}"
+    );
+    let add = AddConnect {
+        owner: ConnectsOwner::Page(page),
+        connect: record,
+    };
+    assert_eq!(add.touched(&ed.doc), pre, "AddConnect scopes the same way");
+    let master_owned = AddConnect {
+        owner: ConnectsOwner::Master(7),
+        connect: Connect::new(conn, "EndX", 3, group, "Connections.X1", 100),
+    };
+    let t = master_owned.touched(&ed.doc);
+    assert!(
+        t.shapes.is_empty() && !t.pages.is_empty(),
+        "master-owned records keep the doc-wide default: {t:?}"
+    );
 }
 
 #[test]

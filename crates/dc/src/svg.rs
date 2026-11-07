@@ -7,6 +7,7 @@
 //!   translate(-LocPinX, +LocPinY)
 //! applied to geometry whose local Y is negated at path-build time.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use vsdx::model::Sheet;
@@ -124,7 +125,17 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
             r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
         );
         for shape in &m.shapes {
-            render_shape(doc, shape, master_h, &[], &m.part, None, None, &mut svg);
+            render_shape(
+                doc,
+                shape,
+                master_h,
+                &[],
+                &m.part,
+                None,
+                None,
+                None,
+                &mut svg,
+            );
         }
         let _ = writeln!(svg, "</g>");
         let _ = writeln!(
@@ -227,7 +238,17 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
         r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
     );
     for shape in &m.shapes {
-        render_shape(doc, shape, master_h, &[], &m.part, None, None, &mut svg);
+        render_shape(
+            doc,
+            shape,
+            master_h,
+            &[],
+            &m.part,
+            None,
+            None,
+            None,
+            &mut svg,
+        );
     }
     let _ = writeln!(svg, "</g>");
     let _ = writeln!(svg, "</svg>");
@@ -342,216 +363,8 @@ pub fn shape_ink_bounds_focused(
     ) {
         let mut chain: Vec<&Shape> = chain.to_vec();
         chain.push(s);
-        let env = shape_env(doc, s, &chain);
-        let get = |n: &str| -> Option<f64> {
-            doc.resolve_cell(s, &chain, n)
-                .and_then(|c| cell_num(&c, &env))
-        };
-        let width = get("Width").unwrap_or(1.0);
-        let height = get("Height").unwrap_or(1.0);
-        // The exact transform string render_shape/render_shape_local
-        // emit for this node, composed into one affine.
-        let local = if top {
-            let (sx, sy) = (
-                if get("FlipX").unwrap_or(0.0) != 0.0 {
-                    -1.0
-                } else {
-                    1.0
-                },
-                if get("FlipY").unwrap_or(0.0) != 0.0 {
-                    -1.0
-                } else {
-                    1.0
-                },
-            );
-            Affine::translate(
-                get("PinX").unwrap_or(0.0),
-                page_h - get("PinY").unwrap_or(0.0),
-            )
-            .then(&Affine::rotate_deg(
-                -get("Angle").unwrap_or(0.0).to_degrees(),
-            ))
-            .then(&Affine::scale(sx, sy))
-            .then(&Affine::translate(
-                -get("LocPinX").unwrap_or(width / 2.0),
-                get("LocPinY").unwrap_or(height / 2.0),
-            ))
-        } else {
-            Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
-                .then(&Affine::rotate_deg(
-                    -get("Angle").unwrap_or(0.0).to_degrees(),
-                ))
-                .then(&Affine::translate(
-                    -get("LocPinX").unwrap_or(width / 2.0),
-                    get("LocPinY").unwrap_or(height / 2.0),
-                ))
-        };
-        let a = to_page.then(&local);
-        // The node's own ink box (local y-down) — mirrored master
-        // content maps into the instance box, so this bounds it too.
-        let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, u: &mut Focus| {
-            let c = [
-                a.apply(x0, y0),
-                a.apply(x1, y0),
-                a.apply(x1, y1),
-                a.apply(x0, y1),
-            ];
-            let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
-            let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
-            u.union((
-                xs.iter().cloned().fold(f64::INFINITY, f64::min),
-                ys.iter().cloned().fold(f64::INFINITY, f64::min),
-                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-                    - xs.iter().cloned().fold(f64::INFINITY, f64::min),
-                ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-                    - ys.iter().cloned().fold(f64::INFINITY, f64::min),
-            ));
-        };
-        box_union(0.0, -height, width, 0.0, &a, u);
-        // #202: the geometry rows' REAL extent — a curved connector's
-        // arc belly leaves the begin-corner box (a 1D connector's
-        // Height is 0), and a layer viewBox built from the box alone
-        // clips the belly into a straight line (every arc-pair
-        // connector in utilisation.vsdx rendered flat). Union every
-        // row's endpoint and control points: every path this module
-        // emits is a line/quad/cubic whose curve stays inside the
-        // hull of those points, plus the elliptical arc's apex
-        // (2·on-curve − chord mid) as the conservative bound.
-        for geo in s.sheet.sections_named("Geometry") {
-            let mut cur = (0.0f64, 0.0f64);
-            for row in &geo.rows {
-                let Some(t) = row.t.as_deref() else { continue };
-                let num = |n: &str| -> f64 {
-                    row.cell(n)
-                        .and_then(|c| {
-                            c.f.as_deref()
-                                .and_then(|f| vsdx::formula::eval(f, &env).ok())
-                                .and_then(|v| v.as_f64())
-                                .filter(|v| v.is_finite())
-                                .or(c.numeric())
-                        })
-                        .unwrap_or(0.0)
-                };
-                let rel = t.starts_with("Rel");
-                let (mut x, mut y) = (num("X"), num("Y"));
-                if rel {
-                    // Raw signed dims — rel_adjust (which the renderer
-                    // uses) multiplies raw, so the bound must match.
-                    x *= width;
-                    y *= height;
-                }
-                // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
-                // box union above; the row coordinates are y-UP.
-                let pt = |x: f64, y: f64, u: &mut Focus| {
-                    let (px, py) = a.apply(x, -y);
-                    u.union((px, py, 0.0, 0.0));
-                };
-                pt(x, y, u);
-                match t {
-                    "ArcTo" | "RelArcTo" => {
-                        // The apex: chord mid + A·right-of-travel.
-                        let sag = num("A");
-                        let (dx, dy) = (x - cur.0, y - cur.1);
-                        let len = dx.hypot(dy).max(1e-9);
-                        let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
-                        pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, u);
-                    }
-                    "EllipticalArcTo" | "RelEllipticalArcTo" => {
-                        let (mut mx, mut my) = (num("A"), num("B"));
-                        if rel {
-                            // Raw signed dims — rel_adjust multiplies
-                            // raw (negative widths mirror the bound).
-                            mx *= width;
-                            my *= height;
-                        }
-                        pt(mx, my, u);
-                        // The arc's apex beyond the on-curve point.
-                        pt(
-                            2.0 * mx - (cur.0 + x) / 2.0,
-                            2.0 * my - (cur.1 + y) / 2.0,
-                            u,
-                        );
-                    }
-                    "CubicBezTo" | "RelCubBezTo" => {
-                        // (A,B) and (C,D): two control points.
-                        let (mut a, mut b) = (num("A"), num("B"));
-                        let (mut c, mut d) = (num("C"), num("D"));
-                        if rel {
-                            a *= width.max(1e-6);
-                            b *= height.max(1e-6);
-                            c *= width.max(1e-6);
-                            d *= height.max(1e-6);
-                        }
-                        pt(a, b, u);
-                        pt(c, d, u);
-                    }
-                    "QuadBezTo" | "RelQuadBezTo" => {
-                        let (mut a, mut b) = (num("A"), num("B"));
-                        if rel {
-                            a *= width.max(1e-6);
-                            b *= height.max(1e-6);
-                        }
-                        pt(a, b, u);
-                    }
-                    "NURBSTo" => {
-                        // #188: the interior control points live in the
-                        // E formula's (x, y, knot, weight) groups.
-                        let e_text = row
-                            .cell("E")
-                            .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
-                            .unwrap_or_default();
-                        if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                            // Per-axis: xType gates X by Width, yType
-                            // gates Y by Height (raw signed — rel_adjust
-                            // and the render arm multiply raw).
-                            let fx = if f.x_type == 0.0 { width } else { 1.0 };
-                            let fy = if f.y_type == 0.0 { height } else { 1.0 };
-                            for (gx, gy, _, _) in &f.points {
-                                pt(gx * fx, gy * fy, u);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-                cur = (x, y);
-            }
-        }
-        // Text can overflow the shape box (TxtWidth/TxtHeight are
-        // independent cells); bound it with emit_text's placement math.
-        let has_text = s
-            .sheet
-            .text
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|t| !t.is_empty());
-        if has_text {
-            let tw = get("TxtWidth").unwrap_or(width).max(0.02);
-            let th = get("TxtHeight").unwrap_or(height).max(0.02);
-            let (tlx, tly) = (
-                get("TxtLocPinX").unwrap_or(tw / 2.0),
-                get("TxtLocPinY").unwrap_or(th / 2.0),
-            );
-            let (tx, ty) = (
-                get("TxtPinX").unwrap_or(width / 2.0),
-                get("TxtPinY").unwrap_or(height / 2.0),
-            );
-            if get("TxtAngle").unwrap_or(0.0) != 0.0 {
-                // Rotated text: bound by the circumscribed square.
-                let side = tw.max(th);
-                let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
-                box_union(
-                    cx - side / 2.0,
-                    cy - side / 2.0,
-                    cx + side / 2.0,
-                    cy + side / 2.0,
-                    &a,
-                    u,
-                );
-            } else {
-                let (x0, y0) = (tx - tlx, -(ty - tly + th));
-                box_union(x0, y0, x0 + tw, y0 + th, &a, u);
-            }
-        }
+        let (node_box, a) = node_ink_box(doc, s, &chain, page_h, top, to_page);
+        u.union(node_box);
         for sub in &s.sub_shapes {
             let saved = u.inside;
             u.enter(sub.id);
@@ -574,6 +387,290 @@ pub fn shape_ink_bounds_focused(
     let w = w.min(max_x - x);
     let h = h.min(max_y - y);
     Some((x, y, w.max(0.01), h.max(0.01)))
+}
+
+/// One node's own ink box in page space (inches, y-down), with the
+/// affine that maps its local frame there: the per-node half of the
+/// ink-bounds walk ([`shape_ink_bounds_focused`]) and of the #236
+/// cull's subtree-box pass. `chain` includes `s`. The box unions the
+/// transformed [0..w]×[-h..0] XForm box, every geometry row's real
+/// extent (#202 — curve hulls and arc apexes), and the text block's
+/// placement box; no padding, no clamping (the callers decide).
+/// Mirrored master content maps into the instance box, so this box
+/// bounds it too.
+fn node_ink_box(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    page_h: f64,
+    top: bool,
+    to_page: Affine,
+) -> ((f64, f64, f64, f64), Affine) {
+    let env = shape_env(doc, s, chain);
+    let get = |n: &str| -> Option<f64> {
+        doc.resolve_cell(s, chain, n)
+            .and_then(|c| cell_num(&c, &env))
+    };
+    let width = get("Width").unwrap_or(1.0);
+    let height = get("Height").unwrap_or(1.0);
+    // The exact transform string render_shape/render_shape_local
+    // emit for this node, composed into one affine.
+    let local = if top {
+        let (sx, sy) = (
+            if get("FlipX").unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+            if get("FlipY").unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+        );
+        Affine::translate(
+            get("PinX").unwrap_or(0.0),
+            page_h - get("PinY").unwrap_or(0.0),
+        )
+        .then(&Affine::rotate_deg(
+            -get("Angle").unwrap_or(0.0).to_degrees(),
+        ))
+        .then(&Affine::scale(sx, sy))
+        .then(&Affine::translate(
+            -get("LocPinX").unwrap_or(width / 2.0),
+            get("LocPinY").unwrap_or(height / 2.0),
+        ))
+    } else {
+        Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
+            .then(&Affine::rotate_deg(
+                -get("Angle").unwrap_or(0.0).to_degrees(),
+            ))
+            .then(&Affine::translate(
+                -get("LocPinX").unwrap_or(width / 2.0),
+                get("LocPinY").unwrap_or(height / 2.0),
+            ))
+    };
+    let a = to_page.then(&local);
+    let mut u = Focus {
+        acc: None,
+        focus: None,
+        inside: true,
+    };
+    // The node's own ink box (local y-down) — mirrored master
+    // content maps into the instance box, so this bounds it too.
+    let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, u: &mut Focus| {
+        let c = [
+            a.apply(x0, y0),
+            a.apply(x1, y0),
+            a.apply(x1, y1),
+            a.apply(x0, y1),
+        ];
+        let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
+        let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
+        u.union((
+            xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::INFINITY, f64::min),
+            xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - ys.iter().cloned().fold(f64::INFINITY, f64::min),
+        ));
+    };
+    box_union(0.0, -height, width, 0.0, &a, &mut u);
+    // #202: the geometry rows' REAL extent — a curved connector's
+    // arc belly leaves the begin-corner box (a 1D connector's
+    // Height is 0), and a layer viewBox built from the box alone
+    // clips the belly into a straight line (every arc-pair
+    // connector in utilisation.vsdx rendered flat). Union every
+    // row's endpoint and control points: every path this module
+    // emits is a line/quad/cubic whose curve stays inside the
+    // hull of those points, plus the elliptical arc's apex
+    // (2·on-curve − chord mid) as the conservative bound.
+    for geo in s.sheet.sections_named("Geometry") {
+        let mut cur = (0.0f64, 0.0f64);
+        for row in &geo.rows {
+            let Some(t) = row.t.as_deref() else { continue };
+            let num = |n: &str| -> f64 {
+                row.cell(n)
+                    .and_then(|c| {
+                        c.f.as_deref()
+                            .and_then(|f| vsdx::formula::eval(f, &env).ok())
+                            .and_then(|v| v.as_f64())
+                            .filter(|v| v.is_finite())
+                            .or(c.numeric())
+                    })
+                    .unwrap_or(0.0)
+            };
+            let rel = t.starts_with("Rel");
+            let (mut x, mut y) = (num("X"), num("Y"));
+            if rel {
+                // Raw signed dims — rel_adjust (which the renderer
+                // uses) multiplies raw, so the bound must match.
+                x *= width;
+                y *= height;
+            }
+            // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
+            // box union above; the row coordinates are y-UP.
+            let pt = |x: f64, y: f64, u: &mut Focus| {
+                let (px, py) = a.apply(x, -y);
+                u.union((px, py, 0.0, 0.0));
+            };
+            pt(x, y, &mut u);
+            match t {
+                "ArcTo" | "RelArcTo" => {
+                    // The apex: chord mid + A·right-of-travel.
+                    let sag = num("A");
+                    let (dx, dy) = (x - cur.0, y - cur.1);
+                    let len = dx.hypot(dy).max(1e-9);
+                    let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
+                    pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, &mut u);
+                }
+                "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                    let (mut mx, mut my) = (num("A"), num("B"));
+                    if rel {
+                        // Raw signed dims — rel_adjust multiplies
+                        // raw (negative widths mirror the bound).
+                        mx *= width;
+                        my *= height;
+                    }
+                    pt(mx, my, &mut u);
+                    // The arc's apex beyond the on-curve point.
+                    pt(
+                        2.0 * mx - (cur.0 + x) / 2.0,
+                        2.0 * my - (cur.1 + y) / 2.0,
+                        &mut u,
+                    );
+                }
+                "CubicBezTo" | "RelCubBezTo" => {
+                    // (A,B) and (C,D): two control points.
+                    let (mut a, mut b) = (num("A"), num("B"));
+                    let (mut c, mut d) = (num("C"), num("D"));
+                    if rel {
+                        a *= width.max(1e-6);
+                        b *= height.max(1e-6);
+                        c *= width.max(1e-6);
+                        d *= height.max(1e-6);
+                    }
+                    pt(a, b, &mut u);
+                    pt(c, d, &mut u);
+                }
+                "QuadBezTo" | "RelQuadBezTo" => {
+                    let (mut a, mut b) = (num("A"), num("B"));
+                    if rel {
+                        a *= width.max(1e-6);
+                        b *= height.max(1e-6);
+                    }
+                    pt(a, b, &mut u);
+                }
+                "NURBSTo" => {
+                    // #188: the interior control points live in the
+                    // E formula's (x, y, knot, weight) groups.
+                    let e_text = row
+                        .cell("E")
+                        .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                        .unwrap_or_default();
+                    if let Some(f) = crate::curve::parse_nurbs(&e_text) {
+                        // Per-axis: xType gates X by Width, yType
+                        // gates Y by Height (raw signed — rel_adjust
+                        // and the render arm multiply raw).
+                        let fx = if f.x_type == 0.0 { width } else { 1.0 };
+                        let fy = if f.y_type == 0.0 { height } else { 1.0 };
+                        for (gx, gy, _, _) in &f.points {
+                            pt(gx * fx, gy * fy, &mut u);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cur = (x, y);
+        }
+    }
+    // Text can overflow the shape box (TxtWidth/TxtHeight are
+    // independent cells); bound it with emit_text's placement math.
+    let has_text = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|t| !t.is_empty());
+    if has_text {
+        let tw = get("TxtWidth").unwrap_or(width).max(0.02);
+        let th = get("TxtHeight").unwrap_or(height).max(0.02);
+        let (tlx, tly) = (
+            get("TxtLocPinX").unwrap_or(tw / 2.0),
+            get("TxtLocPinY").unwrap_or(th / 2.0),
+        );
+        let (tx, ty) = (
+            get("TxtPinX").unwrap_or(width / 2.0),
+            get("TxtPinY").unwrap_or(height / 2.0),
+        );
+        if get("TxtAngle").unwrap_or(0.0) != 0.0 {
+            // Rotated text: bound by the circumscribed square.
+            let side = tw.max(th);
+            let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
+            box_union(
+                cx - side / 2.0,
+                cy - side / 2.0,
+                cx + side / 2.0,
+                cy + side / 2.0,
+                &a,
+                &mut u,
+            );
+        } else {
+            let (x0, y0) = (tx - tlx, -(ty - tly + th));
+            box_union(x0, y0, x0 + tw, y0 + th, &a, &mut u);
+        }
+    }
+    (u.acc.unwrap_or((0.0, 0.0, 0.0, 0.0)), a)
+}
+
+/// The page-space ink box of every shape in `shape_id`'s subtree —
+/// each entry unions the node's own box with all its descendants'
+/// ([`node_ink_box`], one shared walk). This is the #236 patch cull's
+/// predicate source: a node whose SUBTREE box misses the padded
+/// damage rect paints nothing inside it and is omitted from the patch
+/// serialization. The top-level root's own entry covers its whole
+/// subtree.
+pub fn subtree_ink_boxes(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+) -> Option<HashMap<i64, (f64, f64, f64, f64)>> {
+    let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
+    let root = page.shapes.iter().find(|s| s.id == shape_id)?;
+    let mut map: HashMap<i64, (f64, f64, f64, f64)> = HashMap::new();
+    fn walk(
+        doc: &Document,
+        s: &Shape,
+        chain: &[&Shape],
+        page_h: f64,
+        top: bool,
+        to_page: Affine,
+        map: &mut HashMap<i64, (f64, f64, f64, f64)>,
+    ) -> (f64, f64, f64, f64) {
+        let mut chain: Vec<&Shape> = chain.to_vec();
+        chain.push(s);
+        let (own, a) = node_ink_box(doc, s, &chain, page_h, top, to_page);
+        let mut acc = own;
+        for sub in &s.sub_shapes {
+            let sub_box = walk(doc, sub, &chain, page_h, false, a, map);
+            acc = union_box(acc, sub_box);
+        }
+        map.insert(s.id, acc);
+        acc
+    }
+    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut map);
+    Some(map)
+}
+
+/// Union two (x, y, w, h) page rects — the bounds-walk's accumulator
+/// as a plain function (the #236 subtree-box pass unions bottom-up).
+fn union_box(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let x1 = (a.0 + a.2).max(b.0 + b.2);
+    let y1 = (a.1 + a.3).max(b.1 + b.3);
+    let nx = a.0.min(b.0);
+    let ny = a.1.min(b.1);
+    (nx, ny, x1 - nx, y1 - ny)
 }
 
 /// One top-level shape's subtree as a standalone layer SVG (#93): the
@@ -609,6 +706,86 @@ pub fn render_shape_layer_opts(
     skip_text: Option<i64>,
     greek_ppi: Option<f32>,
 ) -> anyhow::Result<(Vec<f64>, String)> {
+    render_shape_layer_inner(
+        doc, page, shape_id, hidden, bounds, skip_text, greek_ppi, None,
+    )
+}
+
+/// [`render_shape_layer_opts`] for the #236 damage-region patch: only
+/// the subtree nodes whose ink box intersects `cull_rect` (page
+/// inches) are serialized. Omitted nodes lie entirely outside the
+/// patch rect (the caller pads it past stroke bleed and anti-aliasing
+/// reach), so pixels inside the patch are unchanged — the
+/// `layers::culled_patch_pixels_match_the_full_layer_render` pin
+/// holds the patch-vs-full byte comparison for the culled tree.
+/// `bounds` stays the FULL layer's viewBox: the patch renders through
+/// the same grid as the existing texture.
+#[allow(clippy::too_many_arguments)] // the layer's full identity + the cull rect (#236)
+pub fn render_shape_layer_opts_culled(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+    skip_text: Option<i64>,
+    greek_ppi: Option<f32>,
+    cull_rect: (f64, f64, f64, f64),
+) -> anyhow::Result<(Vec<f64>, String)> {
+    let boxes = subtree_ink_boxes(doc, page, shape_id)
+        .ok_or_else(|| anyhow::anyhow!("shape {shape_id} not found on page {}", page.id))?;
+    let cull = InkCull {
+        rect: cull_rect,
+        boxes: &boxes,
+    };
+    render_shape_layer_inner(
+        doc,
+        page,
+        shape_id,
+        hidden,
+        bounds,
+        skip_text,
+        greek_ppi,
+        Some(&cull),
+    )
+}
+
+/// The #236 cull predicate: a shape id → its subtree ink box, plus the
+/// padded damage rect. `skips` is the render walk's per-node test — a
+/// node whose SUBTREE box misses the rect paints nothing inside it
+/// (the full render's own viewBox clips anything beyond the box), so
+/// omitting it changes no pixel the patch will show.
+struct InkCull<'a> {
+    rect: (f64, f64, f64, f64),
+    boxes: &'a HashMap<i64, (f64, f64, f64, f64)>,
+}
+
+impl InkCull<'_> {
+    fn skips(&self, id: i64) -> bool {
+        // A node missing from the map cannot happen (the pass walks
+        // the same subtree); keep it if it does — conservative.
+        self.boxes
+            .get(&id)
+            .is_some_and(|b| !boxes_intersect(*b, self.rect))
+    }
+}
+
+/// Two (x, y, w, h) page rects intersect (closed test — a shared edge
+/// counts, so the caller's padding is what creates distance).
+fn boxes_intersect(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.0 <= b.0 + b.2 && b.0 <= a.0 + a.2 && a.1 <= b.1 + b.3 && b.1 <= a.1 + a.3
+}
+
+#[allow(clippy::too_many_arguments)] // shared body of the plain and culled serializers
+fn render_shape_layer_inner(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+    skip_text: Option<i64>,
+    greek_ppi: Option<f32>,
+    cull: Option<&InkCull>,
+) -> anyhow::Result<(Vec<f64>, String)> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let Some(shape) = page.shapes.iter().find(|s| s.id == shape_id) else {
         anyhow::bail!("shape {shape_id} not found on page {}", page.id);
@@ -637,6 +814,7 @@ pub fn render_shape_layer_opts(
             &page.part,
             skip_text,
             greek.as_ref(),
+            cull,
             &mut svg,
         );
     }
@@ -710,7 +888,17 @@ fn render_page_opts(
                 continue;
             }
         }
-        render_shape(doc, shape, h, &[], &page.part, skip_text, None, &mut svg);
+        render_shape(
+            doc,
+            shape,
+            h,
+            &[],
+            &page.part,
+            skip_text,
+            None,
+            None,
+            &mut svg,
+        );
     }
     // #187: line jumps — Visio prints hops. The export appends the
     // same treatment the canvas paints (white gap, under redraw, hop
@@ -1044,6 +1232,7 @@ fn render_shape<'a>(
     part: &str,
     skip_text: Option<i64>,
     greek: Option<&GreekCtx>,
+    cull: Option<&InkCull>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -1100,7 +1289,12 @@ fn render_shape<'a>(
     }
     // Sub-shapes of a group live in the parent's local frame.
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, greek, out);
+        // #236: a sub whose subtree box misses the cull rect paints
+        // nothing inside the patch — skip it and its whole subtree.
+        if cull.is_some_and(|c| c.skips(sub.id)) {
+            continue;
+        }
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, cull, out);
     }
     mirror_master(doc, s, &chain, width, height, greek, out);
 
@@ -1121,6 +1315,7 @@ fn render_shape<'a>(
 
 /// Render a shape whose XForm is relative to its parent's local frame
 /// (used for sub-shapes of groups).
+#[allow(clippy::too_many_arguments)] // the render walk's context rides one call (#236 cull)
 fn render_shape_local<'a>(
     doc: &'a Document,
     s: &'a Shape,
@@ -1128,6 +1323,7 @@ fn render_shape_local<'a>(
     part: &str,
     skip_text: Option<i64>,
     greek: Option<&GreekCtx>,
+    cull: Option<&InkCull>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -1164,7 +1360,11 @@ fn render_shape_local<'a>(
         }
     }
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, greek, out);
+        // #236: the cull test, at every subtree level.
+        if cull.is_some_and(|c| c.skips(sub.id)) {
+            continue;
+        }
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, cull, out);
     }
     mirror_master(doc, s, &chain, width, height, greek, out);
     // Group-local rendering applies no flip scale of its own, so the text
@@ -1261,7 +1461,10 @@ fn mirror_master(
             ty = -(by + bh),
         );
         for r in &m.shapes {
-            render_shape_local(doc, r, &[], mpart, None, greek, out);
+            // Master-canvas roots of a multi-root master: the union
+            // bbox maps into the instance rect, which the node's own
+            // ink box bounds — no cull of their own (#236).
+            render_shape_local(doc, r, &[], mpart, None, greek, None, out);
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
@@ -1285,7 +1488,10 @@ fn mirror_master(
             if let Some(t) = &wrapper {
                 let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
             }
-            render_shape_local(doc, sub, chain, mpart, None, greek, out);
+            // Mirrored master children map into the instance's local
+            // frame, bounded by the node's own ink box — no cull of
+            // their own (#236).
+            render_shape_local(doc, sub, chain, mpart, None, greek, None, out);
             if wrapper.is_some() {
                 let _ = writeln!(out, "</g>");
             }
@@ -4098,7 +4304,7 @@ mod tests {
             }));
             let chain = [&s];
             let mut out = String::new();
-            render_shape(&doc, &s, 11.0, &chain, "", None, None, &mut out);
+            render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
             out
         };
         // 0 = no marker at all.
@@ -5410,6 +5616,53 @@ mod tests {
             !svg.contains("<g transform"),
             "hidden root must not draw: {svg}"
         );
+    }
+
+    /// #236: the culled patch serialization omits every subtree node
+    /// whose ink box misses the (padded) cull rect and keeps the ones
+    /// it covers — the serialize+parse saving is real, and a
+    /// regression to full serialization would re-include the far
+    /// shape's ink. The group node itself always stays (its subtree
+    /// box spans both leaves).
+    #[test]
+    fn culled_serialization_omits_shapes_outside_the_cull_rect() {
+        // A group with two disjoint leaves: red left, green right.
+        // Real Geometry rows, so the leaves actually paint.
+        let rect_rows = |w: f64, h: f64| {
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", w), ("Y", 0.0)]),
+                geo_row(3, "LineTo", &[("X", w), ("Y", h)]),
+                geo_row(4, "LineTo", &[("X", 0.0), ("Y", h)]),
+                geo_row(5, "LineTo", &[("X", 0.0), ("Y", 0.0)]),
+            ]
+        };
+        let mut left = shape_at(2, (0.5, 0.5), 0.6, 0.4, 0.0);
+        left.sheet.set_cell("FillForegnd", Cell::value("#ff2200"));
+        push_geo(&mut left, rect_rows(0.6, 0.4));
+        let mut right = shape_at(3, (2.5, 0.5), 0.6, 0.4, 0.0);
+        right.sheet.set_cell("FillForegnd", Cell::value("#22cc00"));
+        push_geo(&mut right, rect_rows(0.6, 0.4));
+        let mut group = shape_at(1, (3.0, 5.0), 3.0, 1.0, 0.0);
+        group.sub_shapes = vec![left, right];
+        let (doc, page) = page_fixture(vec![group]);
+        let bounds = shape_ink_bounds(&doc, &page, 1).unwrap();
+        // The cull rect covers the LEFT leaf's x range only (the
+        // leaves share their y range, so x does the separating).
+        let cull = (bounds.0, bounds.1, 1.4, bounds.3);
+        let (_, culled) =
+            render_shape_layer_opts_culled(&doc, &page, 1, &[], bounds, None, None, cull).unwrap();
+        assert!(
+            culled.contains("#ff2200"),
+            "the covered leaf stays in the patch: {culled}"
+        );
+        assert!(
+            !culled.contains("#22cc00"),
+            "the far leaf is omitted from the patch serialization: {culled}"
+        );
+        // The full serialization keeps both.
+        let (_, full) = render_shape_layer_opts(&doc, &page, 1, &[], bounds, None, None).unwrap();
+        assert!(full.contains("#ff2200") && full.contains("#22cc00"));
     }
 
     /// GitHub #22: the shared TextBlock resolution must agree with the

@@ -69,17 +69,18 @@ pub(crate) enum RasterJob {
     /// Re-render an already-parsed tree at a new width (#91 bucket
     /// change; the SVG string is gone, only the tree is reused).
     Render { tree: Tree, width: f32 },
-    /// The #219 damage-region patch: parse the SAME full-layer SVG a
-    /// full re-render would serialize (the patch region is clipped by
-    /// the transform, not by the serialization), then render it
-    /// through `render_tree`'s own scale for the existing texture's
+    /// The #219 damage-region patch: parse the patch SVG (the full
+    /// layer's serialization until #236; since then, culled to the
+    /// shapes whose ink can reach the patch rect — the region is
+    /// clipped by the transform, not by the serialization) and render
+    /// it through `render_tree`'s own scale for the existing texture's
     /// (`width`, `height`) dimensions post-translated by the INTEGER
     /// pixel offset `(crop_x, crop_y)` into a `patch_w`×`patch_h`
-    /// image. The integer shift keeps the patch bit-identical to the
-    /// corresponding region of a full re-render (the `layers` test
-    /// pins it). Returns the tree like `Parse` (the caller ignores it
-    /// for patches — the cached tree/svg must stay keyed to their own
-    /// serialization).
+    /// image. The integer shift keeps the patch pixel-identical to the
+    /// corresponding region of a full re-render (the `layers` tests
+    /// pin it, culled tree included). Returns the tree like `Parse`
+    /// (the caller ignores it for patches — the cached tree/svg must
+    /// stay keyed to their own serialization).
     ParseRegion {
         svg: String,
         width: u32,

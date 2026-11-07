@@ -1530,14 +1530,33 @@ impl crate::Command for RemoveShape {
                 }],
             };
         }
-        // Empty path: nothing captured yet (touched before apply) —
-        // say nothing precise, invalidate the page.
+        // Empty path: nothing captured yet (touched before apply).
+        // Name a NESTED target so the layer store can harvest its
+        // pre-edit bounds — the removal's damage half (#236). The
+        // store pairs those bounds with the post-apply absence and
+        // patches just the removed shape's old region. Top-level
+        // targets stay conservative (page).
         if path.is_empty() {
+            if let Some(root) = crate::scope::top_level_ancestor(doc, self.page, self.shape) {
+                if root != self.shape {
+                    return crate::TouchList {
+                        pages: vec![],
+                        shapes: vec![crate::Touched {
+                            page: self.page,
+                            shape: root,
+                            touch: crate::Touch::Ink,
+                            sub: Some(self.shape),
+                        }],
+                    };
+                }
+            }
             return crate::TouchList::page(self.page);
         }
         // Post-apply the shape is gone; walk to its former container
         // to confirm the path resolves, then roll up to the top-level
-        // root at path[0].
+        // root at path[0]. The sub names the REMOVED shape: its post
+        // bounds resolve to absent, and the store patches the old
+        // ink's region (#236).
         if let Some(page) = doc.pages.iter().find(|p| p.id == self.page) {
             let mut node = page.shapes.get(path[0]);
             for ix in path.iter().take(path.len().saturating_sub(1)).skip(1) {
@@ -1550,7 +1569,7 @@ impl crate::Command for RemoveShape {
                         page: self.page,
                         shape: path_root(page, &path),
                         touch: crate::Touch::Ink,
-                        sub: None,
+                        sub: Some(self.shape),
                     }],
                 };
             }
@@ -1638,16 +1657,26 @@ impl crate::Command for DuplicateShape {
                     sub: None,
                 }],
             },
-            // Sub-shape duplicate: the containing group's ink changed.
-            Some(root) => crate::TouchList {
-                pages: vec![],
-                shapes: vec![crate::Touched {
-                    page: self.page,
-                    shape: root,
-                    touch: crate::Touch::Ink,
-                    sub: None,
-                }],
-            },
+            // Duplicating a nested member: apply pushes the clone
+            // TOP-LEVEL (page.shapes), so the containing group's ink
+            // never changes — the truthful touch is the clone's new
+            // membership, not Ink on the group (#236; the old
+            // sub-less Ink forced a pointless full re-render of the
+            // group's layer). Pre-apply (no clone yet) stays
+            // conservative.
+            Some(_) => self
+                .clone
+                .as_ref()
+                .map(|c| crate::TouchList {
+                    pages: vec![],
+                    shapes: vec![crate::Touched {
+                        page: self.page,
+                        shape: c.id,
+                        touch: crate::Touch::Membership,
+                        sub: None,
+                    }],
+                })
+                .unwrap_or_else(|| crate::TouchList::page(self.page)),
             None => crate::TouchList::page(self.page),
         }
     }
@@ -2390,7 +2419,13 @@ impl crate::Command for ReorderShape {
                     page: self.page,
                     shape: root,
                     touch: crate::Touch::Ink,
-                    sub: None,
+                    // #236: the reordered member paints over (or
+                    // under) the siblings it swaps with — the changed
+                    // pixels all lie inside the member's own ink
+                    // bounds, so its old∪new (identical) focused
+                    // bounds pin the damage region. The position never
+                    // moves; only what shows behind it.
+                    sub: (root != self.shape).then_some(self.shape),
                 }],
             },
             None => crate::TouchList::page(self.page),
@@ -2975,7 +3010,40 @@ pub struct AddConnect {
     pub connect: Connect,
 }
 
+/// The #236 connector touch: Ink on `conn`'s top-level ancestor, with
+/// `sub` naming the connector when it is nested — the layer store
+/// pairs the connector's own old∪new focused bounds and patches just
+/// that region of the group's texture instead of re-rendering it (or
+/// the page). Falls back to the page touch when the record's connector
+/// does not resolve (stale glue).
+fn connector_touch(doc: &Document, page: i64, conn: i64) -> crate::TouchList {
+    match crate::scope::top_level_ancestor(doc, page, conn) {
+        Some(root) => crate::TouchList {
+            pages: vec![],
+            shapes: vec![crate::Touched {
+                page,
+                shape: root,
+                touch: crate::Touch::Ink,
+                sub: sub_shape(root, conn),
+            }],
+        },
+        None => crate::TouchList::page(page),
+    }
+}
+
 impl crate::Command for AddConnect {
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        // A glue record rides its connector (the record itself never
+        // repaints — the route reads it — so the conservative
+        // shape-level touch stays). Master-owned records affect every
+        // instance of the master; keep the doc-wide default there.
+        // The trait default used to dirty every page on every
+        // connector authoring step (#236).
+        match &self.owner {
+            crate::ConnectsOwner::Page(pid) => connector_touch(doc, *pid, self.connect.from_sheet),
+            crate::ConnectsOwner::Master(_) => crate::TouchList::all_pages(doc),
+        }
+    }
     fn label(&self) -> String {
         format!(
             "connect {}:{} → {}:{} on {}",
@@ -3021,6 +3089,21 @@ impl RemoveConnect {
 }
 
 impl crate::Command for RemoveConnect {
+    fn touched(&self, doc: &Document) -> crate::TouchList {
+        // Same connector-scoped touch as AddConnect (#236): the
+        // removed record rides its connector. The record is known
+        // statically pre-apply (read at `index`) and captured at apply.
+        let conn = self.removed.clone().or_else(|| {
+            self.owner
+                .read_connects(doc)
+                .ok()
+                .and_then(|l| l.list.get(self.index).cloned())
+        });
+        match (&self.owner, conn) {
+            (crate::ConnectsOwner::Page(pid), Some(c)) => connector_touch(doc, *pid, c.from_sheet),
+            _ => crate::TouchList::all_pages(doc),
+        }
+    }
     fn label(&self) -> String {
         format!("remove connection {} from {}", self.index, self.owner)
     }

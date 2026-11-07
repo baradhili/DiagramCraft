@@ -13,10 +13,11 @@
 //!   edit (a nested sub-shape's cell, #219) does less still: the
 //!   command names the edited sub-shape, the store pairs its old∪new
 //!   focused ink bounds into a damage rect, and the patch re-renders
-//!   just that rect of the existing texture (the same full-layer
-//!   serialization, rastered through `render_tree`'s own scale plus an
-//!   integer-pixel translate — bit-identical to the full render by
-//!   construction) and composites it with `TextureHandle::set_partial`.
+//!   just that rect of the existing texture (serialized CULLED to the
+//!   shapes whose ink reaches the rect — #236 — and rastered through
+//!   `render_tree`'s own scale plus an integer-pixel translate;
+//!   pixel-identical to the full render, pinned per-shape-set) and
+//!   composites it with `TextureHandle::set_partial`.
 //!   Damage past half the texture, a moved layer grid, or an unbounded
 //!   edit falls back to the full re-render; stale completions can
 //!   never overwrite a fresh patch (version/bucket identity);
@@ -248,8 +249,41 @@ impl Default for ShapeLayers {
 /// damage regions, and focused bounds throughout the store.
 pub(crate) type Rect = (f64, f64, f64, f64);
 
-/// Post-transition focused bounds of a top's edited sub-shapes.
-type SubBounds = HashMap<i64, HashMap<i64, Rect>>;
+/// The ink state of one edited sub-shape on ONE side of a transition
+/// (#236): bounds while it paints, `Absent` when the transition
+/// created or removed it (a creation pairs its post bounds alone, a
+/// removal its pre bounds), `Unbounded` when it exists but its ink
+/// cannot be pinned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum SubBound {
+    Bounded(Rect),
+    Absent,
+    Unbounded,
+}
+
+/// Per-transition ink state of a top's edited sub-shapes: the pre
+/// half of the NEXT transition's damage rect (an undo or redo reverts
+/// to exactly this state). A top's entries drop on any touch that
+/// can't pin its damage.
+type SubBounds = HashMap<i64, HashMap<i64, SubBound>>;
+
+/// Resolve `sub`'s ink state under top-level `top` on `page_id` from
+/// `doc`. Absent when the sub no longer hangs under this top —
+/// created, removed, or re-parented by the transition (`top`'s layer
+/// is the rendering unit, so a sub that left it is gone from it);
+/// unbounded when it exists but the focused walk cannot pin ink.
+fn sub_bound(doc: &vsdx::Document, page_id: i64, top: i64, sub: i64) -> SubBound {
+    if dc_core::scope::top_level_ancestor(doc, page_id, sub) != Some(top) {
+        return SubBound::Absent;
+    }
+    let Some(page) = doc.pages.iter().find(|p| p.id == page_id) else {
+        return SubBound::Unbounded;
+    };
+    match dc::svg::shape_ink_bounds_focused(doc, page, top, Some(sub)) {
+        Some(r) => SubBound::Bounded(r),
+        None => SubBound::Unbounded,
+    }
+}
 
 /// Union two (x, y, w, h) page rects.
 fn union_rect(a: Rect, b: Rect) -> Rect {
@@ -261,48 +295,51 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
 }
 
 impl ShapeLayers {
-    /// Capture the PRE-edit focused ink bounds of every nested Ink
-    /// touch a command is about to produce (#219). Call with the
-    /// command's own `touched()` on the PRE-apply document, just
-    /// before applying. The returned `(page, top, sub, rect)` list
-    /// feeds [`ShapeLayers::touch_damage`]'s `pre` argument on the
-    /// apply path; undo/redo pass an empty slice and pair against the
-    /// per-transition cache instead.
+    /// Capture the PRE-edit ink state of every nested Ink touch a
+    /// command is about to produce (#219, tri-state since #236). Call
+    /// with the command's own `touched()` on the PRE-apply document,
+    /// just before applying. The returned `(page, top, sub, state)`
+    /// list feeds [`ShapeLayers::touch_damage`]'s `pre` argument on
+    /// the apply path; undo/redo pass an empty slice and pair against
+    /// the per-transition cache instead. An `Absent` state is the
+    /// creation case — the sub does not hang under this top yet.
     pub fn harvest_pre_damage(
         &self,
         doc: &vsdx::Document,
         pre_touched: &dc_core::TouchList,
-    ) -> Vec<(i64, i64, i64, Rect)> {
+    ) -> Vec<(i64, i64, i64, SubBound)> {
         let mut out = Vec::new();
         for t in &pre_touched.shapes {
             if t.touch != dc_core::Touch::Ink {
                 continue;
             }
             let Some(sub) = t.sub else { continue };
-            let Some(page) = doc.pages.iter().find(|p| p.id == t.page) else {
+            // A touch on a page that does not exist carries no state.
+            if !doc.pages.iter().any(|p| p.id == t.page) {
                 continue;
-            };
-            if let Some(r) = dc::svg::shape_ink_bounds_focused(doc, page, t.shape, Some(sub)) {
-                out.push((t.page, t.shape, sub, r));
             }
+            out.push((t.page, t.shape, sub, sub_bound(doc, t.page, t.shape, sub)));
         }
         out
     }
 
     /// Route a command's touch list WITH its damage regions (#219).
     /// For every nested Ink touch, the edited sub-shape's post-edit
-    /// focused bounds pair with its pre-edit bounds — from `pre` (the
+    /// ink state pairs with its pre-edit state — from `pre` (the
     /// apply path's harvest) or the per-transition cache (undo/redo) —
     /// and the union becomes the shape's pending damage rect. The
-    /// cache is written with the POST-transition bounds so the next
-    /// transition pairs against exactly this state; any touch that
-    /// cannot pin its damage (no sub, unresolvable bounds, missing
-    /// pre rect) marks the top unbounded AND drops its cached bounds.
+    /// tri-state pairing (#236) covers creations (pre `Absent`: the
+    /// post bounds are the whole damage) and removals (post `Absent`:
+    /// the pre bounds are). The cache is written with the
+    /// POST-transition state so the next transition pairs against
+    /// exactly this state; any touch that cannot pin its damage (no
+    /// sub, unresolvable bounds, missing pre record) marks the top
+    /// unbounded AND drops its cached bounds.
     pub fn touch_damage(
         &mut self,
         doc: &vsdx::Document,
         touched: &dc_core::TouchList,
-        pre: &[(i64, i64, i64, Rect)],
+        pre: &[(i64, i64, i64, SubBound)],
         current_page: i64,
     ) {
         let mut damages: HashMap<i64, Rect> = HashMap::new();
@@ -321,23 +358,15 @@ impl ShapeLayers {
                 self.sub_bounds.remove(&t.shape);
                 continue;
             };
-            let Some(page) = doc.pages.iter().find(|p| p.id == t.page) else {
-                continue;
-            };
-            let Some(post) = dc::svg::shape_ink_bounds_focused(doc, page, t.shape, Some(sub))
-            else {
-                self.pending_full.insert(t.shape);
-                self.sub_bounds.remove(&t.shape);
-                continue;
-            };
+            let post = sub_bound(doc, t.page, t.shape, sub);
             // The pre half: the apply path's harvest first, else the
             // per-transition cache (undo/redo revert to exactly the
             // state written by the previous transition). Read BEFORE
             // the cache is overwritten with `post`.
-            let pre_rect = pre
+            let pre_state = pre
                 .iter()
                 .find(|(p, top, s, _)| *p == t.page && *top == t.shape && *s == sub)
-                .map(|(_, _, _, r)| *r)
+                .map(|(_, _, _, b)| *b)
                 .or_else(|| {
                     self.sub_bounds
                         .get(&t.shape)
@@ -348,14 +377,30 @@ impl ShapeLayers {
                 .entry(t.shape)
                 .or_default()
                 .insert(sub, post);
-            match pre_rect {
-                Some(p) => {
-                    let d = damages.entry(t.shape).or_insert(post);
-                    *d = union_rect(*d, union_rect(p, post));
+            match (pre_state, post) {
+                (Some(SubBound::Bounded(p)), SubBound::Bounded(q)) => {
+                    let d = damages.entry(t.shape).or_insert(q);
+                    *d = union_rect(*d, union_rect(p, q));
                 }
-                // No pre rect: the edit's old ink is unbounded — full
-                // re-render (the cache write above still stands).
-                None => {
+                // #236: the transition CREATED the sub (absent before)
+                // — its new ink is the only damage; or REMOVED it —
+                // the old ink is. The nested RemoveShape's removal and
+                // its undo ride these arms; the cache write above
+                // records the post state either way.
+                (Some(SubBound::Absent), SubBound::Bounded(q)) => {
+                    let d = damages.entry(t.shape).or_insert(q);
+                    *d = union_rect(*d, q);
+                }
+                (Some(SubBound::Bounded(p)), SubBound::Absent) => {
+                    let d = damages.entry(t.shape).or_insert(p);
+                    *d = union_rect(*d, p);
+                }
+                // Unresolvable ink on either side, no pre record at
+                // all (the cache was dropped, or the sub is new to
+                // the store), or a touch naming a sub that hangs
+                // under this top on NEITHER side: the old ink cannot
+                // be pinned — full re-render.
+                _ => {
                     self.pending_full.insert(t.shape);
                 }
             }
@@ -680,6 +725,19 @@ impl ShapeLayers {
     pub fn version_for_test(&self, id: i64) -> u64 {
         self.versions.get(&id).copied().unwrap_or(self.base_version)
     }
+    /// kittest (#236): whether a top's next render is forced to a full
+    /// re-render (its damage cannot be pinned).
+    #[doc(hidden)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pending_full_for_test(&self, id: i64) -> bool {
+        self.pending_full.contains(&id)
+    }
+    /// kittest (#236): a top's pending damage rect, if bounded.
+    #[doc(hidden)]
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn pending_damage_for_test(&self, id: i64) -> Option<Rect> {
+        self.pending_damage.get(&id).copied()
+    }
 
     /// The frame pass: refresh stale bounds, post raster jobs for
     /// entries that are missing/stale/out-of-bucket (viewport-culled,
@@ -865,15 +923,35 @@ impl ShapeLayers {
                         // #219 damage-region patch: a localized content
                         // edit re-renders just the damaged rect of the
                         // EXISTING texture and composites it with
-                        // set_partial. The patch serializes the SAME
-                        // full-layer SVG a full re-render would (post-edit
-                        // model, current bounds) but greeks at the
+                        // set_partial. The patch greeks at the
                         // TEXTURE's own ppi — the patch must match the
                         // pixels around it, not the current zoom's intent.
                         let ppi_patch = entry.bucket as f32 / 4.0;
+                        // #236: the serialization culls to the shapes
+                        // whose ink can reach the patch rect — the
+                        // serialize + usvg-parse cost drops from
+                        // O(subtree) to O(culled set). The rect pads
+                        // the damage by the max stroke half-width plus
+                        // 4 device px of anti-aliasing reach at the
+                        // texture's own scale, so a shape whose ink
+                        // only grazes the damage is kept; omitted
+                        // shapes lie entirely outside and change no
+                        // pixel the patch shows (the full render's own
+                        // viewBox clips anything beyond the ink boxes).
+                        let [tex_w, tex_h] = entry.tex.as_ref().expect("checked above").size();
+                        let ppi_tex =
+                            (tex_w as f64 / bbox.2.max(1e-9)).min(tex_h as f64 / bbox.3.max(1e-9));
+                        let bleed = 0.08 + 4.0 / ppi_tex.max(1e-9);
+                        let damage = pending_damage.expect("plan implies damage");
+                        let cull_rect = (
+                            damage.0 - bleed,
+                            damage.1 - bleed,
+                            damage.2 + 2.0 * bleed,
+                            damage.3 + 2.0 * bleed,
+                        );
                         let _s =
                             crate::perf::span(crate::perf::Stage::Svg(crate::perf::Kind::Page));
-                        match dc::svg::render_shape_layer_opts(
+                        match dc::svg::render_shape_layer_opts_culled(
                             doc,
                             page,
                             shape.id,
@@ -881,10 +959,9 @@ impl ShapeLayers {
                             bbox,
                             skip_text,
                             Some(ppi_patch),
+                            cull_rect,
                         ) {
                             Ok((_, svg)) => {
-                                let [tex_w, tex_h] =
-                                    entry.tex.as_ref().expect("checked above").size();
                                 let job = RasterJob::ParseRegion {
                                     svg,
                                     width: tex_w as u32,
@@ -1647,6 +1724,78 @@ mod tests {
         );
     }
 
+    /// #236: a NESTED removal pairs its pre bounds with the post
+    /// absence — the removed member's own region becomes the damage,
+    /// not a full re-render — and its undo pairs the cached absence
+    /// with the restored member's bounds (the creation arm). The two
+    /// tri-state cases the cell-edit commands could never produce.
+    #[test]
+    fn nested_removal_and_its_undo_pair_tri_state_damage() {
+        let doc = plain_group_doc();
+        let mut ed = dc_core::Editor::new(doc);
+        let mut layers = ShapeLayers::default();
+        layers.set_page(0);
+        let pre_bounds =
+            dc::svg::shape_ink_bounds_focused(&ed.doc, &ed.doc.pages[0], 1, Some(3)).unwrap();
+
+        // t1: remove the nested member. touched() names root+sub both
+        // pre (the member still hangs under the top) and post (absent).
+        let cmd = dc_core::RemoveShape::new(0, 3);
+        let pre_touched = cmd.touched(&ed.doc);
+        assert!(
+            pre_touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 1 && t.sub == Some(3) && t.touch == dc_core::Touch::Ink),
+            "pre-apply touched names the nested member: {pre_touched:?}"
+        );
+        let pre = layers.harvest_pre_damage(&ed.doc, &pre_touched);
+        let (_, touched) = ed.apply(cmd).unwrap();
+        layers.touch_damage(&ed.doc, &touched, &pre, 0);
+        assert!(
+            !layers.pending_full_for_test(1),
+            "a bounded removal never marks the top unbounded"
+        );
+        let d = layers.pending_damage_for_test(1).unwrap();
+        assert!(
+            (d.0 - pre_bounds.0).abs() < 1e-9
+                && (d.1 - pre_bounds.1).abs() < 1e-9
+                && (d.2 - pre_bounds.2).abs() < 1e-9
+                && (d.3 - pre_bounds.3).abs() < 1e-9,
+            "the removal's damage is the removed member's own region: {d:?} vs {pre_bounds:?}"
+        );
+
+        // The composite consumes t1's region; t2 pairs in isolation.
+        layers.pending_damage.clear();
+        layers.pending_full.clear();
+
+        // t2: undo restores the member — the cache holds Absent (the
+        // removal's post state), so the restored bounds are the whole
+        // damage: the creation arm.
+        let Some((_, touched)) = ed.undo().unwrap() else {
+            panic!("the removal must be undoable");
+        };
+        assert!(
+            touched
+                .shapes
+                .iter()
+                .any(|t| t.shape == 1 && t.sub == Some(3)),
+            "post-undo touched still names the member: {touched:?}"
+        );
+        layers.touch_damage(&ed.doc, &touched, &[], 0);
+        assert!(
+            !layers.pending_full_for_test(1),
+            "the undo pairs against the cached absence"
+        );
+        let post_bounds =
+            dc::svg::shape_ink_bounds_focused(&ed.doc, &ed.doc.pages[0], 1, Some(3)).unwrap();
+        let d = layers.pending_damage_for_test(1).unwrap();
+        assert!(
+            (d.0 - post_bounds.0).abs() < 1e-9,
+            "undo damage = restored bounds"
+        );
+    }
+
     #[test]
     fn undo_pairs_against_the_transition_cache() {
         let doc = plain_group_doc();
@@ -1793,6 +1942,120 @@ mod tests {
                 let a = patch.pixels[j * (pw as usize) + i];
                 let b = full.pixels[(j + y0 as usize) * tw + (i + x0 as usize)];
                 assert_eq!(a, b, "patch pixel ({i}, {j}) diverges from the full render");
+            }
+        }
+    }
+
+    /// #236 acceptance gate: the CULLED patch serialization is still
+    /// pixel-identical to the corresponding region of a whole-layer
+    /// render at the same texture dimensions. The cull omits only
+    /// shapes whose subtree ink box (plus the store's bleed) cannot
+    /// reach the region — the far member and its shaped text — so the
+    /// per-shape-set pin holds byte for byte. This is the empirical
+    /// half of the identity argument the full-serialization patch had
+    /// by construction.
+    #[test]
+    fn culled_patch_pixels_match_the_full_layer_render() {
+        crate::svgimg::pin_embedded_fonts_for_tests();
+        let mut doc = plain_group_doc();
+        // Text on BOTH members: the far member's shaped glyphs must be
+        // omitted by the cull, the near member's must survive it — the
+        // font-shaped path is the risky half on both sides.
+        {
+            let page = &mut doc.pages[0];
+            for (id, t) in [(2i64, "Near"), (3i64, "Far away text")] {
+                let m = page.shapes[0]
+                    .sub_shapes
+                    .iter_mut()
+                    .find(|s| s.id == id)
+                    .unwrap();
+                m.sheet.text = Some(t.into());
+            }
+        }
+        let page_ref = &doc.pages[0];
+        let bounds = dc::svg::shape_ink_bounds(&doc, page_ref, 1).unwrap();
+        let width = (bounds.2 as f32 * 96.0).clamp(1.0, 2048.0);
+        let kind = crate::perf::Kind::Page;
+        let (_, full_svg) =
+            dc::svg::render_shape_layer_opts(&doc, page_ref, 1, &[], bounds, None, Some(96.0))
+                .unwrap();
+        let full_tree = crate::svgimg::parse_svg(&full_svg, kind).unwrap();
+        let full = crate::svgimg::render_tree(&full_tree, width, kind).unwrap();
+        let [tw, th] = full.size;
+        assert!(
+            tw > 32 && th > 32,
+            "fixture layer must raster to a real texture"
+        );
+
+        // The cull rect the store computes: the damage (the near
+        // member's focused bounds) padded by the max stroke half-width
+        // plus 4 device px at the texture's own scale.
+        let dmg = dc::svg::shape_ink_bounds_focused(&doc, page_ref, 1, Some(2)).unwrap();
+        let ppi_tex = (tw as f64 / bounds.2).min(th as f64 / bounds.3);
+        let bleed = 0.08 + 4.0 / ppi_tex;
+        let cull = (
+            dmg.0 - bleed,
+            dmg.1 - bleed,
+            dmg.2 + 2.0 * bleed,
+            dmg.3 + 2.0 * bleed,
+        );
+        let (_, culled_svg) = dc::svg::render_shape_layer_opts_culled(
+            &doc,
+            page_ref,
+            1,
+            &[],
+            bounds,
+            None,
+            Some(96.0),
+            cull,
+        )
+        .unwrap();
+        // Text serializes as per-character <tspan>s: "Near" is 4, the
+        // far member's 13 more must be omitted by the cull.
+        let culled_tspans = culled_svg.matches("<tspan").count();
+        assert_eq!(
+            culled_tspans, 4,
+            "only the near member's four glyphs survive the cull: {culled_svg}"
+        );
+        assert!(
+            full_svg.matches("<tspan").count() > 4,
+            "the full serialization carries both members' text"
+        );
+        let culled_tree = crate::svgimg::parse_svg(&culled_svg, kind).unwrap();
+
+        // The patch rect: the damage snapped outward to whole texture
+        // pixels (the planner's own rule).
+        let sx = tw as f64 / bounds.2;
+        let sy = th as f64 / bounds.3;
+        let x0 = (((dmg.0 - bounds.0) * sx).floor() as i64).clamp(0, tw as i64) as i32;
+        let y0 = (((dmg.1 - bounds.1) * sy).floor() as i64).clamp(0, th as i64) as i32;
+        let x1 = (((dmg.0 + dmg.2 - bounds.0) * sx).ceil() as i64).clamp(0, tw as i64) as i32;
+        let y1 = (((dmg.1 + dmg.3 - bounds.1) * sy).ceil() as i64).clamp(0, th as i64) as i32;
+        let (pw, ph) = ((x1 - x0) as u32, (y1 - y0) as u32);
+        assert!(pw > 4 && ph > 4, "the patch rect must be a real region");
+
+        // The culled tree through the same scale + integer crop shift
+        // RasterJob::ParseRegion runs.
+        let size = culled_tree.size();
+        let t = resvg::usvg::Transform::from_row(
+            tw as f32 / size.width().max(1e-3),
+            0.0,
+            0.0,
+            th as f32 / size.height().max(1e-3),
+            -(x0 as f32),
+            -(y0 as f32),
+        );
+        let patch = crate::svgimg::render_tree_transform(&culled_tree, t, pw, ph, kind).unwrap();
+
+        // Byte-exact: the culled patch equals the full render's region.
+        for j in 0..ph as usize {
+            for i in 0..pw as usize {
+                let a = patch.pixels[j * (pw as usize) + i];
+                let b = full.pixels[(j + y0 as usize) * tw + (i + x0 as usize)];
+                assert_eq!(
+                    a, b,
+                    "culled patch pixel ({i}, {j}) diverges from the full render"
+                );
             }
         }
     }
