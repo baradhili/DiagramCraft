@@ -262,8 +262,9 @@ pub struct App {
     splash: Option<std::time::Instant>,
     /// #224: the in-flight file open — the parse runs on a worker
     /// thread (the same pattern as the rfd pick); the overlay shows
-    /// and the result lands through finish_load.
-    loading: Option<(PathBuf, mpsc::Receiver<Result<vsdx::Document, String>>)>,
+    /// and the result lands through finish_load. The `Instant` drives
+    /// the loading animation.
+    loading: Option<InflightLoad>,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
     /// run on the UI thread — otherwise the eframe event loop stalls
@@ -369,6 +370,15 @@ enum ColorTarget {
     /// Character row-0 Color (#73): writes a section-row cell, not a
     /// plain one.
     Text,
+}
+
+/// #224: one in-flight document open — the picked path, the moment
+/// the load began (the loading animation's clock), and the worker's
+/// parse-result channel.
+struct InflightLoad {
+    path: PathBuf,
+    started: std::time::Instant,
+    rx: mpsc::Receiver<Result<vsdx::Document, String>>,
 }
 
 enum PendingDialog {
@@ -886,7 +896,11 @@ impl App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| path.display().to_string())
         );
-        self.loading = Some((path, rx));
+        self.loading = Some(InflightLoad {
+            path,
+            started: std::time::Instant::now(),
+            rx,
+        });
     }
 
     /// The shared open-completion path: the #224 worker's landing and
@@ -930,10 +944,11 @@ impl App {
     /// means still in flight (the caller draws the overlay + the
     /// status heartbeat); the landing goes through
     /// [`App::finish_load`].
-    fn poll_loading(&mut self) -> Option<PathBuf> {
-        let Some((path, rx)) = &self.loading else {
+    fn poll_loading(&mut self) -> Option<(PathBuf, std::time::Instant)> {
+        let Some(load) = &self.loading else {
             return None;
         };
+        let (path, started, rx) = (&load.path, &load.started, &load.rx);
         match rx.try_recv() {
             Ok(result) => {
                 let path = path.clone();
@@ -948,7 +963,7 @@ impl App {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or_else(|| path.display().to_string())
                 );
-                Some(path.clone())
+                Some((path.clone(), *started))
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.loading = None;
@@ -14450,9 +14465,9 @@ impl App {
         // both animating.
         if self.loading.is_some() {
             let in_flight = self.poll_loading();
-            if let Some(path) = in_flight {
+            if let Some((path, started)) = in_flight {
                 let screen = ui.input(|i| i.viewport_rect());
-                crate::loading::draw_loading(ui, screen, &path);
+                crate::loading::draw_loading(ui, screen, &path, started);
             }
         }
         if let Some(started) = self.splash {

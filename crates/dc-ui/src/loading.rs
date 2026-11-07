@@ -357,8 +357,11 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
 /// Draw the in-flight file-load scrim: the kit's white document card
 /// (bob + twinkle nodes + indeterminate progress) with an `Opening
 /// <file>…` line, above an input-eating full-screen rect (modal for
-/// v1). Time-driven repaints while up.
-pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, path: &std::path::Path) {
+/// v1). `started` — the moment the open began — drives the bob, the
+/// twinkle cycle and the progress sweep (a fresh `Instant::now()`
+/// per frame would hold every phase at t≈0, #218 review).
+/// Time-driven repaints while up.
+pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, path: &std::path::Path, started: Instant) {
     egui::Area::new(egui::Id::unique("dc-loading"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
@@ -366,7 +369,7 @@ pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, path: &std::path::Path) {
             ui.allocate_rect(screen, Sense::click_and_drag());
             let p = ui.painter().clone();
             p.rect_filled(screen, 0.0, BG_TOP.gamma_multiply(0.72));
-            let t = Instant::now().elapsed().as_secs_f32();
+            let t = started.elapsed().as_secs_f32();
             // The card bobs (the kit's translate 0 → −4 → 0 over 3 s).
             let bob = (t % 3.0 / 3.0 * std::f32::consts::TAU).sin() * -4.0;
             let c = screen.center() + Vec2::new(0.0, bob - 10.0);

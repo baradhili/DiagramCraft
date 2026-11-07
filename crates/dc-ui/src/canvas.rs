@@ -133,15 +133,16 @@ impl View {
         page: &PageGeom,
     ) {
         let (x, y, w, h) = rect;
-        // Degenerate rects (a hairline selection) must not produce
-        // absurd zooms: floor each side at 0.25 in.
-        let w = (w as f32).max(0.25);
-        let h = (h as f32).max(0.25);
-        let zx = content.x / (w * 96.0);
-        let zy = content.y / (h * 96.0);
+        // The zoom floors each side at 0.25 in (a hairline selection
+        // must not produce an absurd zoom); the CENTER uses the RAW
+        // dimensions — a 1D connector's h=0 selection would land
+        // 0.125 in off-center otherwise (#218 review).
+        let (wf, hf) = ((w as f32).max(0.25), (h as f32).max(0.25));
+        let zx = content.x / (wf * 96.0);
+        let zy = content.y / (hf * 96.0);
         self.zoom = ((zx.min(zy) * 384.0).floor() / 384.0).clamp(0.1, 8.0);
-        let cx = x as f32 + w / 2.0;
-        let cy = page.h_in as f32 - (y as f32 + h / 2.0);
+        let cx = x as f32 + w as f32 / 2.0;
+        let cy = page.h_in as f32 - (y as f32 + h as f32 / 2.0);
         let ppi = self.px_per_in();
         self.pan = origin + content / 2.0 - Vec2::new(cx * ppi, cy * ppi);
         self.fit_mode = false;

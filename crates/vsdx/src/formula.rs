@@ -829,8 +829,12 @@ impl<'a> Parser<'a> {
                     .and_then(|v| v.as_f64())
                     .map(|v| v != 0.0)
                     .unwrap_or(false);
-                let count = haystack.chars().count();
-                if start < 1.0 || start > count as f64 {
+                // The start range checks the ORIGINAL haystack; the
+                // search bounds off the SEARCHED string's char count —
+                // case folding can change the count (İ), and a needle
+                // longer than the haystack is simply not found (#218
+                // review: `saturating_sub` + a slice could panic).
+                if start < 1.0 || start > haystack.chars().count() as f64 {
                     return Err("FIND start out of range".into());
                 }
                 let skip = (start - 1.0) as usize;
@@ -844,8 +848,12 @@ impl<'a> Parser<'a> {
                 if needle.is_empty() {
                     return Ok(Value::Num(start));
                 }
-                let at = (skip..=count.saturating_sub(needle.len()))
-                    .find(|&i| hay[i..i + needle.len()] == needle[..]);
+                // `checked_sub` makes a needle longer than the
+                // haystack an empty search range (never a slice panic).
+                let at = hay
+                    .len()
+                    .checked_sub(needle.len())
+                    .and_then(|last| (skip..=last).find(|&i| hay[i..i + needle.len()] == needle[..]));
                 match at {
                     Some(i) => Ok(Value::Num(i as f64 + 1.0)),
                     None => Err("FIND: text not found".into()),
@@ -1548,6 +1556,9 @@ mod tests {
         // Not-found and out-of-range starts are errors (cached-V fallback).
         assert!(eval("FIND(\"z\",\"abc\")", &e).is_err());
         assert!(eval("FIND(\"b\",\"abc\",9)", &e).is_err());
+        // A needle longer than the haystack is not found — no panic
+        // (#218 review).
+        assert!(eval("FIND(\"abcd\",\"ab\")", &e).is_err());
         // VALUE parses a number out of text; garbage errors.
         assert_eq!(eval("VALUE(\"2.5\")", &e).unwrap().as_f64(), Some(2.5));
         assert!(eval("VALUE(\"abc\")", &e).is_err());

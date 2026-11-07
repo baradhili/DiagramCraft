@@ -14,12 +14,16 @@ use vsdx::model::find_shape_by_id;
 const FIXTURE: &str = "../../../Sample/test files/utilisation.vsdx";
 
 fn open_fixture() -> Option<dc_core::Editor> {
+    if !std::path::Path::new(FIXTURE).exists() {
+        eprintln!("skipping: fixture not available");
+        return None;
+    }
+    // A PRESENT fixture that fails to parse is a regression (a corrupt
+    // file or a parser break) — fail loudly, never silently pass the
+    // three tests that gate on this (#218 review).
     match vsdx::parse::parse(std::path::Path::new(FIXTURE)) {
         Ok(doc) => Some(dc_core::Editor::new(doc)),
-        Err(e) => {
-            eprintln!("skipping: fixture not available: {e}");
-            None
-        }
+        Err(e) => panic!("the fixture exists but does not parse: {e}"),
     }
 }
 

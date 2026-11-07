@@ -819,6 +819,30 @@ impl ShapeLayers {
             if self.stale_bbox.contains(&shape.id) || !self.bboxes.contains_key(&shape.id) {
                 match dc::svg::shape_ink_bounds(doc, page, shape.id) {
                     Some(b) => {
+                        // A pure translation (the Move touch's same-size
+                        // box) carries the texture's model grid with it —
+                        // the cached texture is content-identical, only
+                        // its placement moved; leaving the old grid drew
+                        // the ink at the PRE-move position (#218 review).
+                        // A size change drops the grid: the full render
+                        // the version bump schedules re-anchors it.
+                        if let Some(e) = self.entries.get_mut(&shape.id) {
+                            if let (Some(tb), Some(old)) = (e.tex_bounds, self.bboxes.get(&shape.id)) {
+                                const EPS: f64 = 1e-9;
+                                let same_size = (tb.2 - old.2).abs() < EPS
+                                    && (tb.3 - old.3).abs() < EPS;
+                                if same_size {
+                                    e.tex_bounds = Some((
+                                        tb.0 + (b.0 - old.0),
+                                        tb.1 + (b.1 - old.1),
+                                        tb.2,
+                                        tb.3,
+                                    ));
+                                } else {
+                                    e.tex_bounds = None;
+                                }
+                            }
+                        }
                         self.bboxes.insert(shape.id, b);
                         self.stale_bbox.remove(&shape.id);
                     }
@@ -893,6 +917,12 @@ impl ShapeLayers {
                         continue;
                     }
                     entry.failed = None;
+                    // The failed edit's region is not in this edit's
+                    // damage — patching only the new rect would leave
+                    // the failure's region stale until some later full
+                    // render. Force the full render (#218 review).
+                    self.pending_damage.remove(&shape.id);
+                    self.pending_full.insert(shape.id);
                 }
                 // Settle gate (#124 item 6.2): while the zoom is still
                 // moving, a shape whose texture already shows its

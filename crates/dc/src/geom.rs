@@ -334,11 +334,15 @@ pub fn arc_row(s: &Shape, master_root: Option<&Shape>, frame: &HitFrame) -> Opti
             .as_deref()
             .or(master.and_then(|m| m.t.as_deref()))
             .unwrap_or("");
-        let (x, y) = (cell(row, *master, "X"), cell(row, *master, "Y"));
         let rel = t.starts_with("Rel");
-        let end = match (x, y) {
+        // Per-coordinate defaults, mirroring the hit walk below: the
+        // corpus arcs omit Y and inherit it — an X-only row ends at
+        // (x, 0), not (0, 0) (#218 review).
+        let end = match (cell(row, *master, "X"), cell(row, *master, "Y")) {
             (Some(x), Some(y)) => placed((x, y), rel),
-            _ => (0.0, 0.0),
+            (Some(x), None) => placed((x, 0.0), rel),
+            (None, Some(y)) => placed((0.0, y), rel),
+            (None, None) => (0.0, 0.0),
         };
         if t == "EllipticalArcTo" || t == "RelEllipticalArcTo" {
             // A/B ride `cell` alone — the hit walk applies no rel or
@@ -610,16 +614,17 @@ pub fn geometry_hit_segments(
                     .unwrap_or_default();
                 let mut drew = false;
                 if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                    let (fx, fy) = if f.x_type == 0.0 {
-                        (own.0, 1.0)
-                    } else {
-                        (1.0, 1.0)
-                    };
-                    let (fx, fy) = if f.y_type == 0.0 {
-                        (fx, own.1)
-                    } else {
-                        (fx, fy)
-                    };
+                    // Per-axis (#218 review): a fractional axis (type 0)
+                    // multiplies by the instance dims — what the
+                    // renderer's env resolves Width/Height to. An
+                    // absolute axis carries master-unit literals, so it
+                    // takes the master→instance scale the endpoints
+                    // took — an inherited resized master keeps the hit
+                    // polyline ON the rendered curve.
+                    let (fx, fy) = (
+                        if f.x_type == 0.0 { own.0 } else { scale.0 },
+                        if f.y_type == 0.0 { own.1 } else { scale.1 },
+                    );
                     let start = cur.unwrap_or(end);
                     let mut points = vec![start];
                     let mut knots = vec![cell(row, *master, "C").unwrap_or(0.0)];
