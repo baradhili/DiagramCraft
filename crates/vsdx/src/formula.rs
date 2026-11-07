@@ -577,6 +577,21 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Value::Num(best))
             }
+            // SQRT: the 1D chord masters derive their frame width from
+            // the endpoints through it (`Width=SQRT((EndX-BeginX)^2+
+            // (EndY-BeginY)^2)`, the Line-arc corpus master); a
+            // negative argument errors so callers fall back to the
+            // cached V.
+            "SQRT" => {
+                if args.len() != 1 {
+                    return Err(format!("{name} takes one argument"));
+                }
+                let v = arg(&args, 0)?;
+                if v < 0.0 {
+                    return Err(format!("{name} of a negative value"));
+                }
+                Ok(Value::Num(v.sqrt()))
+            }
             // Text measurement (#147): the args are already evaluated
             // (TheText arrives as a Str through the bridge), the
             // measurement itself defers to the bridge.
@@ -811,6 +826,26 @@ mod tests {
         );
         // Unknown functions still error (callers fall back to cached V).
         assert!(eval("SETF(GetRef(Width), 1)", &e).is_err());
+    }
+
+    #[test]
+    fn sqrt_serves_the_chord_masters() {
+        let mut e = env();
+        e.insert("BeginX".into(), 1.0);
+        e.insert("BeginY".into(), 6.0);
+        e.insert("EndX".into(), 3.5);
+        e.insert("EndY".into(), 6.2);
+        // The Line-arc corpus master's Width formula: the endpoint
+        // chord, not the signed dx.
+        assert_eq!(
+            eval("SQRT((EndX-BeginX)^2+(EndY-BeginY)^2)", &e)
+                .unwrap()
+                .as_f64(),
+            Some(2.5f64.hypot(0.2))
+        );
+        assert_eq!(eval("SQRT(0)", &e).unwrap().as_f64(), Some(0.0));
+        // Negative argument errors (callers fall back to cached V).
+        assert!(eval("SQRT(Width-3)", &e).is_err());
     }
 
     #[test]

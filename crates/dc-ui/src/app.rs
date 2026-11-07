@@ -4696,11 +4696,18 @@ impl App {
         // Visio-authored connectors GUARD their derived cells
         // (GUARD(EndX-BeginX)…) — a literal write would refuse and
         // abort the whole Macro (CodeRabbit); only formula-free
-        // derived cells write. The endpoint cells go through
-        // SetGluedCell (the glue engine owns their formulas).
+        // derived cells write. And only cells the INSTANCE owns: an
+        // inherited master literal (the Line-arc corpus Height=0)
+        // stays inherited — materializing a signed-delta literal over
+        // it corrupts the master link and the frame (#226 ownership;
+        // the reroute that follows in the same Macro derives the
+        // chord-model frame cells from the endpoints).
+        // The endpoint cells go through SetGluedCell (the glue engine
+        // owns their formulas).
         .filter(|(n, _)| {
             matches!(*n, "BeginX" | "BeginY" | "EndX" | "EndY")
-                || dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_none()
+                || (dc_core::commands::effective_formula(&ed.doc, sh, &chain, n).is_none()
+                    && sh.sheet.cell(n).is_some())
         })
         .map(|(n, v)| {
             if matches!(n, "BeginX" | "BeginY" | "EndX" | "EndY") {
