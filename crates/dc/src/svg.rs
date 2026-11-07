@@ -488,6 +488,7 @@ fn node_ink_box(
     // (2·on-curve − chord mid) as the conservative bound.
     for geo in s.sheet.sections_named("Geometry") {
         let mut cur = (0.0f64, 0.0f64);
+        let mut first_pt: Option<(f64, f64)> = None;
         for row in &geo.rows {
             let Some(t) = row.t.as_deref() else { continue };
             let num = |n: &str| -> f64 {
@@ -583,6 +584,41 @@ fn node_ink_box(
                 _ => {}
             }
             cur = (x, y);
+            if first_pt.is_none() {
+                first_pt = Some((x, y));
+            }
+        }
+        // #185: arrowheads draw at physical size beyond the row-point
+        // hull — a size-5/6 head on a horizontal 1D connector reaches
+        // ±0.125/±0.25 in sideways against the 0.08 in bleed pad, so
+        // union a conservative square (the gallery's largest reach) at
+        // each end that carries a head. Same gate as the renderer's.
+        let arrowed = |arrow: f64| arrow >= 0.5 && !(46.0..=50.5).contains(&arrow);
+        if get("BeginArrow").is_some_and(arrowed) || get("EndArrow").is_some_and(arrowed) {
+            let weight = get("LineWeight").unwrap_or(0.75 / 72.0);
+            let pad = |pt: (f64, f64), arrow: Option<f64>, sz: f64, u: &mut Focus| {
+                if !arrow.is_some_and(arrowed) {
+                    return;
+                }
+                let r = arrow_head_reach(weight, sz);
+                let (px, py) = a.apply(pt.0, -pt.1);
+                box_union(px - r, py - r, px + r, py + r, &a, u);
+            };
+            if let Some((x, y)) = first_pt {
+                pad(
+                    (x, y),
+                    get("BeginArrow"),
+                    get("BeginArrowSize").unwrap_or(2.0),
+                    &mut u,
+                );
+            }
+
+            pad(
+                cur,
+                get("EndArrow"),
+                get("EndArrowSize").unwrap_or(2.0),
+                &mut u,
+            );
         }
     }
     // Text can overflow the shape box (TxtWidth/TxtHeight are
@@ -2442,6 +2478,12 @@ fn render_all_geometry(
                         // instance units and must NOT be placed-scaled
                         // again (#203 review). Cached master-unit
                         // numerics are master-unit and keep placed().
+                        // A value-only master cell (no formula — the
+                        // common plain-geometry case) or a formula the
+                        // instance env can't evaluate falls back to the
+                        // scaled cache; skipping would let row_num
+                        // default the axis to 0 and collapse the
+                        // inherited geometry (#185 review).
                         let sv = if proportional {
                             scell
                                 .f
@@ -2449,6 +2491,9 @@ fn render_all_geometry(
                                 .and_then(|f| vsdx::formula::eval(f, &env).ok())
                                 .and_then(|v| v.as_f64())
                                 .filter(|v| v.is_finite() && v.abs() <= bound)
+                                .or_else(|| {
+                                    scell.numeric().map(placed).filter(|v| v.abs() <= bound)
+                                })
                         } else {
                             scell.numeric().map(placed).filter(|v| v.abs() <= bound)
                         };
@@ -2699,6 +2744,14 @@ fn render_geometry(
 
     for row in rows.iter().filter(|r| r.t.is_some()) {
         let Some(t) = row.t.as_deref() else { continue };
+        // Any row type except SplineKnot ends an open spline (#188,
+        // #185 review): flush the accumulated curve BEFORE the row's
+        // own command so the path keeps its drawn order — a LineTo
+        // after a knot used to land in `d` first, jumping the pen
+        // back when the spline finally flushed.
+        if t != "SplineKnot" {
+            flush_spline!();
+        }
         let (mx, my) = (
             row_num(row, "X").unwrap_or(0.0),
             row_num(row, "Y").unwrap_or(0.0),
@@ -2864,8 +2917,8 @@ fn render_geometry(
                 // #188: a SplineStart opens a spline (§2.4.2.15): X/Y
                 // is the SECOND control point (the previous row's end
                 // is the first); A/B/C/D are second/first/last knots
-                // and the degree. Any non-SplineKnot row flushes it.
-                flush_spline!();
+                // and the degree. Any non-SplineKnot row flushes it
+                // (the loop-top flush).
                 spline_acc = Some(crate::curve::SplineAcc::start(
                     cur,
                     (x, y),
@@ -2895,8 +2948,8 @@ fn render_geometry(
                 // (§2.4.2.7). The E cell's NURBS() formula carries the
                 // interior points/knots/weights; the row cells frame
                 // them (C/D first knot/weight, A/B second-to-last
-                // knot/last weight, X/Y the endpoint).
-                flush_spline!();
+                // knot/last weight, X/Y the endpoint). The loop-top
+                // flush already ended any open spline.
                 let e_text = row
                     .cell("E")
                     .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
@@ -2945,10 +2998,7 @@ fn render_geometry(
                 let _ = write!(d, "L {}", emit_pt((x, y)));
                 cur = (x, y);
             }
-            _ => {
-                // Any other row ends an open spline.
-                flush_spline!();
-            }
+            _ => {}
         }
     }
     // A spline open through the section's end flushes here.
@@ -3282,6 +3332,22 @@ fn arrow_spec(kind: i64) -> Option<&'static [HeadPart]> {
 /// sizes 0–6, independent of export scale, group resize, drawing
 /// scale and dash pattern (#185).
 const ARROW_SIZE_PT: [f64; 7] = [1.44, 1.8, 2.52, 3.24, 3.96, 9.0, 18.0];
+
+/// The gallery's largest head reach in units (the 34/38 diamond's
+/// rear vertex; kind 9 reaches 1 unit forward and the diamonds 1.125
+/// sideways, both inside this square). The conservative bound the
+/// ink-box walk pads around arrowed endpoints.
+const ARROW_MAX_REACH_UNITS: f64 = 6.0;
+
+/// The physical half-extent an arrowhead reaches beyond a line
+/// endpoint: `reach × (LineWeight + C[size])` with the zero-weight
+/// SVG floor — the same unit law [`emit_arrow_head`] draws with, so
+/// the ink-box padding never clips a head.
+fn arrow_head_reach(weight: f64, sz: f64) -> f64 {
+    let head_weight = if weight > 0.0 { weight } else { 0.75 / 72.0 };
+    let i = (sz.round() as i64).clamp(0, 6) as usize;
+    ARROW_MAX_REACH_UNITS * (head_weight + ARROW_SIZE_PT[i] / 72.0)
+}
 
 /// Per-kind shaft setback in head units (#185): how far back from the
 /// line end the shaft stops. Closed/hollow heads trim to their rear
@@ -3770,6 +3836,7 @@ fn emit_arrow_head(
     // The group scales unit-space geometry by `unit`; open strokes
     // divide the pen back out so the ink is `weight` wide on paper.
     let pen = weight / unit;
+    let color = escape_attr(color);
     let mut body = String::new();
     for part in parts {
         if let Some((cx, cy, r)) = part.circle {

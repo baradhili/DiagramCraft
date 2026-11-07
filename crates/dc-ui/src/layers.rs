@@ -917,6 +917,14 @@ impl ShapeLayers {
                 } else {
                     let patch_plan = pending_damage
                         .filter(|_| !damage_unbounded)
+                        // A superseded in-flight job is discarded on
+                        // landing, and its damage left `pending_damage`
+                        // when it was posted — patching only the new
+                        // rect would lose that region (ghosts). Fall
+                        // back to the full render, which covers
+                        // everything and replaces the inflight mark
+                        // (#185 review).
+                        .filter(|_| entry.inflight.is_none())
                         .filter(|_| entry.tex.is_some() && entry.tex_bounds.is_some())
                         .and_then(|damage| plan_patch(entry, bbox, damage));
                     if let Some(plan) = patch_plan {
@@ -1000,7 +1008,17 @@ impl ShapeLayers {
                                                         TextureOptions::LINEAR,
                                                     );
                                                     entry.version = version;
-                                                    entry.bucket = bucket;
+                                                    // The patch rendered at the
+                                                    // TEXTURE's own bucket
+                                                    // (ppi_patch): claiming the
+                                                    // current zoom bucket here
+                                                    // would mark a stale-
+                                                    // resolution texture
+                                                    // `current` and cancel a
+                                                    // deferred re-bucket. The
+                                                    // queued path keeps the
+                                                    // texture's bucket the same
+                                                    // way (#185 review).
                                                     self.patch_landings += 1;
                                                 }
                                             }

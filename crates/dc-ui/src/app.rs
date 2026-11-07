@@ -2002,6 +2002,12 @@ impl App {
                             .unwrap_or_default();
                         if let Some(f) = dc::curve::parse_nurbs(&e_text) {
                             for (i, (gx, gy, _, _)) in f.points.iter().enumerate() {
+                                // Per-axis type gates, matching the drag
+                                // commit's rule: an axis with type 0 is
+                                // fractional (scale by its dimension),
+                                // an absolute axis keeps the raw value —
+                                // otherwise the handle jumps on the
+                                // first drag (#185 review).
                                 out.push(Handle {
                                     id: HandleId::GeoPoint {
                                         section_ix: geo.ix,
@@ -2009,8 +2015,16 @@ impl App {
                                         cell: canvas::GeoCell::NurbsPt(i),
                                     },
                                     pos: frame.to_page((
-                                        gx * frame.size.0.max(1e-6),
-                                        gy * frame.size.1.max(1e-6),
+                                        if f.x_type == 0.0 {
+                                            gx * frame.size.0.max(1e-6)
+                                        } else {
+                                            *gx
+                                        },
+                                        if f.y_type == 0.0 {
+                                            gy * frame.size.1.max(1e-6)
+                                        } else {
+                                            *gy
+                                        },
                                     )),
                                 });
                             }
@@ -2129,7 +2143,11 @@ impl App {
                                 .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
                                 .unwrap_or_default();
                             if let Some(f) = dc::curve::parse_nurbs(&e_text) {
-                                let (fx, fy) = if f.x_type == 0.0 { (w, h) } else { (1.0, 1.0) };
+                                // Per-axis type gates, matching the drag
+                                // commit: x_type gates X by Width,
+                                // y_type gates Y by Height (#185 review).
+                                let fx = if f.x_type == 0.0 { w } else { 1.0 };
+                                let fy = if f.y_type == 0.0 { h } else { 1.0 };
                                 for (i, (gx, gy, _, _)) in f.points.iter().enumerate() {
                                     out.push(Handle {
                                         id: HandleId::GeoPoint {
@@ -9088,7 +9106,14 @@ impl App {
         let mut hide_layers: Vec<i64> = Vec::new();
         // #226: an endpoint-handle drag on the selected 1D shape hides
         // its static layer quad — the styled live ghost (built after
-        // the snap closures below) replaces it for the gesture.
+        // the snap closures below) replaces it for the gesture. The
+        // ghost plans through [`crate::cmd::plan_connector_frame`] for
+        // BOTH connectors and plain 1D lines: the planner's line_frame
+        // branch and `apply_line_endpoint`'s angle model write
+        // different cell sets, but both draw the same segment ink the
+        // release lands, so the preview matches the drop (#185
+        // review — verified; the cells diverge, the visible ink does
+        // not).
         let armed_handle_now = canvas::armed_handle(ui.ctx());
         let endpoint_drag_live = matches!(
             armed_handle_now,

@@ -130,8 +130,10 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             // `|a| > chord/2` cap cannot fire on that near-zero
             // value. A valid (minor-arc) run bulges OPPOSITE the
             // center, so the run side and the sagitta sign must
-            // disagree: break when they agree.
-            if chord < 1e-9 || a.abs() > chord / 2.0 {
+            // disagree: break when they agree (sagitta's left test
+            // and side_of share the cross-product sign, so the
+            // product's sign is frame-independent).
+            if chord < 1e-9 || a.abs() > chord / 2.0 || run_side * a > 0.0 {
                 break;
             }
             best_j = j;

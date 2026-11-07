@@ -211,7 +211,6 @@ for Graphviz layout (untracked sample, like all of `Sample/`).
 - Plugin architecture: out-of-tree diagram sources, shape mappers, and command packs with a stable API over `dc-core`.
 
 - Language import-renderers with **configurable shape mapping** (bind language node/edge types to masters/stencil shapes): **d2**, **Graphviz DOT** (synergy: GraphVizio is a Graphviz add-in —
-
   its public behavior is a useful oracle), and **Mermaid**.
 
 ## License
