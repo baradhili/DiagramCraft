@@ -1,14 +1,17 @@
-//! Startup splash and file-load feedback (#224), drawn from the owner's
-//! Tarahi brand kit — the **light theme set** attached to the issue
+//! Startup splash and file-load feedback (#224, #242), drawn from the
+//! owner's Tarahi brand kit — the **light theme set** attached to #224
 //! (`tarahi-logo-light` / `tarahi-splash-light` /
 //! `tarahi-file-loading-light`): the network mark on a cool-white
 //! gradient, violet/sky connectors, white document cards.
 //!
-//! Both overlays are procedurally animated and time-driven (a start
-//! `Instant`; no GIF/video assets, no scripts). The kit's 3.2 s splash
-//! choreography is compressed into [`SPLASH_SECS`] (same phase order:
-//! mark draw-in → cards → wordmark rise → caption); the loader keeps
-//! the kit's bob/twinkle/progress periods verbatim.
+//! Both surfaces are procedurally animated and time-driven (a start
+//! `Instant`; no GIF/video assets, no scripts). The splash is a
+//! SEPARATE OBJECT, Visio 2016 style (the owner's #242 follow-up): a
+//! borderless centered card — mark draw-in → cards → wordmark rise →
+//! caption, and a determinate progress bar filling over the splash
+//! window — floating over the boot backdrop, skippable by click or
+//! key. The load scrim keeps the kit's bob/twinkle/progress periods
+//! verbatim and runs until the first render completes.
 //!
 //! Headless determinism: the ctors pin no splash and tests land loads
 //! synchronously, so kittest never sees either overlay unless it asks.
@@ -32,9 +35,9 @@ const CARD_STROKE: Color32 = Color32::from_rgb(0xC2, 0xCC, 0xDA);
 const FOLD: Color32 = Color32::from_rgb(0xE6, 0xEC, 0xF3);
 const DOT: Color32 = Color32::from_rgb(0xAA, 0xB4, 0xC6);
 
-/// How long the splash shows before handing off to the shell
-/// (the owner's #242 call: seven seconds). Any click or key skips it.
-pub const SPLASH_SECS: f32 = 7.0;
+/// How long the splash shows before handing off to the shell (the
+/// owner's retiming: five seconds). Any click or key skips it.
+pub const SPLASH_SECS: f32 = 5.0;
 
 /// The loading scrim's minimum display (#242: a fast parse landed the
 /// document before the overlay ever painted a frame — "the doc load
@@ -308,14 +311,16 @@ fn draw_splash_bg(p: &egui::Painter, screen: Rect) {
     }
 }
 
-/// Draw the full-screen splash overlay. Returns `true` while it wants
-/// to stay up (before [`SPLASH_SECS`]); the caller hands off to the
-/// shell afterwards. Repaints are time-driven (the animation advances
-/// without input).
+/// Draw the splash — a SEPARATE OBJECT, Visio 2016 style (the owner's
+/// #242 follow-up): a borderless centered card floating over the boot
+/// backdrop, with the product mark, the wordmark block, and a bottom
+/// progress bar filling over the splash window. Returns `true` while
+/// it stays up (before [`SPLASH_SECS`]); the caller hands off to the
+/// shell afterwards. Repaints are time-driven; any click or key skips.
 pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
     let t = started.elapsed().as_secs_f32();
     // The full window or an explicit skip: any click or key ends the
-    // boot moment early (a 7 s wait must stay dismissable; the splash
+    // boot moment early (a 5 s wait must stay dismissable; the splash
     // area eats the dismissing input this frame, the shell takes over
     // next).
     let skip = ui.input(|i| {
@@ -327,27 +332,44 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
     if t >= SPLASH_SECS || skip {
         return false;
     }
+    // The splash card: Visio 2016's splash proportions — a portrait
+    // object centered on screen, fixed size regardless of the window.
+    let card_w = 420.0_f32.min(screen.width() * 0.9);
+    let card_h = 640.0_f32.min(screen.height() * 0.9);
+    let card = Rect::from_center_size(screen.center(), Vec2::new(card_w, card_h));
     egui::Area::new(egui::Id::unique("dc-splash"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
         .show(ui.ctx(), |ui| {
-            // The scrim also eats input: the boot moment is not
+            // The backdrop also eats input: the boot moment is not
             // interactive.
             ui.allocate_rect(screen, Sense::click_and_drag());
             let p = ui.painter().clone();
+            // The boot backdrop: the kit's gradient + dot grid over the
+            // whole screen, dimmed so the card reads as the object.
             draw_splash_bg(&p, screen);
-            // The mark sits above the vertical center (the kit's
-            // 470/1920 placement, adapted to any window size).
-            let c = screen.center() - Vec2::new(0.0, screen.height() * 0.12);
-            let half = (screen.height() * 0.15).clamp(60.0, 160.0);
+            p.rect_filled(screen, 0.0, BG_BOT.gamma_multiply(0.45));
+            // The card: drop shadow, rounded white sheet, the kit art
+            // inside.
+            p.rect_filled(
+                card.translate(Vec2::new(0.0, 10.0)),
+                10.0,
+                INK.gamma_multiply(0.18),
+            );
+            p.rect_filled(card, 10.0, CARD);
+            p.rect_stroke(card, 10.0, Stroke::new(1.4, CARD_STROKE), egui::StrokeKind::Inside);
+            draw_splash_bg(&p, card);
+            // The mark sits above the card's vertical center.
+            let c = card.center() - Vec2::new(0.0, card.height() * 0.10);
+            let half = (card.height() * 0.17).clamp(56.0, 120.0);
             draw_mark(&p, c, half, t);
             // The wordmark rises + fades in (the kit's 0.5→0.6 phase).
             let wm_t = ease_out(((t - SPLASH_SECS * 0.52) / (SPLASH_SECS * 0.22)).clamp(0.0, 1.0));
             if wm_t > 0.0 {
-                let rise = (1.0 - wm_t) * 28.0;
-                let size = (half * 0.62).clamp(24.0, 64.0);
+                let rise = (1.0 - wm_t) * 20.0;
+                let size = (half * 0.56).clamp(22.0, 48.0);
                 p.text(
-                    c + Vec2::new(0.0, half + 46.0 + rise),
+                    c + Vec2::new(0.0, half + 40.0 + rise),
                     egui::Align2::CENTER_TOP,
                     "tarahi",
                     egui::FontId::proportional(size),
@@ -358,14 +380,39 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
                     ease_out(((t - SPLASH_SECS * 0.66) / (SPLASH_SECS * 0.2)).clamp(0.0, 1.0));
                 if cap_t > 0.0 {
                     p.text(
-                        c + Vec2::new(0.0, half + 46.0 + size + 18.0),
+                        c + Vec2::new(0.0, half + 40.0 + size + 14.0),
                         egui::Align2::CENTER_TOP,
                         "DIAGRAM · DESIGN",
-                        egui::FontId::proportional(13.0),
+                        egui::FontId::proportional(12.0),
                         MUTED.gamma_multiply(cap_t),
                     );
                 }
             }
+            // The Visio-splash progress: a determinate bar along the
+            // card's bottom edge filling over the splash window (the
+            // kit's violet→sky gradient, lerp'd by t).
+            let pad = 26.0;
+            let track = Rect::from_min_max(
+                Pos2::new(card.left() + pad, card.bottom() - pad - 8.0),
+                Pos2::new(card.right() - pad, card.bottom() - pad),
+            );
+            p.rect_filled(track, 4.0, SKY_LT.gamma_multiply(0.22));
+            let frac = (t / SPLASH_SECS).clamp(0.0, 1.0);
+            if frac > 0.0 {
+                p.rect_filled(
+                    Rect::from_min_size(track.min, Vec2::new(track.width() * frac, track.height())),
+                    4.0,
+                    lerp_color(VIOLET, SKY, frac),
+                );
+            }
+            // The app name at the card's bottom, above the bar.
+            p.text(
+                Pos2::new(card.center().x, card.bottom() - pad - 18.0),
+                egui::Align2::CENTER_BOTTOM,
+                "DiagramCraft",
+                egui::FontId::proportional(13.0),
+                MUTED.gamma_multiply(0.8),
+            );
         });
     // Time-driven animation: keep the frames coming while showing.
     ui.ctx().request_repaint_after(Duration::from_millis(16));
