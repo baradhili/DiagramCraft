@@ -116,12 +116,14 @@ impl ExportPane {
                 ),
             ] {
                 let selected = self.format == f;
-                if ui.radio(selected, label).on_hover_text(hint).clicked() {
+                if ui.radio(selected, label).on_hover_text(hint).clicked() && !selected {
                     self.format = f;
                     // The suggested path follows the format (#218
                     // review): exporting PNG bytes into a .svg name
-                    // is the common flow otherwise.
-                    if !self.path.trim().is_empty() {
+                    // is the common flow otherwise. Only a path with
+                    // a KNOWN export extension retargets — a custom
+                    // suffix is the user's own and stays.
+                    if path_buf_ext(&self.path).is_some() {
                         let p = std::path::PathBuf::from(self.path.trim())
                             .with_extension(f.extensions()[0]);
                         self.path = p.to_string_lossy().into_owned();

@@ -77,10 +77,19 @@ fn backstage_export_writes_the_picked_file() {
     }
     h.run();
     h.run();
-    // Browse… hands the pane path to the preset answer.
+    // Browse… hands the pane path to the preset answer. The answer
+    // rides a worker thread — pump until it lands (#218 review
+    // round 3: two frames raced the channel).
     h.get_by_label("Browse…").click();
-    h.run();
-    h.run();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().debug_export_pane_path().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the preset answer never reached the pane"
+        );
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
     assert_eq!(
         h.state().debug_export_pane_path(),
         out.to_string_lossy(),

@@ -413,14 +413,18 @@ fn recent_entry_click_reopens() {
     // #242: the open rides the async flight (parse worker + the scrim's
     // minimum display + the first render) — pump until the editor
     // lands.
-    let mut waited = 0;
+    // Wall-clock deadline, sleeping every iteration (#218 review
+    // round 3): the scrim holds LOADING_MIN_SECS of real time, and
+    // 20,000 iterations of a fast runner finish before it — and spin
+    // the CPU while at it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while harness.state().debug_shape_count() == 0 {
-        waited += 1;
-        assert!(waited < 20_000, "the recent reopen never landed");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recent reopen never landed"
+        );
         harness.run();
-        if waited % 500 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(
         harness.state().debug_shape_count(),
