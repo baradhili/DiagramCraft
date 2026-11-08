@@ -1224,19 +1224,70 @@ impl crate::Command for AddMasterInstance {
         if one_d {
             let (bx, ex) = (self.pin.0 - 0.5, self.pin.0 + 0.5);
             let by = self.pin.1;
-            for (n, v) in [
-                ("BeginX", bx),
-                ("BeginY", by),
-                ("EndX", ex),
-                ("EndY", by),
-                ("Width", 1.0),
-                ("Height", 0.0),
-                ("LocPinX", 0.5),
-                ("LocPinY", 0.0),
-                ("Angle", 0.0),
-            ] {
-                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
-            }
+            let (w, h) = (ex - bx, 0.0f64);
+            // The derived XForm cells are INSTANCING CACHES, not
+            // masks (#248): a cell the master derives by FORMULA
+            // (the chord SQRT/ATAN2 frames, the Width*0.5 loc pins,
+            // GUARD bands) lands as an `F="Inh"` cache — the value
+            // this pose evaluates to, the formula still the
+            // master's. A literal `f=None` snapshot masked every
+            // master formula from the drop onward: reroutes refused
+            // glue on locked masters (the plan wrote a literal over
+            // a master-owned dim) and chord frames rendered flat
+            // (Height/Angle frozen at the drop pose). A cell the
+            // master owns as a LITERAL is not written at all —
+            // plain inheritance, exactly like Visio's save.
+            let src = doc.master(self.master).and_then(|m| m.shapes.first());
+            let master_f = |n: &str| -> Option<String> {
+                src.and_then(|r| r.sheet.cell(n).and_then(|c| c.f.clone()))
+                    .filter(|f| f != "Inh" && f != "No Formula")
+            };
+            let master_v = |n: &str| -> Option<f64> {
+                src.and_then(|r| r.sheet.cell(n).and_then(|c| c.numeric()))
+            };
+            // Width/Height track the endpoints when their master
+            // formulas reference them; otherwise (a chord master's
+            // band Height, a controls-driven value) the master's
+            // own cached value IS the instance's.
+            let tracks = |f: &Option<String>| {
+                f.as_deref()
+                    .map(|f| {
+                        let u = f.to_uppercase();
+                        ["BEGINX", "ENDX", "BEGINY", "ENDY"]
+                            .iter()
+                            .any(|k| u.contains(k))
+                    })
+                    .unwrap_or(false)
+            };
+            let wf = master_f("Width");
+            let hf = master_f("Height");
+            // Width always spans the drop (Begin/End own it); the
+            // tracks() test only decides Height's value.
+            let width_v = w;
+            let height_v = if tracks(&hf) { h } else { master_v("Height").unwrap_or(h) };
+            // LocPin derives from the frame this pose wrote.
+            let locpinx_v = w / 2.0;
+            let locpiny_v = height_v / 2.0;
+            let mut put = |n: &str, v: f64, f: Option<String>| {
+                sheet.set_cell(
+                    n,
+                    Cell {
+                        v: Some(format!("{v:.6}")),
+                        f,
+                        ..Cell::default()
+                    },
+                );
+            };
+            // The endpoints are the instance's own (glue owns them).
+            put("BeginX", bx, None);
+            put("BeginY", by, None);
+            put("EndX", ex, None);
+            put("EndY", by, None);
+            put("Width", width_v, wf);
+            put("Height", height_v, hf);
+            put("LocPinX", locpinx_v, master_f("LocPinX"));
+            put("LocPinY", locpiny_v, master_f("LocPinY"));
+            put("Angle", 0.0, master_f("Angle"));
         }
         let shape = Shape {
             id,

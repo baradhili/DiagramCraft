@@ -799,24 +799,34 @@ pub fn plan_connector_frame(
     // master's own 0. Route-frame connectors (the dynamic
     // master's guarded zero angle, the synthetic
     // begin-corner rows) keep the signed-delta model.
+    // A fresh stencil-drop instance (#248) has NO local rows, so the
+    // inherited-row route below can never fire for it — the master's
+    // own frame formulas carry the chord signature instead
+    // (`Width=SQRT((EndX-BeginX)^2+…)`, `Angle=ATAN2(…)`): the
+    // instance frame IS the begin→end chord.
+    let master_chord = doc
+        .instance_source(conn, chain)
+        .and_then(|src| src.sheet.cell("Width").and_then(|c| c.f.clone()))
+        .is_some_and(|f| f.to_uppercase().contains("SQRT("));
     let chord_frame = conn.master.is_some()
         && !line_frame
-        && conn
-            .sheet
-            .sections_named("Geometry")
-            .iter()
-            .enumerate()
-            .any(|(si, g)| {
-                g.rows.iter().any(|r| {
-                    ["X", "Y"].iter().any(|n| {
-                        inherited_geo_formula(doc, conn, chain, si, r.ix, n)
-                            .is_some_and(|f| {
-                                let u = f.to_uppercase();
-                                ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
-                            })
+        && (master_chord
+            || conn
+                .sheet
+                .sections_named("Geometry")
+                .iter()
+                .enumerate()
+                .any(|(si, g)| {
+                    g.rows.iter().any(|r| {
+                        ["X", "Y"].iter().any(|n| {
+                            inherited_geo_formula(doc, conn, chain, si, r.ix, n)
+                                .is_some_and(|f| {
+                                    let u = f.to_uppercase();
+                                    ["WIDTH", "HEIGHT"].iter().any(|k| u.contains(k))
+                                })
+                        })
                     })
-                })
-            });
+                }));
     // LocPin derives from the EFFECTIVE size: when Height is
     // a constant guard the band keeps its height, so LocPinY
     // stays half the kept height — except a line_frame
@@ -847,12 +857,23 @@ pub fn plan_connector_frame(
     frame_env.insert("EndY".to_string(), endp.1);
     for (n, v) in [
         ("Width", w_new),
-        ("Height", h_new),
+        // A chord master's Height is MASTER-OWNED (a locked band or
+        // a Controls-driven value): the frame loop skips it, the
+        // drop's inherited cache stays, and no write can trip a
+        // LockHeight refusal (#248). Signed-frame masters keep
+        // Height in the loop (their guards track the endpoints).
+        ("Height", if chord_frame { f64::NAN } else { h_new }),
         ("PinX", (beg.0 + endp.0) / 2.0),
         ("PinY", (beg.1 + endp.1) / 2.0),
         ("LocPinX", w_eff / 2.0),
         ("LocPinY", h_eff / 2.0),
     ] {
+        if n == "Height" && chord_frame {
+            // Keep the current (inherited) value in the frame env
+            // for the downstream formulas; write nothing.
+            frame_env.insert(n.to_string(), get(n).unwrap_or(h_new));
+            continue;
+        }
         match formula_tracks(n) {
             Some(f) => {
                 let v = vsdx::formula::eval(&f, &frame_env)

@@ -44,7 +44,20 @@ pub fn is_connector_in(doc: &vsdx::Document, chain: &[&Shape], s: &Shape) -> boo
     }
     let resolved = |n: &str| doc.resolve_cell(s, chain, n);
     let one_d = resolved("BeginX").is_some();
-    let glue_owned = resolved("BegTrigger").is_some() || resolved("EndTrigger").is_some();
+    let triggers = resolved("BegTrigger").is_some() || resolved("EndTrigger").is_some();
+    // Glue-owned endpoints (#250): a STATIC glue write (`PAR(PNT(...))`)
+    // leaves no ObjType and no trigger cells, but the formula is the
+    // glue engine's own signature — user-authored connectors and
+    // stencil masters statically glued in the app reroute through it
+    // too. `_WALKGLUE` covers a dynamic end whose trigger write was
+    // skipped.
+    let glue_formula = |c: Option<&vsdx::Cell>| {
+        c.and_then(|c| c.f.clone())
+            .is_some_and(|f| f.contains("PAR(PNT(") || f.contains("_WALKGLUE("))
+    };
+    let glue_owned = triggers
+        || glue_formula(resolved("BeginX").as_ref())
+        || glue_formula(resolved("EndX").as_ref());
     one_d && glue_owned
 }
 
@@ -758,6 +771,12 @@ pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
     let mut out = Vec::new();
     for i in 0..lines.len() {
         for j in (i + 1)..lines.len() {
+            // Per-PAIR crossings (#251): one crossing REGION hops once.
+            // Flattened curves produce entry+exit sample windows whose
+            // crossings converge onto the same pixels — hopping each
+            // drew overlapping arcs on one intersection (the #238
+            // screenshot). Clusters within the hop radius merge.
+            let mut pair: Vec<Jump> = Vec::new();
             for w1 in lines[i].pts.windows(2) {
                 for w2 in lines[j].pts.windows(2) {
                     let Some(at) = seg_cross(w1[0], w1[1], w2[0], w2[1]) else {
@@ -779,7 +798,7 @@ pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
                         (&lines[j], &lines[i])
                     };
                     let (d, du) = if i_jumps { (d1, d2) } else { (d2, d1) };
-                    out.push(Jump {
+                    pair.push(Jump {
                         at,
                         dir: d,
                         under: du,
@@ -790,6 +809,34 @@ pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
                     });
                 }
             }
+            // Merge the pair's jumps inside a hop radius: the arc's
+            // own reach (2× JUMP_RADIUS_IN) bounds what "one region"
+            // means visually. Distinct crossings beyond it stay.
+            pair.sort_by(|a, b| {
+                a.at.0
+                    .partial_cmp(&b.at.0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut clustered: Vec<Jump> = Vec::new();
+            for jmp in pair {
+                let reach = (JUMP_RADIUS_IN * 2.0)
+                    .max((jmp.weight + jmp.under_weight) * 2.0);
+                if let Some(last) = clustered.last_mut() {
+                    let dd =
+                        (last.at.0 - jmp.at.0).hypot(last.at.1 - jmp.at.1);
+                    if dd < reach {
+                        // Same region: the centroid keeps the arc on
+                        // the intersection instead of stacking arcs.
+                        last.at = (
+                            (last.at.0 + jmp.at.0) / 2.0,
+                            (last.at.1 + jmp.at.1) / 2.0,
+                        );
+                        continue;
+                    }
+                }
+                clustered.push(jmp);
+            }
+            out.extend(clustered);
         }
     }
     out
@@ -880,6 +927,46 @@ pub fn page_jumps(doc: &vsdx::Document, page: &vsdx::Page, hidden: &[i64]) -> Ve
 
 #[cfg(test)]
 mod tests {
+    /// #251: one crossing REGION hops once — a flattened curve's
+    /// entry/exit sample windows converge onto the same pixels and
+    /// merge to a single arc; distinct crossings beyond the hop
+    /// radius stay separate.
+    #[test]
+    fn line_jumps_cluster_converging_crossings() {
+        let l = |id: i64, z: usize, pts: &[(f64, f64)]| JumpLine {
+            id,
+            z,
+            weight: 0.01,
+            color: (0, 0, 0),
+            pts: pts.to_vec(),
+        };
+        // A shallow arc's belly crossed by a line: entry and exit sit
+        // within the hop radius of each other.
+        let arc = vec![
+            (0.0, 1.0),
+            (0.5, 1.04),
+            (1.0, 1.06),
+            (1.5, 1.04),
+            (2.0, 1.0),
+        ];
+        let js = line_jumps(&[
+            l(1, 0, &arc),
+            l(2, 1, &[(0.8, 2.0), (1.2, 0.0)]),
+        ]);
+        assert_eq!(js.len(), 1, "the converging pair merges: {js:?}");
+        // Two crossings far apart stay two hops.
+        let js = line_jumps(&[
+            l(1, 0, &[(0.0, 1.0), (1.0, 1.0), (1.0, 3.0), (4.0, 3.0)]),
+            l(2, 1, &[(2.0, 0.0), (2.0, 4.0)]),
+        ]);
+        assert_eq!(js.len(), 1, "one real crossing");
+        let js = line_jumps(&[
+            l(1, 0, &[(0.0, 1.0), (3.0, 1.0)]),
+            l(2, 1, &[(1.0, 0.0), (1.0, 2.0), (2.5, 2.0), (2.5, 0.0)]),
+        ]);
+        assert_eq!(js.len(), 2, "distinct crossings stay separate: {js:?}");
+    }
+
     use super::*;
     use vsdx::model::SheetChild;
 

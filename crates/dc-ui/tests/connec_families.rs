@@ -10,12 +10,9 @@
 //! The masters classify by FRAME at runtime (the sweep's families):
 //! chord frames (`Width=SQRT((EndX-BeginX)^2+…)`, `Angle=ATAN2`),
 //! signed frames (`Width=GUARD(EndX-BeginX)`), and everything else.
-//! The currently-green set is pinned here; the known-broken classes
-//! are the `#[ignore]`d acceptance tests each fix issue flips green:
-//! 25 chord masters refuse endpoint glue outright (LockHeight Macro
-//! abort — #248), five masters glue but their ink never tracks the
-//! far end (#248/#249), and statically-glued trigger-less masters are
-//! invisible to the reroute engine (#250).
+//! #248/#249 landed: every 1D master glues, tracks its targets and
+//! undoes byte-exact; the chord acceptance and the band/knee net
+//! below pin it. #250's static-only reroute gap has its own probe.
 
 use dc_core::{Command, Editor, Scope};
 use dc_ui::cmd::{MoveShape, RerouteConnectors};
@@ -141,10 +138,9 @@ fn dyn_connector_master_id() -> i64 {
 const US: &[u8] = include_bytes!("../assets/stencils/connec.vssx");
 const METRIC: &[u8] = include_bytes!("../assets/stencils/connec-m.vssx");
 
-/// Masters whose glue completes but whose ink never tracks the far
-/// end (the sweep's #238 evidence; each entry carries its class):
-/// chord masters whose Height/Angle caches never refresh (#248), and
-/// signed-frame masters whose authored band ignores Height (#249).
+/// Masters the #238 sweep flagged for ink that skipped the far end —
+/// the #248/#249 fixes healed them; they stay listed as the
+/// regression net for the band/knee classes (chord + signed).
 const KNOWN_FLAT_BAND: &[(&str, &str)] = &[
     ("2 lines", "chord"),
     ("4 lines", "chord"),
@@ -216,7 +212,7 @@ fn fresh_doc(master: &vsdx::Master) -> vsdx::Document {
                 ("ID".into(), "0".into()),
                 ("NameU".into(), "P1".into()),
             ],
-            shapes: vec![rect(1, 2.0, 2.0, true), rect(2, 7.5, 5.0, false)],
+            shapes: vec![rect(1, 2.0, 2.0, true), rect(2, 7.5, 5.0, true)],
             ..vsdx::model::Page::default()
         }],
         masters: vec![m],
@@ -267,6 +263,13 @@ fn covers(b: (f64, f64, f64, f64), x: f64, y: f64) -> bool {
 /// The full drop → glue → move → undo cycle for ONE master. Returns
 /// the per-master outcome flags the assertions read.
 fn exercise(master: &vsdx::Master) -> Exercised {
+    exercise_mode(master, false)
+}
+
+/// `static_only` glues BOTH ends statically (`PAR(PNT(...))`, no
+/// trigger cells) — the #250 probe: glue-formula-owned masters must
+/// still reroute.
+fn exercise_mode(master: &vsdx::Master, static_only: bool) -> Exercised {
     let name = master.name_u.clone().unwrap_or_default();
     let root = master.shapes.first().expect("master root");
     let out = Exercised {
@@ -316,25 +319,52 @@ fn exercise(master: &vsdx::Master) -> Exercised {
             },
         )));
     }
-    cmds.push(Box::new(dc_core::SetCell::new(
-        Scope::Shape {
-            page: 0,
-            shape: conn_id,
-        },
-        "EndTrigger",
-        Cell {
-            v: Some("2".into()),
-            f: Some("GUARD(_XFTRIGGER(Sheet.2!EventXFMod))".into()),
-            ..Cell::default()
-        },
-    )));
+    if static_only {
+        // Static end: PAR(PNT) onto B's own connection row — no
+        // trigger cells anywhere (the #250 detection surface).
+        let f = dc_ui::connectors::static_glue_formula(2, 2);
+        for (cell, v) in [("EndX", 8.5), ("EndY", 6.0)] {
+            cmds.push(Box::new(dc_core::SetGluedCell::new(
+                Scope::Shape {
+                    page: 0,
+                    shape: conn_id,
+                },
+                cell,
+                Cell {
+                    v: Some(format!("{v:.6}")),
+                    f: Some(f.clone()),
+                    ..Cell::default()
+                },
+            )));
+        }
+    } else {
+        cmds.push(Box::new(dc_core::SetCell::new(
+            Scope::Shape {
+                page: 0,
+                shape: conn_id,
+            },
+            "EndTrigger",
+            Cell {
+                v: Some("2".into()),
+                f: Some("GUARD(_XFTRIGGER(Sheet.2!EventXFMod))".into()),
+                ..Cell::default()
+            },
+        )));
+    }
     cmds.push(Box::new(dc_core::AddConnect {
         owner: dc_core::ConnectsOwner::Page(0),
         connect: dc_core::Connect::new(conn_id, "BeginX", 9, 1, "Connections.X2", 102),
     }));
     cmds.push(Box::new(dc_core::AddConnect {
         owner: dc_core::ConnectsOwner::Page(0),
-        connect: dc_core::Connect::new(conn_id, "EndX", 12, 2, "PinX".to_string(), 3),
+        connect: dc_core::Connect::new(
+            conn_id,
+            "EndX",
+            12,
+            2,
+            (if static_only { "Connections.X2" } else { "PinX" }).to_string(),
+            if static_only { 102 } else { 3 },
+        ),
     }));
     cmds.push(Box::new(RerouteConnectors::new_including(0, vec![conn_id])));
     let glue = ed.apply(dc_core::Macro::new("glue", cmds));
@@ -362,10 +392,16 @@ fn exercise(master: &vsdx::Master) -> Exercised {
         (bx - 3.0).abs() < 1e-6 && (by - 2.5).abs() < 1e-6,
         "{name}: begin did not land on A's point: ({bx},{by})"
     );
-    let want = dc_ui::connectors::attach_point((7.5, 5.0, 1.0, 1.0), (3.0, 2.5));
+    // Static-only: the end sits on B's row (rect-relative (1.0, 0.5)
+    // of the pre-move rect origin (7.5, 5.0)).
+    let want = if static_only {
+        (8.5, 5.5)
+    } else {
+        dc_ui::connectors::attach_point((7.5, 5.0, 1.0, 1.0), (3.0, 2.5))
+    };
     assert!(
         (ex - want.0).abs() < 0.05 && (ey - want.1).abs() < 0.05,
-        "{name}: end did not land on B's facing side: ({ex},{ey})"
+        "{name}: end did not land on its glue site: ({ex},{ey})"
     );
     let conn = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, conn_id).unwrap();
     assert!(
@@ -384,10 +420,17 @@ fn exercise(master: &vsdx::Master) -> Exercised {
     ))
     .expect("{name}: the move phase applies");
     let (_, _, ex, ey) = resolved(&ed, conn_id);
-    let want = dc_ui::connectors::attach_point((9.5, 6.0, 1.0, 1.0), (3.0, 2.5));
+    // B moved by (+2,+1): rect (9.5,6,1,1), center (10,6.5). The
+    // static end lands on B's connection row (pin-relative
+    // (0.5, 0.5)).
+    let want = if static_only {
+        (10.5, 6.5)
+    } else {
+        dc_ui::connectors::attach_point((9.5, 6.0, 1.0, 1.0), (3.0, 2.5))
+    };
     assert!(
         (ex - want.0).abs() < 0.05 && (ey - want.1).abs() < 0.05,
-        "{name}: the dynamic end did not walk with B: ({ex},{ey})"
+        "{name}: the end did not walk with B: ({ex},{ey})"
     );
     let tracked = ink(&ed, conn_id)
         .map(|b| covers(b, want.0, want.1))
@@ -449,9 +492,9 @@ fn every_1d_master_drops_and_renders() {
 /// The signed-frame masters + the ObjType=2 Dynamic connector glue,
 /// track their targets through a move, and undo byte-exact — the
 /// dynamic-connector model working across the whole stencil surface.
-/// Chord-frame masters are excluded: #248/#249 catalogue their gaps
-/// (the refusal class errors the glue Macro; the flat-band class
-/// renders a stale pose) and their acceptance tests run ignored.
+/// Chord-frame masters run in their own acceptance test below
+/// (#248): the frame classification differs, so the classes stay
+/// separate.
 #[test]
 fn signed_frame_masters_glue_track_and_undo() {
     for (label, doc) in both_stencils() {
@@ -469,7 +512,7 @@ fn signed_frame_masters_glue_track_and_undo() {
                 .and_then(|c| c.f.clone())
                 .unwrap_or_default();
             if frames.contains("SQRT(") {
-                continue; // chord frame: #248's class, exercised ignored
+                continue; // chord frame: #248's acceptance covers it
             }
             let out = exercise(m);
             assert!(
@@ -485,13 +528,38 @@ fn signed_frame_masters_glue_track_and_undo() {
     }
 }
 
-// -- the fix-issue acceptance tests (ignored until #248/#249/#250 land)
+// -- #250: the static-only detection surface --------------------------
 
-/// #248 acceptance: the chord-frame masters — every one of them glue
-/// (no LockHeight Macro abort) and track the moved target. Today 25
+/// A trigger-less master glued STATICALLY (`PAR(PNT(...))` on both
+/// ends, no ObjType=2, no triggers) is glue-formula-owned: moving the
+/// target must reroute it (the caches follow), not strand the
+/// endpoint at the pre-move pose (#250).
+#[test]
+fn static_only_glued_masters_reroute_on_a_move() {
+    // Spot masters across the families; Elbow 1 carries no triggers.
+    for name in ["Elbow 1", "Side to side 1", "Line-arc connector", "2-line elbow"] {
+        let (_, doc) = both_stencils().remove(0);
+        let Some(m) = doc.masters.iter().find(|m| m.name_u.as_deref() == Some(name)) else {
+            panic!("{name} in the US stencil");
+        };
+        let out = exercise_mode(m, true);
+        assert!(out.glue_ok, "{name}: static-only glue refused");
+        assert!(
+            !out.flat_band,
+            "{name}: the static-only end did not follow the moved target"
+        );
+    }
+}
+
+// -- the class acceptance tests (#248/#249 landed; #250's probe above)
+
+/// #248: the chord-frame masters — every one of them glue (no
+/// LockHeight Macro abort) and track the moved target. The drop's
+/// derived XForm cells are `F="Inh"` instancing caches (the snapshot
+/// fix), the chord frame engages from the master's own formulas, and
+/// master-owned Height is never written. Previously 25 refused.
 /// refuse outright and the rest render stale/flat ink.
 #[test]
-#[ignore = "#248: chord-frame masters refuse glue or render stale ink"]
 fn chord_frame_masters_glue_and_track() {
     let mut refused = Vec::new();
     let mut flat = Vec::new();
@@ -528,11 +596,11 @@ fn chord_frame_masters_glue_and_track() {
     );
 }
 
-/// #249 acceptance: the signed-frame flat-band masters (the authored
-/// horizontal band ignoring Height) re-render to follow the moved
-/// target. Today the #248-fix tree runs this to catch the survivors.
+/// #249: the band/knee masters — their Scratch/Controls formulas
+/// re-evaluate against the glued endpoints with live cross-row
+/// feeds (`Scratch.Y2=ABS(BeginY-EndY)` spans the ink), so they
+/// follow the moved target.
 #[test]
-#[ignore = "#249: the 2/4-line elbow band never tracks the target"]
 fn flat_band_masters_track_their_targets() {
     for (label, doc) in both_stencils() {
         for m in &doc.masters {
@@ -698,4 +766,45 @@ fn stencil_master_connector_glues_and_follows_a_move() {
         br.0,
         br.1 + br.3 / 2.0
     );
+}
+
+/// #251: the page's line-jump switch persists through a save/load
+/// round trip (the PageSheet's `ConLineJumpCode`/`LineJumpFactorX`),
+/// and the default page shows jumps (the Visio default — the shipped
+/// corpus carries no jump cells).
+#[test]
+fn line_jump_settings_persist_through_a_round_trip() {
+    let mut ed = Editor::new(vsdx::Document {
+        pages: vec![vsdx::model::Page {
+            id: 0,
+            name: "P".into(),
+            part: "pages/page1.xml".into(),
+            attrs: vec![("ID".into(), "0".into())],
+            children: vec![vsdx::model::IndexChild::Sheet {
+                tag: "PageSheet".into(),
+                sheet: vsdx::model::Sheet::default(),
+            }],
+            ..vsdx::model::Page::default()
+        }],
+        ..vsdx::Document::default()
+    });
+    assert!(ed.doc.pages[0].line_jumps_shown(), "the default shows");
+    ed.apply(dc_core::SetCell::new(
+        dc_core::Scope::PageSheet { page: 0 },
+        "ConLineJumpCode",
+        vsdx::Cell::value("1"),
+    ))
+    .unwrap();
+    ed.apply(dc_core::SetCell::new(
+        dc_core::Scope::PageSheet { page: 0 },
+        "LineJumpFactorX",
+        vsdx::Cell::value("1.75"),
+    ))
+    .unwrap();
+    assert!(!ed.doc.pages[0].line_jumps_shown());
+    assert!((ed.doc.pages[0].line_jump_factor() - 1.75).abs() < 1e-9);
+    // One undo restores the shown default.
+    ed.undo().unwrap();
+    ed.undo().unwrap();
+    assert!(ed.doc.pages[0].line_jumps_shown());
 }

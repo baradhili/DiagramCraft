@@ -306,6 +306,8 @@ pub struct JumpFx {
     pub under_weight: f64,
     pub color: Color32,
     pub under_color: Color32,
+    /// The page's jump-size multiplier (#251).
+    pub factor: f32,
 }
 
 /// The guide color: Visio's teal guide lines.
@@ -1723,7 +1725,7 @@ pub fn show(
     // the jumper over the crossing (Visio's default arc style).
     for j in jumps {
         let ppi = view.px_per_in();
-        let r = crate::connectors::JUMP_RADIUS_IN as f32 * ppi;
+        let r = crate::connectors::JUMP_RADIUS_IN as f32 * j.factor * ppi;
         let at = page_to_screen(j.at.0, j.at.1, view, page);
         let dir = Vec2::new(j.dir.0 as f32, -(j.dir.1 as f32)); // y flip
         let under = Vec2::new(j.under.0 as f32, -(j.under.1 as f32));

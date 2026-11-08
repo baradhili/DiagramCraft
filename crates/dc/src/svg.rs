@@ -526,7 +526,47 @@ fn node_ink_box(
                 mw.map_or(1.0, |mw| width / mw),
                 mh.map_or(1.0, |mh| height / mh),
             );
-            let menv = shape_env(doc, src, &[]);
+            // The master env builds ONCE with the instance's GLUED
+            // Begin/End and the Scratch/Controls formulas
+            // RE-EVALUATED against them — the cached V is the
+            // authored pose, and the band masters derive their whole
+            // vertical span from them (`Scratch.Y2 =
+            // ABS(BeginY-EndY)`, #249).
+            let mut menv = shape_env(doc, src, &[]);
+            for n in ["BeginX", "BeginY", "EndX", "EndY"] {
+                if let Some(v) = doc.resolve_cell(s, chain, n).and_then(|c| c.numeric()) {
+                    menv.insert(n.to_string(), v);
+                }
+            }
+            for sec_name in ["Scratch", "Controls"] {
+                for sec in src.sheet.sections_named(sec_name) {
+                    for row in &sec.rows {
+                        for (name, cell) in &row.cells {
+                            let key = match sec_name {
+                                "Scratch" => format!("Scratch.{}{}", name, row.ix + 1),
+                                _ => {
+                                    let rn = row
+                                        .n
+                                        .clone()
+                                        .unwrap_or_else(|| format!("Row_{}", row.ix));
+                                    format!("Controls.{}.{}", rn, name)
+                                }
+                            };
+                            let v = cell
+                                .f
+                                .as_deref()
+                                .filter(|f| *f != "Inh" && *f != "No Formula")
+                                .and_then(|f| vsdx::formula::eval(f, &menv).ok())
+                                .and_then(|v| v.as_f64())
+                                .filter(|v| v.is_finite())
+                                .or_else(|| cell.numeric());
+                            if let Some(v) = v {
+                                menv.insert(key, v);
+                            }
+                        }
+                    }
+                }
+            }
             walk.extend(
                 src.sheet
                     .sections_named("Geometry")
@@ -535,30 +575,45 @@ fn node_ink_box(
             );
         }
     }
-    for (geo, gscale, genv) in &walk {
+    for (walk_ix, (geo, gscale, genv)) in walk.into_iter().enumerate() {
+        let mut genv = genv;
+        let gname = format!("Geometry{}", walk_ix + 1);
         let mut cur = (0.0f64, 0.0f64);
         let mut first_pt: Option<(f64, f64)> = None;
+        fn row_num_in(
+            env: &vsdx::formula::Env,
+            row: &vsdx::Row,
+            n: &str,
+        ) -> f64 {
+            row.cell(n)
+                .and_then(|c| {
+                    c.f.as_deref()
+                        .and_then(|f| vsdx::formula::eval(f, env).ok())
+                        .and_then(|v| v.as_f64())
+                        .filter(|v| v.is_finite())
+                        .or(c.numeric())
+                })
+                .unwrap_or(0.0)
+        }
         for row in &geo.rows {
             let Some(t) = row.t.as_deref() else { continue };
-            let num = |n: &str| -> f64 {
-                row.cell(n)
-                    .and_then(|c| {
-                        c.f.as_deref()
-                            .and_then(|f| vsdx::formula::eval(f, genv).ok())
-                            .and_then(|v| v.as_f64())
-                            .filter(|v| v.is_finite())
-                            .or(c.numeric())
-                    })
-                    .unwrap_or(0.0)
-            };
             let rel = t.starts_with("Rel");
-            let (mut x, mut y) = (num("X"), num("Y"));
+            let (mut x, mut y) = (
+                row_num_in(&genv, row, "X"),
+                row_num_in(&genv, row, "Y"),
+            );
             if rel {
                 // Raw signed dims — rel_adjust (which the renderer
                 // uses) multiplies raw, so the bound must match.
                 x *= width;
                 y *= height;
             }
+            // Feed the section-local coordinates back for cross-row
+            // references (`Geometry1.X2`, #249) — before the scale,
+            // which maps onto the page but not into the next row's
+            // frame.
+            genv.insert(format!("{}.X{}", gname, row.ix), x);
+            genv.insert(format!("{}.Y{}", gname, row.ix), y);
             // Master-frame rows scale into the instance like the
             // renderer's emit (every point, literals and evaluated
             // formulas alike).
@@ -574,14 +629,14 @@ fn node_ink_box(
             match t {
                 "ArcTo" | "RelArcTo" => {
                     // The apex: chord mid + A·right-of-travel.
-                    let sag = num("A");
+                    let sag = row_num_in(&genv, row, "A");
                     let (dx, dy) = (x - cur.0, y - cur.1);
                     let len = dx.hypot(dy).max(1e-9);
                     let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
                     pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, &mut u);
                 }
                 "EllipticalArcTo" | "RelEllipticalArcTo" => {
-                    let (mut mx, mut my) = (num("A"), num("B"));
+                    let (mut mx, mut my) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
                     if rel {
                         // Raw signed dims — rel_adjust multiplies
                         // raw (negative widths mirror the bound).
@@ -600,8 +655,8 @@ fn node_ink_box(
                 }
                 "CubicBezTo" | "RelCubBezTo" => {
                     // (A,B) and (C,D): two control points.
-                    let (mut a, mut b) = (num("A"), num("B"));
-                    let (mut c, mut d) = (num("C"), num("D"));
+                    let (mut a, mut b) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
+                    let (mut c, mut d) = (row_num_in(&genv, row, "C"), row_num_in(&genv, row, "D"));
                     if rel {
                         a *= width.max(1e-6);
                         b *= height.max(1e-6);
@@ -612,7 +667,7 @@ fn node_ink_box(
                     pt(c * gscale.0, d * gscale.1, &mut u);
                 }
                 "QuadBezTo" | "RelQuadBezTo" => {
-                    let (mut a, mut b) = (num("A"), num("B"));
+                    let (mut a, mut b) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
                     if rel {
                         a *= width.max(1e-6);
                         b *= height.max(1e-6);
@@ -1024,15 +1079,17 @@ fn render_page_full(
     // paddings pin the canvas's screen-px extras at 96 dpi. Scoped
     // renders (`only`) draw one shape's subtree — page-wide jumps
     // would drag in crossings from connectors outside the scope.
-    let jumps = if only.is_none() {
+    // The page's Show-Line-Jumps switch gates the overlay (#251).
+    let jumps = if only.is_none() && page.line_jumps_shown() {
         crate::geom::page_jumps(doc, page, hidden)
     } else {
         Vec::new()
     };
     if !jumps.is_empty() {
+        let factor = page.line_jump_factor();
         let _ = writeln!(svg, r#"<g data-dc="line-jumps">"#);
         for j in &jumps {
-            append_jump(&mut svg, h, j);
+            append_jump_scaled(&mut svg, h, j, factor);
         }
         let _ = writeln!(svg, "</g>");
     }
@@ -1050,8 +1107,24 @@ const JUMP_UNDER_EXT_IN: f64 = 1.0 / 96.0;
 /// under line redrawn straight through it, and the hop arc bulging
 /// page-up (`canvas.rs`'s screen-up flip, computed here in page
 /// space so rotated jumpers stay correct).
+#[allow(dead_code)] // the factor-1 form; tests call the scaled one
 fn append_jump(svg: &mut String, page_h: f64, j: &crate::geom::Jump) {
-    let (r, w, uw) = (crate::geom::JUMP_RADIUS_IN, j.weight, j.under_weight);
+    append_jump_scaled(svg, page_h, j, 1.0);
+}
+
+/// [`append_jump`] with the page's jump-size multiplier (#251 — the
+/// PageSheet's `LineJumpFactorX`).
+fn append_jump_scaled(
+    svg: &mut String,
+    page_h: f64,
+    j: &crate::geom::Jump,
+    factor: f64,
+) {
+    let (r, w, uw) = (
+        crate::geom::JUMP_RADIUS_IN * factor,
+        j.weight,
+        j.under_weight,
+    );
     let sy = |y: f64| page_h - y;
     let pt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, sy(p.1));
     let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
@@ -2603,10 +2676,11 @@ fn render_all_geometry(
             }
             merged.push(m);
         }
-        for geo in &merged {
+        for (i, geo) in merged.iter().enumerate() {
             // Instance frame: formulas and cached values are both in
             // instance units.
-            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, out);
+            let gname = format!("Geometry{}", i + 1);
+            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, &gname, out);
         }
         return;
     }
@@ -2627,27 +2701,72 @@ fn render_all_geometry(
         mw.map_or(1.0, |mw| width / mw),
         mh.map_or(1.0, |mh| height / mh),
     );
-    for geo in src.sheet.sections_named("Geometry") {
+    // The master env builds ONCE for all sections (knee rows
+    // cross-reference sibling sections) and RE-EVALUATES the master's
+    // Scratch/Controls against the instance's glued Begin/End — their
+    // cached V is the authored pose, and the band masters derive
+    // their whole vertical span from them (`Scratch.Y2 =
+    // ABS(BeginY-EndY)`, #249).
+    let mut menv = shape_env(doc, src, &[]);
+    for n in ["BeginX", "BeginY", "EndX", "EndY"] {
+        if let Some(v) = doc.resolve_cell(s, chain, n).and_then(|c| c.numeric()) {
+            menv.insert(n.to_string(), v);
+        }
+    }
+    for sec_name in ["Scratch", "Controls"] {
+        for sec in src.sheet.sections_named(sec_name) {
+            for row in &sec.rows {
+                for (name, cell) in &row.cells {
+                    let key = match sec_name {
+                        "Scratch" => format!("Scratch.{}{}", name, row.ix + 1),
+                        _ => {
+                            let rn = row
+                                .n
+                                .clone()
+                                .unwrap_or_else(|| format!("Row_{}", row.ix));
+                            format!("Controls.{}.{}", rn, name)
+                        }
+                    };
+                    let v = cell
+                        .f
+                        .as_deref()
+                        .filter(|f| *f != "Inh" && *f != "No Formula")
+                        .and_then(|f| vsdx::formula::eval(f, &menv).ok())
+                        .and_then(|v| v.as_f64())
+                        .filter(|v| v.is_finite())
+                        .or_else(|| cell.numeric());
+                    if let Some(v) = v {
+                        menv.insert(key, v);
+                    }
+                }
+            }
+        }
+    }
+    for (i, geo) in src.sheet.sections_named("Geometry").into_iter().enumerate() {
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, chain, geo, scale, Frame::Master(src), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(menv.clone()), &format!("Geometry{}", i + 1), out);
     }
 }
 
 /// Which frame geometry rows live in — picks the formula environment.
-enum Frame<'a> {
+/// The master variant carries the PREPARED env (master cells, the
+/// instance's glued Begin/End seeded in).
+enum Frame {
     Instance,
-    Master(&'a Shape),
+    Master(vsdx::formula::Env),
 }
 
+#[allow(clippy::too_many_arguments)] // the walk's natural inputs (+gname, #249)
 fn render_geometry(
     doc: &Document,
     s: &Shape,
     chain: &[&Shape],
     section: &vsdx::Section,
     scale: (f64, f64),
-    frame: Frame<'_>,
+    frame: Frame,
+    gname: &str,
     out: &mut String,
 ) {
     let rows = &section.rows;
@@ -2657,9 +2776,9 @@ fn render_geometry(
     // The cached V already lives in that frame; evaluating a formula in
     // the WRONG frame (e.g. master rows against instance Width) skews
     // rectangles into triangles.
-    let env = match frame {
+    let mut env = match frame {
         Frame::Instance => shape_env_for(doc, s, chain, rows),
-        Frame::Master(src) => shape_env_for(doc, src, &[], rows),
+        Frame::Master(env) => env,
     };
     // Section-level cells carry NoFill/NoLine/NoShow. Formula first,
     // cached V as fallback (the row-cell convention): the master's
@@ -2693,7 +2812,7 @@ fn render_geometry(
         .resolve_cell(s, chain, "LinePattern")
         .and_then(|c| cell_num(&c, &env));
     let no_line = flag("NoLine") || line_pattern.is_some_and(|p| p == 0.0);
-    let row_num = |r: &Row, c: &str| -> Option<f64> {
+    fn row_num(env: &vsdx::formula::Env, r: &Row, c: &str) -> Option<f64> {
         r.cell(c).and_then(|cell| {
             // Geometry rows: the formula is authoritative (Visio evaluates
             // F at load; page copies can carry a stale cached V — e.g.
@@ -2706,13 +2825,13 @@ fn render_geometry(
                     if f == "Inh" || f == "No Formula" {
                         None
                     } else {
-                        vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                        vsdx::formula::eval(f, env).ok().and_then(|v| v.as_f64())
                     }
                 })
                 .filter(|v| v.is_finite());
             by_formula.or_else(|| cell.numeric())
         })
-    };
+    }
 
     let fill_color = themed_color_string(doc, s, chain, "FillForegnd");
     let line_color = themed_color_string(doc, s, chain, "LineColor");
@@ -2835,10 +2954,16 @@ fn render_geometry(
             flush_spline!();
         }
         let (mx, my) = (
-            row_num(row, "X").unwrap_or(0.0),
-            row_num(row, "Y").unwrap_or(0.0),
+            row_num(&env, row, "X").unwrap_or(0.0),
+            row_num(&env, row, "Y").unwrap_or(0.0),
         );
         let (x, y) = rel_adjust(t, mx, my, width, height);
+        // Feed the evaluated coordinates back into the env (#249):
+        // later rows reference earlier ones section-qualified
+        // (`Geometry1.X2`), and the stale cached V would keep the
+        // whole chain at the authored pose.
+        env.insert(format!("{}.X{}", gname, row.ix), x);
+        env.insert(format!("{}.Y{}", gname, row.ix), y);
         match t {
             "MoveTo" | "RelMoveTo" => {
                 let _ = write!(d, "M {}", emit_pt((x, y)));
@@ -2854,7 +2979,7 @@ fn render_geometry(
                 // verified against the Process master's rounded rect, which
                 // traverses CCW (y-up, interior on the left) with positive-A
                 // corner arcs bulging outward.
-                let h = row_num(row, "A").unwrap_or(0.0);
+                let h = row_num(&env, row, "A").unwrap_or(0.0);
                 let (sx, sy) = cur;
                 let chord = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
                 if h.abs() < 1e-9 || chord < 1e-9 {
@@ -2884,11 +3009,11 @@ fn render_geometry(
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
                 let m = (
-                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(&env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(&env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                 );
-                let c_ang = row_num(row, "C").unwrap_or(0.0);
-                let ratio = row_num(row, "D").unwrap_or(1.0).abs().max(1e-6);
+                let c_ang = row_num(&env, row, "C").unwrap_or(0.0);
+                let ratio = row_num(&env, row, "D").unwrap_or(1.0).abs().max(1e-6);
                 // Sane bounds: the arc must fit (loosely) inside the
                 // shape's scaled extent — a solved ellipse or on-arc point
                 // far outside means the numeric solver diverged on a tiny
@@ -2929,10 +3054,10 @@ fn render_geometry(
             }
             "Ellipse" => {
                 // (X,Y) center, (A,B) major-axis endpoint, (C,D) minor-axis endpoint.
-                let a = row_num(row, "A").unwrap_or(x + 1.0);
-                let b = row_num(row, "B").unwrap_or(y);
-                let c2 = row_num(row, "C").unwrap_or(x);
-                let d2 = row_num(row, "D").unwrap_or(y + 1.0);
+                let a = row_num(&env, row, "A").unwrap_or(x + 1.0);
+                let b = row_num(&env, row, "B").unwrap_or(y);
+                let c2 = row_num(&env, row, "C").unwrap_or(x);
+                let d2 = row_num(&env, row, "D").unwrap_or(y + 1.0);
                 let rx = ((a - x).powi(2) + (b - y).powi(2)).sqrt().max(1e-6);
                 let ry = ((c2 - x).powi(2) + (d2 - y).powi(2)).sqrt().max(1e-6);
                 let ang = (b - y).atan2(a - x); // major-axis angle, y-up frame
@@ -2958,15 +3083,15 @@ fn render_geometry(
                 // relative fractions of Width/Height.
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(row, "A").unwrap_or(cur.0),
-                    row_num(row, "B").unwrap_or(cur.1),
+                    row_num(&env, row, "A").unwrap_or(cur.0),
+                    row_num(&env, row, "B").unwrap_or(cur.1),
                     width,
                     height,
                 );
                 let (c2, d2) = rel_adjust(
                     t,
-                    row_num(row, "C").unwrap_or(x),
-                    row_num(row, "D").unwrap_or(y),
+                    row_num(&env, row, "C").unwrap_or(x),
+                    row_num(&env, row, "D").unwrap_or(y),
                     width,
                     height,
                 );
@@ -2982,8 +3107,8 @@ fn render_geometry(
             "QuadBezTo" | "RelQuadBezTo" => {
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(&env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(&env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                     width,
                     height,
                 );
@@ -3004,17 +3129,17 @@ fn render_geometry(
                 spline_acc = Some(crate::curve::SplineAcc::start(
                     cur,
                     (x, y),
-                    row_num(row, "A").unwrap_or(0.0),
-                    row_num(row, "B").unwrap_or(0.0),
-                    row_num(row, "C").unwrap_or(1.0),
-                    row_num(row, "D").unwrap_or(3.0),
+                    row_num(&env, row, "A").unwrap_or(0.0),
+                    row_num(&env, row, "B").unwrap_or(0.0),
+                    row_num(&env, row, "C").unwrap_or(1.0),
+                    row_num(&env, row, "D").unwrap_or(3.0),
                 ));
                 cur = (x, y);
             }
             "SplineKnot" => {
                 match spline_acc.as_mut() {
                     Some(acc) => {
-                        acc.knot((x, y), row_num(row, "A").unwrap_or(0.0));
+                        acc.knot((x, y), row_num(&env, row, "A").unwrap_or(0.0));
                         cur = (x, y);
                     }
                     None => {
@@ -3041,16 +3166,16 @@ fn render_geometry(
                     let fx = if f.x_type == 0.0 { width } else { 1.0 };
                     let fy = if f.y_type == 0.0 { height } else { 1.0 };
                     let mut points = vec![cur];
-                    let mut knots = vec![row_num(row, "C").unwrap_or(0.0)];
-                    let mut weights = vec![row_num(row, "D").unwrap_or(1.0)];
+                    let mut knots = vec![row_num(&env, row, "C").unwrap_or(0.0)];
+                    let mut weights = vec![row_num(&env, row, "D").unwrap_or(1.0)];
                     for (gx, gy, gk, gw) in &f.points {
                         points.push((gx * fx, gy * fy));
                         knots.push(*gk);
                         weights.push(*gw);
                     }
-                    knots.push(row_num(row, "A").unwrap_or(0.0));
+                    knots.push(row_num(&env, row, "A").unwrap_or(0.0));
                     knots.push(f.last_knot);
-                    weights.push(row_num(row, "B").unwrap_or(1.0));
+                    weights.push(row_num(&env, row, "B").unwrap_or(1.0));
                     points.push((x, y));
                     let built = crate::curve::SplineData {
                         degree: f.degree,
@@ -4527,6 +4652,41 @@ pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::
                 }
             }
         }
+        // Scratch + Controls numeric cells (#249): the connector
+        // stencil's band/knee masters derive their geometry rows
+        // through them (`LineTo(F:Scratch.X2*Scratch.C1)`,
+        // `Controls.Row_1.Y`) — without them every such row fell to
+        // its authored cached pose and the ink never tracked the
+        // endpoints. Scratch references are `Scratch.X1` (row 1's X
+        // cell); Controls references carry the row's name
+        // (`Controls.Row_1.Y`).
+        for scratch in sheet.sections_named("Scratch") {
+            for row in &scratch.rows {
+                for (name, cell) in &row.cells {
+                    if let Some(v) = cell.numeric() {
+                        // Visio's Scratch references are 1-BASED
+                        // (`Scratch.X1` is the first row's X).
+                        env.insert(
+                            format!("Scratch.{}{}", name, row.ix + 1),
+                            v,
+                        );
+                    }
+                }
+            }
+        }
+        for controls in sheet.sections_named("Controls") {
+            for row in &controls.rows {
+                let rn = row
+                    .n
+                    .clone()
+                    .unwrap_or_else(|| format!("Row_{}", row.ix));
+                for (name, cell) in &row.cells {
+                    if let Some(v) = cell.numeric() {
+                        env.insert(format!("Controls.{}.{}", rn, name), v);
+                    }
+                }
+            }
+        }
     }
     // Geometry row coordinates (Geometry1.X1 style references).
     for (i, geo) in own.sections_named("Geometry").iter().enumerate() {
@@ -5833,6 +5993,73 @@ mod tests {
         // than the crossing's (page y 5 → SVG y 6 on an 11in page).
         let apex = format!("{:.5} {:.5}", 3.0, 6.0 - crate::geom::JUMP_RADIUS_IN);
         assert!(svg.contains(&apex), "the arc apex is page-up: {apex}");
+    }
+
+    /// #251: the page's Show-Line-Jumps switch (`ConLineJumpCode=1`
+    /// on the PageSheet) suppresses the jump overlay entirely; the
+    /// `LineJumpFactorX` size multiplier scales the hop arc.
+    #[test]
+    fn export_gates_line_jumps_on_the_page_setting() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        let (doc, _page) = page_fixture(vec![
+            connector(1, (3.0, 5.0), 4.0, 0.0),
+            connector(2, (3.0, 5.0), 0.0, 4.0),
+        ]);
+        // Hidden: the PageSheet switch suppresses the group.
+        let mut hidden = doc.clone();
+        hidden.pages[0]
+            .sheet_mut()
+            .unwrap()
+            .set_cell("ConLineJumpCode", Cell::value("1"));
+        let svg = render_page(&hidden, &hidden.pages[0]).unwrap();
+        assert!(
+            !svg.contains(r#"data-dc="line-jumps""#),
+            "the hidden page draws no jump group"
+        );
+        // Shown at 2×: the hop arc's radius doubles.
+        let mut big = doc.clone();
+        big.pages[0]
+            .sheet_mut()
+            .unwrap()
+            .set_cell("LineJumpFactorX", Cell::value("2"));
+        let svg = render_page(&big, &big.pages[0]).unwrap();
+        let apex = format!(
+            "{:.5} {:.5}",
+            3.0,
+            6.0 - crate::geom::JUMP_RADIUS_IN * 2.0
+        );
+        assert!(svg.contains(&apex), "the 2× arc apex: {apex}");
     }
 
     /// #187: a page with NO crossings draws no jump group.

@@ -5791,6 +5791,38 @@ impl App {
     /// #113 (URS-1122): write the page's size (page inches, portrait
     /// orientation of the pair as given) as one undo Macro, then
     /// refit the view to the new page.
+    /// #251: the page's Show-Line-Jumps toggle (Page Setup ▸ Layout
+    /// and Routing) — `ConLineJumpCode` on the PageSheet (1 = hidden,
+    /// 2 = shown), one undoable command.
+    fn apply_line_jumps_shown(&mut self, show: bool) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        self.apply(SetCell::new(
+            Scope::PageSheet { page: page_id },
+            "ConLineJumpCode",
+            vsdx::Cell::value(if show { "2" } else { "1" }),
+        ));
+        self.status = if show {
+            "line jumps shown".into()
+        } else {
+            "line jumps hidden".into()
+        };
+    }
+
+    /// #251: the page's jump-size multiplier (`LineJumpFactorX`).
+    fn apply_line_jump_factor(&mut self, factor: f64) {
+        let Some(page_id) = self.page_id() else {
+            return;
+        };
+        self.apply(SetCell::new(
+            Scope::PageSheet { page: page_id },
+            "LineJumpFactorX",
+            vsdx::Cell::value(format!("{factor:.6}")),
+        ));
+        self.status = format!("line jump size ×{factor:.2}");
+    }
+
     fn apply_page_size(&mut self, (w, h): (f64, f64)) {
         let Some(page_id) = self.page_id() else {
             return;
@@ -6657,6 +6689,46 @@ impl App {
                         && geom.w_in <= geom.h_in
                     {
                         apply = Some((geom.h_in.max(geom.w_in), geom.h_in.min(geom.w_in)));
+                    }
+                });
+                // Layout and Routing (#251): the line-jump display
+                // switch and jump size — Visio's Page Setup group,
+                // persisted on the PageSheet.
+                ui.separator();
+                ui.strong("Line jumps");
+                let mut show_toggle = self
+                    .ed
+                    .as_ref()
+                    .map(|ed| {
+                        ed.doc.pages
+                            [self.page_idx.min(ed.doc.pages.len() - 1)]
+                            .line_jumps_shown()
+                    })
+                    .unwrap_or(true);
+                if ui.checkbox(&mut show_toggle, "Show line jumps").changed() {
+                    self.apply_line_jumps_shown(show_toggle);
+                }
+                let mut jump_factor = self
+                    .ed
+                    .as_ref()
+                    .map(|ed| {
+                        ed.doc.pages
+                            [self.page_idx.min(ed.doc.pages.len() - 1)]
+                            .line_jump_factor()
+                    })
+                    .unwrap_or(1.0) as f32;
+                ui.horizontal(|ui| {
+                    ui.label("Jump size");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut jump_factor)
+                                .range(0.5..=3.0)
+                                .speed(0.05)
+                                .suffix("×"),
+                        )
+                        .changed()
+                    {
+                        self.apply_line_jump_factor(jump_factor as f64);
                     }
                 });
             });
@@ -9592,18 +9664,37 @@ impl App {
         // built before the field borrows below.
         let underlays = self.build_bg_underlays(ui.ctx());
         // #108: line-jump hops for the frame's connector crossings.
-        let jump_fx: Vec<canvas::JumpFx> = crate::connectors::line_jumps(&self.jump_lines())
-            .into_iter()
-            .map(|j| canvas::JumpFx {
-                at: j.at,
-                dir: j.dir,
-                under: j.under,
-                weight: j.weight,
-                under_weight: j.under_weight,
-                color: Color32::from_rgb(j.color.0, j.color.1, j.color.2),
-                under_color: Color32::from_rgb(j.under_color.0, j.under_color.1, j.under_color.2),
-            })
-            .collect();
+        // The page's Show-Line-Jumps switch gates the overlay (#251);
+        // the jump-size multiplier scales the hops.
+        let jump_factor = {
+            let page = &self.ed.as_ref().unwrap().doc.pages[self.page_idx];
+            if page.line_jumps_shown() {
+                page.line_jump_factor()
+            } else {
+                0.0
+            }
+        };
+        let jump_fx: Vec<canvas::JumpFx> = if jump_factor > 0.0 {
+            crate::connectors::line_jumps(&self.jump_lines())
+                .into_iter()
+                .map(|j| canvas::JumpFx {
+                    at: j.at,
+                    dir: j.dir,
+                    under: j.under,
+                    weight: j.weight,
+                    under_weight: j.under_weight,
+                    color: Color32::from_rgb(j.color.0, j.color.1, j.color.2),
+                    under_color: Color32::from_rgb(
+                        j.under_color.0,
+                        j.under_color.1,
+                        j.under_color.2,
+                    ),
+                    factor: jump_factor as f32,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         self.jumps_last = jump_fx.len();
         // #177: everything the connection-point overlay needs, built
         // before the destructuring borrows below (the closure runs

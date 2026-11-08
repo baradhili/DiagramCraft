@@ -288,9 +288,42 @@ pub struct Page {
 }
 
 impl Page {
+    /// The page's line-jump display switch (#251): Visio's Layout and
+    /// Routing "Show line jumps" (Page Setup). Persisted as the
+    /// PageSheet's `ConLineJumpCode` — absent or any value but 1
+    /// shows (the Visio default; the shipped corpus carries no jump
+    /// cells at all).
+    pub fn line_jumps_shown(&self) -> bool {
+        self.sheet()
+            .and_then(|s| s.cell("ConLineJumpCode"))
+            .and_then(|c| c.numeric())
+            .map(|v| v != 1.0)
+            .unwrap_or(true)
+    }
+
+    /// The page's line-jump SIZE multiplier (#251): the PageSheet's
+    /// `LineJumpFactorX` (Visio's Layout and Routing jump size),
+    /// defaulting to 1.0.
+    pub fn line_jump_factor(&self) -> f64 {
+        self.sheet()
+            .and_then(|s| s.cell("LineJumpFactorX"))
+            .and_then(|c| c.numeric())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0)
+    }
+
     /// The page's sheet: the inline `<PageSheet>` from the pages index.
     pub fn sheet(&self) -> Option<&Sheet> {
         self.children.iter().find_map(|c| match c {
+            IndexChild::Sheet { sheet, .. } => Some(sheet),
+            _ => None,
+        })
+    }
+
+    /// [`Page::sheet`] for mutation (page-default cells a writer or
+    /// test sets in place).
+    pub fn sheet_mut(&mut self) -> Option<&mut Sheet> {
+        self.children.iter_mut().find_map(|c| match c {
             IndexChild::Sheet { sheet, .. } => Some(sheet),
             _ => None,
         })
