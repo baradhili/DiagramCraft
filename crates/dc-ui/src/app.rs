@@ -2081,7 +2081,11 @@ impl App {
             if crate::guides::is_guide(sh) {
                 return None;
             }
-            Self::shape_rect_static(&ed.doc, page_id, sh)
+            // The nested-aware rect (#218 review round 3): a
+            // group-edit selection's members carry parent-local
+            // cells, and the raw Pin/Width read zooms to the wrong
+            // spot.
+            self.shape_rect(&ed.doc, page_id, sh)
         };
         let mut acc = rect_of(primary);
         for (p, sid) in &self.sel_set {
@@ -3614,10 +3618,10 @@ impl App {
         // and a moved cache would desync render from evaluation. It
         // stays pinned to its target (Visio's feel) UNLESS the drag
         // carries it past the snap radius, when it releases (the
-        // Connect record drops; the endpoint cells keep their stale
-        // glue formulas under a moved cache — the corpus release
-        // convention). A free end moves as a plain value through the
-        // GUARD-waived write.
+        // Connect record drops and the endpoint cells become plain
+        // values — glue formulas replaced, so nothing can snap the
+        // end back to a target that no longer owns it). A free end
+        // moves as a plain value through the GUARD-waived write.
         let mut free: [bool; 2] = [true, true];
         let mut releases: Vec<usize> = Vec::new(); // Connect indexes
         let mut release_ends = 0usize;
@@ -3647,8 +3651,9 @@ impl App {
                 if free[end] {
                     continue;
                 }
-                // Release: move the cache under the stale glue
-                // formula and drop the Connect record.
+                // Release: a plain value write replaces the cell
+                // (dropping the glue formula — the next drag sees a
+                // free end) and the Connect record drops with it.
                 if let Some(idx) = list
                     .list
                     .iter()

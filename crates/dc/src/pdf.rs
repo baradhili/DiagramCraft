@@ -96,6 +96,8 @@ struct PageData {
 /// embedding per face for the whole file), a Ref counter, and the
 /// caches keyed by tree-object pointer identity. Insertion-order Vecs
 /// keep the assembly deterministic (HashMap iteration is not).
+type FaceBytes = Option<(Arc<Vec<u8>>, u32)>;
+
 struct PdfContext<'db> {
     db: &'db Arc<fontdb::Database>,
     next_ref: i32,
@@ -111,6 +113,10 @@ struct PdfContext<'db> {
     shading_order: Vec<(usize, [u32; 6])>,
     /// char → fallback face for glyphs the primary face lacks.
     fallbacks: HashMap<char, Option<FaceKey>>,
+    /// Face bytes, read once per face (#218 review round 3): the
+    /// fallback scan probes every database face per uncovered char,
+    /// and file-backed system fonts re-read megabytes each time.
+    face_cache: HashMap<FaceKey, FaceBytes>,
     image_counter: u32,
     shade_counter: u32,
     /// The page content's base transform (px → points, y-flip): a
@@ -133,6 +139,7 @@ impl<'db> PdfContext<'db> {
             shadings: HashMap::new(),
             shading_order: Vec::new(),
             fallbacks: HashMap::new(),
+            face_cache: HashMap::new(),
             image_counter: 0,
             shade_counter: 0,
             base: tiny_skia_path::Transform::identity(),
@@ -151,16 +158,26 @@ impl<'db> PdfContext<'db> {
     }
 
     /// The face bytes + index for a FaceKey, read from the db.
-    fn face_data(&self, key: FaceKey) -> Option<(Vec<u8>, u32)> {
+    fn face_data(&mut self, key: FaceKey) -> FaceBytes {
+        if let Some(hit) = self.face_cache.get(&key) {
+            return hit.clone();
+        }
         let info = self.db.face(key.0)?;
         let data = match &info.source {
-            fontdb::Source::Binary(arc) => (**arc).as_ref().to_vec(),
-            fontdb::Source::File(path) => std::fs::read(path).ok()?,
-            fontdb::Source::SharedFile(path, _) => std::fs::read(path).ok()?,
+            // The trait object has no Clone: copy its bytes once,
+            // then the memo serves every later call.
+            fontdb::Source::Binary(arc) => {
+                let bytes: &[u8] = (**arc).as_ref();
+                Arc::new(bytes.to_vec())
+            }
+            fontdb::Source::File(path) => std::fs::read(path).ok().map(Arc::new)?,
+            fontdb::Source::SharedFile(path, _) => std::fs::read(path).ok().map(Arc::new)?,
             #[allow(unreachable_patterns)] // memmap-off builds
             _ => return None,
         };
-        Some((data, info.index))
+        let hit: FaceBytes = Some((data, info.index));
+        self.face_cache.insert(key, hit.clone());
+        hit
     }
 
     /// Query the db for the face a chunk's span asks for. The SVG's

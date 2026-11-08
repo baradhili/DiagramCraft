@@ -1026,8 +1026,9 @@ pub fn show(
     }
 
     // The Connector Tool draws with a crosshair (Visio); the Lasso
-    // trails freehand, also a crosshair.
-    if connector_tool || lasso_tool {
+    // trails freehand and the Freeform pen lays down a stroke — all
+    // crosshairs (#218 review round 3).
+    if connector_tool || lasso_tool || freeform_tool {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
     }
     // AutoConnect arrow cursor.

@@ -861,16 +861,20 @@ pub fn plan_connector_frame(
                     .filter(|v| v.is_finite())
                     .unwrap_or(v);
                 frame_env.insert(n.to_string(), v);
-                // An inherited cache keeps its MARKER (#218 review
-                // round 2): the effective formula is the master's —
-                // writing it locally would override the master and
-                // break the "a reroute never rewrites a formula"
-                // rule the Angle and row-cache paths already keep.
-                let keep = if conn.sheet.cell(n).and_then(|c| c.f.as_deref()) == Some("Inh") {
-                    "Inh".to_string()
-                } else {
-                    f
-                };
+                // An inherited cache — or a cell the instance does
+                // not own at all (#218 review round 3: the Line-arc
+                // fixture's LocPinY) — refreshes behind the MARKER:
+                // the effective formula is the master's, and writing
+                // it locally would override the master and break the
+                // "a reroute never rewrites a formula" rule the
+                // Angle and row-cache paths already keep. Only an
+                // instance's OWN formula is kept verbatim.
+                let own_f = conn
+                    .sheet
+                    .cell(n)
+                    .and_then(|c| c.f.clone())
+                    .filter(|f| f != "Inh" && f != "No Formula");
+                let keep = own_f.unwrap_or_else(|| "Inh".to_string());
                 cells.push((n.to_string(), v, Some(keep)));
             }
             // A frame dim with no formula anywhere: rewrite
@@ -1847,9 +1851,13 @@ mod reroute_master_tests {
                 .is_some_and(|v| (v.parse::<f64>().unwrap() - 2.0).abs() < 1e-6),
             "PinX cache = (B+E)/2 = 2.0: {pinx_v:?}"
         );
-        assert!(
-            pinx_f.as_deref().is_some_and(|f| f.contains("GUARD")),
-            "the guard stays on the refreshed cell: {pinx_f:?}"
+        // The guard stays the MASTER's through the instance's Inh
+        // marker — the corpus form (#226); the reroute refreshes V
+        // only (#218 review round 3).
+        assert_eq!(
+            pinx_f.as_deref(),
+            Some("Inh"),
+            "the formula stays the master's through the marker: {pinx_f:?}"
         );
         let h = conn.sheet.cell("Height").unwrap();
         assert!(
@@ -1938,9 +1946,14 @@ mod reroute_master_tests {
             cell("Height")
         );
         let pinx = conn.sheet.cell("PinX").unwrap();
-        assert!(
-            pinx.f.as_deref().is_some_and(|f| f.contains("GUARD")),
-            "the GUARD formula is kept: {:?}",
+        // The instance cache keeps its marker: the GUARD lives on
+        // the master and the corpus instances carry F="Inh" (#226).
+        // The reroute refreshes V, never localizes the formula
+        // (#218 review round 3).
+        assert_eq!(
+            pinx.f.as_deref(),
+            Some("Inh"),
+            "the formula stays the master's through the marker: {:?}",
             pinx.f
         );
         cmd.undo(&mut ed.doc).unwrap();
@@ -1991,6 +2004,10 @@ mod reroute_master_tests {
             "Height spans dy: {:?}",
             h.v
         );
+        // The instance OWNS this Height guard (a local formula, not
+        // an Inh cache) — the reroute keeps it verbatim and only
+        // refreshes V (#218 review round 3: absent or inherited
+        // cells take the marker instead).
         assert!(
             h.f.as_deref().is_some_and(|f| f.contains("GUARD")),
             "the band guard formula is kept: {:?}",

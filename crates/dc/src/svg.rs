@@ -498,7 +498,44 @@ fn node_ink_box(
     // emits is a line/quad/cubic whose curve stays inside the
     // hull of those points, plus the elliptical arc's apex
     // (2·on-curve − chord mid) as the conservative bound.
-    for geo in s.sheet.sections_named("Geometry") {
+    // What the renderer draws: the instance's own Geometry when it
+    // carries any, else the MASTER source's rows scaled into the
+    // instance frame (render_all_geometry's master path) — a fresh
+    // stencil-drop instance renders entirely through it, and its
+    // arrowheads and arc bellies must bound the ink too or the
+    // layer viewBox clips them and the #236 cull skips them
+    // (#218 review round 3).
+    let own = s.sheet.sections_named("Geometry");
+    let mut walk: Vec<(&vsdx::Section, (f64, f64), vsdx::formula::Env)> = own
+        .iter()
+        .map(|g| (*g, (1.0, 1.0), env.clone()))
+        .collect();
+    if own.is_empty() {
+        if let Some(src) = doc.instance_source(s, chain) {
+            let mw = src
+                .sheet
+                .cell("Width")
+                .and_then(|c| c.numeric())
+                .filter(|v| v.abs() > 1e-9);
+            let mh = src
+                .sheet
+                .cell("Height")
+                .and_then(|c| c.numeric())
+                .filter(|v| v.abs() > 1e-9);
+            let scale = (
+                mw.map_or(1.0, |mw| width / mw),
+                mh.map_or(1.0, |mh| height / mh),
+            );
+            let menv = shape_env(doc, src, &[]);
+            walk.extend(
+                src.sheet
+                    .sections_named("Geometry")
+                    .into_iter()
+                    .map(|g| (g, scale, menv.clone())),
+            );
+        }
+    }
+    for (geo, gscale, genv) in &walk {
         let mut cur = (0.0f64, 0.0f64);
         let mut first_pt: Option<(f64, f64)> = None;
         for row in &geo.rows {
@@ -507,7 +544,7 @@ fn node_ink_box(
                 row.cell(n)
                     .and_then(|c| {
                         c.f.as_deref()
-                            .and_then(|f| vsdx::formula::eval(f, &env).ok())
+                            .and_then(|f| vsdx::formula::eval(f, genv).ok())
                             .and_then(|v| v.as_f64())
                             .filter(|v| v.is_finite())
                             .or(c.numeric())
@@ -522,6 +559,11 @@ fn node_ink_box(
                 x *= width;
                 y *= height;
             }
+            // Master-frame rows scale into the instance like the
+            // renderer's emit (every point, literals and evaluated
+            // formulas alike).
+            x *= gscale.0;
+            y *= gscale.1;
             // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
             // box union above; the row coordinates are y-UP.
             let pt = |x: f64, y: f64, u: &mut Focus| {
@@ -546,6 +588,8 @@ fn node_ink_box(
                         mx *= width;
                         my *= height;
                     }
+                    mx *= gscale.0;
+                    my *= gscale.1;
                     pt(mx, my, &mut u);
                     // The arc's apex beyond the on-curve point.
                     pt(
@@ -564,8 +608,8 @@ fn node_ink_box(
                         c *= width.max(1e-6);
                         d *= height.max(1e-6);
                     }
-                    pt(a, b, &mut u);
-                    pt(c, d, &mut u);
+                    pt(a * gscale.0, b * gscale.1, &mut u);
+                    pt(c * gscale.0, d * gscale.1, &mut u);
                 }
                 "QuadBezTo" | "RelQuadBezTo" => {
                     let (mut a, mut b) = (num("A"), num("B"));
@@ -573,7 +617,7 @@ fn node_ink_box(
                         a *= width.max(1e-6);
                         b *= height.max(1e-6);
                     }
-                    pt(a, b, &mut u);
+                    pt(a * gscale.0, b * gscale.1, &mut u);
                 }
                 "NURBSTo" => {
                     // #188: the interior control points live in the
@@ -586,8 +630,8 @@ fn node_ink_box(
                         // Per-axis: xType gates X by Width, yType
                         // gates Y by Height (raw signed — rel_adjust
                         // and the render arm multiply raw).
-                        let fx = if f.x_type == 0.0 { width } else { 1.0 };
-                        let fy = if f.y_type == 0.0 { height } else { 1.0 };
+                        let fx = if f.x_type == 0.0 { width * gscale.0 } else { gscale.0 };
+                        let fy = if f.y_type == 0.0 { height * gscale.1 } else { gscale.1 };
                         for (gx, gy, _, _) in &f.points {
                             pt(gx * fx, gy * fy, &mut u);
                         }
