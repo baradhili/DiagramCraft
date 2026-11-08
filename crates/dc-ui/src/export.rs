@@ -286,11 +286,14 @@ mod tests {
     #[test]
     fn reset_for_suggests_a_path_beside_the_drawing() {
         let mut pane = ExportPane::default();
+        // Compare as paths — `with_file_name` joins with the platform
+        // separator, so the string form differs on Windows (#218 CI).
         pane.reset_for(std::path::Path::new("/docs/plan.vsdx"));
-        assert_eq!(pane.path(), "/docs/plan.svg");
+        let docs = std::path::Path::new("/docs");
+        assert_eq!(std::path::Path::new(pane.path()), docs.join("plan.svg"));
         pane.format = Format::Pdf;
         pane.reset_for(std::path::Path::new("/docs/plan.vsdx"));
-        assert_eq!(pane.path(), "/docs/plan.pdf");
+        assert_eq!(std::path::Path::new(pane.path()), docs.join("plan.pdf"));
     }
 
     #[test]

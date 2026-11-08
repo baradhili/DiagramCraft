@@ -614,16 +614,17 @@ pub fn geometry_hit_segments(
                     .unwrap_or_default();
                 let mut drew = false;
                 if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                    // Per-axis (#218 review): a fractional axis (type 0)
-                    // multiplies by the instance dims — what the
-                    // renderer's env resolves Width/Height to. An
-                    // absolute axis carries master-unit literals, so it
-                    // takes the master→instance scale the endpoints
-                    // took — an inherited resized master keeps the hit
-                    // polyline ON the rendered curve.
+                    // Per-axis (#218 review), matching the renderer's
+                    // total: a fractional axis (type 0) multiplies by
+                    // the instance dims AND the master→instance scale
+                    // the emitted points take (`emit_pt`'s sc());
+                    // an absolute axis carries master-unit literals
+                    // and takes only the scale. An inherited resized
+                    // master keeps the hit polyline ON the rendered
+                    // curve.
                     let (fx, fy) = (
-                        if f.x_type == 0.0 { own.0 } else { scale.0 },
-                        if f.y_type == 0.0 { own.1 } else { scale.1 },
+                        if f.x_type == 0.0 { frame.size.0 * scale.0 } else { scale.0 },
+                        if f.y_type == 0.0 { frame.size.1 * scale.1 } else { scale.1 },
                     );
                     let start = cur.unwrap_or(end);
                     let mut points = vec![start];

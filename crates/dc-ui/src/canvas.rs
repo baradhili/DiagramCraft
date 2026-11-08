@@ -674,6 +674,11 @@ pub fn show(
                         view.pan.y + r.center().y * old_ppi,
                     )
                 })
+                // An off-screen selection center must not anchor the
+                // zoom (#218 review): after a pan away from the
+                // selection, holding it fixed drags the visible area
+                // off the cursor — the hovered point anchors instead.
+                .filter(|a| canvas_r.contains(*a))
                 .unwrap_or(hp);
             let old = view.zoom;
             view.zoom = (view.zoom * factor).clamp(0.1, 8.0);

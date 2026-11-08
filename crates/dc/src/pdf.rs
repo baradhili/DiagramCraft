@@ -63,6 +63,13 @@ struct FaceRefs {
     to_unicode: Ref,
     /// PostScript name for /BaseFont.
     postscript: String,
+    /// The content-stream resource name (`F0`, `F1`, …), unique per
+    /// registered face (#218 review): PostScript names collide — a
+    /// system face and its vendored twin, and every empty name
+    /// collapses to one string — while the /Font dict is keyed by
+    /// this name. Duplicate keys would draw one face's glyph IDs
+    /// with the other face's font.
+    res_name: &'static str,
 }
 
 /// One decoded image XObject; `name` is the content-stream name and
@@ -214,6 +221,7 @@ impl<'db> PdfContext<'db> {
             descriptor: self.alloc_ref(),
             file: self.alloc_ref(),
             to_unicode: self.alloc_ref(),
+            res_name: Self::leak_name("F", self.face_order.len() as u32),
             postscript,
         };
         self.faces.insert(key, refs.clone());
@@ -769,14 +777,20 @@ fn emit_image(chunk: &mut Chunk, ctx: &mut PdfContext, content: &mut Content, im
     };
     let size = img.size();
     let t = img.abs_transform();
-    // A ∘ S(size): scale multiplies the linear columns.
+    // A ∘ [w 0 0 −h 0 h] (#218 review): PDF image space renders the
+    // unit square with the FIRST sample row at y = 1, and the page
+    // content's base transform is y-down — without the vertical flip
+    // every picture exports mirrored top to bottom. The composition:
+    // linear = A ∘ diag(w, −h); the S' translation [0, h] lands as
+    // A.linear · [0, h] + A.trans.
+    let (w, h) = (size.width(), size.height());
     let m = [
-        t.sx * size.width(),
-        t.ky * size.width(),
-        t.kx * size.height(),
-        t.sy * size.height(),
-        t.tx,
-        t.ty,
+        t.sx * w,
+        t.ky * w,
+        -t.kx * h,
+        -t.sy * h,
+        t.kx * h + t.tx,
+        t.sy * h + t.ty,
     ];
     content.save_state().transform(m);
     content.x_object(Name(name.as_bytes()));
@@ -880,7 +894,7 @@ fn emit_text(ctx: &mut PdfContext, content: &mut Content, text: &usvg::Text) {
                 continue;
             };
             let upem = face_upem(&data, index);
-            content.set_font(face_content_name(&refs.postscript), font_size);
+            content.set_font(Name(refs.res_name.as_bytes()), font_size);
             let mut positioned = content.show_positioned();
             let mut items = positioned.items();
             for (i, g) in run.glyphs.iter().enumerate() {
@@ -974,7 +988,7 @@ fn assemble(
             let mut fonts = res.insert(Name(b"Font")).dict();
             for key in &ctx.face_order {
                 if let Some(refs) = ctx.faces.get(key) {
-                    fonts.pair(face_content_name(&refs.postscript), refs.type0);
+                    fonts.pair(Name(refs.res_name.as_bytes()), refs.type0);
                 }
             }
         }
@@ -1142,4 +1156,72 @@ fn global_bbox(face: &ttf_parser::Face) -> pdf_writer::Rect {
         f32::from(b.x_max),
         f32::from(b.y_max),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 2×2 RGBA PNG: row 0 (top) red, row 1 (bottom) blue.
+    fn two_row_png() -> Vec<u8> {
+        let mut img = image::RgbaImage::new(2, 2);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        img.put_pixel(1, 1, image::Rgba([0, 0, 255, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    /// #218 review: the image matrix composes the vertical flip —
+    /// the first sample row lands at the rect's TOP edge in the
+    /// y-down content frame, not the bottom (every picture exported
+    /// upside down).
+    #[test]
+    fn image_matrix_flips_the_first_row_to_the_top() {
+        let png = two_row_png();
+        let b64 = crate::svg::base64(&png);
+        let svg = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="10"><image x="0" y="0" width="20" height="10" xlink:href="data:image/png;base64,{b64}"/></svg>"#
+        );
+        let db = raster::font_db();
+        let tree = raster::parse_svg(&svg, &db).expect("svg parses");
+        // The single Image node under the root group.
+        fn find_image(g: &usvg::Group) -> Option<&usvg::Image> {
+            g.children().iter().find_map(|n| match n {
+                usvg::Node::Image(img) => Some(img.as_ref()),
+                usvg::Node::Group(sub) => find_image(sub),
+                _ => None,
+            })
+        }
+        let img = find_image(tree.root()).expect("the svg carries the image");
+
+        let mut pdf = Pdf::new();
+        let mut ctx = PdfContext::new(&db);
+        let mut content = Content::new();
+        emit_image(&mut pdf, &mut ctx, &mut content, img);
+        let buf = String::from_utf8(content.finish().to_vec()).unwrap();
+        // A ∘ [w 0 0 −h 0 h]: with an axis-aligned image the cm's
+        // matrix is [w' 0 0 −h' e' h'] — d NEGATIVE with f = −d (the
+        // first sample row lands at the rect's top edge). The pre-fix
+        // matrix read `[w' 0 0 h' 0 0]`: row 0 at the bottom.
+        let cm = buf
+            .lines()
+            .find(|l| l.ends_with(" cm"))
+            .expect("the image emitted a cm");
+        let m: Vec<f32> = cm
+            .split(' ')
+            .filter_map(|t| t.parse().ok())
+            .collect();
+        assert_eq!(m.len(), 6, "a cm matrix: {cm:?}");
+        assert!(
+            m[0] > 0.0 && m[1] == 0.0 && m[2] == 0.0,
+            "axis-aligned image: {cm:?}"
+        );
+        assert!(
+            m[3] < 0.0 && (m[5] - (-m[3])).abs() < 1e-3,
+            "the image matrix carries the vertical flip (d<0, f=−d): {cm:?}"
+        );
+    }
 }

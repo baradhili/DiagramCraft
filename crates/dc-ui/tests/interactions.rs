@@ -957,10 +957,14 @@ fn qat_help_opens_about() {
         h.state().debug_about_open_for_test(),
         "the QAT Help button opened About"
     );
-    // The window's ✕ closes it.
+    // The window is titled, and Escape closes it.
     h.get_by_label_contains("About Tarahi");
     h.key_press(egui::Key::Escape);
     h.run();
+    assert!(
+        !h.state().debug_about_open_for_test(),
+        "Escape closed About"
+    );
 }
 
 /// #242: the 7-second splash is skippable — any click hands off to the

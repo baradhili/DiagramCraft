@@ -349,6 +349,21 @@ impl ShapeLayers {
         pre: &[(i64, i64, i64, SubBound)],
         current_page: i64,
     ) {
+        // A Move/Membership touch in the SAME batch restructures the
+        // shape: its cached sub bounds were dropped and the texture's
+        // grid moves with the root. A nested ink edit on such a shape
+        // cannot pin its patch region — the pre half of its damage
+        // union maps to a frame the texture no longer shows (#218
+        // review) — so it takes the full render.
+        let restructured: std::collections::HashSet<i64> = touched
+            .shapes
+            .iter()
+            .filter(|t| {
+                t.page == current_page
+                    && matches!(t.touch, dc_core::Touch::Move | dc_core::Touch::Membership)
+            })
+            .map(|t| t.shape)
+            .collect();
         let mut damages: HashMap<i64, Rect> = HashMap::new();
         for t in &touched.shapes {
             if t.page != current_page || t.touch != dc_core::Touch::Ink {
@@ -365,6 +380,11 @@ impl ShapeLayers {
                 self.sub_bounds.remove(&t.shape);
                 continue;
             };
+            if restructured.contains(&t.shape) {
+                self.pending_full.insert(t.shape);
+                self.sub_bounds.remove(&t.shape);
+                continue;
+            }
             let post = sub_bound(doc, t.page, t.shape, sub);
             // The pre half: the apply path's harvest first, else the
             // per-transition cache (undo/redo revert to exactly the
@@ -527,10 +547,16 @@ impl ShapeLayers {
     pub fn render_drained(&self) -> bool {
         self.composited
             && !self.deferred
-            && self
-                .entries
-                .values()
-                .all(|e| e.inflight.is_none() && (e.tex.is_some() || e.failed.is_some()))
+            && self.entries.values().all(|e| {
+                e.inflight.is_none()
+                    // A landed entry whose texture was later EVICTED
+                    // (#218 review) is not outstanding work — the
+                    // version only ever takes a real landing value,
+                    // fresh entries keep the u64::MAX sentinel.
+                    && (e.tex.is_some()
+                        || e.failed.is_some()
+                        || e.version != u64::MAX)
+            })
     }
 
     pub fn set_page(&mut self, page: i64) {
@@ -863,8 +889,15 @@ impl ShapeLayers {
                         if let Some(e) = self.entries.get_mut(&shape.id) {
                             if let (Some(tb), Some(old)) = (e.tex_bounds, self.bboxes.get(&shape.id)) {
                                 const EPS: f64 = 1e-9;
-                                let same_size = (tb.2 - old.2).abs() < EPS
-                                    && (tb.3 - old.3).abs() < EPS;
+                                // Compare the NEW model bounds to the
+                                // OLD ones (#218 review): after a full
+                                // landing or a patch the texture grid
+                                // EQUALS the old bounds, so comparing
+                                // against `tb` never saw a resize —
+                                // the stale-size texture kept drawing
+                                // at a translated rect.
+                                let same_size = (b.2 - old.2).abs() < EPS
+                                    && (b.3 - old.3).abs() < EPS;
                                 if same_size {
                                     e.tex_bounds = Some((
                                         tb.0 + (b.0 - old.0),

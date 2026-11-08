@@ -258,14 +258,17 @@ pub fn render_width(tree: &usvg::Tree, target_width: f32) -> anyhow::Result<Pixm
 pub fn render_dpi(tree: &usvg::Tree, dpi: f32) -> anyhow::Result<Pixmap> {
     const MAX_PX: u32 = 16_384;
     let size = tree.size();
-    // SVG width attr is inches * 96; derive the true inch width.
-    let w_in = size.width() / 96.0;
-    let w = ((w_in * dpi).round() as u32).clamp(1, MAX_PX);
-    let h = ((w_in.max(1e-3).recip() * size.height() * dpi).round() as u32).clamp(1, MAX_PX);
-    let t = usvg::Transform::from_scale(
-        w as f32 / size.width().max(1e-3),
-        h as f32 / size.height().max(1e-3),
-    );
+    // SVG size is inches * 96: one uniform px-per-unit scale, reduced
+    // to fit the ceiling on the longer side. Clamping the axes
+    // independently would squash a page whose long side hits the
+    // ceiling first (#218 review), and separate clamps still allow a
+    // 16384 × 16384 RGBA allocation.
+    let (sw, sh) = (size.width().max(1e-3), size.height().max(1e-3));
+    let mut k = (dpi / 96.0).max(1e-6);
+    k = k.min(MAX_PX as f32 / sw).min(MAX_PX as f32 / sh);
+    let w = ((sw * k).round() as u32).clamp(1, MAX_PX);
+    let h = ((sh * k).round() as u32).clamp(1, MAX_PX);
+    let t = usvg::Transform::from_scale(w as f32 / sw, h as f32 / sh);
     render_pixmap(tree, t, w, h)
 }
 

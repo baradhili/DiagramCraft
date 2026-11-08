@@ -351,34 +351,37 @@ mod tests {
         use std::io::Read;
         let mut out = Vec::new();
         let mut rest = bytes;
-        while let Some(pos) = find(rest, b"stream") {
-            let after = &rest[pos + b"stream".len()..];
+        // Scan by the dict's /Length, not by hunting `endstream`
+        // (#218 review round): compressed payloads can contain the
+        // literal bytes `stream`/`endstream`, and a keyword scan
+        // desyncs on them.
+        while let Some(len_pos) = find(rest, b"/Length ") {
+            let after_len = &rest[len_pos + b"/Length ".len()..];
+            let digits: usize = after_len
+                .iter()
+                .take_while(|b| b.is_ascii_digit())
+                .map(|b| b - b'0')
+                .fold(0usize, |acc, d| acc * 10 + d as usize);
+            let Some(stream_pos) = find(after_len, b"stream") else {
+                break;
+            };
+            let after = &after_len[stream_pos + b"stream".len()..];
             // Skip the EOL the writer emits after the `stream` keyword.
             let data_start = after
                 .iter()
                 .position(|b| *b != b'\n' && *b != b'\r')
                 .unwrap_or(after.len());
-            let Some(end) = find(after, b"endstream") else {
+            if data_start + digits > after.len() {
                 break;
-            };
-            let payload = &after[data_start..end];
-            // Trim the EOL the writer emits before endstream.
-            let mut trim = 0;
-            for b in payload.iter().rev() {
-                if *b == b'\n' || *b == b'\r' {
-                    trim += 1;
-                } else {
-                    break;
-                }
             }
-            let payload = &payload[..payload.len().saturating_sub(trim)];
+            let payload = &after[data_start..data_start + digits];
             let mut dec = flate2::read::ZlibDecoder::new(payload);
             let mut data = Vec::new();
             // Non-stream objects (font files) aren't zlib — skip.
             if dec.read_to_end(&mut data).is_ok() && !data.is_empty() {
-                out.push((pos, data));
+                out.push((len_pos, data));
             }
-            rest = &after[end + b"endstream".len()..];
+            rest = &after[data_start + digits..];
         }
         out
     }

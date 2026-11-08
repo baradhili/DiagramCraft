@@ -14643,6 +14643,12 @@ impl App {
         }
 
         if self.about_open {
+            // Esc closes the frontmost About (the #110 dialog
+            // keyboard audit's rule — About slipped it; #218 review).
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.about_open = false;
+                return;
+            }
             let mut open = self.about_open;
             egui::Window::new("About Tarahi")
                 .open(&mut open)
