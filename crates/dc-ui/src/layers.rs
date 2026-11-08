@@ -215,6 +215,11 @@ pub struct ShapeLayers {
     patch_posts: u64,
     full_posts: u64,
     patch_landings: u64,
+    /// #242: the composite ran since the last `clear()` (a fresh
+    /// document/page must composite once before its render can count
+    /// as drained), and the frame deferred posts on the budget cap.
+    composited: bool,
+    deferred: bool,
 }
 
 impl Default for ShapeLayers {
@@ -241,6 +246,8 @@ impl Default for ShapeLayers {
             patch_posts: 0,
             full_posts: 0,
             patch_landings: 0,
+            composited: false,
+            deferred: false,
         }
     }
 }
@@ -489,6 +496,8 @@ impl ShapeLayers {
         self.pending_damage.clear();
         self.pending_full.clear();
         self.sub_bounds.clear();
+        self.composited = false;
+        self.deferred = false;
         // The bucket re-settles for the new content: a fresh store's
         // first fills post immediately anyway, but the counter starts
         // from zero so the fit-settle debounce still guards the
@@ -508,8 +517,20 @@ impl ShapeLayers {
     /// culled (off-viewport) shape's pending entries persist by design
     /// and would hold the scrim forever; their pixels render on
     /// scroll-in, after the reveal.
-    pub fn busy(&self) -> bool {
-        self.entries.values().any(|e| e.inflight.is_some())
+    /// Whether the page's first render has fully drained: the
+    /// composite has run since the last `clear()`, nothing was
+    /// budget-deferred this frame, and every landed-track entry has
+    /// its texture (or a recorded failure). The #242 scrim gates on
+    /// this — `inflight` alone missed the budget-deferral window
+    /// (posts deferred before any entry exists), so the scrim used to
+    /// close before the render STARTED.
+    pub fn render_drained(&self) -> bool {
+        self.composited
+            && !self.deferred
+            && self
+                .entries
+                .values()
+                .all(|e| e.inflight.is_none() && (e.tex.is_some() || e.failed.is_some()))
     }
 
     pub fn set_page(&mut self, page: i64) {
@@ -800,6 +821,8 @@ impl ShapeLayers {
         // landed inline this frame so the LRU never evicts it.
         let mut just_landed: Option<i64> = None;
         self.drawn.clear();
+        self.composited = true;
+        self.deferred = false;
         let mut quads = Vec::new();
         let mut status = None;
         let hidden_member = |s: &vsdx::Shape| -> bool {
@@ -954,6 +977,7 @@ impl ShapeLayers {
                     // before serializing so a big page's fill spreads
                     // over frames instead of bursting O(page) strings
                     // on frame one (#93).
+                    self.deferred = true;
                     continue;
                 } else {
                     let patch_plan = pending_damage

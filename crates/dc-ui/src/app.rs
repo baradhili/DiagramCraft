@@ -14566,9 +14566,11 @@ impl App {
         }
         if scrim.is_none() {
             if let Some((path, started)) = &self.rendering {
-                // Reveal only on the finished render: the raster jobs
-                // drained AND the scrim showed its minimum window.
-                let drained = !self.layers.busy()
+                // Reveal only on the finished render: the page's
+                // first render fully drained (composite ran, nothing
+                // budget-deferred, every on-screen shape's texture
+                // landed) AND the scrim showed its minimum window.
+                let drained = self.layers.render_drained()
                     && started.elapsed().as_secs_f32() >= crate::loading::LOADING_MIN_SECS;
                 if drained {
                     self.status = format!("opened {}", path.display());
