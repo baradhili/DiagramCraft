@@ -2471,8 +2471,37 @@ impl App {
         // carries one, else the master root's (what renders).
         let straight = |t: &str| matches!(t, "" | "MoveTo" | "RelMoveTo" | "LineTo" | "RelLineTo");
         let curved = |rows: &[vsdx::model::Row]| {
-            rows.iter()
+            if rows
+                .iter()
                 .any(|r| r.t.as_deref().map(|t| !straight(t)).unwrap_or(false))
+            {
+                return true;
+            }
+            // A multi-SEGMENT polyline is not the chord either (#218
+            // review): the right-angle route's elbow rows drew the
+            // selection stroke diagonally over the bend. Degenerate
+            // rows — the straight route's repeated endpoint — stay
+            // straight.
+            let mut cur: Option<(f64, f64)> = None;
+            let mut segments = 0usize;
+            for r in rows {
+                let t = r.t.as_deref().unwrap_or("");
+                let x = r.cell("X").and_then(|c| c.numeric()).unwrap_or(0.0);
+                let y = r.cell("Y").and_then(|c| c.numeric()).unwrap_or(0.0);
+                match t {
+                    "MoveTo" | "RelMoveTo" => cur = Some((x, y)),
+                    "LineTo" | "RelLineTo" => {
+                        let same = cur
+                            .is_some_and(|(cx, cy)| (cx - x).abs() < 1e-9 && (cy - y).abs() < 1e-9);
+                        if !same {
+                            segments += 1;
+                        }
+                        cur = Some((x, y));
+                    }
+                    _ => {}
+                }
+            }
+            segments > 1
         };
         if let Some(g) = sh.sheet.sections_named("Geometry").first() {
             return curved(&g.rows);

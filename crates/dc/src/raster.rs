@@ -266,6 +266,11 @@ pub fn render_dpi(tree: &usvg::Tree, dpi: f32) -> anyhow::Result<Pixmap> {
     let (sw, sh) = (size.width().max(1e-3), size.height().max(1e-3));
     let mut k = (dpi / 96.0).max(1e-6);
     k = k.min(MAX_PX as f32 / sw).min(MAX_PX as f32 / sh);
+    // The per-side ceiling still allows 16384² — a single ~1 GiB
+    // RGBA allocation a square page at high dpi would attempt. Bound
+    // the total area too: 64 Mpx ≈ 256 MiB (#218 review round 2).
+    const MAX_AREA: f32 = 64.0 * 1024.0 * 1024.0;
+    k = k.min((MAX_AREA / (sw * sh)).sqrt());
     let w = ((sw * k).round() as u32).clamp(1, MAX_PX);
     let h = ((sh * k).round() as u32).clamp(1, MAX_PX);
     let t = usvg::Transform::from_scale(w as f32 / sw, h as f32 / sh);

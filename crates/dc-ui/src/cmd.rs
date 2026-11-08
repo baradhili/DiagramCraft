@@ -861,7 +861,17 @@ pub fn plan_connector_frame(
                     .filter(|v| v.is_finite())
                     .unwrap_or(v);
                 frame_env.insert(n.to_string(), v);
-                cells.push((n.to_string(), v, Some(f)));
+                // An inherited cache keeps its MARKER (#218 review
+                // round 2): the effective formula is the master's —
+                // writing it locally would override the master and
+                // break the "a reroute never rewrites a formula"
+                // rule the Angle and row-cache paths already keep.
+                let keep = if conn.sheet.cell(n).and_then(|c| c.f.as_deref()) == Some("Inh") {
+                    "Inh".to_string()
+                } else {
+                    f
+                };
+                cells.push((n.to_string(), v, Some(keep)));
             }
             // A frame dim with no formula anywhere: rewrite
             // it only when the INSTANCE carries its own
@@ -2698,6 +2708,16 @@ mod reroute_master_tests {
         assert!((g("PinX") - 2.25).abs() < 1e-6);
         assert!((g("PinY") - 6.1).abs() < 1e-6);
         assert!((g("LocPinX") - chord / 2.0).abs() < 1e-6);
+        // The inherited frame caches keep their MARKER — the value
+        // refreshes, the formula stays the master's (#218 review
+        // round 2: a local formula copy would override the master).
+        for n in ["PinX", "Width", "LocPinX"] {
+            assert_eq!(
+                conn.sheet.cell(n).unwrap().f.as_deref(),
+                Some("Inh"),
+                "{n} keeps its Inh marker"
+            );
+        }
         // The chord frame rotates with the drag, behind its marker.
         let angle = conn.sheet.cell("Angle").unwrap();
         assert!(

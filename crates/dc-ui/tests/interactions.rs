@@ -6513,10 +6513,13 @@ fn curved_connector_curve_handles_and_control_drag() {
     drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
     let conn = h.state().debug_sel().expect("connector selected").1;
 
-    // Straight: no curve row, chord kept, no control handles.
+    // The diagonal pair routed right-angle draws a real elbow: its
+    // ink LEAVES the begin→end chord, so it is curve ink — stroking
+    // the chord read as "the drag flattened the bend" (#218 review
+    // round 2). Curve-row detection below still gates the handles.
     assert!(
-        !h.state().debug_sel_1d_curved(),
-        "a straight connector is not curved"
+        h.state().debug_sel_1d_curved(),
+        "the elbow route is curve ink"
     );
     let ctrl_id = |c| dc_ui::canvas::HandleId::GeoPoint {
         section_ix: 0,
@@ -6527,7 +6530,7 @@ fn curved_connector_curve_handles_and_control_drag() {
         h.state()
             .debug_handle_screen(ctrl_id(dc_ui::canvas::GeoCell::Ctrl))
             .is_none(),
-        "no control handles on a straight route"
+        "no control handles on an elbow route"
     );
 
     // ctx ▸ Curved Connector.

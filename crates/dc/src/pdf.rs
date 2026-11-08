@@ -999,29 +999,73 @@ fn face_content_name(postscript: &str) -> Name<'_> {
     Name(if bytes.is_empty() { b"F0" } else { bytes })
 }
 
-/// The single font program to embed: a collection's face offset
-/// names a self-contained sfnt — slice from it; a plain font file is
-/// already the face.
-fn face_bytes(data: &[u8], index: u32) -> &[u8] {
+/// The single font program to embed. A collection's per-font offset
+/// table names a face whose TABLE OFFSETS ARE COLLECTION-RELATIVE
+/// (OpenType TTC layout) — slicing at the face offset would leave
+/// every table pointing into the wrong bytes. Rebuild a standalone
+/// sfnt with the tables rebased; a plain font file is already the
+/// face.
+fn face_bytes(data: &[u8], index: u32) -> Vec<u8> {
     if data.len() >= 12 && &data[0..4] == b"ttcf" {
         let n = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
-        if index > 0 && (index as usize) >= n {
-            return data;
-        }
-        let at = 12 + index as usize * 4;
-        if at + 4 <= data.len() {
-            let o = u32::from_be_bytes([
-                data[at],
-                data[at + 1],
-                data[at + 2],
-                data[at + 3],
-            ]) as usize;
-            if o > 0 && o < data.len() {
-                return &data[o..];
+        let i = index as usize;
+        if n > 0 && i < n {
+            let at = 12 + i * 4;
+            if at + 4 <= data.len() {
+                let o = u32::from_be_bytes([
+                    data[at],
+                    data[at + 1],
+                    data[at + 2],
+                    data[at + 3],
+                ]) as usize;
+                if o + 12 <= data.len() {
+                    if let Some(out) = rebuild_sfnt(&data[o..], o) {
+                        return out;
+                    }
+                }
             }
         }
     }
-    data
+    data.to_vec()
+}
+
+/// Rebuild one sfnt (header at `face`, itself positioned `base` into
+/// the collection) into a standalone font: copy the table directory
+/// and re-point each entry at the table's new position, 4-byte
+/// aligned as the spec requires. The stored offsets count from the
+/// COLLECTION start — translate them through `base`.
+fn rebuild_sfnt(face: &[u8], base: usize) -> Option<Vec<u8>> {
+    if face.len() < 12 {
+        return None;
+    }
+    let num_tables = u16::from_be_bytes([face[4], face[5]]) as usize;
+    let dir_len = 12 + num_tables * 16;
+    if face.len() < dir_len {
+        return None;
+    }
+    let mut total = dir_len;
+    let mut spans = Vec::with_capacity(num_tables);
+    for e in 0..num_tables {
+        let at = 12 + e * 16;
+        let off = u32::from_be_bytes(face[at + 8..at + 12].try_into().ok()?) as usize;
+        let len = u32::from_be_bytes(face[at + 12..at + 16].try_into().ok()?) as usize;
+        let off = off.checked_sub(base)?;
+        if off + len > face.len() {
+            return None;
+        }
+        spans.push((off, len));
+        total += (len + 3) & !3;
+    }
+    let mut out = vec![0u8; total];
+    out[..dir_len].copy_from_slice(&face[..dir_len]);
+    let mut cursor = dir_len;
+    for (e, (off, len)) in spans.iter().enumerate() {
+        let at = 12 + e * 16;
+        out[at + 8..at + 12].copy_from_slice(&(cursor as u32).to_be_bytes());
+        out[cursor..cursor + len].copy_from_slice(&face[*off..*off + len]);
+        cursor += (len + 3) & !3;
+    }
+    Some(out)
 }
 
 /// Object assembly: fonts, images, shadings, page tree, catalog —
@@ -1185,7 +1229,7 @@ fn assemble(
         // offset table names (#218 review).
         let embed = face_bytes(&data, index);
         {
-            let mut s = pdf.stream(refs.file, embed);
+            let mut s = pdf.stream(refs.file, &embed);
             if true_type {
                 s.pair(Name(b"Length1"), embed.len() as i32);
             } else {
@@ -1260,6 +1304,55 @@ mod tests {
     /// the first sample row lands at the rect's TOP edge in the
     /// y-down content frame, not the bottom (every picture exported
     /// upside down).
+    /// #218 review round 2: a collection face extracts as a
+    /// STANDALONE sfnt — the per-font table offsets are
+    /// collection-relative, so the rebuild re-points them; both faces
+    /// of a synthetic two-font .ttc parse at index 0 afterward.
+    #[test]
+    fn ttc_face_extracts_as_a_standalone_sfnt() {
+        let font = include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf");
+        // Wrap the font twice into a TTC, rebasing each copy's table
+        // offsets to its position in the collection — what real
+        // builders do (collection-relative offsets).
+        let embed_at = |font: &[u8], at: u32| -> Vec<u8> {
+            let mut copy = font.to_vec();
+            let num_tables = u16::from_be_bytes([copy[4], copy[5]]) as usize;
+            for e in 0..num_tables {
+                let t = 12 + e * 16;
+                let off = u32::from_be_bytes(copy[t + 8..t + 12].try_into().unwrap());
+                copy[t + 8..t + 12].copy_from_slice(&(off + at).to_be_bytes());
+            }
+            copy
+        };
+        // The header is 12 bytes (magic, version, numFonts) followed
+        // by the offset array — 2 offsets = 8, so font 0 starts at 20.
+        let head = font.len() as u32;
+        let mut ttc = Vec::new();
+        ttc.extend_from_slice(b"ttcf");
+        ttc.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        ttc.extend_from_slice(&2u32.to_be_bytes());
+        ttc.extend_from_slice(&20u32.to_be_bytes());
+        ttc.extend_from_slice(&(20 + head).to_be_bytes());
+        ttc.extend_from_slice(&embed_at(font, 20));
+        ttc.extend_from_slice(&embed_at(font, 20 + head));
+
+        let f0 = face_bytes(&ttc, 0);
+        let f1 = face_bytes(&ttc, 1);
+        let src_face = ttf_parser::Face::parse(font, 0).unwrap();
+        for (i, bytes) in [(0usize, &f0), (1, &f1)] {
+            let face = ttf_parser::Face::parse(bytes, 0)
+                .unwrap_or_else(|e| panic!("face {i} of the collection parses standalone: {e}"));
+            assert_eq!(
+                face.number_of_glyphs(),
+                src_face.number_of_glyphs(),
+                "face {i} carries the source's tables"
+            );
+        }
+        // Out-of-range index falls back to the raw bytes (parse as a
+        // collection fails the caller's own guard).
+        assert_eq!(face_bytes(&ttc, 5).len(), ttc.len());
+    }
+
     #[test]
     fn image_matrix_flips_the_first_row_to_the_top() {
         let png = two_row_png();
