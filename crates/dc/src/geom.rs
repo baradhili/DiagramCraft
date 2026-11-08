@@ -862,10 +862,10 @@ pub fn page_jumps(doc: &vsdx::Document, page: &vsdx::Page, hidden: &[i64]) -> Ve
             .resolve_cell(s, &chain, "LineWeight")
             .and_then(|c| c.numeric())
             .unwrap_or(0.01);
-        let color = doc
-            .resolve_cell(s, &chain, "LineColor")
-            .and_then(|c| c.v.clone())
-            .and_then(|v| parse_hex_rgb(&v))
+        // Resolve like the renderer (#218 review): a legacy palette
+        // index (`LineColor V='0'`) is common, and the hex-only read
+        // drew every such crossing's under line and hop arc in gray.
+        let color = parse_hex_rgb(&crate::svg::themed_color_string(doc, s, &chain, "LineColor"))
             .unwrap_or((0x42, 0x42, 0x42));
         lines.push(JumpLine {
             id: s.id,

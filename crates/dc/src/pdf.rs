@@ -107,12 +107,16 @@ struct PdfContext<'db> {
     to_unicode: HashMap<FaceKey, BTreeMap<u16, Vec<char>>>,
     images: HashMap<usize, ImageEntry>,
     image_order: Vec<usize>,
-    shadings: HashMap<usize, ShadeEntry>,
-    shading_order: Vec<usize>,
+    shadings: HashMap<(usize, [u32; 6]), ShadeEntry>,
+    shading_order: Vec<(usize, [u32; 6])>,
     /// char → fallback face for glyphs the primary face lacks.
     fallbacks: HashMap<char, Option<FaceKey>>,
     image_counter: u32,
     shade_counter: u32,
+    /// The page content's base transform (px → points, y-flip): a
+    /// shading pattern's /Matrix ignores the CTM at paint time, so
+    /// the gradient must bake it plus the node's abs transform.
+    base: tiny_skia_path::Transform,
 }
 
 impl<'db> PdfContext<'db> {
@@ -131,6 +135,7 @@ impl<'db> PdfContext<'db> {
             fallbacks: HashMap::new(),
             image_counter: 0,
             shade_counter: 0,
+            base: tiny_skia_path::Transform::identity(),
         }
     }
 
@@ -288,7 +293,10 @@ fn shape_text(data: &[u8], index: u32, text: &str) -> Vec<ShapedGlyph> {
         for i in 0..out.len() {
             glyphs.push(ShapedGlyph {
                 id: u16::try_from(infos[i].glyph_id).unwrap_or(0),
-                cluster: infos[i].cluster as usize,
+                // Text-absolute: harfrust clusters are offsets into
+                // the run's own slice; the fallback splitter slices
+                // the SPAN text by them (#218 review).
+                cluster: run.start + infos[i].cluster as usize,
                 x_advance: positions[i].x_advance as f32,
                 x_offset: positions[i].x_offset as f32,
             });
@@ -356,8 +364,12 @@ fn split_fallback_runs(
 /// cluster offsets onto the slice.
 fn finalize_run(run: (FaceKey, usize, usize, Vec<ShapedGlyph>), text: &str) -> GlyphRun {
     let (face, start, end, mut glyphs) = run;
+    // RTL visual order returns DECREASING clusters, so the first
+    // glyph can sit past a later one — rebase from the run's MINIMUM
+    // cluster and never underflow (#218 review).
+    let base = glyphs.iter().map(|g| g.cluster).min().unwrap_or(start).min(start);
     for g in &mut glyphs {
-        g.cluster -= start;
+        g.cluster = g.cluster.saturating_sub(base);
     }
     GlyphRun {
         face,
@@ -369,6 +381,18 @@ fn finalize_run(run: (FaceKey, usize, usize, Vec<ShapedGlyph>), text: &str) -> G
 /// usvg's absolute transform as a PDF matrix (same six coefficients).
 fn transform_matrix(t: tiny_skia_path::Transform) -> [f32; 6] {
     [t.sx, t.ky, t.kx, t.sy, t.tx, t.ty]
+}
+
+/// A ∘ B: B maps a point first, then A (PDF cm / usvg convention).
+fn compose(a: tiny_skia_path::Transform, b: tiny_skia_path::Transform) -> tiny_skia_path::Transform {
+    tiny_skia_path::Transform::from_row(
+        a.sx * b.sx + a.kx * b.ky,
+        a.ky * b.sx + a.sy * b.ky,
+        a.sx * b.kx + a.kx * b.sy,
+        a.ky * b.kx + a.sy * b.sy,
+        a.sx * b.tx + a.kx * b.ty + a.tx,
+        a.ky * b.tx + a.sy * b.ty + a.ty,
+    )
 }
 
 /// usvg y-down color → PDF rgb 0..1.
@@ -510,13 +534,24 @@ fn register_gradient(
     chunk: &mut Chunk,
     ctx: &mut PdfContext,
     paint: &usvg::Paint,
+    extra: tiny_skia_path::Transform,
 ) -> Option<&'static str> {
-    let key = match paint {
+    let ptr = match paint {
         usvg::Paint::LinearGradient(g) => Arc::as_ptr(g) as *const u8 as usize,
         usvg::Paint::RadialGradient(g) => Arc::as_ptr(g) as *const u8 as usize,
         // Pattern fills never occur in Tarahi output.
         _ => return None,
     };
+    // The gradient's own transform composes after base ∘ abs: the
+    // pattern's /Matrix maps pattern space to DEFAULT user space and
+    // ignores the CTM at fill time (#218 review). Paths sharing one
+    // gradient under different transforms need distinct patterns.
+    let matrix = match paint {
+        usvg::Paint::LinearGradient(g) => compose(extra, g.transform()),
+        usvg::Paint::RadialGradient(g) => compose(extra, g.transform()),
+        _ => unreachable!(),
+    };
+    let key = (ptr, transform_matrix(matrix).map(f32::to_bits));
     if let Some(hit) = ctx.shadings.get(&key) {
         return Some(hit.name);
     }
@@ -531,11 +566,6 @@ fn register_gradient(
     let coords = match paint {
         usvg::Paint::LinearGradient(g) => vec![g.x1(), g.y1(), g.x2(), g.y2()],
         usvg::Paint::RadialGradient(g) => vec![g.fx(), g.fy(), 0.0, g.cx(), g.cy(), g.r().get()],
-        _ => unreachable!(),
-    };
-    let matrix = match paint {
-        usvg::Paint::LinearGradient(g) => g.transform(),
-        usvg::Paint::RadialGradient(g) => g.transform(),
         _ => unreachable!(),
     };
     {
@@ -580,6 +610,7 @@ pub fn pdf_bytes(
     let mut pdf = Pdf::new();
     let mut ctx = PdfContext::new(&db);
     let mut page_data = Vec::new();
+    let mut trees: Vec<usvg::Tree> = Vec::new();
 
     for &idx in pages {
         let page = doc
@@ -594,9 +625,24 @@ pub fn pdf_bytes(
         // Base: the SVG's user units land as PIXELS in the tree (usvg
         // bakes the viewBox→px scale — PX_PER_IN — into every node's
         // absolute transform), y-down; PDF points, y-up. 72/96 maps
-        // the tree's px to points.
-        content.transform([72.0 / 96.0, 0.0, 0.0, -72.0 / 96.0, 0.0, h_in as f32 * 72.0]);
+        // the tree's px to points. The gradient pattern matrix needs
+        // the same mapping (it ignores the CTM at paint time).
+        let base = tiny_skia_path::Transform::from_row(
+            72.0 / 96.0,
+            0.0,
+            0.0,
+            -72.0 / 96.0,
+            0.0,
+            h_in as f32 * 72.0,
+        );
+        content.transform(transform_matrix(base));
+        ctx.base = base;
         walk_group(&mut pdf, &mut ctx, &mut content, tree.root());
+        // The image/gradient registries key by tree-object addresses:
+        // every tree must OUTLIVE them, or the allocator can hand a
+        // freed address to the next page's image and alias its
+        // XObject (#218 review).
+        trees.push(tree);
         let buf = content.finish();
         page_data.push(PageData {
             content: buf.as_slice().to_vec(),
@@ -641,7 +687,7 @@ fn emit_path(chunk: &mut Chunk, ctx: &mut PdfContext, content: &mut Content, p: 
         .save_state()
         .transform(transform_matrix(p.abs_transform()));
     if let Some(f) = fill {
-        set_fill_paint(chunk, ctx, content, f);
+        set_fill_paint(chunk, ctx, content, f, p.abs_transform());
     }
     if let Some(s) = stroke {
         set_stroke_paint(chunk, ctx, content, s);
@@ -714,14 +760,21 @@ fn write_path_data(content: &mut Content, path: &tiny_skia_path::Path) {
     }
 }
 
-fn set_fill_paint(chunk: &mut Chunk, ctx: &mut PdfContext, content: &mut Content, f: &usvg::Fill) {
+fn set_fill_paint(
+    chunk: &mut Chunk,
+    ctx: &mut PdfContext,
+    content: &mut Content,
+    f: &usvg::Fill,
+    abs: tiny_skia_path::Transform,
+) {
     match f.paint() {
         usvg::Paint::Color(c) => {
             let [r, g, b] = color_rgb(*c);
             content.set_fill_rgb(r, g, b);
         }
         usvg::Paint::LinearGradient(_) | usvg::Paint::RadialGradient(_) => {
-            match register_gradient(chunk, ctx, f.paint()) {
+            let extra = compose(ctx.base, abs);
+            match register_gradient(chunk, ctx, f.paint(), extra) {
                 Some(name) => {
                     content.set_fill_color_space(pdf_writer::types::ColorSpaceOperand::Pattern);
                     content.set_fill_pattern(std::iter::empty(), Name(name.as_bytes()));
@@ -946,6 +999,31 @@ fn face_content_name(postscript: &str) -> Name<'_> {
     Name(if bytes.is_empty() { b"F0" } else { bytes })
 }
 
+/// The single font program to embed: a collection's face offset
+/// names a self-contained sfnt — slice from it; a plain font file is
+/// already the face.
+fn face_bytes(data: &[u8], index: u32) -> &[u8] {
+    if data.len() >= 12 && &data[0..4] == b"ttcf" {
+        let n = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        if index > 0 && (index as usize) >= n {
+            return data;
+        }
+        let at = 12 + index as usize * 4;
+        if at + 4 <= data.len() {
+            let o = u32::from_be_bytes([
+                data[at],
+                data[at + 1],
+                data[at + 2],
+                data[at + 3],
+            ]) as usize;
+            if o > 0 && o < data.len() {
+                return &data[o..];
+            }
+        }
+    }
+    data
+}
+
 /// Object assembly: fonts, images, shadings, page tree, catalog —
 /// everything the walk phase allocated refs for gets its dict here.
 fn assemble(
@@ -1101,11 +1179,15 @@ fn assemble(
             }
         }
         // The font file stream: /Length1 for TrueType (required by
-        // readers), /Subtype OpenType for CFF containers.
+        // readers), /Subtype OpenType for CFF containers. A font
+        // COLLECTION (.ttc/.otc — the CJK fallback shape on most
+        // hosts) is not a font program: slice out the face the
+        // offset table names (#218 review).
+        let embed = face_bytes(&data, index);
         {
-            let mut s = pdf.stream(refs.file, &data);
+            let mut s = pdf.stream(refs.file, embed);
             if true_type {
-                s.pair(Name(b"Length1"), data.len() as i32);
+                s.pair(Name(b"Length1"), embed.len() as i32);
             } else {
                 s.pair(Name(b"Subtype"), Name(b"OpenType"));
             }

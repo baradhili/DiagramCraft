@@ -99,11 +99,10 @@ fn backstage_export_writes_the_picked_file() {
     while std::time::Instant::now() < deadline {
         h.run();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        // The poll runs a frame behind the worker's completion — run
-        // two more frames once the file lands, then stop.
-        if out.exists() {
-            h.run();
-            h.run();
+        // The worker sends its result only after the write COMPLETES
+        // — `out.exists()` fires on a half-written file whose poll
+        // has not landed yet (#218 review).
+        if h.state().debug_export_pane_note().is_some() {
             break;
         }
     }

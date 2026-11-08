@@ -118,6 +118,14 @@ impl ExportPane {
                 let selected = self.format == f;
                 if ui.radio(selected, label).on_hover_text(hint).clicked() {
                     self.format = f;
+                    // The suggested path follows the format (#218
+                    // review): exporting PNG bytes into a .svg name
+                    // is the common flow otherwise.
+                    if !self.path.trim().is_empty() {
+                        let p = std::path::PathBuf::from(self.path.trim())
+                            .with_extension(f.extensions()[0]);
+                        self.path = p.to_string_lossy().into_owned();
+                    }
                 }
                 ui.weak(hint);
             }
@@ -211,7 +219,16 @@ impl ExportPane {
         }
         let format = self.format;
         let transparent = self.transparent;
-        let dpi = self.dpi.trim().parse::<f32>().unwrap_or(96.0).max(16.0);
+        // Finite and bounded (#218 review): "inf" parses, and an
+        // unbounded density asks gigabytes of RGBA from the raster.
+        let dpi = self
+            .dpi
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|v| v.is_finite())
+            .map(|v| v.clamp(16.0, 1200.0))
+            .unwrap_or(96.0);
         let pages: Vec<usize> = if self.all_pages {
             Vec::new()
         } else {

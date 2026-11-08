@@ -613,8 +613,12 @@ fn node_ink_box(
                     return;
                 }
                 let r = arrow_head_reach(weight, sz);
-                let (px, py) = a.apply(pt.0, -pt.1);
-                box_union(px - r, py - r, px + r, py + r, &a, u);
+                // LOCAL y-down corners — box_union applies the affine
+                // itself; pre-applying it here doubled the transform
+                // and threw the pad square across the page (#218
+                // review).
+                let (lx, ly) = (pt.0, -pt.1);
+                box_union(lx - r, ly - r, lx + r, ly + r, &a, u);
             };
             if let Some((x, y)) = first_pt {
                 pad(
@@ -4199,7 +4203,12 @@ fn color_value(doc: &Document, v: &str, f: Option<&str>) -> String {
     }
 }
 
-fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) -> String {
+pub(crate) fn themed_color_string(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    cell: &str,
+) -> String {
     match doc.resolve_cell(s, chain, cell) {
         Some(c) => color_value(doc, c.v.as_deref().unwrap_or(""), c.f.as_deref()),
         None => palette(-1),

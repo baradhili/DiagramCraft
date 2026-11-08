@@ -737,6 +737,7 @@ pub fn plan_connector_frame(
     beg: (f64, f64),
     endp: (f64, f64),
     pre_end: (f64, f64),
+    pre_beg: (f64, f64),
 ) -> FramePlan {
     let get = |n: &str| doc.resolve_cell(conn, chain, n).and_then(|v| v.numeric());
     let mut cells: Vec<(String, f64, Option<String>)> = Vec::new();
@@ -939,13 +940,19 @@ pub fn plan_connector_frame(
         // endpoints. Rows whose cells carry formulas
         // evaluate against the refreshed caches in the
         // renderer and are left to it.
+        // The rows live in the frame's begin-corner space, so their
+        // translation is the CHANGE OF THE begin→end OFFSET, not the
+        // end's own movement (#218 review): a moved BEGIN (the end
+        // glued elsewhere) previously translated nothing, and the
+        // endpoint-drop path — whose `pre_end` already names the new
+        // end — saw a zero delta either way.
         let dx = if formula_tracks("Width").is_some() {
-            endp.0 - pre_end.0
+            (endp.0 - beg.0) - (pre_end.0 - pre_beg.0)
         } else {
             0.0
         };
         let dy = if formula_tracks("Height").is_some() {
-            endp.1 - pre_end.1
+            (endp.1 - beg.1) - (pre_end.1 - pre_beg.1)
         } else {
             0.0
         };
@@ -1247,7 +1254,7 @@ impl Command for RerouteConnectors {
                 // Frame + route once, from both new endpoints — the
                 // shared planner (the live endpoint-drag preview plans
                 // through the same function).
-                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, (ex, ey));
+                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, (ex, ey), (bx, by));
                 let mut cells = end_cells;
                 cells.extend(plan.cells);
                 plans.push(Plan {

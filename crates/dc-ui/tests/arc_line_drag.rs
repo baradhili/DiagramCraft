@@ -240,11 +240,12 @@ fn preview_planner_matches_the_commit_reroute() {
     // plan's frame/row cache writes. No commands, no reroute.
     let mut preview_ed = dc_core::Editor::new(ed.doc.clone());
     let pre_end = (resolved(&ed, 1021, "EndX"), resolved(&ed, 1021, "EndY"));
+    let pre_beg = (resolved(&ed, 1021, "BeginX"), resolved(&ed, 1021, "BeginY"));
     let plan = {
         let page = ed.doc.pages.iter().find(|p| p.id == page_id).unwrap();
         let sh = find_shape_by_id(&page.shapes, 1021).unwrap();
         let chain = dc_core::scope::shape_chain(&ed.doc, page_id, 1021).unwrap();
-        dc_ui::cmd::plan_connector_frame(&ed.doc, sh, &chain, begin, drop, pre_end)
+        dc_ui::cmd::plan_connector_frame(&ed.doc, sh, &chain, begin, drop, pre_end, pre_beg)
     };
     {
         use dc_core::commands::{set_row_cell, RowSel};

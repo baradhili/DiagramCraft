@@ -567,6 +567,7 @@ struct EndpointPreview {
     doc: vsdx::Document,
     conn_id: i64,
     pre_end: (f64, f64),
+    pre_beg: (f64, f64),
     last_to: (f64, f64),
     tex: Option<egui::TextureHandle>,
     bbox: (f64, f64, f64, f64),
@@ -1048,11 +1049,16 @@ impl App {
         {
             let result = load.result.take().expect("result gated the landing");
             let path = load.path.clone();
+            let loaded = result.is_ok();
             self.finish_load(path.clone(), result);
             // The first render is the heavy half (every shape rasters +
             // lands): keep the scrim up until the layer store drains
-            // (#242 — "run until render is complete").
-            self.rendering = Some((path, load.started));
+            // (#242 — "run until render is complete"). A FAILED open
+            // must not enter it — its drain would overwrite the error
+            // status with "opened …" (#218 review).
+            if loaded {
+                self.rendering = Some((path, load.started));
+            }
             return None;
         }
         self.status = format!(
@@ -1674,13 +1680,12 @@ impl App {
             .unwrap_or_else(|| "drawing.vsdx".into());
         // The Export pane's suggested file (drawing.svg / .png / .pdf,
         // #35) — the save dialog opens on it.
-        let default_export_name = self
-            .export_pane
-            .path()
-            .rsplit('/')
-            .next()
-            .unwrap_or("drawing.svg")
-            .to_string();
+        // Path::file_name handles both separators (#218 review) — a
+        // backslash path would survive rsplit('/') whole.
+        let default_export_name = std::path::Path::new(self.export_pane.path())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "drawing.svg".to_string());
         let (tx, rx) = mpsc::channel();
         // The native dialog is untestable headless (rfd opens GTK);
         // an armed preset answers in its place (tests only).
@@ -5469,10 +5474,12 @@ impl App {
             let chain = shape_chain(&ed.doc, page_id, sid).ok()?;
             let g = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
             let pre_end = (g("EndX")?, g("EndY")?);
+            let pre_beg = (g("BeginX")?, g("BeginY")?);
             self.endpoint_preview = Some(EndpointPreview {
                 doc: ed.doc.clone(),
                 conn_id: sid,
                 pre_end,
+                pre_beg,
                 last_to: (f64::NAN, f64::NAN),
                 tex: None,
                 bbox: (0.0, 0.0, 0.0, 0.0),
@@ -5518,7 +5525,15 @@ impl App {
             let page2 = ep.doc.pages.iter().find(|p| p.id == page_id)?;
             let conn = vsdx::model::find_shape_by_id(&page2.shapes, sid)?;
             let chain2 = shape_chain(&ep.doc, page_id, sid).ok()?;
-            crate::cmd::plan_connector_frame(&ep.doc, conn, &chain2, beg, endp, ep.pre_end)
+            crate::cmd::plan_connector_frame(
+                &ep.doc,
+                conn,
+                &chain2,
+                beg,
+                endp,
+                ep.pre_end,
+                ep.pre_beg,
+            )
         };
         // Apply the plan's writes to the snapshot (plain cache writes
         // — the renderer reads values, not formulas).
@@ -14671,14 +14686,16 @@ impl App {
                         egui::FontId::proportional(26.0),
                         egui::Color32::from_rgb(0x1A, 0x24, 0x44),
                     );
+                    // Inside the WINDOW — the outer ui paints on the
+                    // shell behind it (#218 review).
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Tarahi v{} — cleanroom Visio-compatible diagramming",
+                            env!("CARGO_PKG_VERSION")
+                        ))
+                        .size(12.0),
+                    );
                 });
-            ui.label(
-                egui::RichText::new(format!(
-                    "Tarahi v{} — cleanroom Visio-compatible diagramming",
-                    env!("CARGO_PKG_VERSION")
-                ))
-                .size(12.0),
-            );
             self.about_open = open && self.about_open;
         }
     }
