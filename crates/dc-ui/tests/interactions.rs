@@ -49,6 +49,75 @@ fn dblclick_harness_with_blank() -> Harness<'static, App> {
         )
 }
 
+/// #35: the backstage Export page writes the picked file — Browse…
+/// (preset dialog), path adoption, Export… click, worker lands.
+#[test]
+fn backstage_export_writes_the_picked_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("exported.png");
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
+        .build_ui_state(
+            |ui, app: &mut App| {
+                dc_ui::theme::install(ui.ctx());
+                app.draw(ui);
+            },
+            App::with_blank(),
+        );
+    h.run();
+    {
+        let app = h.state_mut();
+        // The native save dialog is untestable headless: the preset
+        // answers the Browse… dialog with the export target.
+        app.preset_file_dialog_for_test(Some(out.clone()));
+        app.open_backstage_for_test();
+        app.set_backstage_page_for_test("export");
+    }
+    h.run();
+    h.run();
+    // Browse… hands the pane path to the preset answer.
+    h.get_by_label("Browse…").click();
+    h.run();
+    h.run();
+    assert_eq!(
+        h.state().debug_export_pane_path(),
+        out.to_string_lossy(),
+        "the picked path lands in the pane"
+    );
+    assert_eq!(
+        h.state().debug_export_pane_note(),
+        None,
+        "no stale note before exporting"
+    );
+    // Export… spawns the worker; the first export also pays the
+    // shared font-database build (system font scan), so wait on
+    // wall-clock time, not frame count.
+    h.get_by_label("Export…").click();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        h.run();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        // The poll runs a frame behind the worker's completion — run
+        // two more frames once the file lands, then stop.
+        if out.exists() {
+            h.run();
+            h.run();
+            break;
+        }
+    }
+    let note = h.state().debug_export_pane_note().unwrap_or("");
+    assert!(out.exists(), "the worker wrote the PNG (note: {note:?})");
+    assert!(
+        note.contains("Exported 1 file"),
+        "pane reports the export: {note:?}"
+    );
+    // PNG sanity through the shipped decoder: the blank drawing page.
+    let img = image::open(&out).unwrap();
+    assert!(img.width() >= 800, "96 dpi letter page: {img:?}");
+}
+
 /// Click (press + release queued together, then settle — the kittest
 /// convention; settling between press and release cancels the click).
 fn click_at(h: &mut Harness<'_, App>, pos: Pos2, button: egui::PointerButton) {
@@ -933,9 +1002,8 @@ fn splash_shows_then_hands_off() {
     );
     // Aged past the window: the next frame hands off to the shell.
     h.state_mut().debug_splash_for_test(Some(
-        std::time::Instant::now() - std::time::Duration::from_millis(
-            (dc_ui::loading::SPLASH_SECS * 1000.0) as u64 + 200,
-        ),
+        std::time::Instant::now()
+            - std::time::Duration::from_millis((dc_ui::loading::SPLASH_SECS * 1000.0) as u64 + 200),
     ));
     h.run();
     assert!(
@@ -953,8 +1021,8 @@ fn wheel_zoom_anchors_on_the_selection() {
     let mut h = harness_with_blank();
     h.run();
     let (_, shape) = place_master(&mut h, 2); // Rectangle
-    // Move it off the canvas center so the hovered-point anchor and
-    // the selection anchor differ.
+                                              // Move it off the canvas center so the hovered-point anchor and
+                                              // the selection anchor differ.
     let center = h.state().debug_shape_screen_rect(shape).unwrap().center();
     drag_naturally(&mut h, center, egui::vec2(-180.0, -120.0));
     let before = h.state().debug_shape_screen_rect(shape).unwrap();
@@ -998,8 +1066,7 @@ fn zoom_to_selection_centers_the_selection() {
     h.key_press_modifiers(egui::Modifiers::SHIFT, egui::Key::Z);
     h.run();
     let rect = h.state().debug_shape_screen_rect(shape).unwrap();
-    let (origin, content) =
-        dc_ui::canvas::content_area(h.state().debug_canvas_rect(), true);
+    let (origin, content) = dc_ui::canvas::content_area(h.state().debug_canvas_rect(), true);
     // The selection's center sits at the content-area center.
     assert!(
         (rect.center().to_vec2() - (origin.to_vec2() + content / 2.0)).length() < 3.0,

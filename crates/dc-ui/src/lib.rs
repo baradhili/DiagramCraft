@@ -8,14 +8,15 @@ pub mod app;
 pub mod canvas;
 pub mod cmd;
 pub mod connectors;
+pub mod export;
 pub mod freeform;
 #[doc(hidden)]
 pub mod group_fixture;
 pub mod guides;
 pub mod hyperlink;
-pub mod loading;
 pub mod icontex;
 mod layers;
+pub mod loading;
 pub mod os_theme;
 pub mod perf;
 pub mod props;

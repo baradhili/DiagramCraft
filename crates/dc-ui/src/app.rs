@@ -291,6 +291,10 @@ pub struct App {
     backstage_page: BackPage,
     /// Live query for the backstage New page's template search (#55).
     backstage_search: String,
+    /// Backstage Export page state (#35): format/scope/options/path
+    /// and the in-flight worker — the pane module owns the domain,
+    /// app.rs only forwards (owner's 2026-10-26 decomposition rule).
+    export_pane: crate::export::ExportPane,
     /// "Save changes?" prompt before File → New discards a dirty doc.
     confirm_new: bool,
     /// Continue into a new blank drawing once the save-as dialog
@@ -409,6 +413,8 @@ enum PendingDialog {
     /// Hyperlinks ▸ Address browse (#71): a picked target file for
     /// the draft's Address field.
     HyperlinkAddress(Receiver<Option<PathBuf>>),
+    /// Backstage Export Browse… (#35): the picked output file.
+    ExportSave(Receiver<Option<PathBuf>>),
 }
 
 #[derive(Clone, Copy)]
@@ -422,6 +428,9 @@ enum PendingKind {
     OpenPicture,
     /// Hyperlinks ▸ Address browse (#71).
     HyperlinkAddress,
+    /// Backstage Export page's Browse… (#35): the save dialog carries
+    /// the pane's format so the extension filter matches.
+    ExportSave(dc::export::Format),
 }
 
 /// Backstage rail command.
@@ -704,6 +713,7 @@ impl App {
             backstage: false,
             backstage_page: BackPage::Info,
             backstage_search: String::new(),
+            export_pane: crate::export::ExportPane::default(),
             confirm_new: false,
             new_after_save: false,
             confirm_close: None,
@@ -856,6 +866,16 @@ impl App {
     #[doc(hidden)]
     pub fn debug_set_doc_path_for_test(&mut self, path: PathBuf) {
         self.path = path;
+    }
+    /// kittest (#35): the Export pane's armed output path.
+    #[doc(hidden)]
+    pub fn debug_export_pane_path(&self) -> &str {
+        self.export_pane.path()
+    }
+    /// kittest (#35): the pane's last note (status of the worker).
+    #[doc(hidden)]
+    pub fn debug_export_pane_note(&self) -> Option<&str> {
+        self.export_pane.note_for_test()
     }
     #[doc(hidden)]
     pub fn debug_close_prompt(&self) -> bool {
@@ -1652,6 +1672,15 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "drawing.vsdx".into());
+        // The Export pane's suggested file (drawing.svg / .png / .pdf,
+        // #35) — the save dialog opens on it.
+        let default_export_name = self
+            .export_pane
+            .path()
+            .rsplit('/')
+            .next()
+            .unwrap_or("drawing.svg")
+            .to_string();
         let (tx, rx) = mpsc::channel();
         // The native dialog is untestable headless (rfd opens GTK);
         // an armed preset answers in its place (tests only).
@@ -1680,6 +1709,17 @@ impl App {
                         .pick_file(),
                     // Any file can be a hyperlink target (#71).
                     PendingKind::HyperlinkAddress => rfd::FileDialog::new().pick_file(),
+                    PendingKind::ExportSave(format) => rfd::FileDialog::new()
+                        .add_filter(
+                            match format {
+                                dc::export::Format::Svg => "SVG (vector graphics)",
+                                dc::export::Format::Png => "PNG (raster image)",
+                                dc::export::Format::Pdf => "PDF (document)",
+                            },
+                            format.extensions(),
+                        )
+                        .set_file_name(&default_export_name)
+                        .save_file(),
                 },
             };
             let _ = tx.send(picked);
@@ -1690,6 +1730,7 @@ impl App {
             PendingKind::SaveAs => PendingDialog::SaveAs(rx),
             PendingKind::OpenPicture => PendingDialog::OpenPicture(rx),
             PendingKind::HyperlinkAddress => PendingDialog::HyperlinkAddress(rx),
+            PendingKind::ExportSave(_) => PendingDialog::ExportSave(rx),
         });
     }
 
@@ -1743,6 +1784,7 @@ impl App {
             | PendingDialog::SaveAs(rx)
             | PendingDialog::OpenStencil(rx)
             | PendingDialog::OpenPicture(rx)
+            | PendingDialog::ExportSave(rx)
             | PendingDialog::HyperlinkAddress(rx) => match rx.try_recv() {
                 Ok(picked) => (picked, false),
                 Err(mpsc::TryRecvError::Empty) => (None, true),
@@ -1768,6 +1810,9 @@ impl App {
             PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
+            // The picked export target lands in the pane's path field
+            // (#35); a typed/picked extension re-targets the format.
+            PendingDialog::ExportSave(_) => self.export_pane.set_path(path.clone()),
             // The picked target lands in the open draft's Address
             // field (#71), stored the way the document's toggle wants
             // it (a path inside the document's directory shows as its
@@ -2419,9 +2464,7 @@ impl App {
         // anything else — EllipticalArcTo, CubicBezTo, splines, NURBS,
         // polylines — is curve ink. The instance's own section when it
         // carries one, else the master root's (what renders).
-        let straight = |t: &str| {
-            matches!(t, "" | "MoveTo" | "RelMoveTo" | "LineTo" | "RelLineTo")
-        };
+        let straight = |t: &str| matches!(t, "" | "MoveTo" | "RelMoveTo" | "LineTo" | "RelLineTo");
         let curved = |rows: &[vsdx::model::Row]| {
             rows.iter()
                 .any(|r| r.t.as_deref().map(|t| !straight(t)).unwrap_or(false))
@@ -5517,11 +5560,7 @@ impl App {
         let w_px = (bounds.2 * f64::from(self.view.px_per_in())).clamp(16.0, 2048.0);
         let tree = crate::svgimg::parse_svg(&svg, crate::perf::Kind::Page).ok()?;
         let img = crate::svgimg::render_tree(&tree, w_px as f32, crate::perf::Kind::Page).ok()?;
-        ep.tex = Some(ctx.load_texture(
-            "endpoint-drag-preview",
-            img,
-            egui::TextureOptions::LINEAR,
-        ));
+        ep.tex = Some(ctx.load_texture("endpoint-drag-preview", img, egui::TextureOptions::LINEAR));
         ep.bbox = bounds;
         ep.last_to = to;
         let tex = ep.tex.as_ref()?;
@@ -7459,10 +7498,7 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Drawing1".into());
-        let title = format!(
-            "{name} - Tarahi{}",
-            if self.dirty { " *" } else { "" }
-        );
+        let title = format!("{name} - Tarahi{}", if self.dirty { " *" } else { "" });
         if self.window_title != title {
             self.window_title = title.clone();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -7523,6 +7559,9 @@ impl App {
                         } else {
                             BackPage::Recent
                         };
+                        // The Export pane's suggested path follows the
+                        // document (#35).
+                        self.export_pane.reset_for(&self.path);
                     }
                     ui.add_space(8.0);
                     // #156: the contextual Container Tools tab rides
@@ -8239,10 +8278,12 @@ impl App {
                             RibbonButton::new(Icon::ZoomOut, "Zoom Out", Action::ZoomOut),
                         ]),
                         big(RibbonButton::new(Icon::Fit, "Fit Window", Action::FitPage)),
-                        big(
-                            RibbonButton::new(Icon::ZoomSelection, "Selection", Action::ZoomSelection)
-                                .tip("Zoom to selection (Shift+Z)"),
-                        ),
+                        big(RibbonButton::new(
+                            Icon::ZoomSelection,
+                            "Selection",
+                            Action::ZoomSelection,
+                        )
+                        .tip("Zoom to selection (Shift+Z)")),
                         big(RibbonButton::new(Icon::ZoomIn, "100%", Action::Zoom100)),
                     ],
                 ),
@@ -9616,14 +9657,9 @@ impl App {
             if let (Some((page_id, sid)), Some(hid)) = (self.sel, armed_handle_now) {
                 if let Some(ptr) = ui.input(|i| i.pointer.interact_pos()) {
                     let ptr_page = canvas::screen_to_page(ptr, &self.view, &geom);
-                    if let Some(q) = self.endpoint_preview_quad(
-                        ui.ctx(),
-                        page_id,
-                        sid,
-                        hid,
-                        &snap_end,
-                        ptr_page,
-                    ) {
+                    if let Some(q) =
+                        self.endpoint_preview_quad(ui.ctx(), page_id, sid, hid, &snap_end, ptr_page)
+                    {
                         drag_fx.ghosts.push(q);
                         endpoint_ghost = true;
                     }
@@ -13444,6 +13480,7 @@ impl App {
         } else {
             BackPage::Recent
         };
+        self.export_pane.reset_for(&self.path);
     }
     /// kittest: jump straight to one backstage page ("info" | "recent"
     /// | "new" | "print" | "share" | "export").
@@ -14275,6 +14312,14 @@ impl App {
         self.update_drag(&ctx);
         self.poll_dialog(&ctx);
         self.poll_stencil_extraction(&ctx);
+        // Backstage Export worker (#35): the finished file count (or
+        // the failure) lands in the pane's note and the status bar.
+        if let Some(result) = self.export_pane.poll() {
+            self.status = match result {
+                Ok(n) => format!("Exported {n} file{}", if n == 1 { "" } else { "s" }),
+                Err(e) => format!("Export failed: {e}"),
+            };
+        }
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);
         self.page_setup_window(&ctx);
@@ -14605,10 +14650,8 @@ impl App {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ui.ctx(), |ui| {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(220.0, 150.0),
-                        egui::Sense::hover(),
-                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(220.0, 150.0), egui::Sense::hover());
                     crate::loading::draw_mark(
                         ui.painter(),
                         rect.center() + egui::Vec2::new(0.0, -14.0),
@@ -15227,13 +15270,25 @@ impl App {
                         "Share a Copy…",
                         "Sharing arrives with M6",
                     ),
-                    BackPage::Export => backstage_stub(
-                        ui,
-                        "Export",
-                        "Save the drawing in another format.",
-                        "Export…",
-                        "Export filters arrive with M6",
-                    ),
+                    BackPage::Export => {
+                        ui.heading("Export");
+                        ui.add_space(6.0);
+                        ui.weak("Save the drawing in another format.");
+                        ui.add_space(6.0);
+                        let page_count = self.ed().map_or(0, |ed| ed.doc.pages.len());
+                        match self.export_pane.show(ui, page_count) {
+                            crate::export::PaneAction::None => {}
+                            crate::export::PaneAction::Browse(format) => {
+                                self.begin_dialog(PendingKind::ExportSave(format));
+                            }
+                            crate::export::PaneAction::Export => {
+                                let dir = self.path.parent().map(PathBuf::from);
+                                if let Some(ed) = self.ed.as_ref() {
+                                    self.export_pane.launch(&ed.doc, self.page_idx, dir);
+                                }
+                            }
+                        }
+                    }
                 }
             });
         self.backstage_search = search_text;
@@ -16016,11 +16071,7 @@ mod tests {
         assert!(app.dialog.is_none(), "answered dialog is consumed");
         // #224: the parse went to the worker — the opening status
         // shows, the poll lands the failure, the status flips.
-        assert!(
-            app.status.starts_with("Opening"),
-            "status = {}",
-            app.status
-        );
+        assert!(app.status.starts_with("Opening"), "status = {}", app.status);
         assert!(app.debug_loading_for_test());
         // The worker thread races this thread — pump the poll until the
         // result arrives (bounded; the failure path is fast).

@@ -1,0 +1,309 @@
+//! The backstage Export page (#35): SVG / PNG / PDF file export, the
+//! GUI half of `dc::export`. The pane keeps its own state (format,
+//! page scope, transparency, PNG density, output path) and runs the
+//! export on a worker thread — a 300 dpi PNG or a font-embedding PDF
+//! must not park the UI thread, so the result lands through a channel
+//! the App polls (the same pattern as the rfd pick and the stencil
+//! extraction).
+//!
+//! app.rs keeps only the glue: a field, a `poll_export` call in the
+//! frame, and the Browse dialog hand-off — per the owner's 2026-10-26
+//! decomposition direction.
+
+use std::path::PathBuf;
+use std::sync::mpsc::{channel, Receiver};
+
+use dc::export::{self, Format, Options};
+use egui::{Ui, Vec2};
+
+/// What the pane asks the App to do after a frame.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PaneAction {
+    None,
+    /// Open the native save dialog for this format (Browse…).
+    Browse(Format),
+    /// Start the export with the current pane state.
+    Export,
+}
+
+/// The backstage Export page's state + UI.
+pub struct ExportPane {
+    format: Format,
+    /// True = every page; False = the page the canvas shows.
+    all_pages: bool,
+    transparent: bool,
+    /// PNG density as typed (parsed on export; empty/invalid = 96).
+    dpi: String,
+    path: String,
+    /// The last completed export or failure, shown under the button.
+    note: Option<String>,
+    /// The running export's result channel (one at a time).
+    in_flight: Option<Receiver<Result<usize, String>>>,
+}
+
+impl Default for ExportPane {
+    fn default() -> Self {
+        Self {
+            format: Format::Svg,
+            all_pages: true,
+            transparent: false,
+            dpi: "96".into(),
+            path: String::new(),
+            note: None,
+            in_flight: None,
+        }
+    }
+}
+
+impl ExportPane {
+    /// Reset the pane for a document: the output path defaults beside
+    /// the drawing (`drawing.svg`), per Visio's export behavior.
+    pub fn reset_for(&mut self, doc_path: &std::path::Path) {
+        self.path = default_export_path(doc_path, self.format)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        self.note = None;
+        self.in_flight = None;
+    }
+
+    pub fn format(&self) -> Format {
+        self.format
+    }
+
+    /// The armed output path (kittest observability + the dialog
+    /// result).
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The last note (kittest observability).
+    #[doc(hidden)]
+    pub fn note_for_test(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// The preset dialog answered: adopt the picked path.
+    pub fn set_path(&mut self, path: PathBuf) {
+        if let Some(f) = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .and_then(Format::from_extension)
+        {
+            self.format = f;
+        }
+        self.path = path.to_string_lossy().into_owned();
+    }
+
+    /// One frame of the Export page. `page_count` drives the scope
+    /// label; the App performs the returned action.
+    pub fn show(&mut self, ui: &mut Ui, page_count: usize) -> PaneAction {
+        let mut action = PaneAction::None;
+        ui.add_space(4.0);
+        ui.strong("Select a format");
+        ui.add_space(4.0);
+        ui.vertical(|ui| {
+            for (f, label, hint) in [
+                (
+                    Format::Svg,
+                    "SVG",
+                    "Vector graphics — the renderer's own format",
+                ),
+                (Format::Png, "PNG", "Raster image at the chosen density"),
+                (
+                    Format::Pdf,
+                    "PDF",
+                    "Document with selectable text (all pages in one file)",
+                ),
+            ] {
+                let selected = self.format == f;
+                if ui.radio(selected, label).on_hover_text(hint).clicked() {
+                    self.format = f;
+                }
+                ui.weak(hint);
+            }
+        });
+        ui.add_space(8.0);
+
+        ui.strong("Pages");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            // A single-page document has only "Current page" — show it
+            // selected rather than an odd unselected radio.
+            let current_only = page_count <= 1 || !self.all_pages;
+            if ui.radio(current_only, "Current page").clicked() {
+                self.all_pages = false;
+            }
+            if page_count > 1
+                && ui
+                    .radio(self.all_pages, format!("All pages ({page_count})"))
+                    .clicked()
+            {
+                self.all_pages = true;
+            }
+        });
+        if self.format != Format::Pdf {
+            ui.add_space(8.0);
+            ui.strong("Options");
+            ui.add_space(4.0);
+            ui.checkbox(&mut self.transparent, "Transparent background");
+            if self.format == Format::Png {
+                ui.horizontal(|ui| {
+                    ui.label("Resolution (dpi):");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dpi)
+                            .hint_text("96")
+                            .desired_width(60.0),
+                    );
+                });
+            }
+        }
+        ui.add_space(10.0);
+
+        ui.strong("Save as");
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let path_edit = ui.add(
+                egui::TextEdit::singleline(&mut self.path)
+                    .hint_text("Output file")
+                    .desired_width(360.0),
+            );
+            if path_edit.changed() {
+                // A typed extension re-targets the format so the
+                // dialog filter and the writer agree.
+                if let Some(f) = path_buf_ext(&self.path) {
+                    self.format = f;
+                }
+            }
+            if ui.button("Browse…").clicked() {
+                action = PaneAction::Browse(self.format);
+            }
+        });
+        ui.add_space(10.0);
+
+        let busy = self.in_flight.is_some();
+        let enabled = !self.path.trim().is_empty() && !busy;
+        let export = ui.add_enabled(
+            enabled,
+            egui::Button::new("Export…").min_size(Vec2::new(90.0, 26.0)),
+        );
+        if busy {
+            ui.weak("Exporting…");
+        } else if let Some(note) = &self.note {
+            ui.weak(note);
+        } else if self.path.trim().is_empty() {
+            ui.weak("Pick an output file first");
+        }
+        if export.clicked() && enabled {
+            action = PaneAction::Export;
+        }
+        action
+    }
+
+    /// Spawn the export worker (App-side: clones the document as the
+    /// snapshot the export renders).
+    pub fn launch(&mut self, doc: &vsdx::Document, current_page: usize, doc_dir: Option<PathBuf>) {
+        if self.in_flight.is_some() {
+            return; // one export at a time
+        }
+        let path = PathBuf::from(self.path.trim());
+        if path.as_os_str().is_empty() {
+            return;
+        }
+        let format = self.format;
+        let transparent = self.transparent;
+        let dpi = self.dpi.trim().parse::<f32>().unwrap_or(96.0).max(16.0);
+        let pages: Vec<usize> = if self.all_pages {
+            Vec::new()
+        } else {
+            vec![current_page.min(doc.pages.len().saturating_sub(1))]
+        };
+        // A relative path resolves against the document's folder —
+        // exports belong beside the drawing, not beside the cwd.
+        let path = match &doc_dir {
+            Some(dir) if path.is_relative() => dir.join(path),
+            _ => path,
+        };
+        let opts = Options {
+            transparent,
+            png_dpi: dpi,
+        };
+        let doc = doc.clone();
+        let (tx, rx) = channel();
+        self.in_flight = Some(rx);
+        self.note = None;
+        std::thread::spawn(move || {
+            let result = export::write_document(&doc, &path, &pages, format, &opts)
+                .map(|files| files.len())
+                .map_err(|e| format!("{e:#}"));
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain the worker: `Some(result)` once it finishes (pages
+    /// written, or the failure).
+    pub fn poll(&mut self) -> Option<Result<usize, String>> {
+        let rx = self.in_flight.as_mut()?;
+        match rx.try_recv() {
+            Ok(r) => {
+                self.in_flight = None;
+                self.note = Some(match &r {
+                    Ok(n) => format!("Exported {n} file{}.", if *n == 1 { "" } else { "s" }),
+                    Err(e) => format!("Export failed: {e}"),
+                });
+                Some(r)
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.in_flight = None;
+                self.note = Some("Export failed: worker lost".into());
+                Some(Err("worker lost".into()))
+            }
+        }
+    }
+}
+
+/// The output path a fresh pane suggests for a document: beside the
+/// drawing with the format's extension.
+fn default_export_path(doc_path: &std::path::Path, format: Format) -> Option<PathBuf> {
+    let stem = doc_path.file_stem()?;
+    let mut name = stem.to_os_string();
+    name.push(".");
+    name.push(format.extensions()[0]);
+    Some(doc_path.with_file_name(name))
+}
+
+fn path_buf_ext(path: &str) -> Option<Format> {
+    PathBuf::from(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(Format::from_extension)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_for_suggests_a_path_beside_the_drawing() {
+        let mut pane = ExportPane::default();
+        pane.reset_for(std::path::Path::new("/docs/plan.vsdx"));
+        assert_eq!(pane.path(), "/docs/plan.svg");
+        pane.format = Format::Pdf;
+        pane.reset_for(std::path::Path::new("/docs/plan.vsdx"));
+        assert_eq!(pane.path(), "/docs/plan.pdf");
+    }
+
+    #[test]
+    fn set_path_adopts_the_picked_extension() {
+        let mut pane = ExportPane::default();
+        pane.set_path(PathBuf::from("/docs/plan.pdf"));
+        assert_eq!(pane.format(), Format::Pdf);
+        assert_eq!(pane.path(), "/docs/plan.pdf");
+    }
+
+    #[test]
+    fn typed_extension_retargets_the_format() {
+        assert_eq!(path_buf_ext("/x/out.png"), Some(Format::Png));
+        assert_eq!(path_buf_ext("/x/out.txt"), None);
+    }
+}

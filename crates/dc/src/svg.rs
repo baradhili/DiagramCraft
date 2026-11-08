@@ -259,6 +259,18 @@ pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> 
     render_page_with(doc, page, &[])
 }
 
+/// The export render of one page (#35): page chrome dropped (no gray
+/// sheet border — Visio's own exports carry none), white background
+/// per `transparent`. The ink is identical to [`render_page`] — only
+/// the chrome differs.
+pub fn render_page_export(
+    doc: &Document,
+    page: &vsdx::Page,
+    transparent: bool,
+) -> anyhow::Result<String> {
+    render_page_full(doc, page, &[], None, None, false, !transparent)
+}
+
 /// [`render_page`] with hidden layer members: shapes whose
 /// `LayerMember` names one of `hidden` (Visio layer row indexes, the
 /// LayerMember cell convention) are skipped entirely — the annotation
@@ -879,6 +891,23 @@ fn render_page_opts(
     only: Option<i64>,
     skip_text: Option<i64>,
 ) -> anyhow::Result<String> {
+    render_page_full(doc, page, hidden, only, skip_text, true, true)
+}
+
+/// [`render_page_opts`] with the page chrome gated: `border` drops the
+/// gray sheet frame, `background` drops the white page fill — the
+/// file exports (#35) produce the ink only (Visio's own SVG/PDF/PNG
+/// exports carry no sheet chrome), while the canvas and `dc render`
+/// keep the full picture.
+fn render_page_full(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+    only: Option<i64>,
+    skip_text: Option<i64>,
+    border: bool,
+    background: bool,
+) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
 
@@ -894,15 +923,20 @@ fn render_page_opts(
         r#"<!-- Tarahi (cleanroom VSDX renderer); page '{}' -->"#,
         escape_attr(&page.name)
     );
-    let _ = writeln!(
-        svg,
-        r##"<rect x="0" y="0" width="{w}" height="{h}" fill="none" stroke="#c8c8c8" stroke-width="0.01"/>"##
-    );
-    // White background under the sheet (Visio page is white).
-    let _ = writeln!(
-        svg,
-        r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
-    );
+    if border {
+        let _ = writeln!(
+            svg,
+            r##"<rect x="0" y="0" width="{w}" height="{h}" fill="none" stroke="#c8c8c8" stroke-width="0.01"/>"##
+        );
+    }
+    // White background under the sheet (Visio page is white); an
+    // export with `--transparent` omits it so the alpha channel shows.
+    if background {
+        let _ = writeln!(
+            svg,
+            r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
+        );
+    }
     let hidden_member = |s: &Shape| -> bool {
         s.sheet
             .cell("LayerMember")
@@ -3051,8 +3085,9 @@ fn render_geometry(
             head_weight + ARROW_SIZE_PT[i] / 72.0
         };
         let end_setback = kind(end_arrow).map_or(0.0, |k| arrow_setback(k) * head_unit(esz));
-        let begin_setback = kind(begin_arrow)
-            .map_or(0.0, |k| arrow_begin_setback(arrow_setback(k) * head_unit(bsz)));
+        let begin_setback = kind(begin_arrow).map_or(0.0, |k| {
+            arrow_begin_setback(arrow_setback(k) * head_unit(bsz))
+        });
         // The shaft stops at (or under) the head's rear; the heads
         // themselves anchor at the ORIGINAL endpoints, so the trim must
         // not move them. Closed loops and multi-subpath data trim
@@ -3170,7 +3205,10 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
         &[fp("M0,0 L-2,-1 C-2.31476,-0.37049 -2.31476,0.37049 -2,1 Z")],
     ),
     // 7 — open fork (curved barbs).
-    (7, &[sp("M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1")]),
+    (
+        7,
+        &[sp("M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1")],
+    ),
     // 8 — the stealth dart: the concave-rear dart (the 5 glyph).
     (
         8,
@@ -3181,7 +3219,10 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
     // 10 — the filled circle, centered ON the endpoint.
     (10, &[dot(0.0, 0.0, 0.75)]),
     // 11 — the filled square, centered ON the endpoint.
-    (11, &[fp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")]),
+    (
+        11,
+        &[fp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")],
+    ),
     // 12 — ONE wide open V (len 3; the old "double chevron" label
     // was a print misread).
     (12, &[sp("M-3,-1 L0,0 L-3,1")]),
@@ -3210,7 +3251,10 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
     // 20 — the open ring, centered ON the endpoint.
     (20, &[ring(0.0, 0.0, 0.75)]),
     // 21 — the open square, centered ON the endpoint.
-    (21, &[sp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")]),
+    (
+        21,
+        &[sp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")],
+    ),
     // 22 — the open diamond, 4.5 × 2.25.
     (22, &[sp("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z")]),
     // 23 — single slanted tick: 45° behind the tip ("\"), shaft
@@ -3218,10 +3262,7 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
     (23, &[sp("M-2.9,-1 L-0.9,1")]),
     // 24–26 — perpendicular ticks at 1.5 + 0.75·i behind the tip.
     (24, &[sp("M-1.5,-0.75 L-1.5,0.75")]),
-    (
-        25,
-        &[sp("M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75")],
-    ),
+    (25, &[sp("M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75")]),
     (
         26,
         &[sp(
@@ -3231,13 +3272,25 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
     // 27 — the three-pronged open fork (crow's foot).
     (27, &[sp("M0,-0.75 L-1.5,0 L0,0.75")]),
     // 28 — crow's-foot fork + perpendicular tick behind it.
-    (28, &[sp("M0,-0.75 L-1.5,0 L0,0.75"), sp("M-2,-0.75 L-2,0.75")]),
+    (
+        28,
+        &[sp("M0,-0.75 L-1.5,0 L0,0.75"), sp("M-2,-0.75 L-2,0.75")],
+    ),
     // 29 — crow's-foot fork, then the open ring at 2.25.
-    (29, &[sp("M0,-0.75 L-1.5,0 L0,0.75"), ring(-2.25, 0.0, 0.75)]),
+    (
+        29,
+        &[sp("M0,-0.75 L-1.5,0 L0,0.75"), ring(-2.25, 0.0, 0.75)],
+    ),
     // 30 — open ring at 2.25, then a tick toward the tip.
-    (30, &[ring(-2.25, 0.0, 0.75), sp("M-0.75,-0.75 L-0.75,0.75")]),
+    (
+        30,
+        &[ring(-2.25, 0.0, 0.75), sp("M-0.75,-0.75 L-0.75,0.75")],
+    ),
     // 31–33 — 1–3 ticks behind an open ring at the tip.
-    (31, &[sp("M-2.25,-0.75 L-2.25,0.75"), ring(-0.75, 0.0, 0.75)]),
+    (
+        31,
+        &[sp("M-2.25,-0.75 L-2.25,0.75"), ring(-0.75, 0.0, 0.75)],
+    ),
     (
         32,
         &[
@@ -3261,7 +3314,10 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
         ],
     ),
     // 35–37 — 1–3 ticks behind a filled 0.825-radius dot at the tip.
-    (35, &[dot(-0.75, 0.0, 0.825), sp("M-2.25,-0.75 L-2.25,0.75")]),
+    (
+        35,
+        &[dot(-0.75, 0.0, 0.825), sp("M-2.25,-0.75 L-2.25,0.75")],
+    ),
     (
         36,
         &[
@@ -3294,10 +3350,7 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
     (42, &[dot(-0.75, 0.0, 0.75)]),
     // 43 — the open double chevron (two 2-unit V's, len 4; each V is
     // corner→apex→corner so no base edge closes it).
-    (
-        43,
-        &[sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1")],
-    ),
+    (43, &[sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1")]),
     // 44 — perpendicular tick behind a single open V.
     (44, &[sp("M-2,-1 L0,0 L-2,1"), sp("M-3,-0.75 L-3,0.75")]),
     // 45 — perpendicular tick behind the double chevron.
@@ -3587,19 +3640,11 @@ fn quad_at(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), t: f64) -> (f64, f64)
     )
 }
 
-fn cubic_at(
-    p0: (f64, f64),
-    p1: (f64, f64),
-    p2: (f64, f64),
-    p3: (f64, f64),
-    t: f64,
-) -> (f64, f64) {
+fn cubic_at(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
     let mt = 1.0 - t;
     (
-        mt * mt * mt * p0.0 + 3.0 * mt * mt * t * p1.0 + 3.0 * mt * t * t * p2.0
-            + t * t * t * p3.0,
-        mt * mt * mt * p0.1 + 3.0 * mt * mt * t * p1.1 + 3.0 * mt * t * t * p2.1
-            + t * t * t * p3.1,
+        mt * mt * mt * p0.0 + 3.0 * mt * mt * t * p1.0 + 3.0 * mt * t * t * p2.0 + t * t * t * p3.0,
+        mt * mt * mt * p0.1 + 3.0 * mt * mt * t * p1.1 + 3.0 * mt * t * t * p2.1 + t * t * t * p3.1,
     )
 }
 
@@ -4871,10 +4916,7 @@ mod tests {
             (45, "M-5,-0.75 L-5,0.75"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            assert!(
-                out.contains("dc-ah"),
-                "value {v} emits a head group: {out}"
-            );
+            assert!(out.contains("dc-ah"), "value {v} emits a head group: {out}");
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
         // The dots/rings are circle elements (10/42 filled, 20/41
@@ -6611,7 +6653,10 @@ mod tests {
         }
         // 22 is the stroked diamond (4.5 × 2.25 units).
         let parts = arrow_spec(22).unwrap();
-        assert!(parts[0].d.contains("L-2.25,-1.125 L-4.5,0"), "diamond profile");
+        assert!(
+            parts[0].d.contains("L-2.25,-1.125 L-4.5,0"),
+            "diamond profile"
+        );
         // 12 is ONE wide open V; 43 is the double chevron (the print
         // correction — the old table had the two swapped up).
         let v12 = arrow_spec(12).unwrap();
@@ -6783,7 +6828,10 @@ mod tests {
             "the cut lands on the curve: {trimmed}"
         );
         let q_part = trimmed.split("Q ").nth(1).expect("sub-quadratic");
-        let nums: Vec<f64> = q_part.split_whitespace().map(|v| v.parse().unwrap()).collect();
+        let nums: Vec<f64> = q_part
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
         let got = quad_at((0.0, 0.0), (nums[0], nums[1]), (nums[2], nums[3]), 0.5);
         let want = quad_at((0.0, 0.0), (1.0, 2.0), (2.0, 0.0), t_cut * 0.5);
         assert!(
@@ -6796,7 +6844,10 @@ mod tests {
         let a = "M 0 0 A 1 1 0 0 1 2 0 ";
         let trimmed = trim_path(a, 0.0, std::f64::consts::PI / 2.0);
         let a_part = trimmed.split("A ").nth(1).expect("sub-arc");
-        let nums: Vec<f64> = a_part.split_whitespace().map(|v| v.parse().unwrap()).collect();
+        let nums: Vec<f64> = a_part
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
         assert!(
             (nums[5] - 1.0).abs() < 5e-3 && (nums[6] + 1.0).abs() < 5e-3,
             "the arc cut lands at the quarter point: {trimmed}"

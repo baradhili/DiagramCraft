@@ -3,7 +3,10 @@
 
 pub mod curve;
 pub mod edit;
+pub mod export;
 pub mod geom;
+pub mod pdf;
+pub mod raster;
 pub mod svg;
 pub mod textfunc;
 pub mod textmetrics;

@@ -347,6 +347,19 @@ fn shell_snapshot_backstage_recent() {
 }
 
 #[test]
+fn shell_snapshot_backstage_export() {
+    // The #35 Export page: format cards, page scope, options, path row
+    // and the Export… action. The path is pinned like the Info golden —
+    // the pane's suggestion derives from the document path.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::with_doc(&fixture(tmp.path()));
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("export");
+    run_shell("dc_ui_shell_backstage_export", app);
+}
+
+#[test]
 fn shell_snapshot_backstage_new() {
     // The search-first New page (gallery + search box, #55).
     let mut app = App::with_blank();
