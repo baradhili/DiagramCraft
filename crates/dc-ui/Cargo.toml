@@ -3,7 +3,7 @@ name = "dc-ui"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
-description = "DiagramCraft desktop application (Visio-compatible diagram editor)"
+description = "Tarahi desktop application (Visio-compatible diagram editor)"
 
 # Distribution name for the GUI binary (packaging + desktop entry).
 [[bin]]
@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [package.metadata.deb]
 name = "diagramcraft"
-maintainer = "DiagramCraft contributors"
+maintainer = "Tarahi contributors"
 depends = "$auto"
 section = "graphics"
 priority = "optional"

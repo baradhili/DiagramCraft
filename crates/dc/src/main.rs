@@ -1,4 +1,4 @@
-//! dc — DiagramCraft command line.
+//! dc — Tarahi command line.
 //!
 //! Subcommands:
 //!   dc info      <file>              package/part inventory
@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 #[command(
     name = "dc",
     version,
-    about = "DiagramCraft — Linux Visio (VSDX) toolchain"
+    about = "Tarahi — Linux Visio (VSDX) toolchain"
 )]
 struct Cli {
     #[command(subcommand)]

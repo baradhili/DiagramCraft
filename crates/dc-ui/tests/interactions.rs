@@ -889,7 +889,7 @@ fn qat_help_opens_about() {
         "the QAT Help button opened About"
     );
     // The window's ✕ closes it.
-    h.get_by_label_contains("About DiagramCraft");
+    h.get_by_label_contains("About Tarahi");
     h.key_press(egui::Key::Escape);
     h.run();
 }
@@ -4179,7 +4179,7 @@ fn drag_moves_the_shape_live_under_the_cursor() {
 // ---------------------------------------------------------------------------
 
 /// A synthetic standalone stencil (.vssx) written from an in-code
-/// model — DiagramCraft's own fixture, no Microsoft content. Master
+/// model — Tarahi's own fixture, no Microsoft content. Master
 /// ids are caller-chosen so tests can make two stencils collide.
 /// Pump the harness until the dialog worker's answer lands in the
 /// stencil pane (a FIXED frame count races the worker thread on slow

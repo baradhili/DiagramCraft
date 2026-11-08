@@ -82,7 +82,7 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
     );
     let _ = writeln!(
         svg,
-        r#"<!-- DiagramCraft master contact sheet ({} masters) -->"#,
+        r#"<!-- Tarahi master contact sheet ({} masters) -->"#,
         masters.len()
     );
     let _ = writeln!(
@@ -891,7 +891,7 @@ fn render_page_opts(
     );
     let _ = writeln!(
         svg,
-        r#"<!-- DiagramCraft (cleanroom VSDX renderer); page '{}' -->"#,
+        r#"<!-- Tarahi (cleanroom VSDX renderer); page '{}' -->"#,
         escape_attr(&page.name)
     );
     let _ = writeln!(

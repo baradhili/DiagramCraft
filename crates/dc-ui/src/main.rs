@@ -1,4 +1,4 @@
-//! Launch the DiagramCraft desktop app: `dc-ui [file.vsdx|vstx|vssx]`.
+//! Launch the Tarahi desktop app: `dc-ui [file.vsdx|vstx|vssx]`.
 
 fn main() -> eframe::Result<()> {
     let path = std::env::args().nth(1).map(std::path::PathBuf::from);
@@ -6,11 +6,11 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([980.0, 640.0])
-            .with_title("DiagramCraft"),
+            .with_title("Tarahi"),
         ..Default::default()
     };
     eframe::run_native(
-        "DiagramCraft",
+        "Tarahi",
         options,
         Box::new(|cc| Ok(Box::new(dc_ui::app::App::new(cc, path)))),
     )

@@ -264,7 +264,7 @@ impl Editor {
     }
 
     /// A fresh blank drawing: one US-Letter page, no masters (File →
-    /// New). The embedded template is DiagramCraft's own synthetic
+    /// New). The embedded template is Tarahi's own synthetic
     /// package (no Microsoft content).
     pub fn new_blank() -> Editor {
         const BLANK: &[u8] = include_bytes!("../assets/blank.vsdx");

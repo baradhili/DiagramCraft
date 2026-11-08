@@ -724,7 +724,7 @@ fn window_title_tracks_document_and_dirty_state() {
     h.run();
     assert_eq!(
         h.state().debug_window_title_for_test(),
-        "Drawing1 - DiagramCraft",
+        "Drawing1 - Tarahi",
         "an unsaved blank drawing titles the OS window"
     );
 
@@ -734,7 +734,7 @@ fn window_title_tracks_document_and_dirty_state() {
     h.run();
     assert_eq!(
         h.state().debug_window_title_for_test(),
-        "Drawing1 - DiagramCraft *",
+        "Drawing1 - Tarahi *",
         "the dirty marker reaches the OS window title"
     );
     // (Undo keeps the dirty flag under the current save-point

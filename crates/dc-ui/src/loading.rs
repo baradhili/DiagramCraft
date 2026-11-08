@@ -409,7 +409,7 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
             p.text(
                 Pos2::new(card.center().x, card.bottom() - pad - 18.0),
                 egui::Align2::CENTER_BOTTOM,
-                "DiagramCraft",
+                "Tarahi",
                 egui::FontId::proportional(13.0),
                 MUTED.gamma_multiply(0.8),
             );

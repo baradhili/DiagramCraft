@@ -1,6 +1,6 @@
 [package]
 name = "dc"
-description = "DiagramCraft CLI — inspect and render Visio VSDX diagrams"
+description = "Tarahi CLI — inspect and render Visio VSDX diagrams"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

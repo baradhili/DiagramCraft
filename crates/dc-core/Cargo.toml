@@ -1,6 +1,6 @@
 [package]
 name = "dc-core"
-description = "DiagramCraft application core — editing command layer with undo/redo over the vsdx model"
+description = "Tarahi application core — editing command layer with undo/redo over the vsdx model"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -336,7 +336,7 @@ pub struct App {
     /// Last frame's context-menu rect in screen coords; None while the
     /// menu is closed (kept for the placement tests, issue #49).
     ctx_menu_rect: Option<egui::Rect>,
-    /// In-app shape clipboard (Cut/Copy/Paste within DiagramCraft; rich
+    /// In-app shape clipboard (Cut/Copy/Paste within Tarahi; rich
     /// OS-clipboard formats arrive with a later milestone).
     clipboard: Option<Shape>,
     /// In-place WYSIWYG text editor session (GitHub #22); the state
@@ -7460,7 +7460,7 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Drawing1".into());
         let title = format!(
-            "{name} - DiagramCraft{}",
+            "{name} - Tarahi{}",
             if self.dirty { " *" } else { "" }
         );
         if self.window_title != title {
@@ -14597,7 +14597,7 @@ impl App {
 
         if self.about_open {
             let mut open = self.about_open;
-            egui::Window::new("About DiagramCraft")
+            egui::Window::new("About Tarahi")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -14623,7 +14623,7 @@ impl App {
                 });
             ui.label(
                 egui::RichText::new(format!(
-                    "DiagramCraft v{} — cleanroom Visio-compatible diagramming",
+                    "Tarahi v{} — cleanroom Visio-compatible diagramming",
                     env!("CARGO_PKG_VERSION")
                 ))
                 .size(12.0),
