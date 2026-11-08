@@ -8,8 +8,7 @@
 //! `Instant`; no GIF/video assets, no scripts). The splash is a
 //! SEPARATE OBJECT, Visio 2016 style (the owner's #242 follow-up): a
 //! borderless centered card — mark draw-in → cards → wordmark rise →
-//! caption, and a determinate progress bar filling over the splash
-//! window — floating over the boot backdrop, skippable by click or
+//! caption — floating over the boot backdrop, skippable by click or
 //! key. The load scrim keeps the kit's bob/twinkle/progress periods
 //! verbatim and runs until the first render completes.
 //!
@@ -388,26 +387,11 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
                     );
                 }
             }
-            // The Visio-splash progress: a determinate bar along the
-            // card's bottom edge filling over the splash window (the
-            // kit's violet→sky gradient, lerp'd by t).
+            // The app name at the card's bottom (no progress bar —
+            // owner call; the card is a pure brand moment).
             let pad = 26.0;
-            let track = Rect::from_min_max(
-                Pos2::new(card.left() + pad, card.bottom() - pad - 8.0),
-                Pos2::new(card.right() - pad, card.bottom() - pad),
-            );
-            p.rect_filled(track, 4.0, SKY_LT.gamma_multiply(0.22));
-            let frac = (t / SPLASH_SECS).clamp(0.0, 1.0);
-            if frac > 0.0 {
-                p.rect_filled(
-                    Rect::from_min_size(track.min, Vec2::new(track.width() * frac, track.height())),
-                    4.0,
-                    lerp_color(VIOLET, SKY, frac),
-                );
-            }
-            // The app name at the card's bottom, above the bar.
             p.text(
-                Pos2::new(card.center().x, card.bottom() - pad - 18.0),
+                Pos2::new(card.center().x, card.bottom() - pad),
                 egui::Align2::CENTER_BOTTOM,
                 "Tarahi",
                 egui::FontId::proportional(13.0),
