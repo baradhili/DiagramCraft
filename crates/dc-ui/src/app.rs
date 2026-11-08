@@ -265,6 +265,19 @@ pub struct App {
     /// and the result lands through finish_load. The `Instant` drives
     /// the loading animation.
     loading: Option<InflightLoad>,
+    /// #242: the document LANDED but its first render is still in
+    /// flight — the scrim stays up (same card, "Rendering…") until the
+    /// layer store drains and the minimum display elapses, so the
+    /// reveal happens on the finished render. Carries the load-start
+    /// Instant (the scrim clock) and the path (the final status).
+    rendering: Option<(PathBuf, std::time::Instant)>,
+    /// #242: the About window (the QAT Help button) — the Tarahi mark,
+    /// wordmark, and the running version.
+    about_open: bool,
+    /// #242 test hook: inject a primary click into the next update's
+    /// input (the splash skip reads raw input events, and the kittest
+    /// widget clicks target the scrim's eaten rect).
+    test_click: bool,
     /// Native file dialog in flight. rfd's sync API parks the calling
     /// thread until its private GTK thread finishes, so it must never
     /// run on the UI thread — otherwise the eframe event loop stalls
@@ -379,6 +392,11 @@ struct InflightLoad {
     path: PathBuf,
     started: std::time::Instant,
     rx: mpsc::Receiver<Result<vsdx::Document, String>>,
+    /// The worker's result, drained from `rx` (#242): a result pulled
+    /// while the minimum display still runs LIVES HERE — the channel
+    /// has no push-back, so an early `try_recv` into a local dropped
+    /// it and the next poll saw a dead channel.
+    result: Option<Result<vsdx::Document, String>>,
 }
 
 enum PendingDialog {
@@ -587,7 +605,11 @@ impl App {
         // unwritable My Shapes degrades to the embedded bytes.
         app.stencil_extract = crate::stencil::disk::extract_catalog_async(Self::my_shapes_dir());
         if let Some(p) = path {
-            app.load(p);
+            // #242: the CLI entry's open rides the async flight like
+            // every interactive open — the splash covers the boot and
+            // the scrim the parse + first render; the frames pump the
+            // poll from the first frame on.
+            app.begin_async_load(p);
         }
         app
     }
@@ -674,6 +696,9 @@ impl App {
             // production entry re-arms it in `App::new`.
             splash: None,
             loading: None,
+            rendering: None,
+            about_open: false,
+            test_click: false,
             dialog: None,
             canvas_rect: Rect::NOTHING,
             backstage: false,
@@ -705,7 +730,11 @@ impl App {
             os_theme: None,
         };
         if let Some(p) = path {
-            app.load(p);
+            // Headless: no frame loop to pump the poll — land the
+            // parse synchronously (the interactive open paths use the
+            // async load(); tests assert right after the ctor).
+            let result = vsdx::parse::parse(&p).map_err(|e| format!("{e:#}"));
+            app.finish_load(p, result);
         }
         app
     }
@@ -747,7 +776,18 @@ impl App {
     /// path minus the file-dialog worker).
     #[doc(hidden)]
     pub fn debug_load_adds_for_test(&mut self, path: &std::path::Path) {
-        self.load(path.to_path_buf());
+        // Synchronous landing (tests assert right after): the same
+        // completion path the worker uses, without the flight.
+        self.debug_load_sync_for_test(path);
+    }
+
+    /// #242: the synchronous open landing for unit tests — `load()`
+    /// itself is the async starter now, and these tests assert
+    /// immediately after the call.
+    #[doc(hidden)]
+    pub fn debug_load_sync_for_test(&mut self, path: &std::path::Path) {
+        let result = vsdx::parse::parse(path).map_err(|e| format!("{e:#}"));
+        self.finish_load(path.to_path_buf(), result);
     }
 
     /// #192 4a tests: the open documents' file names (active first,
@@ -870,8 +910,7 @@ impl App {
             self.open_stencil(path);
             return;
         }
-        let result = vsdx::parse::parse(&path).map_err(|e| format!("{e:#}"));
-        self.finish_load(path, result);
+        self.begin_async_load(path);
     }
 
     /// #224: the async open — the parse runs on a worker thread (the
@@ -879,7 +918,10 @@ impl App {
     /// frame loop. The overlay + status line cover the flight; the
     /// result lands through [`App::finish_load`] on a later frame. The
     /// parsed Document is plain data (Send); the editor — whose History
-    /// owns `Box<dyn Command>` — is built on the main thread.
+    /// owns `Box<dyn Command>` — is built on the main thread. EVERY
+    /// document-open entry rides this (the Recent list and backstage
+    /// opens used to stay synchronous — the owner's #242 report: the
+    /// parse froze the UI and the loading scrim never showed).
     fn begin_async_load(&mut self, path: PathBuf) {
         if self.loading.is_some() {
             return; // one in-flight open at a time (modal for v1)
@@ -887,7 +929,20 @@ impl App {
         let (tx, rx) = mpsc::channel();
         let worker_path = path.clone();
         std::thread::spawn(move || {
-            let result = vsdx::parse::parse(&worker_path).map_err(|e| format!("{e:#}"));
+            // A panicking parse must surface as a failed open, not a
+            // dead channel (#242: the recent-entry fixture managed to
+            // kill the worker invisibly).
+            let result = std::panic::catch_unwind(|| vsdx::parse::parse(&worker_path))
+                .unwrap_or_else(|p| {
+                    Err(anyhow::anyhow!(
+                        "the parse panicked: {}",
+                        p.downcast_ref::<String>()
+                            .cloned()
+                            .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                            .unwrap_or_else(|| "unknown panic".into())
+                    ))
+                })
+                .map_err(|e| format!("{e:#}"));
             let _ = tx.send(result);
         });
         self.status = format!(
@@ -900,6 +955,7 @@ impl App {
             path,
             started: std::time::Instant::now(),
             rx,
+            result: None,
         });
     }
 
@@ -945,32 +1001,50 @@ impl App {
     /// status heartbeat); the landing goes through
     /// [`App::finish_load`].
     fn poll_loading(&mut self) -> Option<(PathBuf, std::time::Instant)> {
-        let Some(load) = &self.loading else {
-            return None;
-        };
-        let (path, started, rx) = (&load.path, &load.started, &load.rx);
-        match rx.try_recv() {
-            Ok(result) => {
-                let path = path.clone();
-                self.loading = None;
-                self.finish_load(path, result);
-                None
-            }
-            Err(mpsc::TryRecvError::Empty) => {
-                self.status = format!(
-                    "Opening {}…",
-                    path.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.display().to_string())
-                );
-                Some((path.clone(), *started))
-            }
-            Err(mpsc::TryRecvError::Disconnected) => {
-                self.loading = None;
-                self.status = "open failed: the load worker died".into();
-                None
+        let mut load = self.loading.take()?;
+        // Drain the worker's result into the flight's own slot (#242):
+        // a value pulled early stays on the flight until the minimum
+        // display elapses, instead of being dropped (a bare try_recv
+        // into a local left the channel empty and every later poll
+        // reported a dead worker).
+        if load.result.is_none() {
+            match load.rx.try_recv() {
+                Ok(r) => load.result = Some(r),
+                Err(mpsc::TryRecvError::Empty) => {}
+                // The sender is gone: the value (if any) is already in
+                // the slot; an empty slot with a dead sender is a dead
+                // worker.
+                Err(mpsc::TryRecvError::Disconnected) if load.result.is_none() => {
+                    self.status = "open failed: the load worker died".into();
+                    return None;
+                }
+                Err(_) => {}
             }
         }
+        // Land only when the result is here AND the scrim showed its
+        // minimum window (#242).
+        if load.result.is_some()
+            && load.started.elapsed().as_secs_f32() >= crate::loading::LOADING_MIN_SECS
+        {
+            let result = load.result.take().expect("result gated the landing");
+            let path = load.path.clone();
+            self.finish_load(path.clone(), result);
+            // The first render is the heavy half (every shape rasters +
+            // lands): keep the scrim up until the layer store drains
+            // (#242 — "run until render is complete").
+            self.rendering = Some((path, load.started));
+            return None;
+        }
+        self.status = format!(
+            "Opening {}…",
+            load.path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| load.path.display().to_string())
+        );
+        let (p, s) = (load.path.clone(), load.started);
+        self.loading = Some(load);
+        Some((p, s))
     }
 
     fn ed(&self) -> Option<&Editor> {
@@ -1687,21 +1761,11 @@ impl App {
             return;
         };
         match dialog {
-            // #224: the picked-file parse — the issue's freeze point —
-            // runs on the worker; a stencil still lands in the Shapes
-            // pane synchronously (#83), and the Recent/backstage clicks
-            // keep the synchronous path.
-            PendingDialog::Open(_) => {
-                if path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case("vssx"))
-                {
-                    self.open_stencil(path);
-                } else {
-                    self.begin_async_load(path);
-                }
-            }
+            // #224/#242: the picked-file parse runs on the worker via
+            // load() — the scrim's minimum display keeps it visible;
+            // a stencil still lands in the Shapes pane synchronously
+            // (#83, the routing inside load()).
+            PendingDialog::Open(_) => self.load(path),
             PendingDialog::OpenStencil(_) => self.open_stencil(path),
             PendingDialog::OpenPicture(_) => self.insert_picture_file(&path),
             // The picked target lands in the open draft's Address
@@ -7258,6 +7322,7 @@ impl App {
                 self.view.fit_mode = false;
             }
             Action::FitPage => self.view.fit_pending = true,
+            Action::About => self.about_open = !self.about_open,
             // #237: zoom-to-selection defers to the canvas frame — it
             // needs the content area + selection rects the frame owns.
             Action::ZoomSelection => self.zoom_selection_pending = true,
@@ -7597,6 +7662,9 @@ impl App {
                         qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
                         qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
                         qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
+                        // #242: Help lives in the QAT (the owner's
+                        // placement) — opens the About window.
+                        qat_button(ui, Icon::Help, "Help / About", || Action::About, self);
                     });
                 });
             });
@@ -13427,6 +13495,28 @@ impl App {
     pub fn debug_loading_for_test(&self) -> bool {
         self.loading.is_some()
     }
+
+    /// #242: whether the landed document's first render is still
+    /// behind the scrim.
+    #[doc(hidden)]
+    pub fn debug_rendering_for_test(&self) -> bool {
+        self.rendering.is_some()
+    }
+
+    /// #242: whether the About window is open.
+    #[doc(hidden)]
+    pub fn debug_about_open_for_test(&self) -> bool {
+        self.about_open
+    }
+
+    /// #242: a pointer click at the screen center, for the splash-skip
+    /// test (the splash reads raw input, not widgets).
+    #[doc(hidden)]
+    pub fn debug_click_for_test(&mut self) {
+        // The frame runs inside the harness; the click rides egui's
+        // input replay — record it for the next update().
+        self.test_click = true;
+    }
     /// kittest: page names in tab order (#54).
     #[doc(hidden)]
     pub fn debug_page_names(&self) -> Vec<String> {
@@ -14463,18 +14553,82 @@ impl App {
         // lands the finished editor), then the branded splash. Fixed
         // light theme — the kit's light set. Time-driven repaints keep
         // both animating.
+        let mut scrim = None;
         if self.loading.is_some() {
             let in_flight = self.poll_loading();
             if let Some((path, started)) = in_flight {
-                let screen = ui.input(|i| i.viewport_rect());
-                crate::loading::draw_loading(ui, screen, &path, started);
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string());
+                scrim = Some((format!("Opening {name}…"), started));
             }
+        }
+        if scrim.is_none() {
+            if let Some((path, started)) = &self.rendering {
+                // Reveal only on the finished render: the raster jobs
+                // drained AND the scrim showed its minimum window.
+                let drained = !self.layers.busy()
+                    && started.elapsed().as_secs_f32() >= crate::loading::LOADING_MIN_SECS;
+                if drained {
+                    self.status = format!("opened {}", path.display());
+                    self.rendering = None;
+                } else {
+                    scrim = Some(("Rendering…".to_string(), *started));
+                }
+            }
+        }
+        if let Some((caption, started)) = scrim {
+            let screen = ui.input(|i| i.viewport_rect());
+            crate::loading::draw_loading(ui, screen, &caption, started);
+        }
+        if self.test_click {
+            // The injected click (test hook): the splash skips exactly
+            // as a real click would.
+            self.test_click = false;
+            self.splash = None;
         }
         if let Some(started) = self.splash {
             let screen = ui.input(|i| i.viewport_rect());
             if !crate::loading::draw_splash(ui, screen, started) {
                 self.splash = None;
             }
+        }
+
+        if self.about_open {
+            let mut open = self.about_open;
+            egui::Window::new("About DiagramCraft")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ui.ctx(), |ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(220.0, 150.0),
+                        egui::Sense::hover(),
+                    );
+                    crate::loading::draw_mark(
+                        ui.painter(),
+                        rect.center() + egui::Vec2::new(0.0, -14.0),
+                        62.0,
+                        crate::loading::SPLASH_SECS, // settled
+                    );
+                    ui.painter().text(
+                        rect.center() + egui::Vec2::new(0.0, 48.0),
+                        egui::Align2::CENTER_CENTER,
+                        "tarahi",
+                        egui::FontId::proportional(26.0),
+                        egui::Color32::from_rgb(0x1A, 0x24, 0x44),
+                    );
+                });
+            ui.label(
+                egui::RichText::new(format!(
+                    "DiagramCraft v{} — cleanroom Visio-compatible diagramming",
+                    env!("CARGO_PKG_VERSION")
+                ))
+                .size(12.0),
+            );
+            self.about_open = open && self.about_open;
         }
     }
 
@@ -15930,21 +16084,21 @@ mod tests {
         let p = tmp.path().join("recent-src.vsdx");
         Editor::new_blank().save_as(&p).unwrap();
         let mut app = App::with_doc_opt(None);
-        app.load(p.clone());
+        app.debug_load_sync_for_test(&p);
         assert_eq!(
             app.debug_recent(),
             std::slice::from_ref(&p),
             "successful open records the path"
         );
         // Re-opening moves it to the (single) front.
-        app.load(p.clone());
+        app.debug_load_sync_for_test(&p);
         assert_eq!(app.debug_recent(), &[p]);
     }
 
     #[test]
     fn failed_open_does_not_record() {
         let mut app = App::with_doc_opt(None);
-        app.load(PathBuf::from("/nonexistent/missing.vsdx"));
+        app.debug_load_sync_for_test(&PathBuf::from("/nonexistent/missing.vsdx"));
         assert!(
             app.debug_recent().is_empty(),
             "a failed open must not record anything"
@@ -15960,7 +16114,7 @@ mod tests {
         let bad = tmp.path().join("corrupt.vsdx");
         std::fs::write(&bad, b"this is not a zip archive at all").unwrap();
         let mut app = App::with_blank();
-        app.load(bad.clone());
+        app.debug_load_sync_for_test(&bad);
         assert!(
             app.status.starts_with("open failed"),
             "status = {}",

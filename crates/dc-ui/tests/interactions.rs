@@ -862,6 +862,56 @@ fn file_open_parses_on_the_worker_and_lands() {
         !h.state().debug_loading_for_test(),
         "the loading state cleared on landing"
     );
+    // #242: the scrim runs until the first RENDER completes — pump
+    // until the rendering phase clears too (the layer store drained).
+    let mut waited = 0;
+    while h.state().debug_rendering_for_test() {
+        waited += 1;
+        assert!(waited < 20_000, "the rendering phase never drained");
+        h.run();
+        if waited % 500 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+/// #242: the QAT Help button opens the About window (the mark,
+/// wordmark, version) and its close button dismisses it.
+#[test]
+fn qat_help_opens_about() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    h.get_by_label("Help / About").click();
+    h.run();
+    assert!(
+        h.state().debug_about_open_for_test(),
+        "the QAT Help button opened About"
+    );
+    // The window's ✕ closes it.
+    h.get_by_label_contains("About DiagramCraft");
+    h.key_press(egui::Key::Escape);
+    h.run();
+}
+
+/// #242: the 7-second splash is skippable — any click hands off to the
+/// shell immediately.
+#[test]
+fn splash_is_skippable_by_click() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.state_mut()
+        .debug_splash_for_test(Some(std::time::Instant::now()));
+    h.run();
+    assert!(h.state().debug_splash_active_for_test());
+    // A click anywhere (the splash scrim eats it) skips the boot
+    // moment.
+    h.state_mut().debug_click_for_test();
+    h.run();
+    assert!(
+        !h.state().debug_splash_active_for_test(),
+        "the click skipped the splash"
+    );
 }
 
 /// #224: the splash shows on arming and hands off to the shell after

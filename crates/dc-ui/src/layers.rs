@@ -501,6 +501,17 @@ impl ShapeLayers {
     }
 
     /// Page/doc switch: layers are per current page.
+    /// Whether raster work is still outstanding — in-flight jobs on
+    /// any entry. The #242 loading scrim runs until this drains on the
+    /// newly opened document, so the reveal happens on the FINISHED
+    /// render. Pending damage/full sets deliberately don't gate: a
+    /// culled (off-viewport) shape's pending entries persist by design
+    /// and would hold the scrim forever; their pixels render on
+    /// scroll-in, after the reveal.
+    pub fn busy(&self) -> bool {
+        self.entries.values().any(|e| e.inflight.is_some())
+    }
+
     pub fn set_page(&mut self, page: i64) {
         if self.page != Some(page) {
             self.page = Some(page);

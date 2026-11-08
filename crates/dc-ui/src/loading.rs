@@ -32,8 +32,15 @@ const CARD_STROKE: Color32 = Color32::from_rgb(0xC2, 0xCC, 0xDA);
 const FOLD: Color32 = Color32::from_rgb(0xE6, 0xEC, 0xF3);
 const DOT: Color32 = Color32::from_rgb(0xAA, 0xB4, 0xC6);
 
-/// How long the splash shows before handing off to the shell.
-pub const SPLASH_SECS: f32 = 1.6;
+/// How long the splash shows before handing off to the shell
+/// (the owner's #242 call: seven seconds). Any click or key skips it.
+pub const SPLASH_SECS: f32 = 7.0;
+
+/// The loading scrim's minimum display (#242: a fast parse landed the
+/// document before the overlay ever painted a frame — "the doc load
+/// splash never shows up"). The open always shows for at least this
+/// long; the result waits in the channel until it elapses.
+pub const LOADING_MIN_SECS: f32 = 2.0;
 
 fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
@@ -99,8 +106,9 @@ const CONNECTORS: [(Vec2, Vec2, bool, bool); 5] = [
 ];
 
 /// Draw the network mark centered at `c` with half-size `half`, at
-/// animation time `t` seconds.
-fn draw_mark(p: &egui::Painter, c: Pos2, half: f32, t: f32) {
+/// animation time `t` seconds (`SPLASH_SECS` = fully settled — the
+/// About window draws it that way).
+pub(crate) fn draw_mark(p: &egui::Painter, c: Pos2, half: f32, t: f32) {
     let s = half / 150.0;
     // Connectors: grow from the center outward.
     let conn_t = ease_out((t / (SPLASH_SECS * 0.42)).clamp(0.0, 1.0));
@@ -306,7 +314,17 @@ fn draw_splash_bg(p: &egui::Painter, screen: Rect) {
 /// without input).
 pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
     let t = started.elapsed().as_secs_f32();
-    if t >= SPLASH_SECS {
+    // The full window or an explicit skip: any click or key ends the
+    // boot moment early (a 7 s wait must stay dismissable; the splash
+    // area eats the dismissing input this frame, the shell takes over
+    // next).
+    let skip = ui.input(|i| {
+        i.pointer.any_click()
+            || i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Key { pressed: true, .. }))
+    });
+    if t >= SPLASH_SECS || skip {
         return false;
     }
     egui::Area::new(egui::Id::unique("dc-splash"))
@@ -361,7 +379,7 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
 /// twinkle cycle and the progress sweep (a fresh `Instant::now()`
 /// per frame would hold every phase at t≈0, #218 review).
 /// Time-driven repaints while up.
-pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, path: &std::path::Path, started: Instant) {
+pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, caption: &str, started: Instant) {
     egui::Area::new(egui::Id::unique("dc-loading"))
         .order(egui::Order::Foreground)
         .fixed_pos(Pos2::ZERO)
@@ -374,14 +392,10 @@ pub fn draw_loading(ui: &mut egui::Ui, screen: Rect, path: &std::path::Path, sta
             let bob = (t % 3.0 / 3.0 * std::f32::consts::TAU).sin() * -4.0;
             let c = screen.center() + Vec2::new(0.0, bob - 10.0);
             draw_document(&p, c, t);
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string());
             p.text(
                 c + Vec2::new(0.0, 170.0),
                 egui::Align2::CENTER_TOP,
-                format!("Opening {name}…"),
+                caption,
                 egui::FontId::proportional(14.0),
                 MUTED,
             );

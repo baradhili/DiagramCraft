@@ -23,6 +23,7 @@ pub enum Action {
     Zoom100,
     FitPage,
     ZoomSelection,
+    About,
     ToggleGrid,
     ToggleRulers,
     ToggleComments,
@@ -158,6 +159,7 @@ pub enum Icon {
     Theme,
     Fit,
     ZoomSelection,
+    Help,
     ZoomIn,
     ZoomOut,
     Grid,
@@ -237,6 +239,7 @@ impl Icon {
             Icon::Theme => "theme",
             Icon::Fit => "fit",
             Icon::ZoomSelection => "magnify-expand",
+            Icon::Help => "help-circle-outline",
             Icon::ZoomIn => "zoomin",
             Icon::ZoomOut => "zoomout",
             Icon::Grid => "grid",
@@ -1029,6 +1032,40 @@ impl Icon {
                     [c + Vec2::new(-4.5, -2.0), c + Vec2::new(0.5, -2.0)],
                     Stroke::new(1.8, blue),
                 );
+            }
+            Icon::Help => {
+                // help-circle-outline: ring + the question mark strokes.
+                p.circle_stroke(
+                    c,
+                    8.0,
+                    Stroke::new(1.8, lit(Color32::from_rgb(0x2a, 0x6f, 0xb5))),
+                );
+                let ink = lit(Color32::from_rgb(0x31, 0x31, 0x31));
+                p.line_segment(
+                    [c + Vec2::new(-3.0, -2.5), c + Vec2::new(-2.0, -4.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-2.0, -4.5), c + Vec2::new(0.5, -5.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.5, -5.0), c + Vec2::new(3.0, -3.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(3.0, -3.5), c + Vec2::new(1.5, -1.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, -1.0), c + Vec2::new(0.5, 0.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.5, 0.0), c + Vec2::new(0.5, 2.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.circle_filled(c + Vec2::new(0.5, 5.5), 1.3, ink);
             }
             Icon::ZoomSelection => {
                 // The magnify-expand glyph: magnifier over frame corners.

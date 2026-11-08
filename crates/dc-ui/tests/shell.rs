@@ -397,6 +397,18 @@ fn recent_entry_click_reopens() {
     // screen; the document opens.
     harness.get_by_label_contains("shell.vsdx").click();
     harness.run();
+    // #242: the open rides the async flight (parse worker + the scrim's
+    // minimum display + the first render) — pump until the editor
+    // lands.
+    let mut waited = 0;
+    while harness.state().debug_shape_count() == 0 {
+        waited += 1;
+        assert!(waited < 20_000, "the recent reopen never landed");
+        harness.run();
+        if waited % 500 == 0 {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
     assert_eq!(
         harness.state().debug_shape_count(),
         1,

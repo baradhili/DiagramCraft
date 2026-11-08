@@ -47,6 +47,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | theme | palette |
 | fit | fit-to-screen |
 | magnify-expand | magnify-expand |
+| help-circle-outline | help-circle-outline |
 | zoomin | magnify-plus |
 | zoomout | magnify-minus |
 | grid | grid |
