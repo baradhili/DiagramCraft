@@ -6036,12 +6036,13 @@ mod tests {
             connector(1, (3.0, 5.0), 4.0, 0.0),
             connector(2, (3.0, 5.0), 0.0, 4.0),
         ]);
-        // Hidden: the PageSheet switch suppresses the group.
+        // Hidden: the PageSheet switch suppresses the group (6 =
+        // "no line gets jumps", #251's oracle-pinned off switch).
         let mut hidden = doc.clone();
         hidden.pages[0]
             .sheet_mut()
             .unwrap()
-            .set_cell("ConLineJumpCode", Cell::value("1"));
+            .set_cell("LineJumpCode", Cell::value("6"));
         let svg = render_page(&hidden, &hidden.pages[0]).unwrap();
         assert!(
             !svg.contains(r#"data-dc="line-jumps""#),

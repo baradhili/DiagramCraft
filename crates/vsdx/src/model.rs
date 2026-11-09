@@ -288,16 +288,18 @@ pub struct Page {
 }
 
 impl Page {
-    /// The page's line-jump display switch (#251): Visio's Layout and
-    /// Routing "Show line jumps" (Page Setup). Persisted as the
-    /// PageSheet's `ConLineJumpCode` — absent or any value but 1
-    /// shows (the Visio default; the shipped corpus carries no jump
-    /// cells at all).
+    /// The page's line-jump display switch (#251): the PageSheet's
+    /// `LineJumpCode` (the PageLayout-section cell — the oracle
+    /// enumeration of a real Visio-authored page carried
+    /// `LineJumpCode = 1`, Visio's "horizontal lines jump" default).
+    /// Absent shows (the shipped corpus carries no jump cells at
+    /// all); **6 = "no line gets jumps"** — the off switch
+    /// ([MS-Learn] LineJumpCode cell, Page Layout section).
     pub fn line_jumps_shown(&self) -> bool {
         self.sheet()
-            .and_then(|s| s.cell("ConLineJumpCode"))
+            .and_then(|s| s.cell("LineJumpCode"))
             .and_then(|c| c.numeric())
-            .map(|v| v != 1.0)
+            .map(|v| v != 6.0)
             .unwrap_or(true)
     }
 

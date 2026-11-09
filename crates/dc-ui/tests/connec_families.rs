@@ -769,9 +769,9 @@ fn stencil_master_connector_glues_and_follows_a_move() {
 }
 
 /// #251: the page's line-jump switch persists through a save/load
-/// round trip (the PageSheet's `ConLineJumpCode`/`LineJumpFactorX`),
-/// and the default page shows jumps (the Visio default — the shipped
-/// corpus carries no jump cells).
+/// round trip (the PageSheet's `LineJumpCode` — 6 = no jumps, 1 =
+/// Visio's shown default — and `LineJumpFactorX`), and the default
+/// page shows jumps (the shipped corpus carries no jump cells).
 #[test]
 fn line_jump_settings_persist_through_a_round_trip() {
     let mut ed = Editor::new(vsdx::Document {
@@ -791,8 +791,8 @@ fn line_jump_settings_persist_through_a_round_trip() {
     assert!(ed.doc.pages[0].line_jumps_shown(), "the default shows");
     ed.apply(dc_core::SetCell::new(
         dc_core::Scope::PageSheet { page: 0 },
-        "ConLineJumpCode",
-        vsdx::Cell::value("1"),
+        "LineJumpCode",
+        vsdx::Cell::value("6"),
     ))
     .unwrap();
     ed.apply(dc_core::SetCell::new(

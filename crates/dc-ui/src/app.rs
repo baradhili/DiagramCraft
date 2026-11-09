@@ -5792,16 +5792,18 @@ impl App {
     /// orientation of the pair as given) as one undo Macro, then
     /// refit the view to the new page.
     /// #251: the page's Show-Line-Jumps toggle (Page Setup ▸ Layout
-    /// and Routing) — `ConLineJumpCode` on the PageSheet (1 = hidden,
-    /// 2 = shown), one undoable command.
+    /// and Routing) — the PageSheet's `LineJumpCode` (the
+    /// PageLayout-section cell): 1 = horizontal lines jump (Visio's
+    /// authored default), 6 = "no line gets jumps" (the off switch).
+    /// One undoable command.
     fn apply_line_jumps_shown(&mut self, show: bool) {
         let Some(page_id) = self.page_id() else {
             return;
         };
         self.apply(SetCell::new(
             Scope::PageSheet { page: page_id },
-            "ConLineJumpCode",
-            vsdx::Cell::value(if show { "2" } else { "1" }),
+            "LineJumpCode",
+            vsdx::Cell::value(if show { "1" } else { "6" }),
         ));
         self.status = if show {
             "line jumps shown".into()
