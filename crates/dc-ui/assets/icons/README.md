@@ -79,6 +79,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | datetime | clock-outline (#252, 2026-11-09) |
 | title | format-title (#252, 2026-11-09) |
 | eye | eye (#252, 2026-11-09) |
+| lock | lock-outline (#252, 2026-11-09) |
 
 Posters note: MDI is an open-source set, not Microsoft artwork; the
 cleanroom rule (no Microsoft assets) still holds. Fluent UI icons were

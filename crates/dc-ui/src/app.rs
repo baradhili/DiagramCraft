@@ -7589,6 +7589,7 @@ impl App {
             Action::RotateLeft => self.rotate_selection(90.0),
             Action::RotateRight => self.rotate_selection(-90.0),
             Action::Group => self.group_selection(),
+            Action::ContainerDisband => self.disband_container(),
             Action::Ungroup => self.ungroup_selection(),
             Action::Hyperlink => {
                 // #252 Insert ▸ Links: the Hyperlinks dialog (#28/#71)
@@ -7890,6 +7891,7 @@ impl App {
                 .sel
                 .is_some_and(|(_, sid)| self.shapesheets.contains(&sid)),
             sel_group: self.selection_has_group(),
+            sel_container: self.sel_is_container(),
             container_highlight: self.container_highlight_on(),
         }
     }
@@ -11450,6 +11452,54 @@ impl App {
     }
 
     /// Rotate every selected shape ±90° (degrees, Visio CCW positive).
+    /// #252 Container Tools ▸ Membership: disband the selected
+    /// container — every member's `msvSDContainerShape` reference is
+    /// released and the container shape removed, in one undo step.
+    fn disband_container(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(cont) = self.sel_container_id() else {
+            self.status = "Select a container to disband".into();
+            return;
+        };
+        let members = self.container_member_ids(page_id, cont);
+        let mut cmds: Vec<Box<dyn dc_core::Command>> = members
+            .iter()
+            .map(|&m| {
+                Box::new(dc_core::SetRowCell::new(
+                    Scope::Shape {
+                        page: page_id,
+                        shape: m,
+                    },
+                    "User",
+                    0,
+                    dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
+                    "Value",
+                    vsdx::Cell::value(String::new()),
+                )) as Box<dyn dc_core::Command>
+            })
+            .collect();
+        cmds.push(Box::new(dc_core::commands::RemoveShape::new(page_id, cont)));
+        self.apply(dc_core::Macro::new(
+            format!("disband container ({0} member(s) released)", members.len()),
+            cmds,
+        ));
+        self.set_selection(None);
+    }
+
+    /// The selected container's id, if the selection is a container
+    /// (membership points at it — the same test the contextual tab
+    /// uses).
+    fn sel_container_id(&self) -> Option<i64> {
+        let page_id = self.page_id()?;
+        let (_, sid) = self.sel?;
+        let has_members = !self.container_member_ids(page_id, sid).is_empty();
+        if has_members || self.sel_is_container() {
+            Some(sid)
+        } else {
+            None
+        }
+    }
+
     /// #252 Home ▸ Arrange: group the current multi-selection — the
     /// same command the ctx menu fires, including #95's
     /// group-into-group nesting.

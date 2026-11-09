@@ -47,6 +47,8 @@ pub(crate) struct TabCtx {
     pub shapesheet_open: bool,
     /// The selection includes at least one group (Ungroup arms).
     pub sel_group: bool,
+    /// The selection is a container (Container Tools arms Disband).
+    pub sel_container: bool,
     pub container_highlight: bool,
 }
 
@@ -117,6 +119,9 @@ pub enum Action {
     /// #252 Insert ▸ Links: open the Hyperlinks dialog (#28/#71) on
     /// the primary selection.
     Hyperlink,
+    /// #252 Container Tools ▸ Membership: release the container's
+    /// members and delete it (one undo step).
+    ContainerDisband,
     /// #156: apply the SDCONT style (master NameU) — wraps the
     /// selection, or re-wraps the selected container's members.
     ContainerStyle(&'static str),
@@ -262,6 +267,8 @@ pub enum Icon {
     Title,
     /// #252 Review wave.
     Eye,
+    /// #252 Container Tools wave.
+    Lock,
 }
 
 impl Icon {
@@ -307,6 +314,7 @@ impl Icon {
             Icon::DateTime => "datetime",
             Icon::Title => "title",
             Icon::Eye => "eye",
+            Icon::Lock => "lock",
             Icon::Pen => "pen",
             Icon::BringFront => "bringfront",
             Icon::SendBack => "sendback",
@@ -1404,7 +1412,8 @@ impl Icon {
             | Icon::Eraser
             | Icon::DateTime
             | Icon::Title
-            | Icon::Eye => {
+            | Icon::Eye
+            | Icon::Lock => {
                 p.rect_filled(r.shrink(6.0), 2.0, gray);
             }
         }
