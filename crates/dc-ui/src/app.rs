@@ -18,7 +18,7 @@ use vsdx::model::{Document, Shape};
 use crate::canvas::{self, Handle, HandleId, PageGeom, View};
 use crate::cmd::MoveShape;
 use crate::recent::RecentFiles;
-use crate::ribbon::{big, grid, stack, Action, Icon, RibbonButton, Tab, TABS};
+use crate::ribbon::{Action, Icon, Tab, TABS};
 use crate::stencil::{MasterKey, Stencil, StencilId, StencilSet};
 use crate::svgimg::TextureCache;
 use crate::theme;
@@ -508,25 +508,9 @@ const CONN_REVEAL_IN: f64 = 0.6;
 /// An OS clipboard image probe's payload: (w, h, RGBA bytes).
 type OsImage = (u32, u32, Vec<u8>);
 
-/// #156: the SDCONT container style gallery — the shipped Visio 2016
-/// set, in gallery order (Analysis/container-stencil-sdcont.md; the
-/// masters live in the embedded `sdcont` stencil).
-const CONTAINER_STYLES: [&str; 14] = [
-    "Plain",
-    "Notch",
-    "Waves",
-    "Wire",
-    "Belt",
-    "Classic",
-    "Full sail",
-    "Corners",
-    "Alternating",
-    "Banner",
-    "Picture Frame",
-    "Snapshot",
-    "Intersection",
-    "Translucent",
-];
+/// #156: the SDCONT style names live beside the Container Tools tab
+/// layout now (`crate::ribbon::container_tools`).
+use crate::ribbon::container_tools::CONTAINER_STYLES;
 
 /// The active mouse tool (Visio's Home ▸ Tools): the pointer selects
 /// and drags; the Connector Tool (#108) draws connectors; the Lasso
@@ -7838,9 +7822,6 @@ impl App {
     }
 
     fn ribbon_content(&mut self, ui: &mut Ui) {
-        let has_doc = self.ed.is_some();
-        let sel_active = self.sel.is_some();
-        let has_sel = sel_active;
         let mut act: Option<Action> = None;
         let dispatch = |a: Action, act: &mut Option<Action>| {
             *act = Some(a);
@@ -7849,687 +7830,10 @@ impl App {
         if self.tab == Tab::ContainerTools && !self.sel_is_container() {
             self.tab = Tab::Home;
         }
-        let groups: Vec<crate::ribbon::Group> = match self.tab {
-            // File opens the backstage view instead of ribbon content.
-            Tab::File => vec![],
-            Tab::Home => {
-                let sel_count = self
-                    .sel_set
-                    .iter()
-                    .filter(|(p, _)| Some(*p) == self.page_id())
-                    .count();
-                let multi_sel = sel_count >= 2;
-                let tri_sel = sel_count >= 3;
-                vec![
-                    crate::ribbon::Group::new(
-                        "Tools",
-                        vec![stack(vec![
-                            RibbonButton::new(Icon::Pointer, "Pointer Tool", Action::PointerTool)
-                                .selected(self.tool == Tool::Pointer)
-                                .tip("Select and drag (Esc from the Connector Tool)"),
-                            RibbonButton::new(Icon::Connector, "Connector", Action::ConnectorTool)
-                                .selected(self.tool == Tool::Connector)
-                                .tip("Draw a connector between shapes or points (Esc to finish)"),
-                            RibbonButton::new(Icon::ConnPoint, "Conn Point", Action::ConnPointTool)
-                                .width(90.0)
-                                .selected(self.tool == Tool::ConnectionPoint)
-                                .tip(
-                                    "Connection Point tool: click a shape to add a connection \
-                                 point; click one to select it (Delete removes)",
-                                ),
-                            RibbonButton::new(Icon::Pen, "Freeform", Action::FreeformTool)
-                                .selected(self.tool == Tool::Freeform)
-                                .tip(
-                                    "Freeform tool (#132): drag on the page to draw freehand \
-                                 geometry — the stroke becomes an editable shape (Esc finishes)",
-                                ),
-                        ])],
-                    ),
-                    crate::ribbon::Group::new(
-                        "Clipboard",
-                        vec![
-                            big(RibbonButton::new(Icon::Paste, "Paste", Action::Macros)
-                                .enabled(false)
-                                .split()
-                                .tip("Clipboard — planned for a later milestone")),
-                            grid(vec![
-                                vec![
-                                    RibbonButton::new(Icon::Cut, "Cut", Action::Macros)
-                                        .enabled(false)
-                                        .tip("Clipboard — planned"),
-                                    RibbonButton::new(Icon::Copy, "Copy", Action::Macros)
-                                        .enabled(false)
-                                        .tip("Clipboard — planned"),
-                                ],
-                                vec![RibbonButton::new(
-                                    Icon::Painter,
-                                    "Format Painter",
-                                    Action::FormatPainter,
-                                )
-                                .enabled(has_sel)
-                                .selected(self.painter_armed.is_some())
-                                .tip(
-                                    "Copy the selection's formatting to the next shape you click; \
-                                 double-click to keep painting until Esc",
-                                )],
-                            ]),
-                            // Visio's Editing group rides beside Clipboard:
-                            // Select All + Select by Type (#110, URS-1160),
-                            // plus the Select menu's Lasso Select (#110
-                            // remainder: the freehand trail).
-                            grid(vec![
-                                vec![
-                                    RibbonButton::new(
-                                        Icon::Shapes,
-                                        "Select All",
-                                        Action::SelectAll,
-                                    )
-                                    .tip("Select every shape on the page (Ctrl+A)"),
-                                    RibbonButton::new(
-                                        Icon::Shapes,
-                                        "Select by Type…",
-                                        Action::SelectByType,
-                                    )
-                                    .selected(self.selby_open)
-                                    .tip("Select shapes by type, master, or layer"),
-                                ],
-                                vec![RibbonButton::new(
-                                    Icon::Lasso,
-                                    "Lasso Select",
-                                    Action::LassoTool,
-                                )
-                                .selected(self.tool == Tool::Lasso)
-                                .tip(
-                                    "Draw a freehand trail; shapes the trail touches or encloses \
-                                 are selected (Esc to finish)",
-                                )],
-                            ]),
-                        ],
-                    ),
-                    crate::ribbon::Group::new(
-                        "Font",
-                        vec![grid(vec![
-                            vec![
-                                RibbonButton::new(Icon::FontA, "Calibri", Action::Macros)
-                                    .combo()
-                                    .width(128.0)
-                                    .enabled(false)
-                                    .tip("Font family — planned"),
-                                RibbonButton::new(Icon::FontA, "11", Action::Macros)
-                                    .combo()
-                                    .width(46.0)
-                                    .enabled(false)
-                                    .tip("Font size — planned"),
-                                RibbonButton::new(Icon::Grow, "", Action::FontGrow)
-                                    .enabled(has_sel)
-                                    .tip("Increase font size"),
-                                RibbonButton::new(Icon::Shrink, "", Action::FontShrink)
-                                    .enabled(has_sel)
-                                    .tip("Decrease font size"),
-                                RibbonButton::new(Icon::ClearAll, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Clear all formatting — planned"),
-                            ],
-                            vec![
-                                RibbonButton::new(Icon::Bold, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Bold — planned"),
-                                RibbonButton::new(Icon::Italic, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Italic — planned"),
-                                RibbonButton::new(Icon::Underline, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Underline — planned"),
-                                RibbonButton::new(Icon::Strike, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Strikethrough — planned"),
-                                RibbonButton::new(Icon::Subscript, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Subscript — planned"),
-                                RibbonButton::new(Icon::Superscript, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Superscript — planned"),
-                                RibbonButton::new(Icon::TextColor, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Text color — planned"),
-                            ],
-                        ])],
-                    )
-                    .with_launcher(),
-                    crate::ribbon::Group::new(
-                        "Paragraph",
-                        vec![grid(vec![
-                            vec![
-                                RibbonButton::new(Icon::Align, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Align left — planned"),
-                                RibbonButton::new(Icon::AlignCenter, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Align center — planned"),
-                                RibbonButton::new(Icon::AlignRight, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Align right — planned"),
-                                RibbonButton::new(Icon::LineSpacing, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Line spacing — planned"),
-                            ],
-                            vec![
-                                RibbonButton::new(Icon::Bullets, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Bullets — planned"),
-                                RibbonButton::new(Icon::Numbering, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Numbering — planned"),
-                                RibbonButton::new(Icon::IndentLess, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Decrease indent — planned"),
-                                RibbonButton::new(Icon::IndentMore, "", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Increase indent — planned"),
-                            ],
-                        ])],
-                    )
-                    .with_launcher(),
-                    crate::ribbon::Group::new(
-                        "Shape Styles",
-                        vec![
-                            big(
-                                RibbonButton::new(Icon::Theme, "Quick Styles", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Style gallery — planned"),
-                            ),
-                            stack(vec![
-                                RibbonButton::new(Icon::Bucket, "Fill", Action::FillMenu)
-                                    .enabled(has_sel)
-                                    .tip("Shape fill color"),
-                                RibbonButton::new(Icon::Pen, "Line", Action::LineMenu)
-                                    .enabled(has_sel)
-                                    .tip("Line color"),
-                                RibbonButton::new(Icon::Effects, "Effects", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Shape effects — planned"),
-                            ]),
-                        ],
-                    ),
-                    crate::ribbon::Group::new(
-                        "Arrange",
-                        vec![
-                            stack(vec![
-                                RibbonButton::new(
-                                    Icon::BringFront,
-                                    "Bring Forward",
-                                    Action::Macros,
-                                )
-                                .enabled(false)
-                                .tip("Z-order — planned"),
-                                RibbonButton::new(Icon::SendBack, "Send Backward", Action::Macros)
-                                    .enabled(false)
-                                    .tip("Z-order — planned"),
-                                RibbonButton::new(Icon::Check, "To Page", Action::AlignToPage)
-                                    .selected(self.align_to_page)
-                                    .tip("Align against the page instead of the primary selection"),
-                            ]),
-                            grid(vec![
-                                vec![
-                                    RibbonButton::new(Icon::Align, "Left", Action::AlignLeft)
-                                        .enabled(multi_sel)
-                                        .tip("Align left edges (first-selected or page)"),
-                                    RibbonButton::new(
-                                        Icon::AlignCenter,
-                                        "Center",
-                                        Action::AlignHCenter,
-                                    )
-                                    .enabled(multi_sel)
-                                    .tip("Align vertical centers"),
-                                    RibbonButton::new(
-                                        Icon::AlignRight,
-                                        "Right",
-                                        Action::AlignRight,
-                                    )
-                                    .enabled(multi_sel)
-                                    .tip("Align right edges"),
-                                ],
-                                vec![
-                                    RibbonButton::new(Icon::AlignTop, "Top", Action::AlignTop)
-                                        .enabled(multi_sel)
-                                        .tip("Align top edges"),
-                                    RibbonButton::new(
-                                        Icon::AlignMiddle,
-                                        "Middle",
-                                        Action::AlignVCenter,
-                                    )
-                                    .enabled(multi_sel)
-                                    .tip("Align horizontal middles"),
-                                    RibbonButton::new(
-                                        Icon::AlignBottom,
-                                        "Bottom",
-                                        Action::AlignBottom,
-                                    )
-                                    .enabled(multi_sel)
-                                    .tip("Align bottom edges"),
-                                ],
-                                vec![
-                                    RibbonButton::new(Icon::DistH, "Dist H", Action::DistributeH)
-                                        .enabled(tri_sel)
-                                        .tip("Even horizontal spacing (3+ shapes)"),
-                                    RibbonButton::new(Icon::DistV, "Dist V", Action::DistributeV)
-                                        .enabled(tri_sel)
-                                        .tip("Even vertical spacing (3+ shapes)"),
-                                ],
-                            ]),
-                        ],
-                    ),
-                ]
-            }
-            Tab::Insert => vec![
-                crate::ribbon::Group::new(
-                    "Blocks",
-                    vec![
-                        big(
-                            RibbonButton::new(Icon::Container, "Container", Action::Macros)
-                                .enabled(false)
-                                .tip("Containers — planned"),
-                        ),
-                        big(RibbonButton::new(Icon::Callout, "Callout", Action::Macros)
-                            .enabled(false)
-                            .tip("Callouts — planned")),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Illustrations",
-                    vec![
-                        big(
-                            RibbonButton::new(Icon::Picture, "Pictures", Action::InsertPicture)
-                                .tip("Insert a PNG or JPEG picture from a file"),
-                        ),
-                        stack(vec![RibbonButton::new(
-                            Icon::OnlinePic,
-                            "Online Pictures",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Picture shapes — planned")]),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Parts",
-                    vec![
-                        big(RibbonButton::new(Icon::TextBox, "Text Box", Action::Macros)
-                            .enabled(false)
-                            .tip("Text shapes — planned")),
-                        stack(vec![RibbonButton::new(
-                            Icon::Field,
-                            "Field",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Fields — planned")]),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Pages",
-                    vec![big(RibbonButton::new(
-                        Icon::NewPage,
-                        "New Page",
-                        Action::NewPage,
-                    )
-                    .enabled(has_doc))],
-                ),
-                crate::ribbon::Group::new(
-                    "Comments",
-                    vec![big(RibbonButton::new(
-                        Icon::Comment,
-                        "New Comment",
-                        Action::Macros,
-                    )
-                    .enabled(false)
-                    .tip("Comments — planned"))],
-                ),
-            ],
-            Tab::Design => vec![
-                crate::ribbon::Group::new(
-                    "Themes",
-                    vec![
-                        big(RibbonButton::new(Icon::Theme, "Themes", Action::Macros)
-                            .enabled(false)
-                            .tip("Themes — planned")),
-                        stack(vec![RibbonButton::new(
-                            Icon::Theme,
-                            "Variants",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Theme variants — planned")]),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Page Setup",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(
-                                Icon::Orientation,
-                                "Orientation",
-                                Action::PageOrientation,
-                            )
-                            .tip("Swap portrait/landscape (swaps width and height)"),
-                            RibbonButton::new(Icon::NewPage, "Size", Action::PageSizeDialog)
-                                .selected(self.pagesetup_open)
-                                .tip("Page size — ISO/ANSI presets or custom"),
-                        ],
-                        vec![RibbonButton::new(Icon::Shapes, "Auto Size", Action::Macros)
-                            .enabled(false)
-                            .tip("Auto page size — planned")],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Backgrounds",
-                    vec![grid(vec![
-                        vec![RibbonButton::new(
-                            Icon::Picture,
-                            "Backgrounds",
-                            Action::PageBackgrounds,
-                        )
-                        .selected(self.backgrounds_open)
-                        .tip("Assign a background page behind this one")],
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Borders & Titles", Action::Macros)
-                                .enabled(false)
-                                .tip("Borders & titles — planned"),
-                        ],
-                    ])],
-                ),
-                // #156: the Container Styles gallery — the SDCONT
-                // masters (also on the Container Tools contextual
-                // tab once a container exists).
-                crate::ribbon::Group::new(
-                    "Containers",
-                    vec![stack(vec![RibbonButton::new(
-                        Icon::Container,
-                        "Containers…",
-                        Action::ContainerGallery,
-                    )
-                    .selected(self.contgal_open)
-                    .tip("Wrap the selection in a container style")])],
-                ),
-            ],
-            Tab::Data => vec![
-                crate::ribbon::Group::new(
-                    "Display Data",
-                    vec![
-                        big(
-                            RibbonButton::new(Icon::DataGraphic, "Data Graphic", Action::Macros)
-                                .enabled(false)
-                                .tip("Data graphics (M6)"),
-                        ),
-                        stack(vec![RibbonButton::new(
-                            Icon::Shapes,
-                            "Legend",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Legends (M6)")]),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "External Data",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(Icon::Link, "Link Data to Shapes", Action::Macros)
-                                .enabled(false)
-                                .tip("Data linking (M6)"),
-                            RibbonButton::new(Icon::Refresh, "Refresh Data", Action::Macros)
-                                .enabled(false)
-                                .tip("Data linking (M6)"),
-                        ],
-                        vec![
-                            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros)
-                                .enabled(false)
-                                .tip("Data linking (M6)"),
-                        ],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Show/Hide",
-                    vec![stack(vec![
-                        RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros)
-                            .enabled(false)
-                            .tip("Shape data window (M6)"),
-                        RibbonButton::new(Icon::Units, "External Data Window", Action::Macros)
-                            .enabled(false)
-                            .tip("External data window (M6)"),
-                    ])],
-                ),
-            ],
-            Tab::Process => vec![
-                crate::ribbon::Group::new(
-                    "Cross-Functional Flowchart",
-                    vec![big(RibbonButton::new(
-                        Icon::Swimlane,
-                        "Swimlane",
-                        Action::Macros,
-                    )
-                    .enabled(false)
-                    .tip("Swimlanes — planned"))],
-                ),
-                crate::ribbon::Group::new(
-                    "Diagram Layout",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Re-layout Page", Action::Macros)
-                                .enabled(false)
-                                .tip("Auto layout — planned"),
-                        ],
-                        vec![
-                            RibbonButton::new(Icon::Align, "Align & Space", Action::Macros)
-                                .enabled(false)
-                                .tip("Auto alignment — planned"),
-                        ],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Validate",
-                    vec![
-                        big(
-                            RibbonButton::new(Icon::Check, "Check Diagram", Action::Macros)
-                                .enabled(false)
-                                .tip("Diagram validation — planned"),
-                        ),
-                        stack(vec![RibbonButton::new(
-                            Icon::Open,
-                            "Import Flowchart Data",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Flowchart data import — planned")]),
-                    ],
-                ),
-            ],
-            Tab::Review => vec![
-                crate::ribbon::Group::new(
-                    "Proofing",
-                    vec![
-                        big(RibbonButton::new(Icon::Spell, "Spelling", Action::Macros)
-                            .enabled(false)
-                            .tip("Spell check — planned")),
-                        stack(vec![RibbonButton::new(
-                            Icon::FontA,
-                            "Language",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Language settings — planned")]),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Comments",
-                    vec![big(RibbonButton::new(
-                        Icon::Comment,
-                        "New Comment",
-                        Action::Macros,
-                    )
-                    .enabled(false)
-                    .tip("Comments — planned"))],
-                ),
-            ],
-            Tab::View => vec![
-                crate::ribbon::Group::new(
-                    "Show",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(Icon::Rulers, "Rulers", Action::ToggleRulers)
-                                .selected(self.view.show_rulers),
-                            RibbonButton::new(Icon::Grid, "Grid", Action::ToggleGrid)
-                                .selected(self.view.show_grid),
-                        ],
-                        vec![
-                            RibbonButton::new(Icon::Comment, "Comments", Action::ToggleComments)
-                                .selected(self.show_comments),
-                            RibbonButton::new(Icon::Shapes, "Connection Points", Action::Macros)
-                                .enabled(false)
-                                .tip("Connection points — planned"),
-                            RibbonButton::new(Icon::Shapes, "Guides", Action::Macros)
-                                .enabled(false)
-                                .tip("Guides — planned"),
-                        ],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Zoom",
-                    vec![
-                        stack(vec![
-                            RibbonButton::new(Icon::ZoomIn, "Zoom In", Action::ZoomIn),
-                            RibbonButton::new(Icon::ZoomOut, "Zoom Out", Action::ZoomOut),
-                        ]),
-                        big(RibbonButton::new(Icon::Fit, "Fit Window", Action::FitPage)),
-                        big(RibbonButton::new(
-                            Icon::ZoomSelection,
-                            "Selection",
-                            Action::ZoomSelection,
-                        )
-                        .tip("Zoom to selection (Shift+Z)")),
-                        big(RibbonButton::new(Icon::ZoomIn, "100%", Action::Zoom100)),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Visual Aids",
-                    vec![
-                        stack(vec![RibbonButton::new(
-                            Icon::Grid,
-                            "Dynamic Grid",
-                            Action::ToggleDynamicGrid,
-                        )
-                        .selected(self.snap.dynamic_grid)
-                        .tip("Alignment and spacing hints while dragging")]),
-                        big(
-                            RibbonButton::new(Icon::Magnet, "Snap & Glue", Action::SnapGlue)
-                                .selected(self.snap_dlg_open)
-                                .tip("Configure snap and glue targets"),
-                        ),
-                    ],
-                ),
-                crate::ribbon::Group::new(
-                    "Macros",
-                    vec![big(RibbonButton::new(
-                        Icon::Macro,
-                        "Macros",
-                        Action::Macros,
-                    ))],
-                ),
-            ],
-            // #156: the Container Tools contextual tab — the SDCONT
-            // style gallery (each click wraps the selection, or
-            // re-wraps the selected container's members, in a
-            // master-based container of that style) plus the member
-            // highlight toggle.
-            Tab::ContainerTools => vec![
-                crate::ribbon::Group::new(
-                    "Container Styles",
-                    vec![grid(vec![
-                        CONTAINER_STYLES[..7]
-                            .iter()
-                            .map(|n| {
-                                RibbonButton::new(Icon::Container, n, Action::ContainerStyle(n))
-                                    .tip("Wrap the selection in this container style")
-                            })
-                            .collect::<Vec<_>>(),
-                        CONTAINER_STYLES[7..]
-                            .iter()
-                            .map(|n| {
-                                RibbonButton::new(Icon::Container, n, Action::ContainerStyle(n))
-                                    .tip("Wrap the selection in this container style")
-                            })
-                            .collect::<Vec<_>>(),
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Members",
-                    vec![stack(vec![RibbonButton::new(
-                        Icon::Container,
-                        "Highlight Members",
-                        Action::ContainerHighlight,
-                    )
-                    .selected(self.container_highlight_on())
-                    .tip("Tint the container's members while it is selected")])],
-                ),
-            ],
-            Tab::Developer => vec![
-                crate::ribbon::Group::new(
-                    "Show/Hide",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(
-                                Icon::ShapeSheet,
-                                "ShapeSheet",
-                                Action::ShowShapeSheet,
-                            )
-                            .selected(
-                                self.sel
-                                    .is_some_and(|(_, sid)| self.shapesheets.contains(&sid)),
-                            )
-                            .tip("Inspect the selected shape's cells"),
-                            RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
-                                .tip("Toggle display units (model stays inches)"),
-                        ],
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros)
-                                .enabled(false)
-                                .tip("Drawing explorer — planned"),
-                        ],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Shape Design",
-                    vec![grid(vec![
-                        vec![
-                            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros)
-                                .enabled(false)
-                                .tip("Boolean shape operations — planned"),
-                            RibbonButton::new(Icon::Group, "Behavior", Action::Macros)
-                                .enabled(false)
-                                .tip("Shape behavior — planned"),
-                        ],
-                        vec![RibbonButton::new(Icon::Check, "Protection", Action::Macros)
-                            .enabled(false)
-                            .tip("Shape protection — planned")],
-                    ])],
-                ),
-                crate::ribbon::Group::new(
-                    "Code",
-                    vec![
-                        big(RibbonButton::new(Icon::Macro, "Macros", Action::Macros)
-                            .enabled(false)
-                            .tip("VBA macros arrive with M7 (.vsdm)")),
-                        stack(vec![RibbonButton::new(
-                            Icon::Link,
-                            "Add-ins",
-                            Action::Macros,
-                        )
-                        .enabled(false)
-                        .tip("Real Visio add-in hosting arrives with M8")]),
-                    ],
-                ),
-            ],
-        };
+        // One snapshot per frame; the per-tab modules (#252) own the
+        // layouts and never borrow the app.
+        let ctx = self.ribbon_ctx();
+        let groups = crate::ribbon::groups(self.tab, &ctx);
         let mut launcher: Option<&'static str> = None;
         crate::ribbon::content_row(ui, &groups, &mut |a| dispatch(a, &mut act), &mut |label| {
             launcher = Some(label)
@@ -8541,6 +7845,39 @@ impl App {
             self.dispatch(a);
         }
         ui.add_space(2.0);
+    }
+
+    /// The per-frame ribbon snapshot (#252): every fact a tab's group
+    /// builder needs, computed once so the per-tab modules stay pure
+    /// layout.
+    fn ribbon_ctx(&self) -> crate::ribbon::TabCtx {
+        let sel_count = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| Some(*p) == self.page_id())
+            .count();
+        crate::ribbon::TabCtx {
+            has_doc: self.ed.is_some(),
+            has_sel: self.sel.is_some(),
+            multi_sel: sel_count >= 2,
+            tri_sel: sel_count >= 3,
+            tool: self.tool,
+            painter_armed: self.painter_armed.is_some(),
+            selby_open: self.selby_open,
+            align_to_page: self.align_to_page,
+            pagesetup_open: self.pagesetup_open,
+            backgrounds_open: self.backgrounds_open,
+            contgal_open: self.contgal_open,
+            show_rulers: self.view.show_rulers,
+            show_grid: self.view.show_grid,
+            show_comments: self.show_comments,
+            dynamic_grid: self.snap.dynamic_grid,
+            snap_dlg_open: self.snap_dlg_open,
+            shapesheet_open: self
+                .sel
+                .is_some_and(|(_, sid)| self.shapesheets.contains(&sid)),
+            container_highlight: self.container_highlight_on(),
+        }
     }
 
     fn page_tabs(&mut self, ui: &mut Ui) {
@@ -15701,7 +15038,6 @@ fn t_title(t: Tab) -> &'static str {
         Tab::Home => "Home",
         Tab::Insert => "Insert",
         Tab::Design => "Design",
-        Tab::Process => "Process",
         Tab::Data => "Data",
         Tab::Review => "Review",
         Tab::View => "View",

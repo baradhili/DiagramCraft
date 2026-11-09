@@ -233,6 +233,12 @@ pub fn show_overlay(
         .id(id)
         .hint_text("Shape text")
         .desired_width(f32::INFINITY)
+        // One row of the OVERLAY font drives the widget's minimum —
+        // egui otherwise floors multiline edits at 4 rows of the
+        // DEFAULT chrome font (Proportional), whose row height
+        // changed with Open Sans (#252 chrome font) and outgrew the
+        // baseline-anchored place rect.
+        .desired_rows(1)
         .layouter(&mut layouter)
         .frame(
             egui::Frame::new()

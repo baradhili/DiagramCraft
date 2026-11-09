@@ -7,6 +7,64 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::theme;
 
+/// Per-tab content modules (#252): each tab's group layout lives in
+/// its own file under `ribbon/`; `app.rs` keeps only the [`TabCtx`]
+/// snapshot and the dispatch glue (owner decomposition direction,
+/// 2026-10-26).
+pub mod container_tools;
+pub mod data;
+pub mod design;
+pub mod developer;
+pub mod home;
+pub mod insert;
+pub mod review;
+pub mod view;
+
+/// Everything a tab's group builder needs from the app — one snapshot
+/// computed per frame in `app.rs`, so the per-tab modules never borrow
+/// the app and stay pure layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TabCtx {
+    pub has_doc: bool,
+    pub has_sel: bool,
+    /// 2+ shapes selected on the current page (aligns arm).
+    pub multi_sel: bool,
+    /// 3+ shapes selected on the current page (distribution arms).
+    pub tri_sel: bool,
+    pub tool: crate::app::Tool,
+    pub painter_armed: bool,
+    pub selby_open: bool,
+    pub align_to_page: bool,
+    pub pagesetup_open: bool,
+    pub backgrounds_open: bool,
+    pub contgal_open: bool,
+    pub show_rulers: bool,
+    pub show_grid: bool,
+    pub show_comments: bool,
+    pub dynamic_grid: bool,
+    pub snap_dlg_open: bool,
+    /// A shapesheet window is open for the selection.
+    pub shapesheet_open: bool,
+    pub container_highlight: bool,
+}
+
+/// The tab-strip content dispatcher: the fixed tabs' layouts plus the
+/// contextual Container Tools tab (File opens the backstage view
+/// instead of ribbon content).
+pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
+    match tab {
+        Tab::File => Vec::new(),
+        Tab::Home => home::groups(ctx),
+        Tab::Insert => insert::groups(ctx),
+        Tab::Design => design::groups(ctx),
+        Tab::Data => data::groups(ctx),
+        Tab::Review => review::groups(ctx),
+        Tab::View => view::groups(ctx),
+        Tab::Developer => developer::groups(ctx),
+        Tab::ContainerTools => container_tools::groups(ctx),
+    }
+}
+
 /// Everything the ribbon can ask the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -79,7 +137,6 @@ pub enum Tab {
     Insert,
     Design,
     Data,
-    Process,
     Review,
     View,
     Developer,
@@ -88,14 +145,15 @@ pub enum Tab {
     ContainerTools,
 }
 
-/// Visio 2016 order (Layout is not a Visio tab; Data precedes Process).
+/// The strip's fixed tabs (owner 2026-11-09: the Process tab is
+/// dropped — its Re-layout command moves to Design ▸ Layout; Layout
+/// is not a Visio tab).
 pub const TABS: &[Tab] = &[
     Tab::File,
     Tab::Home,
     Tab::Insert,
     Tab::Design,
     Tab::Data,
-    Tab::Process,
     Tab::Review,
     Tab::View,
     Tab::Developer,
