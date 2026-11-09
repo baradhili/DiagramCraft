@@ -260,6 +260,8 @@ pub enum Icon {
     /// #252 Insert wave.
     DateTime,
     Title,
+    /// #252 Review wave.
+    Eye,
 }
 
 impl Icon {
@@ -304,6 +306,7 @@ impl Icon {
             Icon::Eraser => "clear",
             Icon::DateTime => "datetime",
             Icon::Title => "title",
+            Icon::Eye => "eye",
             Icon::Pen => "pen",
             Icon::BringFront => "bringfront",
             Icon::SendBack => "sendback",
@@ -1400,7 +1403,8 @@ impl Icon {
             | Icon::SelectionPane
             | Icon::Eraser
             | Icon::DateTime
-            | Icon::Title => {
+            | Icon::Title
+            | Icon::Eye => {
                 p.rect_filled(r.shrink(6.0), 2.0, gray);
             }
         }
