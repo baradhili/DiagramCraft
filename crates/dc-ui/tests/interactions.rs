@@ -7084,7 +7084,9 @@ fn align_left_lines_selection_on_first_selected() {
 
     h.get_by_label_contains("Home").click();
     h.run();
-    h.get_by_label_contains("Left").click();
+    // Exact match: the ribbon also carries "Rotate Left" now (#252
+    // Arrange refresh) — contains would be ambiguous.
+    h.get_by_label("Left").click();
     h.run();
     let br2 = h.state().debug_shape_page_rect(b).unwrap();
     let ar2 = h.state().debug_shape_page_rect(a).unwrap();

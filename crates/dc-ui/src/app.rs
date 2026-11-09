@@ -7588,6 +7588,8 @@ impl App {
             Action::FontShrink => self.nudge_char_size(-1.0),
             Action::RotateLeft => self.rotate_selection(90.0),
             Action::RotateRight => self.rotate_selection(-90.0),
+            Action::Group => self.group_selection(),
+            Action::Ungroup => self.ungroup_selection(),
         }
     }
 
@@ -7876,8 +7878,24 @@ impl App {
             shapesheet_open: self
                 .sel
                 .is_some_and(|(_, sid)| self.shapesheets.contains(&sid)),
+            sel_group: self.selection_has_group(),
             container_highlight: self.container_highlight_on(),
         }
+    }
+
+    /// Whether any selected shape on the current page is a group
+    /// (#252 Home ▸ Arrange Ungroup enablement).
+    fn selection_has_group(&self) -> bool {
+        let Some(page_id) = self.page_id() else { return false };
+        let Some(ed) = self.ed.as_ref() else { return false };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return false;
+        };
+        self.sel_set.iter().any(|(p, sid)| {
+            *p == page_id
+                && vsdx::model::find_shape_by_id(&page.shapes, *sid)
+                    .is_some_and(|sh| !sh.sub_shapes.is_empty())
+        })
     }
 
     fn page_tabs(&mut self, ui: &mut Ui) {
@@ -11421,6 +11439,75 @@ impl App {
     }
 
     /// Rotate every selected shape ±90° (degrees, Visio CCW positive).
+    /// #252 Home ▸ Arrange: group the current multi-selection — the
+    /// same command the ctx menu fires, including #95's
+    /// group-into-group nesting.
+    fn group_selection(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let members: Vec<i64> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, sid)| *sid)
+            .collect();
+        if members.len() < 2 {
+            self.status = "Group needs 2+ shapes on the page".into();
+            return;
+        }
+        let new_id = self
+            .ed()
+            .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
+        let nest = self.nest_group_target(&members);
+        let cmd = match nest {
+            Some((parent, local_pin)) => {
+                let nested: Vec<i64> =
+                    members.iter().copied().filter(|id| *id != parent).collect();
+                dc_core::commands::GroupShapes::into_group(
+                    page_id, nested, parent, local_pin,
+                )
+            }
+            None => dc_core::commands::GroupShapes::new(page_id, members),
+        };
+        self.apply(cmd);
+        if let Some(nid) = new_id {
+            self.set_selection(Some((page_id, nid)));
+        }
+    }
+
+    /// #252 Home ▸ Arrange: ungroup every selected group — one Macro
+    /// (one undo step); the first ex-member becomes the selection.
+    fn ungroup_selection(&mut self) {
+        let Some(page_id) = self.page_id() else { return };
+        let Some(ed) = self.ed.as_ref() else { return };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return;
+        };
+        let groups: Vec<(i64, Option<i64>)> = self
+            .sel_set
+            .iter()
+            .filter(|(p, _)| *p == page_id)
+            .map(|(_, sid)| {
+                let first_member = vsdx::model::find_shape_by_id(&page.shapes, *sid)
+                    .and_then(|g| g.sub_shapes.first().map(|m| m.id));
+                (*sid, first_member)
+            })
+            .collect();
+        let cmds: Vec<Box<dyn dc_core::Command>> = groups
+            .iter()
+            .filter(|(_, m)| m.is_some())
+            .map(|(sid, _)| Box::new(dc_core::commands::UngroupShape::new(page_id, *sid)) as _)
+            .collect();
+        if cmds.is_empty() {
+            self.status = "Select a group to ungroup".into();
+            return;
+        }
+        let n = cmds.len();
+        self.apply(dc_core::Macro::new(format!("ungroup {n} group(s)"), cmds));
+        if let Some((_, Some(m))) = groups.first() {
+            self.set_selection(Some((page_id, *m)));
+        }
+    }
+
     fn rotate_selection(&mut self, deg: f64) {
         let targets = self.sel_set.clone();
         let Some(ed) = self.ed.as_ref() else { return };
@@ -12010,39 +12097,8 @@ impl App {
                 }
             }
             Act::Group => {
-                let members: Vec<i64> = self
-                    .sel_set
-                    .iter()
-                    .filter(|(p, _)| *p == page_id)
-                    .map(|(_, sid)| *sid)
-                    .collect();
-                let new_id = self
-                    .ed()
-                    .map(|ed| dc_core::commands::next_shape_id(&ed.doc, page_id));
-                // #95: exactly one GROUP in the selection plus other
-                // top-level shapes → nest a new group INSIDE it (the
-                // members' bbox origin converted into the parent's
-                // local frame through the renderer's affine), Visio's
-                // group-into-group. Anything else groups at top level
-                // as before.
-                let nest = self.nest_group_target(&members);
-                let cmd = match nest {
-                    Some((parent, local_pin)) => {
-                        // The parent itself is the CONTAINER, never a
-                        // member (grouping it into itself would
-                        // self-nest).
-                        let nested: Vec<i64> =
-                            members.iter().copied().filter(|id| *id != parent).collect();
-                        dc_core::commands::GroupShapes::into_group(
-                            page_id, nested, parent, local_pin,
-                        )
-                    }
-                    None => dc_core::commands::GroupShapes::new(page_id, members),
-                };
-                self.apply(cmd);
-                if let Some(nid) = new_id {
-                    self.set_selection(Some((page_id, nid)));
-                }
+                // #252: shared with Home ▸ Arrange's Group button.
+                self.group_selection();
             }
             Act::Container => self.wrap_selection_in_container(),
             Act::AddToUnderlying => self.add_selection_to_underlying_container(),

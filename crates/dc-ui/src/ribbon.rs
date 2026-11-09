@@ -45,6 +45,8 @@ pub(crate) struct TabCtx {
     pub snap_dlg_open: bool,
     /// A shapesheet window is open for the selection.
     pub shapesheet_open: bool,
+    /// The selection includes at least one group (Ungroup arms).
+    pub sel_group: bool,
     pub container_highlight: bool,
 }
 
@@ -108,6 +110,10 @@ pub enum Action {
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.
     FormatPainterSticky,
+    /// #252 Home ▸ Arrange: group the selection (Visio's Group).
+    Group,
+    /// #252 Home ▸ Arrange: ungroup the selected group(s).
+    Ungroup,
     /// #156: apply the SDCONT style (master NameU) — wraps the
     /// selection, or re-wraps the selected container's members.
     ContainerStyle(&'static str),
@@ -237,6 +243,17 @@ pub enum Icon {
     AlignBottom,
     DistH,
     DistV,
+    /// #252 Home fidelity wave additions.
+    Justify,
+    TextTool,
+    RectTool,
+    EllipseTool,
+    LineTool,
+    Stamp,
+    Find,
+    FindReplace,
+    SelectionPane,
+    Eraser,
 }
 
 impl Icon {
@@ -269,6 +286,16 @@ impl Icon {
             Icon::LineSpacing => "linespacing",
             Icon::Effects => "effects",
             Icon::Bucket => "bucket",
+            Icon::Justify => "justify",
+            Icon::TextTool => "texttool",
+            Icon::RectTool => "rect",
+            Icon::EllipseTool => "selection-ellipse",
+            Icon::LineTool => "line",
+            Icon::Stamp => "stamp",
+            Icon::Find => "magnify-expand",
+            Icon::FindReplace => "findreplace",
+            Icon::SelectionPane => "selectionpane",
+            Icon::Eraser => "clear",
             Icon::Pen => "pen",
             Icon::BringFront => "bringfront",
             Icon::SendBack => "sendback",
@@ -1352,6 +1379,20 @@ impl Icon {
                     blue,
                 );
             }
+            // #252 wave additions all carry MDI assets; this glyph
+            // fallback only draws if an asset ever fails to load.
+            Icon::Justify
+            | Icon::TextTool
+            | Icon::RectTool
+            | Icon::EllipseTool
+            | Icon::LineTool
+            | Icon::Stamp
+            | Icon::Find
+            | Icon::FindReplace
+            | Icon::SelectionPane
+            | Icon::Eraser => {
+                p.rect_filled(r.shrink(6.0), 2.0, gray);
+            }
         }
     }
 }
@@ -1371,6 +1412,10 @@ pub struct RibbonButton {
     pub split: bool,
     /// Fixed control width (comboboxes: font 140 / size 52, Office-style).
     pub width: Option<f32>,
+    /// Accessible name when the painted label is empty (#252): the
+    /// compact icon-only tier keeps screen-reader and kittest label
+    /// lookups working (e.g. the align buttons paint icons only).
+    pub alt: Option<&'static str>,
 }
 
 impl RibbonButton {
@@ -1385,6 +1430,7 @@ impl RibbonButton {
             combo: false,
             split: false,
             width: None,
+            alt: None,
         }
     }
     pub fn tip(mut self, tip: &'static str) -> Self {
@@ -1407,6 +1453,17 @@ impl RibbonButton {
         self.split = true;
         self
     }
+    /// Set the accessible name (#252 compact tier).
+    pub fn alt(mut self, a: &'static str) -> Self {
+        self.alt = Some(a);
+        self
+    }
+
+    /// The name assistive tech / kittest sees.
+    fn a11y_label(&self) -> &'static str {
+        self.alt.unwrap_or(self.label)
+    }
+
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
         self
@@ -1448,7 +1505,7 @@ impl RibbonButton {
         // The caption is a painted galley — attach its text for
         // screen readers and keyboard focus (GitHub #56).
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
@@ -1487,9 +1544,10 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-        // Painted galley caption — name the control (GitHub #56).
+        // Painted galley caption — name the control (GitHub #56); the
+        // compact icon-only tier carries its name in `alt` (#252).
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
