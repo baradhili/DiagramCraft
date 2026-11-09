@@ -1606,7 +1606,8 @@ fn ribbon_zoom_buttons_zoom_and_refit() {
         "Zoom In: {z_fit} × 1.25 expected, got {z_manual}"
     );
 
-    h.get_by_label_contains("Fit Window").click();
+    // #252: Visio's name — was "Fit Window".
+    h.get_by_label_contains("Whole Page").click();
     h.run();
     let z_refit = h.state().debug_zoom();
     assert!(
