@@ -8117,8 +8117,9 @@ fn container_styles_gallery_tab_and_highlight() {
     h.run();
     assert_eq!(h.state().debug_sel_set_len(), 2, "both selected");
 
-    // Design ▸ Containers… ▸ Classic.
-    h.get_by_label_contains("Design").click();
+    // Insert ▸ Diagram Parts ▸ Containers… ▸ Classic (#252 moved the
+    // gallery from Design to Insert, Visio's placement).
+    h.get_by_label_contains("Insert").click();
     h.run();
     h.get_by_label_contains("Containers…").click();
     h.run();
