@@ -7590,6 +7590,17 @@ impl App {
             Action::RotateRight => self.rotate_selection(-90.0),
             Action::Group => self.group_selection(),
             Action::Ungroup => self.ungroup_selection(),
+            Action::Hyperlink => {
+                // #252 Insert ▸ Links: the Hyperlinks dialog (#28/#71)
+                // on the primary selection; no selection notes it.
+                match self.sel {
+                    Some((_, sid)) => {
+                        self.hyperlink_open = Some(sid);
+                        self.hyperlink_draft = None;
+                    }
+                    None => self.status = "Select a shape to edit its hyperlinks".into(),
+                }
+            }
         }
     }
 

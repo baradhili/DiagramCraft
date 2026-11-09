@@ -114,6 +114,9 @@ pub enum Action {
     Group,
     /// #252 Home ▸ Arrange: ungroup the selected group(s).
     Ungroup,
+    /// #252 Insert ▸ Links: open the Hyperlinks dialog (#28/#71) on
+    /// the primary selection.
+    Hyperlink,
     /// #156: apply the SDCONT style (master NameU) — wraps the
     /// selection, or re-wraps the selected container's members.
     ContainerStyle(&'static str),
@@ -254,6 +257,9 @@ pub enum Icon {
     FindReplace,
     SelectionPane,
     Eraser,
+    /// #252 Insert wave.
+    DateTime,
+    Title,
 }
 
 impl Icon {
@@ -296,6 +302,8 @@ impl Icon {
             Icon::FindReplace => "findreplace",
             Icon::SelectionPane => "selectionpane",
             Icon::Eraser => "clear",
+            Icon::DateTime => "datetime",
+            Icon::Title => "title",
             Icon::Pen => "pen",
             Icon::BringFront => "bringfront",
             Icon::SendBack => "sendback",
@@ -1390,7 +1398,9 @@ impl Icon {
             | Icon::Find
             | Icon::FindReplace
             | Icon::SelectionPane
-            | Icon::Eraser => {
+            | Icon::Eraser
+            | Icon::DateTime
+            | Icon::Title => {
                 p.rect_filled(r.shrink(6.0), 2.0, gray);
             }
         }

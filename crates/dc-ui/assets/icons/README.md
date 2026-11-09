@@ -76,6 +76,8 @@ File names map 1:1 to the `Icon` enum asset stems in
 | magnify-expand | magnify-expand (#252, 2026-11-09; file present since #110 wave, now mapped) |
 | findreplace | find-replace (#252, 2026-11-09) |
 | selectionpane | file-tree-outline (#252, 2026-11-09) |
+| datetime | clock-outline (#252, 2026-11-09) |
+| title | format-title (#252, 2026-11-09) |
 
 Posters note: MDI is an open-source set, not Microsoft artwork; the
 cleanroom rule (no Microsoft assets) still holds. Fluent UI icons were
