@@ -1268,26 +1268,44 @@ impl crate::Command for AddMasterInstance {
             // LocPin derives from the frame this pose wrote.
             let locpinx_v = w / 2.0;
             let locpiny_v = height_v / 2.0;
-            let mut put = |n: &str, v: f64, f: Option<String>| {
-                sheet.set_cell(
-                    n,
-                    Cell {
-                        v: Some(format!("{v:.6}")),
-                        f,
-                        ..Cell::default()
-                    },
-                );
+            // The three-way instancing write (#248, #218 review):
+            // master FORMULA → an F="Inh" cache of this pose's value
+            // (never a copy of the formula text — that would mask the
+            // master's own); master LITERAL → nothing local, plain
+            // inheritance; master lacks the cell → the instance owns
+            // it as a local value.
+            // The endpoints are the instance's own (glue owns them)
+            // — written before the cache closure takes the sheet
+            // borrow.
+            for (n, v) in [("BeginX", bx), ("BeginY", by), ("EndX", ex), ("EndY", by)] {
+                sheet.set_cell(n, Cell::value(format!("{v:.6}")));
+            }
+            let mut cache = |n: &str, v: f64| {
+                let owned = src.and_then(|r| r.sheet.cell(n)).is_some();
+                match (owned, master_f(n).is_some()) {
+                    (true, true) => sheet.set_cell(
+                        n,
+                        Cell {
+                            v: Some(format!("{v:.6}")),
+                            f: Some("Inh".into()),
+                            ..Cell::default()
+                        },
+                    ),
+                    // A master literal stays the master's (#226: a
+                    // local snapshot over the Line master's Height=0
+                    // corrupted the first endpoint drag).
+                    (true, false) => {}
+                    (false, _) => {
+                        sheet.set_cell(n, Cell::value(format!("{v:.6}")));
+                    }
+                }
             };
-            // The endpoints are the instance's own (glue owns them).
-            put("BeginX", bx, None);
-            put("BeginY", by, None);
-            put("EndX", ex, None);
-            put("EndY", by, None);
-            put("Width", width_v, wf);
-            put("Height", height_v, hf);
-            put("LocPinX", locpinx_v, master_f("LocPinX"));
-            put("LocPinY", locpiny_v, master_f("LocPinY"));
-            put("Angle", 0.0, master_f("Angle"));
+            let _ = (wf, hf);
+            cache("Width", width_v);
+            cache("Height", height_v);
+            cache("LocPinX", locpinx_v);
+            cache("LocPinY", locpiny_v);
+            cache("Angle", 0.0);
         }
         let shape = Shape {
             id,

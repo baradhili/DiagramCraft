@@ -293,13 +293,15 @@ impl Page {
     /// enumeration of a real Visio-authored page carried
     /// `LineJumpCode = 1`, Visio's "horizontal lines jump" default).
     /// Absent shows (the shipped corpus carries no jump cells at
-    /// all); **6 = "no line gets jumps"** — the off switch
-    /// ([MS-Learn] LineJumpCode cell, Page Layout section).
+    /// all). **0 = visPLOJumpNone** — the documented off switch
+    /// ([MS-Learn] LineJumpCode cell, Page Layout section; values
+    /// 0–5). 6 stays treated as off too (#218 review: files written
+    /// by tools that use it as "none" keep their intent).
     pub fn line_jumps_shown(&self) -> bool {
         self.sheet()
             .and_then(|s| s.cell("LineJumpCode"))
             .and_then(|c| c.numeric())
-            .map(|v| v != 6.0)
+            .map(|v| v != 0.0 && v != 6.0)
             .unwrap_or(true)
     }
 

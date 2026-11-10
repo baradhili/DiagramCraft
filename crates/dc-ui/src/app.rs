@@ -172,6 +172,10 @@ pub struct App {
     snap: crate::snap::SnapSettings,
     /// The Snap & Glue dialog is open (View ▸ Visual Aids, #109).
     snap_dlg_open: bool,
+    /// #218 review: the Jump-size drag's draft — a DragValue commit
+    /// per frame flooded history; the draft edits locally and commits
+    /// once, when the drag stops (typed input commits immediately).
+    line_jump_draft: Option<f32>,
     /// Dynamic-grid hints for the frame in progress (#109, URS-1088),
     /// recomputed by `update_drag` while a move drag is live and
     /// painted by the canvas from `DragFx::hints`.
@@ -602,8 +606,10 @@ impl App {
             // #242: the CLI entry's open rides the async flight like
             // every interactive open — the splash covers the boot and
             // the scrim the parse + first render; the frames pump the
-            // poll from the first frame on.
-            app.begin_async_load(p);
+            // poll from the first frame on. Routed through load() so
+            // a .vssx still lands in the Shapes pane (#83, #218
+            // review), not the editor.
+            app.load(p);
         }
         app
     }
@@ -655,6 +661,7 @@ impl App {
             pending_activate: None,
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
+            line_jump_draft: None,
             snap_live: Vec::new(),
             conn_fx_last: crate::connectors::ConnPointFx::default(),
             drag_glue: None,
@@ -4402,11 +4409,26 @@ impl App {
         // must refresh in the SAME undo step or the render keeps the
         // pre-drag pose (the glue writes alone leave Pin/Width/Height
         // stale under their GUARDs). Planned by ID: works for the
-        // re-glue and the release alike.
-        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
-            page_id,
-            vec![sid],
-        )));
+        // re-glue and the release alike. The PRE-drag endpoints ride
+        // along (#218 review): the endpoint writes above land first,
+        // so re-reading the pose here would name the NEW ends and the
+        // literal-row translation delta would collapse to zero.
+        let pre_pose = self.ed.as_ref().and_then(|ed| {
+            let page = ed.doc.pages.iter().find(|p| p.id == page_id)?;
+            let sh = vsdx::model::find_shape_by_id(&page.shapes, sid)?;
+            let chain = dc_core::scope::shape_chain(&ed.doc, page_id, sid).ok()?;
+            let g = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+            Some(((g("BeginX")?, g("BeginY")?), (g("EndX")?, g("EndY")?)))
+        });
+        let mut reroute = crate::cmd::RerouteConnectors::new_including(page_id, vec![sid]);
+        if let Some(pre) = pre_pose {
+            reroute = crate::cmd::RerouteConnectors::new_including_with_pre(
+                page_id,
+                vec![sid],
+                [(sid, pre)].into_iter().collect(),
+            );
+        }
+        cmds.push(Box::new(reroute));
         self.apply(Macro::new(
             format!("glue connector {sid} {}", end.cell()),
             cmds,
@@ -6694,7 +6716,7 @@ impl App {
                 if ui.checkbox(&mut show_toggle, "Show line jumps").changed() {
                     self.apply_line_jumps_shown(show_toggle);
                 }
-                let mut jump_factor = self
+                let doc_factor = self
                     .ed
                     .as_ref()
                     .map(|ed| {
@@ -6703,18 +6725,27 @@ impl App {
                             .line_jump_factor()
                     })
                     .unwrap_or(1.0) as f32;
+                let mut jump_factor = self.line_jump_draft.unwrap_or(doc_factor);
                 ui.horizontal(|ui| {
                     ui.label("Jump size");
-                    if ui
-                        .add(
-                            egui::DragValue::new(&mut jump_factor)
-                                .range(0.5..=3.0)
-                                .speed(0.05)
-                                .suffix("×"),
-                        )
-                        .changed()
-                    {
-                        self.apply_line_jump_factor(jump_factor as f64);
+                    let r = ui.add(
+                        egui::DragValue::new(&mut jump_factor)
+                            .range(0.5..=3.0)
+                            .speed(0.05)
+                            .suffix("×"),
+                    );
+                    // Draft while dragging; commit ONCE at drag end
+                    // (or immediately for typed input) — the value
+                    // reloads from the document each frame, so the
+                    // draft is what carries the drag (#218 review).
+                    if r.dragged() {
+                        self.line_jump_draft = Some(jump_factor);
+                    }
+                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                        self.line_jump_draft = None;
+                        if (jump_factor - doc_factor).abs() > 1e-6 {
+                            self.apply_line_jump_factor(jump_factor as f64);
+                        }
                     }
                 });
             });
@@ -11462,23 +11493,16 @@ impl App {
             return;
         };
         let members = self.container_member_ids(page_id, cont);
-        let mut cmds: Vec<Box<dyn dc_core::Command>> = members
-            .iter()
-            .map(|&m| {
-                Box::new(dc_core::SetRowCell::new(
-                    Scope::Shape {
-                        page: page_id,
-                        shape: m,
-                    },
-                    "User",
-                    0,
-                    dc_core::commands::RowSel::Named("msvSDContainerShape".into()),
-                    "Value",
-                    vsdx::Cell::value(String::new()),
-                )) as Box<dyn dc_core::Command>
-            })
-            .collect();
-        cmds.push(Box::new(dc_core::commands::RemoveShape::new(page_id, cont)));
+        // The same cleanup delete_one runs (#218 review): the
+        // membership ROWS come out (#138 treats leftovers as
+        // dangling), and Connects pointing at the container go with
+        // it — writing empty Values would leave both in the file.
+        let mut cmds: Vec<Box<dyn dc_core::Command>> =
+            vec![Box::new(dc_core::commands::RemoveShape::new(page_id, cont))];
+        if let Some(ed) = self.ed() {
+            cmds.extend(dc_core::container_membership_cleanup(&ed.doc, page_id, &[cont]));
+        }
+        cmds.extend(self.connect_cleanup_cmds(page_id, &[cont]));
         self.apply(dc_core::Macro::new(
             format!("disband container ({0} member(s) released)", members.len()),
             cmds,

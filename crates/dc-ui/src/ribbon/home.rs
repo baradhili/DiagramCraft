@@ -120,26 +120,33 @@ fn font_grid(has_sel: bool) -> super::Col {
                 .enabled(false)
                 .tip("Font size — planned"),
             RibbonButton::new(Icon::Grow, "", Action::FontGrow)
+                .alt("Increase Font Size")
                 .enabled(has_sel)
                 .tip("Increase font size"),
             RibbonButton::new(Icon::Shrink, "", Action::FontShrink)
+                .alt("Decrease Font Size")
                 .enabled(has_sel)
                 .tip("Decrease font size"),
         ],
         vec![
             RibbonButton::new(Icon::Bold, "", Action::Macros)
+                .alt("Bold")
                 .enabled(false)
                 .tip("Bold — planned"),
             RibbonButton::new(Icon::Italic, "", Action::Macros)
+                .alt("Italic")
                 .enabled(false)
                 .tip("Italic — planned"),
             RibbonButton::new(Icon::Underline, "", Action::Macros)
+                .alt("Underline")
                 .enabled(false)
                 .tip("Underline — planned"),
             RibbonButton::new(Icon::Strike, "", Action::Macros)
+                .alt("Strikethrough")
                 .enabled(false)
                 .tip("Strikethrough — planned"),
             RibbonButton::new(Icon::TextColor, "", Action::Macros)
+                .alt("Text Color")
                 .enabled(false)
                 .tip("Text color — planned"),
         ],
@@ -150,29 +157,37 @@ fn paragraph_grid() -> super::Col {
     grid(vec![
         vec![
             RibbonButton::new(Icon::Align, "", Action::Macros)
+                .alt("Align Left")
                 .enabled(false)
                 .tip("Align left — planned"),
             RibbonButton::new(Icon::AlignCenter, "", Action::Macros)
+                .alt("Align Center")
                 .enabled(false)
                 .tip("Align center — planned"),
             RibbonButton::new(Icon::AlignRight, "", Action::Macros)
+                .alt("Align Right")
                 .enabled(false)
                 .tip("Align right — planned"),
             RibbonButton::new(Icon::Justify, "", Action::Macros)
+                .alt("Justify")
                 .enabled(false)
                 .tip("Justify — planned"),
         ],
         vec![
             RibbonButton::new(Icon::Bullets, "", Action::Macros)
+                .alt("Bullets")
                 .enabled(false)
                 .tip("Bullets — planned"),
             RibbonButton::new(Icon::Numbering, "", Action::Macros)
+                .alt("Numbering")
                 .enabled(false)
                 .tip("Numbering — planned"),
             RibbonButton::new(Icon::IndentLess, "", Action::Macros)
+                .alt("Decrease Indent")
                 .enabled(false)
                 .tip("Decrease indent — planned"),
             RibbonButton::new(Icon::IndentMore, "", Action::Macros)
+                .alt("Increase Indent")
                 .enabled(false)
                 .tip("Increase indent — planned"),
         ],
@@ -211,22 +226,27 @@ fn tools_cols(ctx: &TabCtx) -> Vec<super::Col> {
         grid(vec![
             vec![
                 RibbonButton::new(Icon::TextTool, "", Action::Macros)
+                    .alt("Text Tool")
                     .enabled(false)
                     .tip("Text tool — planned (double-click edits text today)"),
                 RibbonButton::new(Icon::RectTool, "", Action::Macros)
+                    .alt("Rectangle Tool")
                     .enabled(false)
                     .tip("Rectangle tool — planned"),
             ],
             vec![
                 RibbonButton::new(Icon::EllipseTool, "", Action::Macros)
+                    .alt("Ellipse Tool")
                     .enabled(false)
                     .tip("Ellipse tool — planned"),
                 RibbonButton::new(Icon::LineTool, "", Action::Macros)
+                    .alt("Line Tool")
                     .enabled(false)
                     .tip("Line tool — planned"),
             ],
             vec![
                 RibbonButton::new(Icon::Stamp, "", Action::Macros)
+                    .alt("Stamp Tool")
                     .enabled(false)
                     .tip("Stamp tool — planned"),
             ],

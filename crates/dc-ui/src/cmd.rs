@@ -435,6 +435,10 @@ pub(crate) fn pin_of(doc: &Document, page: i64, shape: i64) -> Option<(f64, f64)
 /// the facing side; the geometry rows carry the new route
 /// (`FixedRoute=1` connectors stay put). Cached values are rewritten,
 /// the corpus formulas kept. Undo restores every touched cell.
+/// #218 review: the PRE-drag endpoint pairs for `also` connectors —
+/// (pre_beg, pre_end) keyed by connector id.
+pub type PrePose = std::collections::HashMap<i64, ((f64, f64), (f64, f64))>;
+
 pub struct RerouteConnectors {
     page: i64,
     moved: Vec<i64>,
@@ -450,6 +454,13 @@ pub struct RerouteConnectors {
     /// connector's Ink touch would vanish and its layer texture would
     /// stay at the dragged raster under the restored bbox (#178).
     touched_cache: dc_core::TouchList,
+    /// #218 review: the PRE-drag endpoint pairs for `also`
+    /// connectors (the endpoint-drop path writes the new endpoint
+    /// cells BEFORE this command applies, so re-reading them from the
+    /// document yields pre == post and the literal-row translation
+    /// delta collapses to zero). Keyed by connector id:
+    /// (pre_beg, pre_end).
+    also_pre: PrePose,
 }
 
 impl RerouteConnectors {
@@ -460,12 +471,28 @@ impl RerouteConnectors {
             also: Vec::new(),
             inner: Vec::new(),
             touched_cache: dc_core::TouchList::default(),
+            also_pre: PrePose::new(),
         }
     }
 
     /// Plan these connectors by ID — every glue record they carry
     /// (or a frame-only refresh when released), no shape-move needed
     /// (#179's endpoint-drop path).
+    /// `new_including` with the PRE-drag endpoint pairs (#218
+    /// review) — the endpoint-drop path's constructor: the drop has
+    /// already written the new endpoint cells when the command
+    /// applies, so the pre pose must ride along or literal geometry
+    /// rows never translate.
+    pub fn new_including_with_pre(
+        page: i64,
+        also: Vec<i64>,
+        pre: PrePose,
+    ) -> RerouteConnectors {
+        let mut cmd = Self::new_including(page, also);
+        cmd.also_pre = pre;
+        cmd
+    }
+
     pub fn new_including(page: i64, also: Vec<i64>) -> RerouteConnectors {
         RerouteConnectors {
             page,
@@ -473,6 +500,7 @@ impl RerouteConnectors {
             also,
             inner: Vec::new(),
             touched_cache: dc_core::TouchList::default(),
+            also_pre: PrePose::new(),
         }
     }
 
@@ -1195,12 +1223,16 @@ impl Command for RerouteConnectors {
                 let (x, y) = (px - lx, py - ly);
                 Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
             };
-            let page_shapes = &doc
+            // A stale page id (a queued/replayed reroute after the
+            // page's deletion) is a no-op, not a panic (#218 review).
+            let Some(page_shapes) = doc
                 .pages
                 .iter()
                 .find(|p| p.id == self.page)
                 .map(|p| &p.shapes)
-                .expect("the helper resolved this page");
+            else {
+                return Ok(());
+            };
             for (conn_id, recs) in candidates {
                 let Some(conn) = vsdx::model::find_shape_by_id(page_shapes, conn_id) else {
                     continue;
@@ -1275,7 +1307,16 @@ impl Command for RerouteConnectors {
                 // Frame + route once, from both new endpoints — the
                 // shared planner (the live endpoint-drag preview plans
                 // through the same function).
-                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, (ex, ey), (bx, by));
+                // The endpoint-drop path carries its PRE-drag pose
+                // (#218 review): the drop wrote the new endpoint
+                // cells before apply, so (bx..ey) re-read as the NEW
+                // values and the literal-row delta collapsed to zero.
+                let (pre_beg, pre_end) = self
+                    .also_pre
+                    .get(&conn.id)
+                    .copied()
+                    .unwrap_or(((bx, by), (ex, ey)));
+                let plan = plan_connector_frame(doc, conn, &chain, beg, endp, pre_end, pre_beg);
                 let mut cells = end_cells;
                 cells.extend(plan.cells);
                 plans.push(Plan {
@@ -2682,6 +2723,81 @@ mod reroute_master_tests {
         .find(|r| r.ix == ix)
         .unwrap()
         .clone()
+    }
+
+    /// #218 review: the endpoint-drop path carries its PRE-drag pose.
+    /// A released master ARC connector with LITERAL rows — the drop
+    /// writes the new endpoint cells BEFORE the reroute applies, so
+    /// re-reading the pose from the document collapses the literal
+    /// row translation to zero and the curve stops short of the
+    /// dropped end.
+    #[test]
+    fn reroute_drop_translates_literal_arc_rows_from_the_pre_pose() {
+        let (mut ed, page_id) = doc_with_master_connector(100, true);
+        let scope = Scope::Shape { page: page_id, shape: 11 };
+        // RELEASED: the drop on empty page removed the glue record —
+        // without this the reroute re-resolves the end onto the old
+        // target's connection point instead of the dropped pose.
+        ed.apply(dc_core::RemoveConnect::new(
+            dc_core::ConnectsOwner::Page(page_id),
+            0,
+        ))
+        .unwrap();
+        // A freshly dropped instance's frame cells are Inh caches of
+        // the master's formulas (#248) — the pose the drop starts
+        // from. The fixture's literals become those caches.
+        for (n, v) in [
+            ("PinX", "1.5"),
+            ("PinY", "6.0"),
+            ("Width", "1.0"),
+            ("LocPinX", "0.5"),
+            ("LocPinY", "0.0"),
+        ] {
+            ed.apply(SetCell::new(
+                scope.clone(),
+                n,
+                VCell {
+                    v: Some(v.into()),
+                    f: Some("Inh".into()),
+                    ..VCell::default()
+                },
+            ))
+            .unwrap();
+        }
+        // The GUI's drop: the plain endpoint move lands FIRST (this
+        // is what re-reading the pose would see afterwards).
+        for (n, v) in [("EndX", "4.5"), ("EndY", "7.0")] {
+            ed.apply(SetCell::new(scope.clone(), n, VCell::value(v)))
+                .unwrap();
+        }
+        // Fixture pre pose: begin (1, 6), end (2, 6).
+        let pre = [(11i64, ((1.0f64, 6.0f64), (2.0f64, 6.0f64)))]
+            .into_iter()
+            .collect();
+        let mut cmd = RerouteConnectors::new_including_with_pre(page_id, vec![11], pre);
+        cmd.apply(&mut ed.doc).unwrap();
+
+        // The begin→end offset grew from (1, 0) to (3.5, 1): the
+        // literal end row's X rides the Width-tracked axis (+3.5);
+        // Y stays (the instance's Height is a constant guard).
+        let end_row = geo_row_of(&ed, page_id, 11, 2);
+        assert!(
+            (end_row.cell("X").unwrap().numeric().unwrap() - 3.5).abs() < 1e-6,
+            "literal row X follows the dropped end: {}",
+            end_row.cell("X").unwrap().v.clone().unwrap()
+        );
+        assert!((end_row.cell("Y").unwrap().numeric().unwrap() - 0.1).abs() < 1e-9);
+        // The sagitta controls are untouched.
+        assert!((end_row.cell("A").unwrap().numeric().unwrap() - 0.5).abs() < 1e-9);
+        // The frame caches track the new chord.
+        let conn = vsdx::model::find_shape_by_id(
+            &ed.doc.pages.iter().find(|p| p.id == page_id).unwrap().shapes,
+            11,
+        )
+        .unwrap();
+        let g = |n: &str| conn.sheet.cell(n).and_then(|c| c.numeric()).unwrap();
+        assert!((g("Width") - 3.5).abs() < 1e-6, "Width {}", g("Width"));
+        assert!((g("PinX") - 2.75).abs() < 1e-6);
     }
 
     /// The endpoint-drag commit: an arc connector's END moved to

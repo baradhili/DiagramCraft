@@ -349,7 +349,8 @@ fn check_move(ed: &Editor, conn_id: i64, f: &mut Vec<Fail>) {
         f.push(Fail { phase: "move", why: "no ink rendered after move".into() });
     } else if let Some(b) = ink(ed, conn_id) {
         let cov = |x: f64, y: f64| b.0 - 0.15 <= x && x <= b.0 + b.2 + 0.15 && (11.0 - b.1 - b.3) - 0.15 <= y && y <= 11.0 - b.1 + 0.15;
-        let want = dc_ui::connectors::attach_point((9.5, 6.0, 1.0, 1.0), (3.0, 2.5));
+        // Reuse the mode-aware `want` (#218 review): the shadowed
+        // dynamic recompute reported ink misses under STATIC_ONLY.
         if !cov(want.0, want.1) {
             f.push(Fail { phase: "move", why: format!("ink bounds {b:?} do not follow the moved end") });
         }

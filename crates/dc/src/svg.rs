@@ -6036,18 +6036,22 @@ mod tests {
             connector(1, (3.0, 5.0), 4.0, 0.0),
             connector(2, (3.0, 5.0), 0.0, 4.0),
         ]);
-        // Hidden: the PageSheet switch suppresses the group (6 =
-        // "no line gets jumps", #251's oracle-pinned off switch).
-        let mut hidden = doc.clone();
-        hidden.pages[0]
-            .sheet_mut()
-            .unwrap()
-            .set_cell("LineJumpCode", Cell::value("6"));
-        let svg = render_page(&hidden, &hidden.pages[0]).unwrap();
-        assert!(
-            !svg.contains(r#"data-dc="line-jumps""#),
-            "the hidden page draws no jump group"
-        );
+        // Hidden: the PageSheet switch suppresses the group (0 =
+        // visPLOJumpNone, the documented off switch per [MS-Learn];
+        // #218 review — 6 was never in the enumeration, and a page
+        // set to None must not draw hop arcs).
+        for off in ["0", "6"] {
+            let mut hidden = doc.clone();
+            hidden.pages[0]
+                .sheet_mut()
+                .unwrap()
+                .set_cell("LineJumpCode", Cell::value(off));
+            let svg = render_page(&hidden, &hidden.pages[0]).unwrap();
+            assert!(
+                !svg.contains(r#"data-dc="line-jumps""#),
+                "the page set to LineJumpCode {off} draws no jump group"
+            );
+        }
         // Shown at 2×: the hop arc's radius doubles.
         let mut big = doc.clone();
         big.pages[0]

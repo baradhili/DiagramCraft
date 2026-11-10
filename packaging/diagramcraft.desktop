@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=DiagramCraft
+Name=Tarahi
 GenericName=Diagram Editor
 Comment=Draw flowcharts, layouts and diagrams from Visio files
 Exec=diagramcraft %F

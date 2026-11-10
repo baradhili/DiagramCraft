@@ -2,8 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>              <string>DiagramCraft</string>
-    <key>CFBundleDisplayName</key>       <string>DiagramCraft</string>
+    <key>CFBundleName</key>              <string>Tarahi</string>
+    <key>CFBundleDisplayName</key>       <string>Tarahi</string>
     <key>CFBundleExecutable</key>        <string>DiagramCraft</string>
     <key>CFBundleIdentifier</key>        <string>com.diagramcraft.app</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>

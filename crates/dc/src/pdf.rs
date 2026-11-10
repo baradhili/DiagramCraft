@@ -967,12 +967,31 @@ fn emit_text(ctx: &mut PdfContext, content: &mut Content, text: &usvg::Text) {
             content.set_font(Name(refs.res_name.as_bytes()), font_size);
             let mut positioned = content.show_positioned();
             let mut items = positioned.items();
+            // RTL runs emit glyphs in VISUAL order: cluster values
+            // DECREASE along the run, so "next glyph's cluster" is
+            // BELOW this one and the old range came out empty —
+            // Hebrew/Arabic glyphs got no ToUnicode entry and their
+            // text could not be selected or copied (#218 review).
+            // The cluster's chars end at the SMALLEST cluster above
+            // this glyph's (text end when there is none).
+            if let Some(first) = run.glyphs.first() {
+                let off = first.x_offset * 1000.0 / upem;
+                if off.abs() > 1e-3 {
+                    // The first glyph's own offset applies before it
+                    // is shown (the loop only carries offsets forward).
+                    items.adjust(-off);
+                }
+            }
             for (i, g) in run.glyphs.iter().enumerate() {
                 // Cluster chars → ToUnicode (multi-char for ligatures).
                 let end = run
                     .glyphs
-                    .get(i + 1)
-                    .map_or(run.text.len(), |n| n.cluster.min(run.text.len()));
+                    .iter()
+                    .map(|n| n.cluster)
+                    .filter(|&c| c > g.cluster)
+                    .min()
+                    .unwrap_or(run.text.len())
+                    .min(run.text.len());
                 let chars: Vec<char> = run
                     .text
                     .get(g.cluster.min(end)..end)
@@ -995,13 +1014,18 @@ fn emit_text(ctx: &mut PdfContext, content: &mut Content, text: &usvg::Text) {
                 let bytes = [(g.id >> 8) as u8, g.id as u8];
                 items.show(Str(bytes.as_slice()));
                 // Kerning correction: shaped advance vs the /W nominal,
-                // plus the next glyph's x offset — thousandths of the
-                // font size, subtracted from the pen.
+                // plus the OFFSET DIFFERENCE to the next glyph — a
+                // per-glyph x_offset must affect only its own glyph,
+                // so this one's is cancelled and the next's applied
+                // (#218 review; marks/diacritics otherwise shift every
+                // later glyph in the run). Thousandths of the font
+                // size, subtracted from the pen.
                 let nominal = glyph_width_1000(&tt, g.id);
                 let shaped1000 = g.x_advance * 1000.0 / upem;
+                let this_offset = g.x_offset * 1000.0 / upem;
                 let next_offset =
                     run.glyphs.get(i + 1).map(|n| n.x_offset).unwrap_or(0.0) * 1000.0 / upem;
-                let adjust = nominal - shaped1000 - next_offset;
+                let adjust = nominal - shaped1000 - (next_offset - this_offset);
                 if adjust.abs() > 1e-3 {
                     items.adjust(adjust);
                 }

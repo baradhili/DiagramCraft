@@ -3832,7 +3832,14 @@ fn format_pane_edits_cells_for_whole_selection() {
         Some(sid),
         "#136: undo keeps the formatted shape selected"
     );
-    h.get_by_label("Bold").click();
+    // #252: the ribbon's Home ▸ Font group also paints a Bold
+    // placeholder — the pane's real toggle is the one BELOW the
+    // ribbon (the topmost match is the ribbon's).
+    let bold = h
+        .get_all_by_label_contains("Bold")
+        .max_by_key(|n| n.rect().top() as i32)
+        .expect("the pane's Bold toggle is present");
+    bold.click();
     h.run();
     assert_eq!(
         h.state().debug_cell_for_test(sid, "Char.Style"),
