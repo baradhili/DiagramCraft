@@ -485,6 +485,23 @@ impl RerouteConnectors {
     /// apply's attach-resolution half can still drop one, which only
     /// leaves an unused harvest entry.
     fn candidate_connectors(&self, doc: &Document) -> Vec<i64> {
+        self.candidate_connectors_with_records(doc)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// The shared discovery (`touched()` takes the IDs, apply's pass 1
+    /// the pairs, so pre-apply harvesting and apply rewrite the SAME
+    /// connectors by construction — #218 review): the glue records of
+    /// the moved shapes plus the #179 also-list, then the #174
+    /// chain-aware connector test, the FixedRoute bail and the
+    /// resolvable-endpoint check. Records are cloned owned — the
+    /// connects list is a page-local value here.
+    fn candidate_connectors_with_records(
+        &self,
+        doc: &Document,
+    ) -> Vec<(i64, Vec<dc_core::connects::Connect>)> {
         use dc_core::connects::ConnectsHost;
         use std::collections::BTreeMap;
         let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
@@ -511,8 +528,8 @@ impl RerouteConnectors {
             }
         }
         by_connector
-            .into_keys()
-            .filter(|conn_id| {
+            .into_iter()
+            .filter(|(conn_id, _)| {
                 let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, *conn_id) else {
                     return false;
                 };
@@ -538,6 +555,7 @@ impl RerouteConnectors {
                 };
                 true
             })
+            .map(|(id, recs)| (id, recs.into_iter().cloned().collect()))
             .collect()
     }
 }
@@ -1159,35 +1177,12 @@ impl Command for RerouteConnectors {
         // ends (CodeRabbit).
         let mut plans: Vec<Plan> = Vec::new();
         {
-            use dc_core::connects::ConnectsHost;
-            use std::collections::BTreeMap;
-            let Some(page) = doc.pages.iter().find(|p| p.id == self.page) else {
-                return Ok(());
-            };
-            let connects = page.connects();
-            let mut by_connector: BTreeMap<i64, Vec<&dc_core::connects::Connect>> = BTreeMap::new();
-            for c in &connects.list {
-                if !self.moved.contains(&c.to_sheet) {
-                    continue;
-                }
-                by_connector.entry(c.from_sheet).or_default().push(c);
-            }
-            // #179: also-listed connectors plan by ID — carrying ALL
-            // their glue records (both ends re-resolve), or none when
-            // just released (a frame-only refresh from the endpoint
-            // cells).
-            for id in &self.also {
-                if !by_connector.contains_key(id) {
-                    by_connector.insert(
-                        *id,
-                        connects
-                            .list
-                            .iter()
-                            .filter(|c| c.from_sheet == *id)
-                            .collect(),
-                    );
-                }
-            }
+            // The candidate set comes from the SAME helper touched()
+            // uses (#218 review) — the glue records of the moved
+            // shapes plus the #179 also-list, with the #174
+            // chain-aware test, the FixedRoute bail and the
+            // resolvable-endpoint check already applied.
+            let candidates = self.candidate_connectors_with_records(doc);
             let trect = |t: &vsdx::model::Shape| -> Option<(f64, f64, f64, f64)> {
                 let ch = dc_core::scope::shape_chain(doc, self.page, t.id).ok()?;
                 let g = |n: &str| doc.resolve_cell(t, &ch, n).and_then(|v| v.numeric());
@@ -1200,28 +1195,19 @@ impl Command for RerouteConnectors {
                 let (x, y) = (px - lx, py - ly);
                 Some((x.min(x + w), y.min(y + h), w.abs(), h.abs()))
             };
-            for (conn_id, recs) in by_connector {
-                let Some(conn) = vsdx::model::find_shape_by_id(&page.shapes, conn_id) else {
+            let page_shapes = &doc
+                .pages
+                .iter()
+                .find(|p| p.id == self.page)
+                .map(|p| &p.shapes)
+                .expect("the helper resolved this page");
+            for (conn_id, recs) in candidates {
+                let Some(conn) = vsdx::model::find_shape_by_id(page_shapes, conn_id) else {
                     continue;
                 };
                 let Ok(chain) = dc_core::scope::shape_chain(doc, self.page, conn.id) else {
                     continue;
                 };
-                // #174: chain-aware — master-based connectors (every
-                // Visio-authored one) carry ObjType=2 on the MASTER;
-                // the local-only check skipped them, so moving a shape
-                // never moved its glued connectors.
-                if !crate::connectors::is_connector_in(doc, &chain, conn) {
-                    continue;
-                }
-                if conn
-                    .sheet
-                    .cell("FixedRoute")
-                    .and_then(|v| v.numeric())
-                    .is_some_and(|v| v == 1.0)
-                {
-                    continue;
-                }
                 let get = |n: &str| doc.resolve_cell(conn, &chain, n).and_then(|v| v.numeric());
                 let (Some(bx), Some(by), Some(ex), Some(ey)) =
                     (get("BeginX"), get("BeginY"), get("EndX"), get("EndY"))
@@ -1239,7 +1225,7 @@ impl Command for RerouteConnectors {
                     } else {
                         crate::connectors::End::End
                     };
-                    let Some(target) = vsdx::model::find_shape_by_id(&page.shapes, c.to_sheet)
+                    let Some(target) = vsdx::model::find_shape_by_id(page_shapes, c.to_sheet)
                     else {
                         continue;
                     };
