@@ -695,11 +695,14 @@ fn node_ink_box(
                         .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
                         .unwrap_or_default();
                     if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                        // Per-axis: xType gates X by Width, yType
-                        // gates Y by Height (raw signed — rel_adjust
-                        // and the render arm multiply raw).
-                        let fx = if f.x_type == 0.0 { width * gscale.0 } else { gscale.0 };
-                        let fy = if f.y_type == 0.0 { height * gscale.1 } else { gscale.1 };
+                        // Per-axis: a fraction lands directly in
+                        // instance units (the frame's own Width/
+                        // Height); an absolute axis carries
+                        // master-unit literals and takes the scale
+                        // once — mirroring the render arm (#218
+                        // review round: no squared stretch).
+                        let fx = if f.x_type == 0.0 { width } else { gscale.0 };
+                        let fy = if f.y_type == 0.0 { height } else { gscale.1 };
                         for (gx, gy, _, _) in &f.points {
                             pt(gx * fx, gy * fy, &mut u);
                         }
@@ -3186,8 +3189,23 @@ fn render_geometry(
                     .unwrap_or_default();
                 let mut drew = false;
                 if let Some(f) = crate::curve::parse_nurbs(&e_text) {
-                    let fx = if f.x_type == 0.0 { width } else { 1.0 };
-                    let fy = if f.y_type == 0.0 { height } else { 1.0 };
+                    // Fractions are of the GEOMETRY frame's own size:
+                    // the master's dims in the master frame (`width/
+                    // scale` recovers them; `emit_pt` applies the
+                    // instance scale exactly once), the instance's
+                    // own dims inline (scale = 1). Scaling by the
+                    // instance dims here too would square the stretch
+                    // (#218 review round).
+                    let fx = if f.x_type == 0.0 {
+                        width / scale.0.max(1e-12)
+                    } else {
+                        1.0
+                    };
+                    let fy = if f.y_type == 0.0 {
+                        height / scale.1.max(1e-12)
+                    } else {
+                        1.0
+                    };
                     let mut points = vec![cur];
                     let mut knots = vec![row_num(env, row, "C").unwrap_or(0.0)];
                     let mut weights = vec![row_num(env, row, "D").unwrap_or(1.0)];
@@ -5088,6 +5106,102 @@ mod tests {
     /// stroke, the dimension set composes ticks with rings/dots, 12
     /// is the single wide V, 43 the double chevron), the head scales
     /// with the LineWeight + C[size] unit law, and 0/46–50 emit none.
+    /// #218 review round: fractional NURBS controls (xType/yType = 0)
+    /// in the MASTER frame scale exactly once — a fraction lands at
+    /// gx·W instance units (gx·mw master units through the one
+    /// master→instance scale), never the old gx·W·scale. A degree-1
+    /// NURBS flattens through its control points, so the emitted
+    /// path pins them.
+    #[test]
+    fn nurbs_fractional_controls_scale_once_in_master_frame() {
+        // Master: a 2×2 canvas; a degree-1 NURBS whose interior
+        // controls sit at x fractions 0.5 and 0.75, y fraction 0.5.
+        let mut mroot = Shape {
+            id: 1,
+            ..Shape::default()
+        };
+        for (n, v) in [("Width", "2"), ("Height", "2")] {
+            mroot.sheet.set_cell(n, Cell::value(v));
+        }
+        mroot.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                Row {
+                    ix: 1,
+                    t: Some("MoveTo".into()),
+                    cells: vec![
+                        ("X".into(), Cell::value("0")),
+                        ("Y".into(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                Row {
+                    ix: 2,
+                    t: Some("NURBSTo".into()),
+                    cells: vec![
+                        ("X".into(), Cell::value("2")),
+                        ("Y".into(), Cell::value("2")),
+                        ("A".into(), Cell::value("2")),
+                        ("B".into(), Cell::value("1")),
+                        ("C".into(), Cell::value("0")),
+                        ("D".into(), Cell::value("1")),
+                        (
+                            "E".into(),
+                            Cell {
+                                v: Some(
+                                    "NURBS(3, 1, 0, 0, 0.5,0.5,1,1, 0.75,0.5,2,1)".into(),
+                                ),
+                                ..Cell::default()
+                            },
+                        ),
+                    ],
+                    ..Row::default()
+                },
+            ],
+            ..Section::default()
+        }));
+        let doc = Document {
+            masters: vec![vsdx::model::Master {
+                id: 7,
+                shapes: vec![mroot],
+                ..vsdx::model::Master::default()
+            }],
+            ..Document::default()
+        };
+        // Instance: 4×2 — double the master width, equal height.
+        let mut inst = Shape {
+            id: 9,
+            master: Some(7),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "3"),
+            ("PinY", "3"),
+            ("Width", "4"),
+            ("Height", "2"),
+            ("LocPinX", "0"),
+            ("LocPinY", "0"),
+        ] {
+            inst.sheet.set_cell(n, Cell::value(v));
+        }
+        let chain: Vec<&Shape> = Vec::new();
+        let mut out = String::new();
+        render_shape(&doc, &inst, 8.5, &chain, "", None, None, None, &mut out);
+        // The controls land at gx·W: 0.5 → 2.0 and 0.75 → 3.0; the y
+        // fraction 0.5 of H=2 → 1.0 (emitted negated). The old
+        // double-scale put them at 4.0 and 6.0.
+        assert!(
+            out.contains("2.00000 -1.00000"),
+            "control 1 (0.5·W) missing: {out}"
+        );
+        assert!(
+            out.contains("3.00000 -1.00000"),
+            "control 2 (0.75·W) missing: {out}"
+        );
+        assert!(!out.contains("6.00000"), "double-scaled control leaked: {out}");
+    }
+
     #[test]
     fn arrow_heads_render_per_value_and_scale() {
         let doc = Document::default();

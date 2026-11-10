@@ -3044,11 +3044,16 @@ impl App {
             return;
         }
         let armed = self.keytips.armed();
-        // Scan (read-only) first; act after the borrow ends.
-        let mut arm = false;
+        // Scan (read-only) first; act after the borrow ends. The tap
+        // simulation walks the events in order: a clean Alt press
+        // opens the window, any other press closes it, and the
+        // release only arms when it stayed open (Office's Alt TAP —
+        // Alt+Tab and other Alt combos never arm, #218 review round).
+        let mut alt_tap = false;
         let mut back = false;
         let mut letter: Option<char> = None;
         let mut click = false;
+        let mut clean = self.keytips.alt_down_clean;
         ctx.input(|i| {
             click = i.pointer.any_click();
             for e in &i.events {
@@ -3058,38 +3063,62 @@ impl App {
                         pressed: true,
                         modifiers: m,
                         ..
-                    } if !m.ctrl && !m.shift && !m.command => arm = true,
+                    } if !m.ctrl && !m.shift && !m.command => {
+                        clean = true;
+                    }
                     egui::Event::Key {
                         key: egui::Key::Escape,
                         pressed: true,
                         ..
-                    } => back = true,
+                    } => {
+                        clean = false;
+                        back = true;
+                    }
                     egui::Event::Key {
                         key: k,
                         pressed: true,
                         modifiers: m,
                         ..
-                    } if !m.ctrl
-                        && !m.command
-                        && (m.alt || armed)
-                        && is_keytip_key(*k) =>
-                    {
+                    } => {
+                        clean = false;
                         // One ASCII alphanumeric at a time — keytips
                         // are single characters by construction
-                        // (`Key::name` is "A".."Z" / "0".."9").
-                        letter = k.name().chars().next();
-                        if letter.is_some() {
-                            break;
+                        // (`Key::name` is "A".."Z" / "0".."9"). First
+                        // letter wins; the scan keeps walking so the
+                        // tap state stays truthful.
+                        if !m.ctrl
+                            && !m.command
+                            && (m.alt || armed)
+                            && is_keytip_key(*k)
+                            && letter.is_none()
+                        {
+                            letter = k.name().chars().next();
                         }
+                    }
+                    egui::Event::Key {
+                        key: egui::Key::AltLeft | egui::Key::AltRight,
+                        pressed: false,
+                        ..
+                    } => {
+                        if clean {
+                            alt_tap = true;
+                        }
+                        clean = false;
                     }
                     _ => {}
                 }
             }
         });
+        self.keytips.alt_down_clean = clean;
         if armed && click {
             self.keytips.disarm();
         }
-        if arm && !self.shell_surface_open() {
+        // The tap gate also refuses to arm while a text field owns
+        // the keyboard (consistent with the app's other shortcuts).
+        if alt_tap
+            && !self.shell_surface_open()
+            && !ctx.egui_wants_keyboard_input()
+        {
             // A bare Alt (re)starts at the strip level, Office-style.
             self.keytips.mode = Some(crate::keytips::Mode::Strip);
         } else if back && armed {

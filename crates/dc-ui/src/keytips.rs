@@ -76,6 +76,10 @@ pub struct Keytips {
     /// after this frame's badges are collected and assigned (the
     /// resolver must never see the just-cleared list).
     pub(crate) pending: Option<char>,
+    /// Office arms keytips on the Alt TAP — press and release with
+    /// nothing in between. True from a clean Alt press until any
+    /// other key press or the release (#218 review round).
+    pub(crate) alt_down_clean: bool,
     pub(crate) badges: Vec<Badge>,
     /// The tab strip's and the ribbon content row's rects this frame
     /// (the armed veil covers their union).

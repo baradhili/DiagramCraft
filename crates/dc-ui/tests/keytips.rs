@@ -161,3 +161,24 @@ fn qat_digit_fires_save() {
     assert!(!h.state().debug_dirty());
     assert_eq!(h.state().debug_keytip_mode(), None);
 }
+
+/// Alt held across another key (the Alt+Tab shape) never arms:
+/// Office arms on the Alt TAP — press and release with nothing in
+/// between (#218 review round). Letters afterwards are not eaten.
+#[test]
+fn alt_held_across_another_key_never_arms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let doc = fixture(tmp.path());
+    let mut h = build(&doc);
+    h.key_down(egui::Key::AltLeft);
+    h.run();
+    h.key_press(egui::Key::Tab);
+    h.run();
+    h.key_up(egui::Key::AltLeft);
+    h.run();
+    assert_eq!(h.state().debug_keytip_mode(), None);
+    // Nothing is armed, so typing reaches the app as usual.
+    h.key_press(egui::Key::H);
+    h.run();
+    assert_eq!(h.state().debug_keytip_mode(), None);
+}
