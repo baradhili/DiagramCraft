@@ -802,6 +802,14 @@ pub fn show(
                 let page_pos = screen_to_page(p, view, page);
                 ui.ctx()
                     .memory_mut(|m| m.data.insert_temp(mem_connector, page_pos));
+            } else if freeform_tool && !ui.input(|i| i.modifiers.command) {
+                // The Freeform Tool (#132) owns the gesture the same
+                // way (#218 review): a press OVER an existing shape
+                // starts the pen stroke, not a shape move — the empty-
+                // page-only branch below never saw those presses. The
+                // command modifier keeps its old pass-through.
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
             } else if view.show_rulers
                 && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
             {
@@ -826,11 +834,6 @@ pub fn show(
                     // the press starts a freehand trail.
                     ui.ctx()
                         .memory_mut(|m| m.data.insert_temp(mem_lasso, vec![p]));
-                } else if freeform_tool {
-                    // Empty page with the Freeform tool (#132): the
-                    // press starts the pen stroke.
-                    ui.ctx()
-                        .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
                 } else {
                     // Empty page: marquee select.
                     ui.ctx()

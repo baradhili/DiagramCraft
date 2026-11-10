@@ -6,7 +6,12 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([980.0, 640.0])
-            .with_title("Tarahi"),
+            .with_title("Tarahi")
+            // The desktop entry's StartupWMClass (#218 review):
+            // without an explicit app id, Wayland toplevels get an
+            // auto-generated one and the entry cannot group its
+            // windows. Title stays the product name.
+            .with_app_id("diagramcraft"),
         ..Default::default()
     };
     eframe::run_native(

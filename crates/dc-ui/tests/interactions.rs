@@ -7209,6 +7209,20 @@ fn format_painter_copies_formatting() {
     drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
     let (_, b) = place_master(&mut h, 3); // Ellipse — different master
 
+    // DISTINCT source values on A (#218 review): the asserts must
+    // prove the copy LANDED on B, not that B's cells merely resolve
+    // through its own master chain. The painter copies NUMERIC format
+    // cells (color strings ride the fill/line menus instead), so the
+    // distinct values are numeric: LineWeight, FillPattern, LinePattern.
+    for (cell, v) in [
+        ("LineWeight", "0.0555"),
+        ("FillPattern", "3"),
+        ("LinePattern", "5"),
+    ] {
+        h.state_mut().set_cell_for_test(page, a, cell, v, None);
+    }
+    h.run();
+
     // The source is A: select it (the ellipse placement left B
     // selected), then arm the painter on A.
     let asr0 = h.state().debug_shape_screen_rect_for_test(a).unwrap();
@@ -7221,10 +7235,25 @@ fn format_painter_copies_formatting() {
     let bsr = h.state().debug_shape_screen_rect_for_test(b).unwrap();
     click_at(&mut h, bsr.center(), egui::PointerButton::Primary);
     h.run();
-    // The painter wrote A's resolved cells onto B as literals.
-    for cell in ["LineWeight", "FillForegnd", "FillPattern"] {
-        let bv = h.state().debug_cell(page, b, cell);
-        assert!(bv.is_some(), "cell {cell} written onto B");
+    // The painter wrote A's resolved cells onto B as literals —
+    // each DISTINCT source value must land (resolving through B's own
+    // master could never produce these).
+    for (cell, want) in [
+        ("LineWeight", "0.0555"),
+        ("FillPattern", "3"),
+        ("LinePattern", "5"),
+    ] {
+        let (bv, bf) = h
+            .state()
+            .debug_cell(page, b, cell)
+            .unwrap_or_else(|| panic!("cell {cell} written onto B"));
+        let v: f64 = bv.parse().unwrap_or_else(|_| panic!("{cell} numeric: {bv}"));
+        let want: f64 = want.parse().unwrap();
+        assert!(
+            (v - want).abs() < 1e-9,
+            "the painter wrote A's {cell} onto B: {v} != {want}"
+        );
+        assert!(bf.is_empty(), "{cell} lands as a literal, not a formula: {bf}");
     }
     assert!(
         h.state().debug_status().contains("formatting cells copied"),
