@@ -768,10 +768,12 @@ fn stencil_master_connector_glues_and_follows_a_move() {
     );
 }
 
-/// #251: the page's line-jump switch persists through a save/load
-/// round trip (the PageSheet's `LineJumpCode` — 6 = no jumps, 1 =
-/// Visio's shown default — and `LineJumpFactorX`), and the default
-/// page shows jumps (the shipped corpus carries no jump cells).
+/// #251: the page's line-jump settings survive a real save/parse
+/// round trip — `LineJumpCode` off writes 0 (visPLOJumpNone, what
+/// App::apply_line_jumps_shown writes; the read side also treats the
+/// legacy undocumented 6 as off) and `LineJumpFactorX` carries its
+/// multiplier; the default page shows jumps (the shipped corpus
+/// carries no jump cells).
 #[test]
 fn line_jump_settings_persist_through_a_round_trip() {
     let mut ed = Editor::new(vsdx::Document {
@@ -789,12 +791,16 @@ fn line_jump_settings_persist_through_a_round_trip() {
         ..vsdx::Document::default()
     });
     assert!(ed.doc.pages[0].line_jumps_shown(), "the default shows");
-    ed.apply(dc_core::SetCell::new(
-        dc_core::Scope::PageSheet { page: 0 },
-        "LineJumpCode",
-        vsdx::Cell::value("6"),
-    ))
-    .unwrap();
+    for off in ["0", "6"] {
+        ed.apply(dc_core::SetCell::new(
+            dc_core::Scope::PageSheet { page: 0 },
+            "LineJumpCode",
+            vsdx::Cell::value(off),
+        ))
+        .unwrap();
+        assert!(!ed.doc.pages[0].line_jumps_shown(), "code {off} hides");
+    }
+    // The loop leaves the app's off value (0) in place; add the size.
     ed.apply(dc_core::SetCell::new(
         dc_core::Scope::PageSheet { page: 0 },
         "LineJumpFactorX",
@@ -803,8 +809,16 @@ fn line_jump_settings_persist_through_a_round_trip() {
     .unwrap();
     assert!(!ed.doc.pages[0].line_jumps_shown());
     assert!((ed.doc.pages[0].line_jump_factor() - 1.75).abs() < 1e-9);
-    // One undo restores the shown default.
-    ed.undo().unwrap();
-    ed.undo().unwrap();
+    // The real round trip: save, re-parse, settings intact.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("jumps.vsdx");
+    vsdx::write::save(&ed.doc, &path).unwrap();
+    let re = vsdx::parse::parse(&path).unwrap();
+    assert!(!re.pages[0].line_jumps_shown(), "off survives the save");
+    assert!((re.pages[0].line_jump_factor() - 1.75).abs() < 1e-9);
+    // In memory, undoing every write restores the shown default.
+    for _ in 0..3 {
+        ed.undo().unwrap();
+    }
     assert!(ed.doc.pages[0].line_jumps_shown());
 }

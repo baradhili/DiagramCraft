@@ -419,47 +419,49 @@ fn node_ink_box(
     to_page: Affine,
 ) -> ((f64, f64, f64, f64), Affine) {
     let env = shape_env(doc, s, chain);
-    let get = |n: &str| -> Option<f64> {
+    // Takes the env per call (not by capture) so `env` can move into
+    // the shared frame env below (#218 review).
+    let get = |n: &str, env: &vsdx::formula::Env| -> Option<f64> {
         doc.resolve_cell(s, chain, n)
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
     };
-    let width = get("Width").unwrap_or(1.0);
-    let height = get("Height").unwrap_or(1.0);
+    let width = get("Width", &env).unwrap_or(1.0);
+    let height = get("Height", &env).unwrap_or(1.0);
     // The exact transform string render_shape/render_shape_local
     // emit for this node, composed into one affine.
     let local = if top {
         let (sx, sy) = (
-            if get("FlipX").unwrap_or(0.0) != 0.0 {
+            if get("FlipX", &env).unwrap_or(0.0) != 0.0 {
                 -1.0
             } else {
                 1.0
             },
-            if get("FlipY").unwrap_or(0.0) != 0.0 {
+            if get("FlipY", &env).unwrap_or(0.0) != 0.0 {
                 -1.0
             } else {
                 1.0
             },
         );
         Affine::translate(
-            get("PinX").unwrap_or(0.0),
-            page_h - get("PinY").unwrap_or(0.0),
+            get("PinX", &env).unwrap_or(0.0),
+            page_h - get("PinY", &env).unwrap_or(0.0),
         )
         .then(&Affine::rotate_deg(
-            -get("Angle").unwrap_or(0.0).to_degrees(),
+            -get("Angle", &env).unwrap_or(0.0).to_degrees(),
         ))
         .then(&Affine::scale(sx, sy))
         .then(&Affine::translate(
-            -get("LocPinX").unwrap_or(width / 2.0),
-            get("LocPinY").unwrap_or(height / 2.0),
+            -get("LocPinX", &env).unwrap_or(width / 2.0),
+            get("LocPinY", &env).unwrap_or(height / 2.0),
         ))
     } else {
-        Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
+        Affine::translate(get("PinX", &env).unwrap_or(0.0), -get("PinY", &env).unwrap_or(0.0))
             .then(&Affine::rotate_deg(
-                -get("Angle").unwrap_or(0.0).to_degrees(),
+                -get("Angle", &env).unwrap_or(0.0).to_degrees(),
             ))
             .then(&Affine::translate(
-                -get("LocPinX").unwrap_or(width / 2.0),
-                get("LocPinY").unwrap_or(height / 2.0),
+                -get("LocPinX", &env).unwrap_or(width / 2.0),
+                get("LocPinY", &env).unwrap_or(height / 2.0),
             ))
     };
     let a = to_page.then(&local);
@@ -506,10 +508,19 @@ fn node_ink_box(
     // layer viewBox clips them and the #236 cull skips them
     // (#218 review round 3).
     let own = s.sheet.sections_named("Geometry");
-    let mut walk: Vec<(&vsdx::Section, (f64, f64), vsdx::formula::Env)> = own
-        .iter()
-        .map(|g| (*g, (1.0, 1.0), env.clone()))
-        .collect();
+    // ONE env per frame, shared across every walked section (#218
+    // review): the per-entry clones discarded row-coordinate
+    // writebacks, so a Geometry2 referencing `Geometry1.X2` fell
+    // back to the authored pose (#249's cross-row case, across
+    // sections). A shape walks either its OWN sections (instance
+    // env) or its master's (the prepared menv) — never both.
+    let mut walk: Vec<(&vsdx::Section, (f64, f64))> =
+        own.iter().map(|g| (*g, (1.0, 1.0))).collect();
+    // Starts as the instance env; the master branch below REPLACES it.
+    // The text block after the walk still reads the INSTANCE env's
+    // Txt* cells (they are the shape's own), so a copy survives the move.
+    let text_env = env.clone();
+    let mut frame_env = env;
     if own.is_empty() {
         if let Some(src) = doc.instance_source(s, chain) {
             let mw = src
@@ -571,12 +582,14 @@ fn node_ink_box(
                 src.sheet
                     .sections_named("Geometry")
                     .into_iter()
-                    .map(|g| (g, scale, menv.clone())),
+                    .map(|g| (g, scale)),
             );
+            frame_env = menv;
         }
     }
-    for (walk_ix, (geo, gscale, genv)) in walk.into_iter().enumerate() {
-        let mut genv = genv;
+    for (walk_ix, (geo, gscale)) in walk.into_iter().enumerate() {
+        // Shared: writebacks persist for later sections of the frame.
+        let genv = &mut frame_env;
         let gname = format!("Geometry{}", walk_ix + 1);
         let mut cur = (0.0f64, 0.0f64);
         let mut first_pt: Option<(f64, f64)> = None;
@@ -599,8 +612,8 @@ fn node_ink_box(
             let Some(t) = row.t.as_deref() else { continue };
             let rel = t.starts_with("Rel");
             let (mut x, mut y) = (
-                row_num_in(&genv, row, "X"),
-                row_num_in(&genv, row, "Y"),
+                row_num_in(genv, row, "X"),
+                row_num_in(genv, row, "Y"),
             );
             if rel {
                 // Raw signed dims — rel_adjust (which the renderer
@@ -629,14 +642,14 @@ fn node_ink_box(
             match t {
                 "ArcTo" | "RelArcTo" => {
                     // The apex: chord mid + A·right-of-travel.
-                    let sag = row_num_in(&genv, row, "A");
+                    let sag = row_num_in(genv, row, "A");
                     let (dx, dy) = (x - cur.0, y - cur.1);
                     let len = dx.hypot(dy).max(1e-9);
                     let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
                     pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, &mut u);
                 }
                 "EllipticalArcTo" | "RelEllipticalArcTo" => {
-                    let (mut mx, mut my) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
+                    let (mut mx, mut my) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
                     if rel {
                         // Raw signed dims — rel_adjust multiplies
                         // raw (negative widths mirror the bound).
@@ -655,8 +668,8 @@ fn node_ink_box(
                 }
                 "CubicBezTo" | "RelCubBezTo" => {
                     // (A,B) and (C,D): two control points.
-                    let (mut a, mut b) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
-                    let (mut c, mut d) = (row_num_in(&genv, row, "C"), row_num_in(&genv, row, "D"));
+                    let (mut a, mut b) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
+                    let (mut c, mut d) = (row_num_in(genv, row, "C"), row_num_in(genv, row, "D"));
                     if rel {
                         a *= width.max(1e-6);
                         b *= height.max(1e-6);
@@ -667,7 +680,7 @@ fn node_ink_box(
                     pt(c * gscale.0, d * gscale.1, &mut u);
                 }
                 "QuadBezTo" | "RelQuadBezTo" => {
-                    let (mut a, mut b) = (row_num_in(&genv, row, "A"), row_num_in(&genv, row, "B"));
+                    let (mut a, mut b) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
                     if rel {
                         a *= width.max(1e-6);
                         b *= height.max(1e-6);
@@ -705,8 +718,8 @@ fn node_ink_box(
         // union a conservative square (the gallery's largest reach) at
         // each end that carries a head. Same gate as the renderer's.
         let arrowed = |arrow: f64| arrow >= 0.5 && !(46.0..=50.5).contains(&arrow);
-        if get("BeginArrow").is_some_and(arrowed) || get("EndArrow").is_some_and(arrowed) {
-            let weight = get("LineWeight").unwrap_or(0.75 / 72.0);
+        if get("BeginArrow", &text_env).is_some_and(arrowed) || get("EndArrow", &text_env).is_some_and(arrowed) {
+            let weight = get("LineWeight", &text_env).unwrap_or(0.75 / 72.0);
             let pad = |pt: (f64, f64), arrow: Option<f64>, sz: f64, u: &mut Focus| {
                 if !arrow.is_some_and(arrowed) {
                     return;
@@ -722,16 +735,16 @@ fn node_ink_box(
             if let Some((x, y)) = first_pt {
                 pad(
                     (x, y),
-                    get("BeginArrow"),
-                    get("BeginArrowSize").unwrap_or(2.0),
+                    get("BeginArrow", &text_env),
+                    get("BeginArrowSize", &text_env).unwrap_or(2.0),
                     &mut u,
                 );
             }
 
             pad(
                 cur,
-                get("EndArrow"),
-                get("EndArrowSize").unwrap_or(2.0),
+                get("EndArrow", &text_env),
+                get("EndArrowSize", &text_env).unwrap_or(2.0),
                 &mut u,
             );
         }
@@ -745,17 +758,17 @@ fn node_ink_box(
         .map(str::trim)
         .is_some_and(|t| !t.is_empty());
     if has_text {
-        let tw = get("TxtWidth").unwrap_or(width).max(0.02);
-        let th = get("TxtHeight").unwrap_or(height).max(0.02);
+        let tw = get("TxtWidth", &text_env).unwrap_or(width).max(0.02);
+        let th = get("TxtHeight", &text_env).unwrap_or(height).max(0.02);
         let (tlx, tly) = (
-            get("TxtLocPinX").unwrap_or(tw / 2.0),
-            get("TxtLocPinY").unwrap_or(th / 2.0),
+            get("TxtLocPinX", &text_env).unwrap_or(tw / 2.0),
+            get("TxtLocPinY", &text_env).unwrap_or(th / 2.0),
         );
         let (tx, ty) = (
-            get("TxtPinX").unwrap_or(width / 2.0),
-            get("TxtPinY").unwrap_or(height / 2.0),
+            get("TxtPinX", &text_env).unwrap_or(width / 2.0),
+            get("TxtPinY", &text_env).unwrap_or(height / 2.0),
         );
-        if get("TxtAngle").unwrap_or(0.0) != 0.0 {
+        if get("TxtAngle", &text_env).unwrap_or(0.0) != 0.0 {
             // Rotated text: bound by the circumscribed square.
             let side = tw.max(th);
             let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
@@ -2746,16 +2759,22 @@ fn render_all_geometry(
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, chain, geo, scale, Frame::Master(menv.clone()), &format!("Geometry{}", i + 1), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(&mut menv), &format!("Geometry{}", i + 1), out);
     }
 }
 
 /// Which frame geometry rows live in — picks the formula environment.
 /// The master variant carries the PREPARED env (master cells, the
 /// instance's glued Begin/End seeded in).
-enum Frame {
+enum Frame<'a> {
     Instance,
-    Master(vsdx::formula::Env),
+    /// The PREPARED env (master cells, the instance's glued Begin/End
+    /// seeded in), SHARED by reference across every Geometry section
+    /// of the frame (#218 review): render_geometry feeds evaluated row
+    /// coordinates back into it (`Geometry1.X2`), and per-section
+    /// clones discarded those writes — a Geometry2 referencing
+    /// Geometry1 fell back to the authored pose.
+    Master(&'a mut vsdx::formula::Env),
 }
 
 #[allow(clippy::too_many_arguments)] // the walk's natural inputs (+gname, #249)
@@ -2765,7 +2784,7 @@ fn render_geometry(
     chain: &[&Shape],
     section: &vsdx::Section,
     scale: (f64, f64),
-    frame: Frame,
+    frame: Frame<'_>,
     gname: &str,
     out: &mut String,
 ) {
@@ -2776,8 +2795,12 @@ fn render_geometry(
     // The cached V already lives in that frame; evaluating a formula in
     // the WRONG frame (e.g. master rows against instance Width) skews
     // rectangles into triangles.
-    let mut env = match frame {
-        Frame::Instance => shape_env_for(doc, s, chain, rows),
+    let mut inst_env;
+    let env: &mut vsdx::formula::Env = match frame {
+        Frame::Instance => {
+            inst_env = shape_env_for(doc, s, chain, rows);
+            &mut inst_env
+        }
         Frame::Master(env) => env,
     };
     // Section-level cells carry NoFill/NoLine/NoShow. Formula first,
@@ -2793,7 +2816,7 @@ fn render_geometry(
                         if f == "Inh" || f == "No Formula" {
                             None
                         } else {
-                            vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                            vsdx::formula::eval(f, env).ok().and_then(|v| v.as_f64())
                         }
                     })
                     .filter(|v| v.is_finite());
@@ -2810,7 +2833,7 @@ fn render_geometry(
     // testing but must not stroke.
     let line_pattern = doc
         .resolve_cell(s, chain, "LinePattern")
-        .and_then(|c| cell_num(&c, &env));
+        .and_then(|c| cell_num(&c, env));
     let no_line = flag("NoLine") || line_pattern.is_some_and(|p| p == 0.0);
     fn row_num(env: &vsdx::formula::Env, r: &Row, c: &str) -> Option<f64> {
         r.cell(c).and_then(|cell| {
@@ -2838,7 +2861,7 @@ fn render_geometry(
     let fill_bkgnd = themed_color_string(doc, s, chain, "FillBkgnd");
     let line_weight = doc
         .resolve_cell(s, chain, "LineWeight")
-        .and_then(|c| cell_num(&c, &env))
+        .and_then(|c| cell_num(&c, env))
         .unwrap_or(0.0104);
     // Visio never fills a 1-D shape (a line/arc has no interior): some
     // line masters carry decorative FillPattern cells (28/30) that must
@@ -2849,7 +2872,7 @@ fn render_geometry(
         0.0
     } else {
         doc.resolve_cell_explicit(s, chain, "FillPattern")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(1.0)
     };
     // Gradient fills: Visio theme fill patterns 24-40 are gradients
@@ -2861,7 +2884,7 @@ fn render_geometry(
     } else if (24.0..=40.0).contains(&fill_pattern) {
         let angle_deg = doc
             .resolve_cell_explicit(s, chain, "FillGradientAngle")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .map(|rad| rad.to_degrees())
             .unwrap_or(90.0);
         let id = format!(
@@ -2954,8 +2977,8 @@ fn render_geometry(
             flush_spline!();
         }
         let (mx, my) = (
-            row_num(&env, row, "X").unwrap_or(0.0),
-            row_num(&env, row, "Y").unwrap_or(0.0),
+            row_num(env, row, "X").unwrap_or(0.0),
+            row_num(env, row, "Y").unwrap_or(0.0),
         );
         let (x, y) = rel_adjust(t, mx, my, width, height);
         // Feed the evaluated coordinates back into the env (#249):
@@ -2979,7 +3002,7 @@ fn render_geometry(
                 // verified against the Process master's rounded rect, which
                 // traverses CCW (y-up, interior on the left) with positive-A
                 // corner arcs bulging outward.
-                let h = row_num(&env, row, "A").unwrap_or(0.0);
+                let h = row_num(env, row, "A").unwrap_or(0.0);
                 let (sx, sy) = cur;
                 let chord = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
                 if h.abs() < 1e-9 || chord < 1e-9 {
@@ -3009,11 +3032,11 @@ fn render_geometry(
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
                 let m = (
-                    row_num(&env, row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(&env, row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                 );
-                let c_ang = row_num(&env, row, "C").unwrap_or(0.0);
-                let ratio = row_num(&env, row, "D").unwrap_or(1.0).abs().max(1e-6);
+                let c_ang = row_num(env, row, "C").unwrap_or(0.0);
+                let ratio = row_num(env, row, "D").unwrap_or(1.0).abs().max(1e-6);
                 // Sane bounds: the arc must fit (loosely) inside the
                 // shape's scaled extent — a solved ellipse or on-arc point
                 // far outside means the numeric solver diverged on a tiny
@@ -3054,10 +3077,10 @@ fn render_geometry(
             }
             "Ellipse" => {
                 // (X,Y) center, (A,B) major-axis endpoint, (C,D) minor-axis endpoint.
-                let a = row_num(&env, row, "A").unwrap_or(x + 1.0);
-                let b = row_num(&env, row, "B").unwrap_or(y);
-                let c2 = row_num(&env, row, "C").unwrap_or(x);
-                let d2 = row_num(&env, row, "D").unwrap_or(y + 1.0);
+                let a = row_num(env, row, "A").unwrap_or(x + 1.0);
+                let b = row_num(env, row, "B").unwrap_or(y);
+                let c2 = row_num(env, row, "C").unwrap_or(x);
+                let d2 = row_num(env, row, "D").unwrap_or(y + 1.0);
                 let rx = ((a - x).powi(2) + (b - y).powi(2)).sqrt().max(1e-6);
                 let ry = ((c2 - x).powi(2) + (d2 - y).powi(2)).sqrt().max(1e-6);
                 let ang = (b - y).atan2(a - x); // major-axis angle, y-up frame
@@ -3083,15 +3106,15 @@ fn render_geometry(
                 // relative fractions of Width/Height.
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(&env, row, "A").unwrap_or(cur.0),
-                    row_num(&env, row, "B").unwrap_or(cur.1),
+                    row_num(env, row, "A").unwrap_or(cur.0),
+                    row_num(env, row, "B").unwrap_or(cur.1),
                     width,
                     height,
                 );
                 let (c2, d2) = rel_adjust(
                     t,
-                    row_num(&env, row, "C").unwrap_or(x),
-                    row_num(&env, row, "D").unwrap_or(y),
+                    row_num(env, row, "C").unwrap_or(x),
+                    row_num(env, row, "D").unwrap_or(y),
                     width,
                     height,
                 );
@@ -3107,8 +3130,8 @@ fn render_geometry(
             "QuadBezTo" | "RelQuadBezTo" => {
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(&env, row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(&env, row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                     width,
                     height,
                 );
@@ -3129,17 +3152,17 @@ fn render_geometry(
                 spline_acc = Some(crate::curve::SplineAcc::start(
                     cur,
                     (x, y),
-                    row_num(&env, row, "A").unwrap_or(0.0),
-                    row_num(&env, row, "B").unwrap_or(0.0),
-                    row_num(&env, row, "C").unwrap_or(1.0),
-                    row_num(&env, row, "D").unwrap_or(3.0),
+                    row_num(env, row, "A").unwrap_or(0.0),
+                    row_num(env, row, "B").unwrap_or(0.0),
+                    row_num(env, row, "C").unwrap_or(1.0),
+                    row_num(env, row, "D").unwrap_or(3.0),
                 ));
                 cur = (x, y);
             }
             "SplineKnot" => {
                 match spline_acc.as_mut() {
                     Some(acc) => {
-                        acc.knot((x, y), row_num(&env, row, "A").unwrap_or(0.0));
+                        acc.knot((x, y), row_num(env, row, "A").unwrap_or(0.0));
                         cur = (x, y);
                     }
                     None => {
@@ -3166,16 +3189,16 @@ fn render_geometry(
                     let fx = if f.x_type == 0.0 { width } else { 1.0 };
                     let fy = if f.y_type == 0.0 { height } else { 1.0 };
                     let mut points = vec![cur];
-                    let mut knots = vec![row_num(&env, row, "C").unwrap_or(0.0)];
-                    let mut weights = vec![row_num(&env, row, "D").unwrap_or(1.0)];
+                    let mut knots = vec![row_num(env, row, "C").unwrap_or(0.0)];
+                    let mut weights = vec![row_num(env, row, "D").unwrap_or(1.0)];
                     for (gx, gy, gk, gw) in &f.points {
                         points.push((gx * fx, gy * fy));
                         knots.push(*gk);
                         weights.push(*gw);
                     }
-                    knots.push(row_num(&env, row, "A").unwrap_or(0.0));
+                    knots.push(row_num(env, row, "A").unwrap_or(0.0));
                     knots.push(f.last_knot);
-                    weights.push(row_num(&env, row, "B").unwrap_or(1.0));
+                    weights.push(row_num(env, row, "B").unwrap_or(1.0));
                     points.push((x, y));
                     let built = crate::curve::SplineData {
                         degree: f.degree,
@@ -3215,19 +3238,19 @@ fn render_geometry(
         // arrow; sizes 0–6, 2 = medium).
         let begin_arrow = doc
             .resolve_cell(s, chain, "BeginArrow")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(0.0);
         let end_arrow = doc
             .resolve_cell(s, chain, "EndArrow")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(0.0);
         let bsz = doc
             .resolve_cell(s, chain, "BeginArrowSize")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(2.0);
         let esz = doc
             .resolve_cell(s, chain, "EndArrowSize")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(2.0);
         // #185/#170: physical per-value arrow geometry. The head unit is
         // LineWeight + C[EndArrowSize] (C = [1.44, 1.8, 2.52, 3.24, 3.96,

@@ -556,6 +556,12 @@ struct EndpointPreview {
     conn_id: i64,
     pre_end: (f64, f64),
     pre_beg: (f64, f64),
+    /// #218 review: the drag anchor's offset — handle origin minus the
+    /// press position at arm time. The COMMIT path moves the endpoint
+    /// by the drag DELTA from its own origin (the grab may start
+    /// HANDLE_GRAB px off-center); the preview must apply the same
+    /// offset to the pointer or it paints where the release won't land.
+    grab_off: (f64, f64),
     last_to: (f64, f64),
     tex: Option<egui::TextureHandle>,
     bbox: (f64, f64, f64, f64),
@@ -5515,17 +5521,31 @@ impl App {
             let g = |n: &str| ed.doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
             let pre_end = (g("EndX")?, g("EndY")?);
             let pre_beg = (g("BeginX")?, g("BeginY")?);
+            // The dragged end's own origin at gesture start — the
+            // commit path's drag anchor (HandleId::LineBegin drags the
+            // Begin pair).
+            let origin = match hid {
+                HandleId::LineEnd => pre_end,
+                _ => pre_beg,
+            };
             self.endpoint_preview = Some(EndpointPreview {
                 doc: ed.doc.clone(),
                 conn_id: sid,
                 pre_end,
                 pre_beg,
+                grab_off: (origin.0 - ptr_page.0, origin.1 - ptr_page.1),
                 last_to: (f64::NAN, f64::NAN),
                 tex: None,
                 bbox: (0.0, 0.0, 0.0, 0.0),
             });
         }
-        let to = snap(true, ptr_page);
+        // The preview endpoint: the pointer PLUS the arm-time offset —
+        // the same place the commit's delta-from-origin lands — then
+        // the endpoint snap, exactly as the release path snaps.
+        let to = {
+            let ep = self.endpoint_preview.as_ref()?;
+            snap(true, (ptr_page.0 + ep.grab_off.0, ptr_page.1 + ep.grab_off.1))
+        };
         // The endpoint pair in DOCUMENT order: the dragged end moves
         // to `to`, the anchored end stays at its resolved position (a
         // glued anchor's cache already names its attach point).
@@ -11874,21 +11894,26 @@ impl App {
                             true,
                             Act::EditText,
                         ),
+                        // #218 review: the three Format-Shape entries
+                        // carry DISTINCT accessible names (an ambiguous
+                        // "Format Shape…" triplicated confuses screen
+                        // readers and label-based tests); all three
+                        // still dispatch Act::FormatShape.
                         (
                             crate::ribbon::Icon::Bucket,
-                            "Format Shape…",
+                            "Format Shape Fill…",
                             true,
                             Act::FormatShape,
                         ),
                         (
                             crate::ribbon::Icon::Pen,
-                            "Format Shape…",
+                            "Format Shape Line…",
                             true,
                             Act::FormatShape,
                         ),
                         (
                             crate::ribbon::Icon::FontA,
-                            "Format Shape…",
+                            "Format Shape Text…",
                             true,
                             Act::FormatShape,
                         ),
