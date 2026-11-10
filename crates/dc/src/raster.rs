@@ -255,7 +255,7 @@ pub fn render_width(tree: &usvg::Tree, target_width: f32) -> anyhow::Result<Pixm
 /// attributes are `w * 96` px for a `w`-inch viewBox, so 96 dpi
 /// reproduces the intrinsic raster one-to-one; a hard ceiling guards
 /// against absurd allocation requests.
-pub fn render_dpi(tree: &usvg::Tree, dpi: f32) -> anyhow::Result<Pixmap> {
+pub fn render_dpi(tree: &usvg::Tree, dpi: f32) -> anyhow::Result<(Pixmap, f32)> {
     const MAX_PX: u32 = 16_384;
     let size = tree.size();
     // SVG size is inches * 96: one uniform px-per-unit scale, reduced
@@ -274,7 +274,11 @@ pub fn render_dpi(tree: &usvg::Tree, dpi: f32) -> anyhow::Result<Pixmap> {
     let w = ((sw * k).round() as u32).clamp(1, MAX_PX);
     let h = ((sh * k).round() as u32).clamp(1, MAX_PX);
     let t = usvg::Transform::from_scale(w as f32 / sw, h as f32 / sh);
-    render_pixmap(tree, t, w, h)
+    // The EFFECTIVE density rides back to the caller (#218 review):
+    // the ceilings can reduce it, and a silently-lower export is a
+    // support trap — callers surface the difference.
+    let effective = k * 96.0;
+    Ok((render_pixmap(tree, t, w, h)?, effective))
 }
 
 /// Encode a pixmap as PNG bytes (premultiplied → unpremultiplied is
@@ -418,7 +422,7 @@ mod tests {
         let tree = parse_svg(&tiny_svg(), &db).unwrap();
         // 10 px at 96 dpi intrinsic (0.1042 in wide) → 10 px; at 192 →
         // 20 px.
-        assert_eq!(render_dpi(&tree, 96.0).unwrap().width(), 10);
-        assert_eq!(render_dpi(&tree, 192.0).unwrap().width(), 20);
+        assert_eq!(render_dpi(&tree, 96.0).unwrap().0.width(), 10);
+        assert_eq!(render_dpi(&tree, 192.0).unwrap().0.width(), 20);
     }
 }

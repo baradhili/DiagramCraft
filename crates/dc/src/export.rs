@@ -68,6 +68,10 @@ impl Default for Options {
 pub struct PageBytes {
     pub page_no: usize,
     pub bytes: Vec<u8>,
+    /// A per-page caveat for the caller to surface (#218 review): the
+    /// PNG density the memory ceiling actually allowed, when it had to
+    /// reduce the request.
+    pub note: Option<String>,
 }
 
 /// Export the selected pages (0-based; empty = all) as bytes, one
@@ -82,6 +86,7 @@ pub fn page_bytes(
     let indices = resolve_pages(doc, pages)?;
     let mut out = Vec::with_capacity(indices.len());
     for idx in indices {
+        let mut note = None;
         let bytes = match format {
             Format::Svg => {
                 svg::render_page_export(doc, &doc.pages[idx], opts.transparent)?.into_bytes()
@@ -90,7 +95,12 @@ pub fn page_bytes(
                 let page_svg = svg::render_page_export(doc, &doc.pages[idx], opts.transparent)?;
                 let db = raster::font_db();
                 let tree = raster::parse_svg(&page_svg, &db)?;
-                let pixmap = raster::render_dpi(&tree, opts.png_dpi)?;
+                let (pixmap, effective) = raster::render_dpi(&tree, opts.png_dpi)?;
+                note = (effective + 0.5 < opts.png_dpi).then(|| {
+                    format!(
+                        "PNG density capped at {effective:.0} dpi by the 64 Mpx memory limit"
+                    )
+                });
                 raster::png_bytes(&pixmap)?
             }
             Format::Pdf => crate::pdf::pdf_bytes(doc, &[idx], opts.transparent)?,
@@ -98,6 +108,7 @@ pub fn page_bytes(
         out.push(PageBytes {
             page_no: idx + 1,
             bytes,
+            note,
         });
     }
     Ok(out)
@@ -113,14 +124,18 @@ pub fn write_document(
     pages: &[usize],
     format: Format,
     opts: &Options,
-) -> anyhow::Result<Vec<PathBuf>> {
+) -> anyhow::Result<(Vec<PathBuf>, Vec<String>)> {
     if format == Format::Pdf {
         let indices = resolve_pages(doc, pages)?;
         let bytes = crate::pdf::pdf_bytes(doc, &indices, opts.transparent)?;
         std::fs::write(out, &bytes).with_context(|| format!("writing {}", out.display()))?;
-        return Ok(vec![out.to_path_buf()]);
+        return Ok((vec![out.to_path_buf()], Vec::new()));
     }
     let rendered = page_bytes(doc, pages, format, opts)?;
+    let notes: Vec<String> = rendered
+        .iter()
+        .filter_map(|p| p.note.clone())
+        .collect();
     let numbered = rendered.len() > 1;
     let mut written = Vec::with_capacity(rendered.len());
     for page in rendered {
@@ -139,7 +154,7 @@ pub fn write_document(
             .with_context(|| format!("writing {}", target.display()))?;
         written.push(target);
     }
-    Ok(written)
+    Ok((written, notes))
 }
 
 /// The concrete page indices an export covers: the given 0-based
@@ -289,12 +304,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let doc = fixture_doc(2);
         let out = tmp.path().join("out.svg");
-        let written = write_document(&doc, &out, &[], Format::Svg, &Options::default()).unwrap();
+        let (written, _) = write_document(&doc, &out, &[], Format::Svg, &Options::default()).unwrap();
         assert_eq!(written.len(), 2);
         assert!(written[0].ends_with("out-1.svg"), "{:?}", written[0]);
         assert!(written[1].ends_with("out-2.svg"), "{:?}", written[1]);
         // A single-page export keeps the plain name.
-        let written = write_document(&doc, &out, &[1], Format::Svg, &Options::default()).unwrap();
+        let (written, _) = write_document(&doc, &out, &[1], Format::Svg, &Options::default()).unwrap();
         assert_eq!(written.len(), 1);
         assert!(written[0].ends_with("out.svg"));
     }

@@ -26,6 +26,9 @@ pub enum PaneAction {
     Export,
 }
 
+/// The worker's answer: files written + per-page notes, or failure.
+type ExportWorkerRx = Receiver<Result<(usize, Vec<String>), String>>;
+
 /// The backstage Export page's state + UI.
 pub struct ExportPane {
     format: Format,
@@ -38,7 +41,7 @@ pub struct ExportPane {
     /// The last completed export or failure, shown under the button.
     note: Option<String>,
     /// The running export's result channel (one at a time).
-    in_flight: Option<Receiver<Result<usize, String>>>,
+    in_flight: Option<ExportWorkerRx>,
 }
 
 impl Default for ExportPane {
@@ -254,21 +257,36 @@ impl ExportPane {
         self.note = None;
         std::thread::spawn(move || {
             let result = export::write_document(&doc, &path, &pages, format, &opts)
-                .map(|files| files.len())
+                .map(|(files, notes)| (files.len(), notes))
                 .map_err(|e| format!("{e:#}"));
             let _ = tx.send(result);
         });
     }
 
+    /// The pane's last note (the export result message).
+    pub fn note_clone(&self) -> Option<String> {
+        self.note.clone()
+    }
+
     /// Drain the worker: `Some(result)` once it finishes (pages
-    /// written, or the failure).
-    pub fn poll(&mut self) -> Option<Result<usize, String>> {
+    /// written + any per-page notes, or the failure).
+    pub fn poll(&mut self) -> Option<Result<(usize, Vec<String>), String>> {
         let rx = self.in_flight.as_mut()?;
         match rx.try_recv() {
             Ok(r) => {
                 self.in_flight = None;
                 self.note = Some(match &r {
-                    Ok(n) => format!("Exported {n} file{}.", if *n == 1 { "" } else { "s" }),
+                    Ok((n, notes)) => {
+                        let mut msg =
+                            format!("Exported {n} file{}.", if *n == 1 { "" } else { "s" });
+                        // #218 review: a density the memory ceiling
+                        // reduced is REPORTED, never silently applied.
+                        for note in notes {
+                            msg.push(' ');
+                            msg.push_str(note);
+                        }
+                        msg
+                    }
                     Err(e) => format!("Export failed: {e}"),
                 });
                 Some(r)

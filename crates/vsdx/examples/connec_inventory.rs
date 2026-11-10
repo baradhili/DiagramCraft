@@ -173,8 +173,11 @@ fn main() -> anyhow::Result<()> {
 fn short_f(f: &str) -> String {
     // Compact the formula for the table: keep the case tokens.
     let mut out = f.replace(char::is_whitespace, "");
-    if out.len() > 40 {
-        out.truncate(40);
+    // Char-based truncation (#218 review): a byte index can split a
+    // multi-byte token and panic (or emit garbage) — keep whole
+    // chars, ≤40 of them.
+    if out.chars().count() > 40 {
+        out = out.chars().take(40).collect();
         out.push('…');
     }
     out

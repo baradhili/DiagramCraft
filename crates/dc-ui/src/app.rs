@@ -13962,10 +13962,12 @@ impl App {
         // Backstage Export worker (#35): the finished file count (or
         // the failure) lands in the pane's note and the status bar.
         if let Some(result) = self.export_pane.poll() {
-            self.status = match result {
-                Ok(n) => format!("Exported {n} file{}", if n == 1 { "" } else { "s" }),
+            // The pane's own note carries the full message incl. any
+            // density-cap notes; the status mirrors it.
+            self.status = self.export_pane.note_clone().unwrap_or_else(|| match result {
+                Ok(_) => "Export finished.".into(),
                 Err(e) => format!("Export failed: {e}"),
-            };
+            });
         }
         self.handle_close_request(&ctx);
         self.reorder_pages_window(&ctx);

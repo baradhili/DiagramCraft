@@ -414,9 +414,14 @@ fn run_export(
         transparent,
         png_dpi: dpi,
     };
-    let written = export::write_document(&doc, out, &selection, format, &opts)?;
+    let (written, notes) = export::write_document(&doc, out, &selection, format, &opts)?;
     for f in &written {
         println!("wrote {}", f.display());
+    }
+    // #218 review: a density the memory ceiling reduced is REPORTED,
+    // never silently applied.
+    for n in &notes {
+        println!("note: {n}");
     }
     Ok(())
 }
@@ -522,4 +527,41 @@ fn verify_roundtrip(source: &vsdx::Document, src_path: &Path, out_path: &Path) -
         src_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod page_range_tests {
+    use super::parse_page_ranges;
+
+    #[test]
+    fn selects_comma_and_range_parts() {
+        assert_eq!(parse_page_ranges(Some("1,3-5"), 6).unwrap(), vec![0, 2, 3, 4]);
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(parse_page_ranges(Some(" 2 "), 3).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn a_single_page_range_degenerates_to_one_page() {
+        assert_eq!(parse_page_ranges(Some("2-2"), 3).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn none_or_empty_selects_every_page() {
+        assert_eq!(parse_page_ranges(None, 2).unwrap(), vec![0, 1]);
+        assert_eq!(parse_page_ranges(Some(""), 2).unwrap(), vec![0, 1]);
+        assert_eq!(parse_page_ranges(Some("   "), 2).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn rejects_nonsense() {
+        for bad in ["0", "3-1", "9", "a", "1-"] {
+            assert!(
+                parse_page_ranges(Some(bad), 3).is_err(),
+                "{bad:?} must not parse against 3 pages"
+            );
+        }
+    }
 }

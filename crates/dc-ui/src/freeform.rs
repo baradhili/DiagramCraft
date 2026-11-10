@@ -119,7 +119,19 @@ pub fn fit_segments(pts: &[(f64, f64)], tol: f64) -> Vec<Seg> {
             // half-chord.
             let (dx, dy) = (pts[j].0 - pts[i].0, pts[j].1 - pts[i].1);
             let chord = dx.hypot(dy);
-            let a = sagitta(pts[i], pts[j], center, r);
+            let mut a = sagitta(pts[i], pts[j], center, r);
+            // #218 review: a true SEMICIRCLE puts the circle center ON
+            // the run chord — sagitta derives its sign from the
+            // center's side, which degenerates to numeric noise there,
+            // and valid 180° runs were randomly rejected by the
+            // same-side guard below. Take the sign from the stroke
+            // side instead (the bulge shares it). Centers strictly to
+            // one side keep the major-arc rejection.
+            let cc = dx * (center.1 - pts[i].1) - dy * (center.0 - pts[i].0);
+            if cc.abs() < 1e-9 * chord.max(1e-9) {
+                let sign = if run_side > 0.0 { -1.0 } else { 1.0 };
+                a = sign * a.abs();
+            }
             // #203 review: reject MAJOR-arc runs. A run wrapping past
             // 180° puts every point on the CENTER side of the chord —
             // the same-side check passes — but `sagitta()` then

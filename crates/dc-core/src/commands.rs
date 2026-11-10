@@ -1265,8 +1265,20 @@ impl crate::Command for AddMasterInstance {
             // tracks() test only decides Height's value.
             let width_v = w;
             let height_v = if tracks(&hf) { h } else { master_v("Height").unwrap_or(h) };
-            // LocPin derives from the frame this pose wrote.
-            let locpinx_v = w / 2.0;
+            // LocPinX derives from the width the instance will RESOLVE
+            // to after this pose (#218 review): a master that owns
+            // Width as a literal INHERITS it (the Box callout's zero
+            // band — the write skips, the cache must not carry the
+            // drop span under its Width*0.5 formula). Master formula
+            // or master-less: the written/local width.
+            let width_res = if src.and_then(|r| r.sheet.cell("Width")).is_some()
+                && master_f("Width").is_none()
+            {
+                master_v("Width").unwrap_or(w)
+            } else {
+                w
+            };
+            let locpinx_v = width_res / 2.0;
             let locpiny_v = height_v / 2.0;
             // The three-way instancing write (#248, #218 review):
             // master FORMULA → an F="Inh" cache of this pose's value

@@ -977,7 +977,11 @@ impl ShapeLayers {
                 // work holds nothing; drop it. Failed/landed/in-flight
                 // entries stay (their pixels or their landing matter).
                 if let Some(e) = self.entries.get(&shape.id) {
-                    if e.version == u64::MAX && e.tex.is_none() && e.inflight.is_none() {
+                    if e.version == u64::MAX
+                        && e.tex.is_none()
+                        && e.inflight.is_none()
+                        && e.failed.is_none()
+                    {
                         self.entries.remove(&shape.id);
                     }
                 }
