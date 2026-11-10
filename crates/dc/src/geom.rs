@@ -812,29 +812,27 @@ pub fn line_jumps(lines: &[JumpLine]) -> Vec<Jump> {
             // Merge the pair's jumps inside a hop radius: the arc's
             // own reach (2× JUMP_RADIUS_IN) bounds what "one region"
             // means visually. Distinct crossings beyond it stay.
-            pair.sort_by(|a, b| {
-                a.at.0
-                    .partial_cmp(&b.at.0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
             let mut clustered: Vec<Jump> = Vec::new();
             for jmp in pair {
                 let reach = (JUMP_RADIUS_IN * 2.0)
                     .max((jmp.weight + jmp.under_weight) * 2.0);
-                if let Some(last) = clustered.last_mut() {
-                    let dd =
-                        (last.at.0 - jmp.at.0).hypot(last.at.1 - jmp.at.1);
+                // Compare EVERY existing cluster (#218 review): the
+                // last-only check (under the old x-sort) let a jump
+                // near an earlier cluster open a duplicate instead of
+                // merging. First hit wins; the centroid keeps the arc
+                // on the intersection instead of stacking arcs.
+                let mut hit = false;
+                for c in clustered.iter_mut() {
+                    let dd = (c.at.0 - jmp.at.0).hypot(c.at.1 - jmp.at.1);
                     if dd < reach {
-                        // Same region: the centroid keeps the arc on
-                        // the intersection instead of stacking arcs.
-                        last.at = (
-                            (last.at.0 + jmp.at.0) / 2.0,
-                            (last.at.1 + jmp.at.1) / 2.0,
-                        );
-                        continue;
+                        c.at = ((c.at.0 + jmp.at.0) / 2.0, (c.at.1 + jmp.at.1) / 2.0);
+                        hit = true;
+                        break;
                     }
                 }
-                clustered.push(jmp);
+                if !hit {
+                    clustered.push(jmp);
+                }
             }
             out.extend(clustered);
         }

@@ -42,7 +42,13 @@ pub fn parse_nurbs(text: &str) -> Option<NurbsFormula> {
         .split(|c: char| c == ',' || c.is_whitespace())
         .filter(|s| !s.is_empty())
     {
-        args.push(tok.parse::<f64>().ok()?);
+        // Reject non-finite parses (#218 review): "inf"/"NaN"/1e999
+        // all parse as f64 and would poison the spline with NaN
+        // geometry — callers keep their straight-chord fallback.
+        args.push(tok
+            .parse::<f64>()
+            .ok()
+            .and_then(|v| v.is_finite().then_some(v))?);
     }
     if args.len() < 4 {
         return None;

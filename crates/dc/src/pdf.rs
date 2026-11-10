@@ -353,6 +353,36 @@ fn split_fallback_runs(
     text: &str,
     glyphs: Vec<ShapedGlyph>,
 ) -> Vec<GlyphRun> {
+    split_fallback_runs_impl(ctx, primary, text, glyphs)
+        .into_iter()
+        .map(|run| {
+            // #218 review: a run the splitter handed a FALLBACK face
+            // still carried the PRIMARY face's glyph ids — /W lookups
+            // and Identity-H codes named the wrong font's glyphs.
+            // Reshape the run's own text on its assigned face; the
+            // primary's runs (and a reshape that fails) keep the
+            // shaped output as it stands.
+            if run.face == primary {
+                return run;
+            }
+            let Some((data, index)) = ctx.face_data(run.face) else {
+                return run;
+            };
+            let glyphs = shape_text(&data, index, &run.text);
+            if glyphs.is_empty() {
+                return run;
+            }
+            GlyphRun { glyphs, ..run }
+        })
+        .collect()
+}
+
+fn split_fallback_runs_impl(
+    ctx: &mut PdfContext,
+    primary: FaceKey,
+    text: &str,
+    glyphs: Vec<ShapedGlyph>,
+) -> Vec<GlyphRun> {
     let Some((data, index)) = ctx.face_data(primary) else {
         return Vec::new();
     };

@@ -5809,7 +5809,9 @@ impl App {
         self.apply(SetCell::new(
             Scope::PageSheet { page: page_id },
             "LineJumpCode",
-            vsdx::Cell::value(if show { "1" } else { "6" }),
+            // Off writes 0 (visPLOJumpNone, [MS-Learn]) — 6 was
+            // never in the enumeration (#218 review).
+            vsdx::Cell::value(if show { "1" } else { "0" }),
         ));
         self.status = if show {
             "line jumps shown".into()

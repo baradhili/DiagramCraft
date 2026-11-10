@@ -365,6 +365,20 @@ impl ShapeLayers {
             .map(|t| t.shape)
             .collect();
         let mut damages: HashMap<i64, Rect> = HashMap::new();
+        // The subs this batch names per top (#218 review): siblings
+        // under the same top can move with an edit without their own
+        // touch row (a group resize scales every member), so their
+        // cached bounds go stale — only named subs stay cached.
+        let named_subs: HashMap<i64, std::collections::HashSet<i64>> =
+            touched
+                .shapes
+                .iter()
+                .filter(|t| t.page == current_page && t.touch == dc_core::Touch::Ink)
+                .filter_map(|t| t.sub.map(|s| (t.shape, s)))
+                .fold(HashMap::new(), |mut acc, (top, s)| {
+                    acc.entry(top).or_default().insert(s);
+                    acc
+                });
         for t in &touched.shapes {
             if t.page != current_page || t.touch != dc_core::Touch::Ink {
                 if t.page == current_page {
@@ -404,6 +418,14 @@ impl ShapeLayers {
                 .entry(t.shape)
                 .or_default()
                 .insert(sub, post);
+            // Drop sibling subs the batch did not name — their cached
+            // pre state may be stale; their next transition falls
+            // back to pending_full (the same no-pre-record path).
+            if let Some(named) = named_subs.get(&t.shape) {
+                if let Some(m) = self.sub_bounds.get_mut(&t.shape) {
+                    m.retain(|s, _| named.contains(s));
+                }
+            }
             match (pre_state, post) {
                 (Some(SubBound::Bounded(p)), SubBound::Bounded(q)) => {
                     let d = damages.entry(t.shape).or_insert(q);
@@ -945,6 +967,18 @@ impl ShapeLayers {
                             self.tex_bytes = self.tex_bytes.saturating_sub(e.bytes);
                             e.bytes = 0;
                         }
+                    }
+                }
+                // #218 review: an entry that was created but never
+                // posted (budget-deferred, then culled before its
+                // post) has no texture, no failure and no landed
+                // version — render_drained() would wait on it
+                // forever and hold the #242 scrim open. Never-posted
+                // work holds nothing; drop it. Failed/landed/in-flight
+                // entries stay (their pixels or their landing matter).
+                if let Some(e) = self.entries.get(&shape.id) {
+                    if e.version == u64::MAX && e.tex.is_none() && e.inflight.is_none() {
+                        self.entries.remove(&shape.id);
                     }
                 }
                 continue;
