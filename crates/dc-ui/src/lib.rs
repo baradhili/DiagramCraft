@@ -15,6 +15,7 @@ pub mod group_fixture;
 pub mod guides;
 pub mod hyperlink;
 pub mod icontex;
+pub mod keytips;
 mod layers;
 pub mod loading;
 pub mod os_theme;

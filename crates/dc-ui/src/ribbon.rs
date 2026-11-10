@@ -1482,8 +1482,10 @@ impl RibbonButton {
         self
     }
 
-    /// The name assistive tech / kittest sees.
-    fn a11y_label(&self) -> &'static str {
+    /// The name assistive tech / kittest sees (the #184 keytip
+    /// letters also key off this — the compact icon-only tier keeps
+    /// its name in `alt`).
+    pub(crate) fn a11y_label(&self) -> &'static str {
         self.alt.unwrap_or(self.label)
     }
 
@@ -1521,10 +1523,12 @@ impl RibbonButton {
         }
     }
 
-    /// Visio "hero" button: large icon above the label.
-    pub fn show_big(self, ui: &mut Ui) -> ButtonClick {
+    /// Visio "hero" button: large icon above the label. `on_rect`
+    /// observes the laid-out rect (the #184 keytip badge collector).
+    pub fn show_big(self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+        on_rect(&self, r);
         // The caption is a painted galley — attach its text for
         // screen readers and keyboard focus (GitHub #56).
         resp.widget_info(|| {
@@ -1555,8 +1559,13 @@ impl RibbonButton {
     }
 
     /// Compact button: small icon beside the label (stacked in a
-    /// narrow column, Visio small-button style).
-    pub fn show_small(self, ui: &mut Ui) -> ButtonClick {
+    /// narrow column, Visio small-button style). `on_rect` observes
+    /// the laid-out rect (the #184 keytip badge collector).
+    pub fn show_small(
+        self,
+        ui: &mut Ui,
+        on_rect: &mut dyn FnMut(&RibbonButton, Rect),
+    ) -> ButtonClick {
         let h = 22.0;
         let gal = ui.painter().layout_no_wrap(
             self.label.to_string(),
@@ -1567,6 +1576,7 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+        on_rect(&self, r);
         // Painted galley caption — name the control (GitHub #56); the
         // compact icon-only tier carries its name in `alt` (#252).
         resp.widget_info(|| {
@@ -1705,7 +1715,12 @@ impl Group {
 const CONTENT_H: f32 = 74.0;
 const LABEL_H: f32 = 18.0;
 
-fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
+fn show_col(
+    ui: &mut Ui,
+    col: &Col,
+    on_action: &mut dyn FnMut(Action),
+    on_rect: &mut dyn FnMut(&RibbonButton, Rect),
+) {
     let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| match c {
         ButtonClick::None => {}
         ButtonClick::Single => on_action(b.action),
@@ -1713,7 +1728,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
     };
     match col {
         Col::Big(b) => {
-            let c = (*b).show_big(ui);
+            let c = (*b).show_big(ui, on_rect);
             fire(on_action, b, c);
         }
         Col::Stack(v) => {
@@ -1721,7 +1736,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.vertical(|ui| {
                     for b in v {
-                        let c = (*b).show_small(ui);
+                        let c = (*b).show_small(ui, on_rect);
                         fire(on_action, b, c);
                     }
                 });
@@ -1734,7 +1749,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                     for row in rows {
                         ui.horizontal(|ui| {
                             for b in row {
-                                let c = (*b).show_small(ui);
+                                let c = (*b).show_small(ui, on_rect);
                                 fire(on_action, b, c);
                             }
                         });
@@ -1750,6 +1765,7 @@ pub fn content_row(
     groups: &[Group],
     on_action: &mut dyn FnMut(Action),
     on_launcher: &mut dyn FnMut(&'static str),
+    on_rect: &mut dyn FnMut(&RibbonButton, Rect),
 ) {
     let t = theme::shell_tokens(ui.visuals());
     let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
@@ -1764,7 +1780,7 @@ pub fn content_row(
                 // top of the tall hero buttons, like Office)
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     for col in &g.cols {
-                        show_col(ui, col, on_action);
+                        show_col(ui, col, on_action, on_rect);
                     }
                 });
                 let x1 = ui.next_widget_position().x - ui.spacing().item_spacing.x;

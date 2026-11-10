@@ -380,6 +380,10 @@ pub struct App {
     /// OS light/dark watcher (GitHub #52). Production only — the
     /// headless constructors leave it off so goldens are deterministic.
     os_theme: Option<crate::os_theme::OsThemeWatcher>,
+    /// #184 Alt keytips: the armed mode plus this frame's badge
+    /// captures (collected during ribbon layout, painted after the
+    /// ribbon panels close — see `crate::keytips`).
+    keytips: crate::keytips::Keytips,
 }
 
 /// Which cell a ribbon palette click targets.
@@ -736,6 +740,7 @@ impl App {
             stencil_disk: false,
             stencil_extract: None,
             os_theme: None,
+            keytips: crate::keytips::Keytips::new(),
         };
         if let Some(p) = path {
             // Headless: no frame loop to pump the poll — land the
@@ -778,6 +783,39 @@ impl App {
     #[doc(hidden)]
     pub fn mark_clean_for_test(&mut self) {
         self.dirty = false;
+    }
+    /// #184 tests: the armed keytip level ("strip"/"controls"); None
+    /// when disarmed.
+    #[doc(hidden)]
+    pub fn debug_keytip_mode(&self) -> Option<&'static str> {
+        self.keytips.mode.map(|m| match m {
+            crate::keytips::Mode::Strip => "strip",
+            crate::keytips::Mode::Controls => "controls",
+        })
+    }
+    /// #184 tests: the assigned keytip letter for a content-row
+    /// control, looked up by its label in the current badge set.
+    #[doc(hidden)]
+    pub fn debug_keytip_letter(&self, label: &str) -> Option<char> {
+        self.keytips.badges.iter().find_map(|b| {
+            match b.hit {
+                crate::keytips::Hit::Action { label: l, .. } if l == label => {
+                    b.key.chars().next()
+                }
+                _ => None,
+            }
+        })
+    }
+    /// #184 tests: the active ribbon tab (a strip keytip's effect).
+    #[doc(hidden)]
+    pub fn debug_tab(&self) -> Tab {
+        self.tab
+    }
+    /// #184 tests: the View ▸ Rulers toggle (a control keytip's
+    /// observable effect).
+    #[doc(hidden)]
+    pub fn debug_show_rulers(&self) -> bool {
+        self.view.show_rulers
     }
     /// #192 4a tests: File > Open ADDS a document — parse the file
     /// and activate it, stashing the current one (the real load()
@@ -2859,6 +2897,9 @@ impl App {
     // -- interaction ------------------------------------------------------
 
     fn handle_shortcuts(&mut self, ctx: &Context) {
+        // #184 keytips own the keyboard FIRST: while Alt-armed (or on
+        // an Alt+letter combo) the letter never reaches a widget.
+        self.keytip_input(ctx);
         let mut open = false;
         let mut save = false;
         let mut save_as = false;
@@ -2987,6 +3028,237 @@ impl App {
         if save_as {
             self.do_save(true);
         }
+    }
+
+    /// #184: the keytip input step — one pass over the raw events
+    /// before any widget sees them. A bare Alt arms the strip level
+    /// (Office gates this to no dialog being open); while armed — or
+    /// on a direct Alt+letter combo — the letter resolves against the
+    /// last-painted badge set, Esc backs out one level, and a pointer
+    /// click disarms. Consumed key events are removed from the input
+    /// so no text field ever types them.
+    fn keytip_input(&mut self, ctx: &Context) {
+        // Office shows no ribbon keytips on the File screen.
+        if self.backstage {
+            self.keytips.disarm();
+            return;
+        }
+        let armed = self.keytips.armed();
+        // Scan (read-only) first; act after the borrow ends.
+        let mut arm = false;
+        let mut back = false;
+        let mut letter: Option<char> = None;
+        let mut click = false;
+        ctx.input(|i| {
+            click = i.pointer.any_click();
+            for e in &i.events {
+                match e {
+                    egui::Event::Key {
+                        key: egui::Key::AltLeft | egui::Key::AltRight,
+                        pressed: true,
+                        modifiers: m,
+                        ..
+                    } if !m.ctrl && !m.shift && !m.command => arm = true,
+                    egui::Event::Key {
+                        key: egui::Key::Escape,
+                        pressed: true,
+                        ..
+                    } => back = true,
+                    egui::Event::Key {
+                        key: k,
+                        pressed: true,
+                        modifiers: m,
+                        ..
+                    } if !m.ctrl
+                        && !m.command
+                        && (m.alt || armed)
+                        && is_keytip_key(*k) =>
+                    {
+                        // One ASCII alphanumeric at a time — keytips
+                        // are single characters by construction
+                        // (`Key::name` is "A".."Z" / "0".."9").
+                        letter = k.name().chars().next();
+                        if letter.is_some() {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+        if armed && click {
+            self.keytips.disarm();
+        }
+        if arm && !self.shell_surface_open() {
+            // A bare Alt (re)starts at the strip level, Office-style.
+            self.keytips.mode = Some(crate::keytips::Mode::Strip);
+        } else if back && armed {
+            // Esc backs out one level; the key never reaches the
+            // dialog closer below while keytips own it.
+            self.keytips.mode = match self.keytips.mode {
+                Some(crate::keytips::Mode::Controls) => Some(crate::keytips::Mode::Strip),
+                _ => None,
+            };
+            ctx.input_mut(|i| {
+                i.events.retain(|e| {
+                    !matches!(
+                        e,
+                        egui::Event::Key {
+                            key: egui::Key::Escape,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                });
+            });
+        } else if let Some(c) = letter {
+            // An Alt+letter combo arms at the strip level on the fly
+            // (Office's accelerator form); armed mode resolves at the
+            // current level. Resolution itself waits for paint time,
+            // when this frame's badges are collected and assigned.
+            if !armed {
+                self.keytips.mode = Some(crate::keytips::Mode::Strip);
+            }
+            let c = c.to_ascii_uppercase();
+            self.keytips.pending = Some(c);
+            // Swallow the key AND its text twin so nothing types it
+            // (only letter/digit keys match — never Escape & co.,
+            // whose names also start with a letter).
+            ctx.input_mut(|i| {
+                i.events.retain(|e| {
+                    let eats = match e {
+                        egui::Event::Key {
+                            key: k,
+                            pressed: true,
+                            ..
+                        } if is_keytip_key(*k) => k.name().starts_with(c),
+                        egui::Event::Text(t) => {
+                            t.chars()
+                                .next()
+                                .is_some_and(|t| t.to_ascii_uppercase() == c)
+                        }
+                        _ => false,
+                    };
+                    !eats
+                });
+            });
+        }
+    }
+
+    /// Resolve one armed letter against the current badge set (the
+    /// last-painted frame's assignments — the shell is layout-stable,
+    /// so the rects and letters are fresh).
+    fn keytip_resolve(&mut self, c: char) {
+        let key = c.to_string();
+        // Letters are LEVEL-SCOPED (Office: the tab letters vanish at
+        // control level): controls match first there, with the QAT
+        // digits kept live at every level; the strip level matches
+        // only its own badges. (Control letters may repeat a strip
+        // letter — "Rulers" R vs the Review tab R — resolved by
+        // scope, never by vec order.)
+        let is_control = |b: &crate::keytips::Badge| {
+            matches!(b.hit, crate::keytips::Hit::Action { label, .. } if !label.is_empty())
+        };
+        let is_qat = |b: &crate::keytips::Badge| {
+            matches!(b.hit, crate::keytips::Hit::Action { label, .. } if label.is_empty())
+        };
+        let find = |pred: &dyn Fn(&crate::keytips::Badge) -> bool| {
+            self.keytips
+                .badges
+                .iter()
+                .find(|b| b.key == key && pred(b))
+                .map(|b| b.hit)
+        };
+        let hit = match self.keytips.mode {
+            Some(crate::keytips::Mode::Controls) => {
+                find(&is_control).or_else(|| find(&is_qat))
+            }
+            _ => find(&|b| !is_control(b)),
+        };
+        match hit {
+            Some(crate::keytips::Hit::Tab(t)) => {
+                self.tab = t;
+                self.keytips.mode = Some(crate::keytips::Mode::Controls);
+            }
+            Some(crate::keytips::Hit::File) => {
+                self.open_file_backstage();
+                self.keytips.disarm();
+            }
+            Some(crate::keytips::Hit::TellMe) => {
+                self.status = "Tell Me search arrives with a later milestone".into();
+                self.keytips.disarm();
+            }
+            Some(crate::keytips::Hit::Action {
+                action,
+                enabled,
+                label: _,
+            }) => {
+                if enabled {
+                    self.dispatch(action);
+                    self.keytips.disarm();
+                } else {
+                    self.status = format!("{} is unavailable", key);
+                }
+            }
+            None => {
+                // Office keeps the mode on an unknown letter (it
+                // beeps); our equivalent is a status note.
+                self.status = format!("no keytip {key}");
+            }
+        }
+    }
+
+    /// Whether any shell dialog/window surface is open — keytips do
+    /// not arm over a dialog (Office's modal behavior). The read-only
+    /// mirror of `close_front_dialog`'s list plus the surfaces that
+    /// manage their own Esc (Hyperlinks, Shape Data, Comments, About).
+    fn shell_surface_open(&self) -> bool {
+        self.selby_open
+            || self.snap_dlg_open
+            || self.pagesetup_open
+            || self.copypic_open
+            || self.contgal_open
+            || self.backgrounds_open
+            || self.reorder_open
+            || self.color_pick.is_some()
+            || !self.shapesheets.is_empty()
+            || self.hyperlink_open.is_some()
+            || self.shape_data_open.is_some()
+            || self.comment_target.is_some()
+            || self.about_open
+            || self.winmenu_open
+            || self.tab_menu.is_some()
+            || self.tab_rename.is_some()
+            || self.confirm_new
+            || self.confirm_close.is_some()
+            || self.text_edit.is_some()
+    }
+
+    /// The File tab's open action (#184: factored from the strip's
+    /// File click so the keytip path shares it exactly).
+    fn open_file_backstage(&mut self) {
+        self.backstage = true;
+        // #55 landing rule (2010): Info with a document open, Recent
+        // (welcome state) without one.
+        self.backstage_page = if self.ed.is_some() {
+            BackPage::Info
+        } else {
+            BackPage::Recent
+        };
+        // The Export pane's suggested path follows the document (#35).
+        self.export_pane.reset_for(&self.path);
+    }
+
+    /// Paint the armed veil + badges after the ribbon panels close
+    /// (#184). Letters are (re)assigned every frame so an Alt+letter
+    /// combo always resolves against fresh assignments; the veil and
+    /// chips draw only while armed.
+    fn paint_keytips(&mut self, ctx: &Context) {
+        crate::keytips::assign_badge_letters(&mut self.keytips.badges);
+        if let Some(c) = self.keytips.pending.take() {
+            self.keytip_resolve(c);
+        }
+        crate::keytips::paint(ctx, &self.keytips);
     }
 
     fn delete_selection(&mut self) {
@@ -7725,18 +7997,14 @@ impl App {
                         Color32::WHITE,
                     );
                     if fresp.clicked() {
-                        self.backstage = true;
-                        // #55 landing rule (2010): Info with a document
-                        // open, Recent (welcome state) without one.
-                        self.backstage_page = if self.ed.is_some() {
-                            BackPage::Info
-                        } else {
-                            BackPage::Recent
-                        };
-                        // The Export pane's suggested path follows the
-                        // document (#35).
-                        self.export_pane.reset_for(&self.path);
+                        self.open_file_backstage();
                     }
+                    // #184: the File badge (Office letter F).
+                    self.keytips.badges.push(crate::keytips::Badge {
+                        rect: fr,
+                        key: "F".into(),
+                        hit: crate::keytips::Hit::File,
+                    });
                     ui.add_space(8.0);
                     // #156: the contextual Container Tools tab rides
                     // after the fixed strip while a container is the
@@ -7763,6 +8031,15 @@ impl App {
                             self.tab = *t;
                         }
                         let r = resp.rect;
+                        // #184: every strip tab badges its Office
+                        // letter while keytips are armed.
+                        if let Some(k) = crate::keytips::tab_keytip(*t) {
+                            self.keytips.badges.push(crate::keytips::Badge {
+                                rect: r,
+                                key: k.into(),
+                                hit: crate::keytips::Hit::Tab(*t),
+                            });
+                        }
                         if active {
                             ui.painter().hline(
                                 r.left() + 2.0..=r.right() - 2.0,
@@ -7864,6 +8141,12 @@ impl App {
                         if presp.clicked() {
                             self.status = "Tell Me search arrives with a later milestone".into();
                         }
+                        // #184: Tell Me badges Q (Office's Alt+Q).
+                        self.keytips.badges.push(crate::keytips::Badge {
+                            rect: pr,
+                            key: "Q".into(),
+                            hit: crate::keytips::Hit::TellMe,
+                        });
                         // The QAT cluster lands LEFT of Tell Me (this is
                         // a right-to-left layout): Save/Undo/Redo as
                         // window-level document controls on the menu
@@ -7872,14 +8155,20 @@ impl App {
                         // surface; the customize chevron is dropped
                         // with the old title band).
                         ui.add_space(10.0);
-                        qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self);
-                        qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self);
-                        qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self);
+                        // #184: the digit badges ride the QAT buttons
+                        // themselves (1..=9 by position, Office's
+                        // rule).
+                        qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self, 1);
+                        qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self, 2);
+                        qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self, 3);
                         // #242: Help lives in the QAT (the owner's
                         // placement) — opens the About window.
-                        qat_button(ui, Icon::Help, "Help / About", || Action::About, self);
+                        qat_button(ui, Icon::Help, "Help / About", || Action::About, self, 4);
                     });
                 });
+                // #184: the armed veil covers the strip's rect
+                // (unioned with the content row's at paint time).
+                self.keytips.strip_rect = Some(ui.min_rect());
             });
         // #192 4a: a Window-menu pick activates after the strip's
         // mutable borrows end.
@@ -7902,9 +8191,27 @@ impl App {
         let ctx = self.ribbon_ctx();
         let groups = crate::ribbon::groups(self.tab, &ctx);
         let mut launcher: Option<&'static str> = None;
-        crate::ribbon::content_row(ui, &groups, &mut |a| dispatch(a, &mut act), &mut |label| {
-            launcher = Some(label)
-        });
+        // #184: every content-row control captures its rect for the
+        // keytip badges (letters assigned at paint time).
+        let badges = &mut self.keytips.badges;
+        crate::ribbon::content_row(
+            ui,
+            &groups,
+            &mut |a| dispatch(a, &mut act),
+            &mut |label| launcher = Some(label),
+            &mut |b, r| {
+                badges.push(crate::keytips::Badge {
+                    rect: r,
+                    key: String::new(),
+                    hit: crate::keytips::Hit::Action {
+                        action: b.action,
+                        enabled: b.enabled,
+                        label: b.a11y_label(),
+                    },
+                });
+            },
+        );
+        self.keytips.content_rect = Some(ui.max_rect());
         if let Some(label) = launcher {
             self.status = format!("{label} dialog — planned for a later milestone");
         }
@@ -13866,6 +14173,9 @@ impl App {
     /// The full shell, testable headlessly (see tests/shell.rs).
     pub fn draw(&mut self, ui: &mut Ui) {
         let _frame = crate::perf::span(crate::perf::Stage::Frame);
+        // #184: the per-frame keytip captures (badges, veil rects)
+        // start empty; the ribbon layout below refills them.
+        self.keytips.begin_frame();
         // Off-thread rasters (#92): land worker completions before
         // layout so this frame uses fresh textures; anything landing
         // (or a post deferred by the per-frame cap) schedules the
@@ -14022,6 +14332,9 @@ impl App {
             .exact_size(1.0)
             .frame(egui::Frame::new().fill(t.ribbon_edge))
             .show(ui, |_| {});
+        // #184: the ribbon panels have laid out — paint the armed
+        // keytip veil + badges above them (no-op while disarmed).
+        self.paint_keytips(&ctx);
         egui::Panel::bottom("status")
             .frame(
                 egui::Frame::new()
@@ -15179,8 +15492,37 @@ fn format_now_utc() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Action, app: &mut App) {
+/// Whether a key carries a single-character name — in this egui's
+/// `Key` that is exactly the letters ("A".."Z") and digits
+/// ("0".."9"), the keytip alphabet (every other key names a word).
+fn is_keytip_key(k: egui::Key) -> bool {
+    k.name().chars().count() == 1
+}
+
+/// One QAT button; returns its laid-out rect. `digit` is the #184
+/// keytip badge (Office numbers the QAT 1..=9 by position); the
+/// action closure is a pure constructor, evaluated once for the
+/// badge and shared with the click.
+fn qat_button(
+    ui: &mut Ui,
+    icon: Icon,
+    tip: &str,
+    action: impl FnOnce() -> Action,
+    app: &mut App,
+    digit: u8,
+) -> Rect {
+    let a = action();
     let (r, resp) = ui.allocate_exact_size(Vec2::new(22.0, 22.0), Sense::click());
+    // #184: the QAT digit badge (Office numbers the QAT 1..=9).
+    app.keytips.badges.push(crate::keytips::Badge {
+        rect: r,
+        key: digit.to_string(),
+        hit: crate::keytips::Hit::Action {
+            action: a,
+            enabled: true,
+            label: "",
+        },
+    });
     // The icon is painted, so the control needs its name attached;
     // screen readers read "Save", not "Save (Ctrl+S)" (GitHub #56).
     let name = tip.split(" (").next().unwrap_or(tip);
@@ -15197,9 +15539,9 @@ fn qat_button(ui: &mut Ui, icon: Icon, tip: &str, action: impl FnOnce() -> Actio
         true,
     );
     if resp.clicked() {
-        let a = action();
         app.dispatch(a);
     }
+    r
 }
 
 fn t_title(t: Tab) -> &'static str {

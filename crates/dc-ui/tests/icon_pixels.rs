@@ -57,7 +57,7 @@ fn icon_paints_pixels_inside_content_row() {
     let mut h = Harness::builder()
         .with_size(egui::vec2(400.0, 120.0))
         .build_ui(|ui| {
-            content_row(ui, &groups, &mut |_a| {}, &mut |_| {});
+            content_row(ui, &groups, &mut |_a| {}, &mut |_| {}, &mut |_, _| {});
         });
     h.run();
     let img = h.render().unwrap();
@@ -82,7 +82,7 @@ fn icon_paints_pixels_inside_content_row() {
                         .fill(dc_ui::theme::RIBBON_BG)
                         .inner_margin(egui::Margin::symmetric(4, 3)),
                 )
-                .show(ui, |ui| content_row(ui, &groups, &mut |_a| {}, &mut |_| {}));
+                .show(ui, |ui| content_row(ui, &groups, &mut |_a| {}, &mut |_| {}, &mut |_, _| {}));
         });
     h.run();
     let img = h.render().unwrap();
