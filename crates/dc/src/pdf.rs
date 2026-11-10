@@ -1319,8 +1319,14 @@ fn assemble(
         // hosts) is not a font program: slice out the face the
         // offset table names (#218 review).
         let embed = face_bytes(&data, index);
+        // Flate the font program (#218 review): fonts are the fat tail
+        // of an export's size, and like every other stream they
+        // decompress transparently. Length1 stays the UNCOMPRESSED
+        // length — that is its defined meaning for FontFile2.
+        let compressed = flate(&embed);
         {
-            let mut s = pdf.stream(refs.file, &embed);
+            let mut s = pdf.stream(refs.file, &compressed);
+            s.filter(Filter::FlateDecode);
             if true_type {
                 s.pair(Name(b"Length1"), embed.len() as i32);
             } else {

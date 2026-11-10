@@ -314,11 +314,11 @@ mod tests {
         // CMaps.
         let mut cmaps: Vec<HashMap<u16, String>> = Vec::new();
         let mut contents: Vec<Vec<u16>> = Vec::new();
-        for (_, data) in streams(&bytes) {
+        for (dict, data) in streams(&bytes) {
             let text = String::from_utf8_lossy(&data);
             if text.contains("begincmap") {
                 cmaps.push(parse_cmap(&text));
-            } else if text.contains("TJ") {
+            } else if text.contains("TJ") && !dict.windows(9).any(|w| w == b"/FontFile") {
                 contents.push(parse_tj_codes(&text));
             }
         }
@@ -347,7 +347,7 @@ mod tests {
     }
 
     /// Every `stream … endstream` payload, zlib-decoded.
-    fn streams(bytes: &[u8]) -> Vec<(usize, Vec<u8>)> {
+    fn streams(bytes: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         use std::io::Read;
         let mut out = Vec::new();
         let mut rest = bytes;
@@ -365,6 +365,11 @@ mod tests {
             let Some(stream_pos) = find(after_len, b"stream") else {
                 break;
             };
+            // The stream's DICTIONARY (for the classifier: font
+            // programs decompress fine now that they are Flated too,
+            // and their binary soup must not reach the TJ parser).
+            let dict_end = len_pos + b"/Length ".len() + stream_pos;
+            let dict = &rest[..dict_end];
             let after = &after_len[stream_pos + b"stream".len()..];
             // Skip the EOL the writer emits after the `stream` keyword.
             let data_start = after
@@ -379,7 +384,7 @@ mod tests {
             let mut data = Vec::new();
             // Non-stream objects (font files) aren't zlib — skip.
             if dec.read_to_end(&mut data).is_ok() && !data.is_empty() {
-                out.push((len_pos, data));
+                out.push((dict.to_vec(), data));
             }
             rest = &after[data_start + digits..];
         }

@@ -990,8 +990,11 @@ impl ShapeLayers {
                 .unwrap_or(self.base_version);
             // Pending damage state, read before the entry borrow: the
             // #219 patch decision needs it plus the entry's texture.
-            let pending_damage = self.pending_damage.get(&shape.id).copied();
-            let damage_unbounded = self.pending_full.contains(&shape.id);
+            // Mutable snapshots: the failed-render retry below
+            // forces a full and must be able to refresh them (#218
+            // review) — the patch decision reads these, not the maps.
+            let mut pending_damage = self.pending_damage.get(&shape.id).copied();
+            let mut damage_unbounded = self.pending_full.contains(&shape.id);
             let entry = self.entries.entry(shape.id).or_insert_with(|| Entry {
                 version: u64::MAX, // never matches a real version
                 bucket,
@@ -1021,9 +1024,15 @@ impl ShapeLayers {
                     // The failed edit's region is not in this edit's
                     // damage — patching only the new rect would leave
                     // the failure's region stale until some later full
-                    // render. Force the full render (#218 review).
+                    // render. Force the full render (#218 review) —
+                    // AND refresh the decision inputs: the snapshots
+                    // below predate this branch, so the patch planner
+                    // would still see bounded damage and mark the
+                    // texture current over the failed region.
                     self.pending_damage.remove(&shape.id);
                     self.pending_full.insert(shape.id);
+                    pending_damage = None;
+                    damage_unbounded = true;
                 }
                 // Settle gate (#124 item 6.2): while the zoom is still
                 // moving, a shape whose texture already shows its

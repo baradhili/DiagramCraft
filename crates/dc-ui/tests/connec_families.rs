@@ -418,7 +418,7 @@ fn exercise_mode(master: &vsdx::Master, static_only: bool) -> Exercised {
             Box::new(RerouteConnectors::new(0, vec![2])),
         ],
     ))
-    .expect("{name}: the move phase applies");
+    .unwrap_or_else(|e| panic!("{name}: the move phase applies: {e}"));
     let (_, _, ex, ey) = resolved(&ed, conn_id);
     // B moved by (+2,+1): rect (9.5,6,1,1), center (10,6.5). The
     // static end lands on B's connection row (pin-relative
