@@ -585,7 +585,11 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
             doc.pages_part.clone(),
             pages_index_xml_floored(
                 doc,
-                rels_rid_floor(pkg.relationships(&doc.pages_part).iter().map(|(id, _, _)| id.as_str())),
+                rels_rid_floor(
+                    pkg.relationships(&doc.pages_part)
+                        .iter()
+                        .map(|(id, _, _)| id.as_str()),
+                ),
             )
             .into_bytes(),
         );
@@ -613,15 +617,12 @@ pub fn build_parts(doc: &Document) -> BTreeMap<String, Vec<u8>> {
                     Some(bytes) => parse_rels(bytes),
                     None => Vec::new(),
                 };
-                let have_masters = entries
-                    .iter()
-                    .any(|e| e.type_ == rel_type("masters"));
+                let have_masters = entries.iter().any(|e| e.type_ == rel_type("masters"));
                 if !have_masters {
                     let next = 1 + entries
                         .iter()
                         .filter_map(|e| {
-                            e.id.strip_prefix("rId")
-                                .and_then(|n| n.parse::<u32>().ok())
+                            e.id.strip_prefix("rId").and_then(|n| n.parse::<u32>().ok())
                         })
                         .max()
                         .unwrap_or(0);
@@ -1124,7 +1125,12 @@ fn reconcile_media(
     let mut xml = String::from_utf8_lossy(&ct_bytes).into_owned();
     if !xml.is_empty() {
         let mut changed = false;
-        for ext in doc.extra_media.iter().map(|m| m.ext.as_str()).collect::<std::collections::BTreeSet<_>>() {
+        for ext in doc
+            .extra_media
+            .iter()
+            .map(|m| m.ext.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+        {
             let marker = format!("Extension=\"{ext}\"");
             if !xml.contains(&marker) {
                 let default = format!(
@@ -1200,7 +1206,10 @@ fn reconcile_page_parts(
     // each page's own `<Rel r:id>` child when it has one, else the same
     // synthesized rId the index was serialized with (both derive from
     // [`page_index_rids`], so the index and rels always agree).
-    let rids = page_index_rids(doc, rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())));
+    let rids = page_index_rids(
+        doc,
+        rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())),
+    );
     let mut entries: Vec<RelEntry> = src_entries
         .iter()
         .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))
@@ -1298,7 +1307,10 @@ fn reconcile_master_parts(
 
     // Same agreement requirement as the pages rels: rIds without their
     // own `<Rel>` child are the ones the index was serialized with.
-    let rids = master_index_rids(doc, rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())));
+    let rids = master_index_rids(
+        doc,
+        rels_rid_floor(src_entries.iter().map(|e| e.id.as_str())),
+    );
     let mut entries: Vec<RelEntry> = src_entries
         .iter()
         .filter(|e| !removed.contains(&resolve_target(&index_dir, &e.target)))

@@ -288,9 +288,46 @@ pub struct Page {
 }
 
 impl Page {
+    /// The page's line-jump display switch (#251): the PageSheet's
+    /// `LineJumpCode` (the PageLayout-section cell — the oracle
+    /// enumeration of a real Visio-authored page carried
+    /// `LineJumpCode = 1`, Visio's "horizontal lines jump" default).
+    /// Absent shows (the shipped corpus carries no jump cells at
+    /// all). **0 = visPLOJumpNone** — the documented off switch
+    /// ([MS-Learn] LineJumpCode cell, Page Layout section; values
+    /// 0–5). 6 stays treated as off too (#218 review: files written
+    /// by tools that use it as "none" keep their intent).
+    pub fn line_jumps_shown(&self) -> bool {
+        self.sheet()
+            .and_then(|s| s.cell("LineJumpCode"))
+            .and_then(|c| c.numeric())
+            .map(|v| v != 0.0 && v != 6.0)
+            .unwrap_or(true)
+    }
+
+    /// The page's line-jump SIZE multiplier (#251): the PageSheet's
+    /// `LineJumpFactorX` (Visio's Layout and Routing jump size),
+    /// defaulting to 1.0.
+    pub fn line_jump_factor(&self) -> f64 {
+        self.sheet()
+            .and_then(|s| s.cell("LineJumpFactorX"))
+            .and_then(|c| c.numeric())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(1.0)
+    }
+
     /// The page's sheet: the inline `<PageSheet>` from the pages index.
     pub fn sheet(&self) -> Option<&Sheet> {
         self.children.iter().find_map(|c| match c {
+            IndexChild::Sheet { sheet, .. } => Some(sheet),
+            _ => None,
+        })
+    }
+
+    /// [`Page::sheet`] for mutation (page-default cells a writer or
+    /// test sets in place).
+    pub fn sheet_mut(&mut self) -> Option<&mut Sheet> {
+        self.children.iter_mut().find_map(|c| match c {
             IndexChild::Sheet { sheet, .. } => Some(sheet),
             _ => None,
         })
@@ -937,9 +974,11 @@ impl Document {
     /// `SnapAngles`, `Protect*` — stay verbatim.
     pub fn set_doc_snap_glue(&mut self, s: DocSnapGlue) {
         let dg = if s.dynamic_grid { "1" } else { "0" };
-        if let Some(ix) = self.items.iter().position(|it| {
-            matches!(it, DocItem::Raw(r) if r.name == "DocumentSettings")
-        }) {
+        if let Some(ix) = self
+            .items
+            .iter()
+            .position(|it| matches!(it, DocItem::Raw(r) if r.name == "DocumentSettings"))
+        {
             if let DocItem::Raw(r) = &mut self.items[ix] {
                 r.inner = set_settings_child(&r.inner, "GlueSettings", &s.glue.to_string());
                 r.inner = set_settings_child(&r.inner, "SnapSettings", &s.snap.to_string());
@@ -1013,10 +1052,8 @@ mod snap_glue_tests {
 
     #[test]
     fn setting_patches_only_the_three_children() {
-        let mut doc = doc_with_settings(
-            vec![("TopPage".to_string(), "0".to_string())],
-            CORPUS_INNER,
-        );
+        let mut doc =
+            doc_with_settings(vec![("TopPage".to_string(), "0".to_string())], CORPUS_INNER);
         let before = doc
             .items
             .iter()
@@ -1051,7 +1088,9 @@ mod snap_glue_tests {
         assert!(g < s && s < d, "corpus child order: {}", after.inner);
         assert!(after.inner.contains("<GlueSettings>0</GlueSettings>"));
         assert!(after.inner.contains("<SnapSettings>65847</SnapSettings>"));
-        assert!(after.inner.contains("<DynamicGridEnabled>0</DynamicGridEnabled>"));
+        assert!(after
+            .inner
+            .contains("<DynamicGridEnabled>0</DynamicGridEnabled>"));
         // And reading back yields exactly what was written.
         let read = doc.doc_snap_glue().unwrap();
         assert_eq!(read.snap, 65847);
@@ -1084,7 +1123,8 @@ mod snap_glue_tests {
         // An element with only a later-order child: the missing
         // GlueSettings/SnapSettings must land before SnapExtensions,
         // and DynamicGridEnabled after it.
-        let mut inner = String::from("<SnapExtensions>34</SnapExtensions><ProtectStyles>0</ProtectStyles>");
+        let mut inner =
+            String::from("<SnapExtensions>34</SnapExtensions><ProtectStyles>0</ProtectStyles>");
         inner = set_settings_child(&inner, "GlueSettings", "1");
         inner = set_settings_child(&inner, "SnapSettings", "2");
         inner = set_settings_child(&inner, "DynamicGridEnabled", "0");

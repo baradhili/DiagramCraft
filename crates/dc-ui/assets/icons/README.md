@@ -46,6 +46,8 @@ File names map 1:1 to the `Icon` enum asset stems in
 | newpage | file-document-plus-outline |
 | theme | palette |
 | fit | fit-to-screen |
+| magnify-expand | magnify-expand |
+| help-circle-outline | help-circle-outline |
 | zoomin | magnify-plus |
 | zoomout | magnify-minus |
 | grid | grid |
@@ -65,6 +67,19 @@ File names map 1:1 to the `Icon` enum asset stems in
 | format-vertical-align-bottom | format-vertical-align-bottom (#110, 2026-10-29) |
 | arrow-expand-horizontal | arrow-expand-horizontal (#110, 2026-10-29) |
 | arrow-expand-vertical | arrow-expand-vertical (#110, 2026-10-29) |
+| justify | format-align-justify (#252, 2026-11-09) |
+| texttool | format-text (#252, 2026-11-09) |
+| rect | rectangle-outline (#252, 2026-11-09) |
+| selection-ellipse | selection-ellipse (#252, 2026-11-09; file present since #110 wave, now mapped) |
+| line | vector-line (#252, 2026-11-09) |
+| stamp | stamper (#252, 2026-11-09) |
+| magnify-expand | magnify-expand (#252, 2026-11-09; file present since #110 wave, now mapped) |
+| findreplace | find-replace (#252, 2026-11-09) |
+| selectionpane | file-tree-outline (#252, 2026-11-09) |
+| datetime | clock-outline (#252, 2026-11-09) |
+| title | format-title (#252, 2026-11-09) |
+| eye | eye (#252, 2026-11-09) |
+| lock | lock-outline (#252, 2026-11-09) |
 
 Posters note: MDI is an open-source set, not Microsoft artwork; the
 cleanroom rule (no Microsoft assets) still holds. Fluent UI icons were

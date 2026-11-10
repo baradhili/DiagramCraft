@@ -65,9 +65,7 @@ pub fn sort_key(row: &Row) -> Option<&str> {
 /// (accent folding etc. — GitHub #94).
 pub fn cmp_sort_key(a: &Row, b: &Row) -> std::cmp::Ordering {
     match (sort_key(a), sort_key(b)) {
-        (Some(x), Some(y)) => x
-            .to_lowercase()
-            .cmp(&y.to_lowercase()),
+        (Some(x), Some(y)) => x.to_lowercase().cmp(&y.to_lowercase()),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,

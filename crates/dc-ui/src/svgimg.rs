@@ -6,7 +6,6 @@
 use egui::{ColorImage, Context, TextureHandle, TextureId, TextureOptions};
 
 use std::collections::HashMap;
-use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Kittest/snapshot mode: resolve every font-family to the embedded
@@ -52,221 +51,29 @@ pub fn pin_determinism_for_tests() {
 }
 
 /// Rasterize an SVG string to a `target_width`-pixel-wide RGBA image
-/// (height follows the viewBox aspect).
+/// (height follows the viewBox aspect). The resolution, database and
+/// parse itself live in `dc::raster` — the shared export/canvas stack
+/// (#35); this half adds the GUI's kittest pin and the egui image.
 ///
 /// Fonts: the SVG backend emits `font-family` fallback chains per text
-/// element — the document's family (Visio's default is Calibri), its
-/// metric-compatible substitute, Carlito, a CSS generic (GitHub #17).
-/// Here each chain is RESOLVED against this database before parsing:
-/// the first family actually installed wins, case-insensitively
-/// (Arial renders as Arial where installed — what the desktop app is
-/// for), and a chain nothing satisfies pins to the embedded Carlito
-/// (metric-compatible with Calibri, OFL-1.1 — see
-/// dc/assets/fonts/LICENSE-Carlito). Text without any font-family
-/// defaults to Carlito as well (`Options::font_family`): usvg's own
-/// default is "Times New Roman", which rendered default text in a
-/// serif on machines with the MS core fonts. System fonts stay
-/// available as per-glyph fallback for scripts Carlito lacks (CJK,
-/// Arabic, …).
+/// element (GitHub #17); `dc::raster::parse_svg` resolves the first
+/// installed family and pins unresolvable chains to the embedded
+/// Carlito. System fonts stay available as per-glyph fallback for
+/// scripts Carlito lacks (CJK, Arabic, …).
 ///
 /// Determinism: the kittest goldens run under `pin_embedded_fonts_for_tests`
-/// (always Carlito), and their fixture documents carry no Character
+/// (vendored faces only), and their fixture documents carry no Character
 /// Font cells, so they render the same on every machine; real
 /// documents render with the user's real fonts.
-/// The font database, built once: the vendored metric faces —
-/// Carlito (style-complete) and Liberation Sans/Serif/Mono (the
-/// Arial/Times/Courier substitution chains' named faces, #145) —
-/// plus generic family mappings (usvg resolves unknown/no
-/// font-family through the generic defaults, which don't exist in a
-/// vendored-only database and would drop the text entirely) and every
-/// installed system font (the primary source — a host with real
-/// Arial/Liberation keeps measuring and rasterizing it).
-fn font_db() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
-    static DB: std::sync::OnceLock<std::sync::Arc<resvg::usvg::fontdb::Database>> =
-        std::sync::OnceLock::new();
-    DB.get_or_init(|| {
-        let mut db = resvg::usvg::fontdb::Database::new();
-        const VENDORED: [&[u8]; 16] = [
-            include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf"),
-            include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf"),
-            include_bytes!("../../dc/assets/fonts/Carlito-Italic.ttf"),
-            include_bytes!("../../dc/assets/fonts/Carlito-BoldItalic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSans-Regular.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSans-Bold.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSans-Italic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSans-BoldItalic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSerif-Regular.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSerif-Bold.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSerif-Italic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationSerif-BoldItalic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationMono-Regular.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationMono-Bold.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationMono-Italic.ttf"),
-            include_bytes!("../../dc/assets/fonts/LiberationMono-BoldItalic.ttf"),
-        ];
-        for bytes in VENDORED {
-            db.load_font_data(bytes.to_vec());
-        }
-        db.set_sans_serif_family("Carlito");
-        db.set_serif_family("Carlito");
-        db.set_monospace_family("Carlito");
-        db.load_system_fonts();
-        std::sync::Arc::new(db)
-    })
-    .clone()
-}
-
-/// Canonical installed family name for `wanted` — case-insensitive,
-/// fontconfig-style (fontdb's own query is exact-match, and Visio
-/// documents spell families freely: "ARIAL", "Segoe UI").
-fn installed_family(db: &resvg::usvg::fontdb::Database, wanted: &str) -> Option<String> {
-    let wanted = wanted.trim();
-    db.faces().find_map(|face| {
-        face.families
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .find(|n| n.eq_ignore_ascii_case(wanted))
-            .map(str::to_string)
-    })
-}
-
-/// Resolve one CSS font-family chain (comma-separated, optionally
-/// single/double-quoted names — the form our renderer emits): the
-/// first INSTALLED named family wins and is returned under its
-/// canonical name; generic keywords pass through to the database's
-/// deterministic mappings; `None` means the chain names nothing
-/// installed and carries no generic — callers pin that case to the
-/// embedded Carlito.
-fn resolve_font_chain(chain: &str, installed: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let mut generic: Option<&str> = None;
-    for part in chain.split(',') {
-        let name = part.trim().trim_matches(|c| c == '\'' || c == '"');
-        if name.is_empty() {
-            continue;
-        }
-        match name.to_ascii_lowercase().as_str() {
-            "serif" | "cursive" | "fantasy" => generic = generic.or(Some("serif")),
-            "monospace" => generic = generic.or(Some("monospace")),
-            "sans-serif" | "system-ui" | "ui-sans-serif" => {
-                generic = generic.or(Some("sans-serif"))
-            }
-            _ => {
-                if let Some(canonical) = installed(name) {
-                    return Some(canonical);
-                }
-            }
-        }
-    }
-    generic.map(str::to_string)
-}
-
-/// Rewrite every `font-family="…"` attribute of the SVG to the single
-/// family the GUI will actually render (see the `rasterize` comment):
-/// against the passed database, or against the vendored-family set
-/// when the test pin is active. An unbalanced quote leaves the rest
-/// of the input untouched rather than corrupting the SVG.
-fn resolve_font_families(svg: &str, db: &resvg::usvg::fontdb::Database) -> String {
-    let pinned = PIN_EMBEDDED.load(Ordering::Relaxed);
-    let from_db = |name: &str| installed_family(db, name);
-    // Pinned (kittest) mode resolves against the VENDORED faces only
-    // (#145): the substitution chains' named families (Carlito,
-    // Liberation) resolve their vendored faces on every machine — the
-    // measurement pin in `dc::textmetrics` mirrors exactly this set.
-    let embedded_only = |name: &str| {
-        const VENDORED: [&str; 4] =
-            ["Carlito", "Liberation Sans", "Liberation Serif", "Liberation Mono"];
-        VENDORED
-            .iter()
-            .find(|v| v.eq_ignore_ascii_case(name))
-            .map(|v| v.to_string())
-    };
-    let installed: &dyn Fn(&str) -> Option<String> = if pinned { &embedded_only } else { &from_db };
-    resolve_font_families_with(svg, installed)
-}
-
-/// [`resolve_font_families`] with the family lookup injected — the
-/// database-driven unit tests stay hermetic regardless of whether
-/// another test in the same process has set the kittest pin (the pin
-/// is process-global and deliberately one-way).
-fn resolve_font_families_with(svg: &str, installed: &dyn Fn(&str) -> Option<String>) -> String {
-    const NEEDLE: &str = "font-family=\"";
-    let mut out = String::with_capacity(svg.len());
-    let mut rest = svg;
-    while let Some(i) = rest.find(NEEDLE) {
-        // also swallow the separating space before the attribute
-        let cut = if i > 0 && rest.as_bytes()[i - 1] == b' ' {
-            i - 1
-        } else {
-            i
-        };
-        out.push_str(&rest[..cut]);
-        let after = &rest[i + NEEDLE.len()..];
-        match after.find('"') {
-            Some(j) => {
-                let resolved = resolve_font_chain(&after[..j], installed)
-                    .unwrap_or_else(|| "Carlito".to_string());
-                let _ = write!(out, " font-family=\"{resolved}\"");
-                rest = &after[j + 1..];
-            }
-            None => {
-                out.push_str(&rest[cut..]);
-                return out;
-            }
-        }
-    }
-    out.push_str(rest);
-    out
-}
-
-/// Parse an SVG string into a renderable tree — the per-SVG-string
-/// half of the raster pipeline (#91): font-chain resolve + usvg parse.
-/// Runs only when the SVG actually changes (a version bump); a raster
-/// width change never re-parses, it re-renders [`render_tree`] on the
-/// held tree.
-///
-/// Fonts: the SVG backend emits `font-family` fallback chains per text
-/// element — the document's family (Visio's default is Calibri), its
-/// metric-compatible substitute, Carlito, a CSS generic (GitHub #17).
-/// Here each chain is RESOLVED against this database before parsing:
-/// the first family actually installed wins, case-insensitively
-/// (Arial renders as Arial where installed — what the desktop app is
-/// for), and a chain nothing satisfies pins to the embedded Carlito
-/// (metric-compatible with Calibri, OFL-1.1 — see
-/// dc/assets/fonts/LICENSE-Carlito). Text without any font-family
-/// defaults to Carlito as well (`Options::font_family`): usvg's own
-/// default is "Times New Roman", which rendered default text in a
-/// serif on machines with the MS core fonts. System fonts stay
-/// available as per-glyph fallback for scripts Carlito lacks (CJK,
-/// Arabic, …).
-///
-/// Determinism: the kittest goldens run under `pin_embedded_fonts_for_tests`
-/// (always Carlito), and their fixture documents carry no Character
-/// Font cells, so they render the same on every machine; real
-/// documents render with the user's real fonts.
-/// The font database, built once: Carlito Regular/Bold plus generic
-/// family mappings — usvg resolves unknown/no font-family through the
-/// generic defaults (Arial / Times New Roman), which don't exist in a
-/// Carlito-only database and would drop the text entirely.
 pub fn parse_svg(svg: &str, kind: crate::perf::Kind) -> anyhow::Result<resvg::usvg::Tree> {
-    let db = font_db();
-    let opts = resvg::usvg::Options {
-        fontdb: db.clone(),
-        // No-font-family text defaults to the embedded face: usvg's own
-        // default family is "Times New Roman", which rendered default
-        // text in a serif on machines with the MS core fonts installed
-        // (GitHub #17).
-        font_family: "Carlito".to_string(),
-        ..Default::default()
-    };
+    let db = dc::raster::font_db();
+    let pinned = PIN_EMBEDDED.load(Ordering::Relaxed);
     let resolved = {
         let _s = crate::perf::span(crate::perf::Stage::Resolve(kind));
-        resolve_font_families(svg, &db)
+        dc::raster::resolve_svg(svg, &db, pinned)
     };
-    {
-        let _s = crate::perf::span(crate::perf::Stage::Parse(kind));
-        resvg::usvg::Tree::from_str(&resolved, &opts)
-    }
-    .map_err(|e| anyhow::anyhow!("parsing page SVG: {e}"))
+    let _s = crate::perf::span(crate::perf::Stage::Parse(kind));
+    dc::raster::parse_resolved(&resolved, &db)
 }
 
 /// Render a parsed tree at a `target_width`-pixel-wide RGBA image
@@ -280,19 +87,36 @@ pub fn render_tree(
     // Widest texture we ever allocate (kittest caps at 2048; GPUs
     // allow more but upscaling a 2048px raster is fine on screen).
     const MAX_TEX: u32 = 2048;
-    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
     let size = tree.size();
     let aspect = size.height().max(1e-3) / size.width().max(1e-3);
     let w = target_width.ceil().clamp(1.0, MAX_TEX as f32) as u32;
     let h = ((target_width * aspect).ceil().max(1.0)) as u32;
     let (w, h) = (w, h.min(MAX_TEX));
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)
-        .ok_or_else(|| anyhow::anyhow!("allocating {w}×{h} raster"))?;
     let t = resvg::usvg::Transform::from_scale(
         w as f32 / size.width().max(1e-3),
         h as f32 / size.height().max(1e-3),
     );
-    resvg::render(tree, t, &mut pixmap.as_mut());
+    render_tree_transform(tree, t, w, h, kind)
+}
+
+/// Render a parsed tree through an explicit transform into a
+/// `w`×`h` pixmap — [`render_tree`]'s inner half, exposed for the
+/// #219 damage-region patcher: the patch renders the SAME
+/// (post-edit, full-layer) tree with [`render_tree`]'s own scale for
+/// the existing texture's dimensions, post-translated by an INTEGER
+/// pixel offset. An integer shift moves the sample grid by whole
+/// pixels, so the patch's pixels are bit-identical to the
+/// corresponding region of a full re-render at the same size — the
+/// regression test in `layers` pins that identity.
+pub fn render_tree_transform(
+    tree: &resvg::usvg::Tree,
+    t: resvg::usvg::Transform,
+    w: u32,
+    h: u32,
+    kind: crate::perf::Kind,
+) -> anyhow::Result<ColorImage> {
+    let _r = crate::perf::span(crate::perf::Stage::Render(kind));
+    let pixmap = dc::raster::render_pixmap(tree, t, w, h)?;
     let data: &[u8] = pixmap.data();
     Ok(ColorImage::from_rgba_unmultiplied(
         [w as usize, h as usize],
@@ -497,81 +321,6 @@ impl TextureCache {
 mod tests {
     use super::*;
 
-    /// A deterministic database: the embedded Carlito set only, no
-    /// system fonts — the same faces every machine (and CI) has.
-    fn carlito_only_db() -> resvg::usvg::fontdb::Database {
-        let mut db = resvg::usvg::fontdb::Database::new();
-        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Regular.ttf").to_vec());
-        db.load_font_data(include_bytes!("../../dc/assets/fonts/Carlito-Bold.ttf").to_vec());
-        db
-    }
-
-    #[test]
-    fn chain_resolves_to_the_first_installed_family() {
-        let arial = |n: &str| (n.eq_ignore_ascii_case("Arial")).then(|| "Arial".to_string());
-        let liberation = |n: &str| {
-            (n.eq_ignore_ascii_case("Liberation Sans")).then(|| "Liberation Sans".to_string())
-        };
-        let none = |_: &str| None::<String>;
-        let chain = "Arial, 'Liberation Sans', Carlito, sans-serif";
-        // Installed document family wins, then its substitute.
-        assert_eq!(resolve_font_chain(chain, &arial).as_deref(), Some("Arial"));
-        assert_eq!(
-            resolve_font_chain(chain, &liberation).as_deref(),
-            Some("Liberation Sans")
-        );
-        // Nothing installed: the chain's generic tail carries it; a
-        // chain with neither an installed name nor a generic is None
-        // (the caller pins that to Carlito).
-        assert_eq!(
-            resolve_font_chain(chain, &none).as_deref(),
-            Some("sans-serif")
-        );
-        assert_eq!(resolve_font_chain("Wingdings", &none), None);
-        // Case-insensitive match, canonical (database) spelling back.
-        let canonical = |n: &str| (n.eq_ignore_ascii_case("arial")).then(|| "Arial".to_string());
-        assert_eq!(
-            resolve_font_chain("ARIAL, Carlito", &canonical).as_deref(),
-            Some("Arial")
-        );
-    }
-
-    #[test]
-    fn chains_rewrite_against_the_database() {
-        let db = carlito_only_db();
-        // No MS or Liberation faces in a Carlito-only database: the
-        // chain resolves to the embedded face — deterministic on any
-        // machine and independent of the process-wide test pin.
-        let svg = r##"<text font-family="Arial, 'Liberation Sans', Carlito, sans-serif" font-size="0.1">x</text>"##;
-        let from_db = |name: &str| installed_family(&db, name);
-        assert_eq!(
-            resolve_font_families_with(svg, &from_db),
-            r#"<text font-family="Carlito" font-size="0.1">x</text>"#
-        );
-        assert_eq!(
-            installed_family(&db, "carlito").as_deref(),
-            Some("Carlito"),
-            "case-insensitive, canonical name back"
-        );
-        assert_eq!(installed_family(&db, "Arial"), None);
-    }
-
-    #[test]
-    fn unbalanced_quote_leaves_svg_untouched() {
-        let db = carlito_only_db();
-        let bad = r#"<text font-family="oops>"#;
-        let from_db = |name: &str| installed_family(&db, name);
-        assert_eq!(resolve_font_families_with(bad, &from_db), bad);
-    }
-
-    #[test]
-    fn svg_without_families_is_unchanged() {
-        let db = carlito_only_db();
-        let plain = r#"<svg><rect x="0"/></svg>"#;
-        let from_db = |name: &str| installed_family(&db, name);
-        assert_eq!(resolve_font_families_with(plain, &from_db), plain);
-    }
-
     /// Face stability under the pinned (kittest) mode: the pinned
     /// database resolves the VENDORED faces (#145), so an Arial chain
     /// rasterizes the vendored Liberation Sans (identically on every
@@ -585,11 +334,9 @@ mod tests {
         let tail = ">Hamburg fi 51</text></svg>";
         let arial_chain =
             format!(r#"{head} font-family="Arial, 'Liberation Sans', Carlito, sans-serif"{tail}"#);
-        let explicit_liberation =
-            format!(r#"{head} font-family="Liberation Sans"{tail}"#);
+        let explicit_liberation = format!(r#"{head} font-family="Liberation Sans"{tail}"#);
         let explicit_carlito = format!(r#"{head} font-family="Carlito"{tail}"#);
-        let calibri_chain =
-            format!(r#"{head} font-family="Calibri, Carlito, sans-serif"{tail}"#);
+        let calibri_chain = format!(r#"{head} font-family="Calibri, Carlito, sans-serif"{tail}"#);
         let bare = format!(r#"{head}{tail}"#);
         let a = rasterize(&arial_chain, 200.0, crate::perf::Kind::Page).unwrap();
         let l = rasterize(&explicit_liberation, 200.0, crate::perf::Kind::Page).unwrap();
@@ -597,7 +344,10 @@ mod tests {
         let d = rasterize(&calibri_chain, 200.0, crate::perf::Kind::Page).unwrap();
         let c = rasterize(&bare, 200.0, crate::perf::Kind::Page).unwrap();
         assert_eq!(a.size, l.size);
-        assert_eq!(a.pixels, l.pixels, "Arial chain == vendored Liberation Sans");
+        assert_eq!(
+            a.pixels, l.pixels,
+            "Arial chain == vendored Liberation Sans"
+        );
         assert_ne!(
             a.pixels, b.pixels,
             "Liberation and Carlito are different faces — the chain must not silently fall to Carlito"
@@ -609,15 +359,21 @@ mod tests {
 
     /// Machine-dependent by design (GitHub #17's requirement: honor
     /// installed fonts): asserts the workstation's MS core fonts are
-    /// found through the same database the app builds. Run explicitly
-    /// on a box that has them:
+    /// found through the same shared database the app builds. Run
+    /// explicitly on a box that has them:
     /// `cargo test -p dc-ui --lib -- --ignored`
     #[test]
     #[ignore = "asserts fonts installed on this workstation"]
     fn installed_ms_fonts_resolve_on_this_machine() {
-        let db = font_db();
-        assert_eq!(installed_family(&db, "Arial").as_deref(), Some("Arial"));
-        assert_eq!(installed_family(&db, "Calibri").as_deref(), Some("Calibri"));
+        let db = dc::raster::font_db();
+        assert_eq!(
+            dc::raster::installed_family(&db, "Arial").as_deref(),
+            Some("Arial")
+        );
+        assert_eq!(
+            dc::raster::installed_family(&db, "Calibri").as_deref(),
+            Some("Calibri")
+        );
     }
 
     /// A minimal parseable page: usvg needs a size to derive the raster
@@ -646,30 +402,49 @@ mod tests {
         // Same key three times — the third inside the same ±0.25 ppi
         // bucket — one build.
         for &ppi in &[96.0f32, 96.0, 96.05] {
-            cache.get(&ctx, &mut pool, 4.0, "page1", 1, ppi, &mut build).unwrap().unwrap();
+            cache
+                .get(&ctx, &mut pool, 4.0, "page1", 1, ppi, &mut build)
+                .unwrap()
+                .unwrap();
         }
         assert_eq!(calls.get(), 1, "cached gets must not rebuild the SVG");
         // Version bump → rebuild (the SVG may have changed).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 96.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 2, 96.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 2);
         // New ppi bucket, same version → NO rebuild: the parsed tree is
         // reused and only re-rendered (#91).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 2, 300.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 2, 300.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 2, "a bucket change must not re-serialize");
         // Another page part builds under its own key.
-        cache.get(&ctx, &mut pool, 4.0, "page2", 2, 300.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page2", 2, 300.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 3);
         // The v1 page1 entry was evicted by the retain on the v2 get, so
         // asking for it again rebuilds (eviction policy unchanged, #90).
-        cache.get(&ctx, &mut pool, 4.0, "page1", 1, 96.0, &mut build).unwrap().unwrap();
+        cache
+            .get(&ctx, &mut pool, 4.0, "page1", 1, 96.0, &mut build)
+            .unwrap()
+            .unwrap();
         assert_eq!(calls.get(), 4);
         // A failed build inserts nothing: the very next get retries.
         let mut failing = || -> anyhow::Result<String> {
             calls.set(calls.get() + 1);
             Err(anyhow::anyhow!("boom"))
         };
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing).is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing)
+            .is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage", 1, 96.0, &mut failing)
+            .is_err());
         assert_eq!(calls.get(), 6, "failed builds are not cached");
         assert!(
             cache.id_for("badpage", 1, 96.0).is_none(),
@@ -681,8 +456,12 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok("<not-svg".into())
         };
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
-        assert!(cache.get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable).is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable)
+            .is_err());
+        assert!(cache
+            .get(&ctx, &mut pool, 4.0, "badpage2", 1, 96.0, &mut unparseable)
+            .is_err());
         assert_eq!(calls.get(), 8, "failed parses are not cached");
     }
 
@@ -703,7 +482,10 @@ mod tests {
             tiny_svg()
         };
         for &ppi in &[96.0f32, 192.0, 300.0] {
-            cache.get(&ctx, &mut pool, 4.0, "page1", 7, ppi, &mut build).unwrap().unwrap();
+            cache
+                .get(&ctx, &mut pool, 4.0, "page1", 7, ppi, &mut build)
+                .unwrap()
+                .unwrap();
         }
         assert_eq!(calls.get(), 1, "three buckets, one build+parse");
         // Each bucket rasterized at its own width: 4 in × ppi.

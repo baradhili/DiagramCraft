@@ -258,7 +258,9 @@ pub fn find_shape_mut(shapes: &mut [Shape], id: i64) -> Option<&mut Shape> {
 pub fn top_level_ancestor(doc: &Document, page: i64, shape_id: i64) -> Option<i64> {
     let page = doc.pages.iter().find(|p| p.id == page)?;
     fn contains(shapes: &[Shape], id: i64) -> bool {
-        shapes.iter().any(|s| s.id == id || contains(&s.sub_shapes, id))
+        shapes
+            .iter()
+            .any(|s| s.id == id || contains(&s.sub_shapes, id))
     }
     page.shapes
         .iter()

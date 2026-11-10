@@ -7,6 +7,7 @@
 //!   translate(-LocPinX, +LocPinY)
 //! applied to geometry whose local Y is negated at path-build time.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 
 use vsdx::model::Sheet;
@@ -15,6 +16,51 @@ use vsdx::model::{Section, SheetChild};
 use vsdx::{Cell, Document, Row, Shape};
 
 const PX_PER_IN: f64 = 96.0;
+
+/// Text renders as glyphs only while its on-screen em height clears
+/// this many pixels; below it the canvas layer path emits gray greek
+/// bars instead (GitHub #124 item 2 — Visio greeks text at low zoom,
+/// and the bars skip the font resolve / glyph-outline work the usvg
+/// parse would otherwise pay for text nobody can read). Export, print,
+/// and stencil thumbnails never greek: their calls pass no ppi.
+pub const TEXT_GREEK_PX: f64 = 4.0;
+
+/// Count of the recorded text sizes (inches, one entry per text block
+/// a layer serialization met) that would greek at `ppi`. The canvas
+/// layer cache compares this across ppi-bucket changes: equal counts
+/// mean the same blocks greeked on both sides (greeked-ness is
+/// monotone in size, so the greeked set is always a prefix), i.e. the
+/// retained SVG/tree serializes identically and the re-render can
+/// skip the re-parse (#124 item 2 + item 6.3).
+pub fn greeked_count(sizes: &[f64], ppi: f32) -> usize {
+    sizes
+        .iter()
+        .filter(|&&s| s * (ppi as f64) < TEXT_GREEK_PX)
+        .count()
+}
+
+/// Greeking context for canvas-layer serializations (#124 item 2).
+/// `Some` only on the `render_shape_layer_opts` path; the ppi decides
+/// per text block whether it emits glyphs or bars, and every text
+/// size met is recorded so the layer cache can build its re-serialize
+/// profile (see [`greeked_count`]).
+pub(crate) struct GreekCtx {
+    ppi: f32,
+    sizes: std::cell::RefCell<Vec<f64>>,
+}
+
+impl GreekCtx {
+    fn new(ppi: f32) -> Self {
+        Self {
+            ppi,
+            sizes: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    fn greeks(&self, size_in: f64) -> bool {
+        size_in * (self.ppi as f64) < TEXT_GREEK_PX
+    }
+}
 
 /// Contact sheet of every master's shape tree, laid out on a grid — the
 /// rendering path for stencils (`.vssx`), whose pages are empty.
@@ -36,7 +82,7 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
     );
     let _ = writeln!(
         svg,
-        r#"<!-- DiagramCraft master contact sheet ({} masters) -->"#,
+        r#"<!-- Tarahi master contact sheet ({} masters) -->"#,
         masters.len()
     );
     let _ = writeln!(
@@ -79,7 +125,17 @@ pub fn render_masters(doc: &Document) -> anyhow::Result<String> {
             r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
         );
         for shape in &m.shapes {
-            render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
+            render_shape(
+                doc,
+                shape,
+                master_h,
+                &[],
+                &m.part,
+                None,
+                None,
+                None,
+                &mut svg,
+            );
         }
         let _ = writeln!(svg, "</g>");
         let _ = writeln!(
@@ -182,7 +238,17 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
         r#"<g transform="translate({tx:.5},{ty:.5}) scale({k:.5},{k:.5})">"#,
     );
     for shape in &m.shapes {
-        render_shape(doc, shape, master_h, &[], &m.part, None, &mut svg);
+        render_shape(
+            doc,
+            shape,
+            master_h,
+            &[],
+            &m.part,
+            None,
+            None,
+            None,
+            &mut svg,
+        );
     }
     let _ = writeln!(svg, "</g>");
     let _ = writeln!(svg, "</svg>");
@@ -191,6 +257,18 @@ pub fn render_master(doc: &Document, m: &vsdx::Master) -> anyhow::Result<String>
 
 pub fn render_page(doc: &Document, page: &vsdx::Page) -> anyhow::Result<String> {
     render_page_with(doc, page, &[])
+}
+
+/// The export render of one page (#35): page chrome dropped (no gray
+/// sheet border — Visio's own exports carry none), white background
+/// per `transparent`. The ink is identical to [`render_page`] — only
+/// the chrome differs.
+pub fn render_page_export(
+    doc: &Document,
+    page: &vsdx::Page,
+    transparent: bool,
+) -> anyhow::Result<String> {
+    render_page_full(doc, page, &[], None, None, false, !transparent)
 }
 
 /// [`render_page`] with hidden layer members: shapes whose
@@ -219,6 +297,41 @@ pub fn render_page_no_text(
     render_page_opts(doc, page, hidden, None, Some(skip_text_shape))
 }
 
+/// Union sink for the ink-bounds walk with the #219 focus gate:
+/// nodes contribute only once the walk is inside the focus subtree
+/// (always, when unfocused). `enter` arms the gate at the focus node;
+/// the walk saves/restores `inside` around each child so a later
+/// sibling of the focus never leaks into the region.
+struct Focus {
+    acc: Option<(f64, f64, f64, f64)>,
+    focus: Option<i64>,
+    inside: bool,
+}
+
+impl Focus {
+    fn enter(&mut self, id: i64) {
+        if Some(id) == self.focus {
+            self.inside = true;
+        }
+    }
+
+    fn union(&mut self, r: (f64, f64, f64, f64)) {
+        if !self.inside {
+            return;
+        }
+        self.acc = Some(match self.acc {
+            None => r,
+            Some((ax, ay, aw, ah)) => {
+                let x1 = (ax + aw).max(r.0 + r.2);
+                let y1 = (ay + ah).max(r.1 + r.3);
+                let nx = ax.min(r.0);
+                let ny = ay.min(r.1);
+                (nx, ny, x1 - nx, y1 - ny)
+            }
+        });
+    }
+}
+
 /// The ink bounds of one top-level shape's subtree, in page
 /// coordinates (inches, y-down like the SVG viewBox): the union of
 /// every node's transformed [0..w]×[-h..0] box and text box, padded to
@@ -229,20 +342,27 @@ pub fn shape_ink_bounds(
     page: &vsdx::Page,
     shape_id: i64,
 ) -> Option<(f64, f64, f64, f64)> {
+    shape_ink_bounds_focused(doc, page, shape_id, None)
+}
+
+/// [`shape_ink_bounds`] restricted to one DESCENDANT's own subtree
+/// (#219): `focus` names a sub-shape inside `shape_id`'s subtree and
+/// only that sub-shape's subtree is unioned — the damage region a
+/// localized edit re-rasters. The cell-resolution chain still runs
+/// from the top-level root, so inherited/master cells resolve exactly
+/// as the renderer resolves them. `None` is the whole-subtree bounds.
+pub fn shape_ink_bounds_focused(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    focus: Option<i64>,
+) -> Option<(f64, f64, f64, f64)> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let root = page.shapes.iter().find(|s| s.id == shape_id)?;
-    let mut acc: Option<(f64, f64, f64, f64)> = None;
-    let mut union = |r: (f64, f64, f64, f64)| {
-        acc = Some(match acc {
-            None => r,
-            Some((ax, ay, aw, ah)) => {
-                let x1 = (ax + aw).max(r.0 + r.2);
-                let y1 = (ay + ah).max(r.1 + r.3);
-                let nx = ax.min(r.0);
-                let ny = ay.min(r.1);
-                (nx, ny, x1 - nx, y1 - ny)
-            }
-        });
+    let mut u = Focus {
+        acc: None,
+        focus,
+        inside: focus.is_none(),
     };
     fn walk(
         doc: &Document,
@@ -251,94 +371,22 @@ pub fn shape_ink_bounds(
         page_h: f64,
         top: bool,
         to_page: Affine,
-        union: &mut dyn FnMut((f64, f64, f64, f64)),
+        u: &mut Focus,
     ) {
         let mut chain: Vec<&Shape> = chain.to_vec();
         chain.push(s);
-        let env = shape_env(doc, s, &chain);
-        let get = |n: &str| -> Option<f64> {
-            doc.resolve_cell(s, &chain, n)
-                .and_then(|c| cell_num(&c, &env))
-        };
-        let width = get("Width").unwrap_or(1.0);
-        let height = get("Height").unwrap_or(1.0);
-        // The exact transform string render_shape/render_shape_local
-        // emit for this node, composed into one affine.
-        let local = if top {
-            let (sx, sy) = (
-                if get("FlipX").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
-                if get("FlipY").unwrap_or(0.0) != 0.0 { -1.0 } else { 1.0 },
-            );
-            Affine::translate(get("PinX").unwrap_or(0.0), page_h - get("PinY").unwrap_or(0.0))
-                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
-                .then(&Affine::scale(sx, sy))
-                .then(&Affine::translate(
-                    -get("LocPinX").unwrap_or(width / 2.0),
-                    get("LocPinY").unwrap_or(height / 2.0),
-                ))
-        } else {
-            Affine::translate(get("PinX").unwrap_or(0.0), -get("PinY").unwrap_or(0.0))
-                .then(&Affine::rotate_deg(-get("Angle").unwrap_or(0.0).to_degrees()))
-                .then(&Affine::translate(
-                    -get("LocPinX").unwrap_or(width / 2.0),
-                    get("LocPinY").unwrap_or(height / 2.0),
-                ))
-        };
-        let a = to_page.then(&local);
-        // The node's own ink box (local y-down) — mirrored master
-        // content maps into the instance box, so this bounds it too.
-        let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, union: &mut dyn FnMut((f64, f64, f64, f64))| {
-            let c = [
-                a.apply(x0, y0),
-                a.apply(x1, y0),
-                a.apply(x1, y1),
-                a.apply(x0, y1),
-            ];
-            let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
-            let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
-            union((
-                xs.iter().cloned().fold(f64::INFINITY, f64::min),
-                ys.iter().cloned().fold(f64::INFINITY, f64::min),
-                xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - xs.iter().cloned().fold(f64::INFINITY, f64::min),
-                ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - ys.iter().cloned().fold(f64::INFINITY, f64::min),
-            ));
-        };
-        box_union(0.0, -height, width, 0.0, &a, union);
-        // Text can overflow the shape box (TxtWidth/TxtHeight are
-        // independent cells); bound it with emit_text's placement math.
-        let has_text = s
-            .sheet
-            .text
-            .as_deref()
-            .map(str::trim)
-            .is_some_and(|t| !t.is_empty());
-        if has_text {
-            let tw = get("TxtWidth").unwrap_or(width).max(0.02);
-            let th = get("TxtHeight").unwrap_or(height).max(0.02);
-            let (tlx, tly) = (
-                get("TxtLocPinX").unwrap_or(tw / 2.0),
-                get("TxtLocPinY").unwrap_or(th / 2.0),
-            );
-            let (tx, ty) = (
-                get("TxtPinX").unwrap_or(width / 2.0),
-                get("TxtPinY").unwrap_or(height / 2.0),
-            );
-            if get("TxtAngle").unwrap_or(0.0) != 0.0 {
-                // Rotated text: bound by the circumscribed square.
-                let side = tw.max(th);
-                let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
-                box_union(cx - side / 2.0, cy - side / 2.0, cx + side / 2.0, cy + side / 2.0, &a, union);
-            } else {
-                let (x0, y0) = (tx - tlx, -(ty - tly + th));
-                box_union(x0, y0, x0 + tw, y0 + th, &a, union);
-            }
-        }
+        let (node_box, a) = node_ink_box(doc, s, &chain, page_h, top, to_page);
+        u.union(node_box);
         for sub in &s.sub_shapes {
-            walk(doc, sub, &chain, page_h, false, a, union);
+            let saved = u.inside;
+            u.enter(sub.id);
+            walk(doc, sub, &chain, page_h, false, a, u);
+            u.inside = saved;
         }
     }
-    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut union);
-    let (x, y, w, h) = acc?;
+    u.enter(root.id);
+    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut u);
+    let (x, y, w, h) = u.acc?;
     // Stroke bleed margin; then clamp to the page ± 2 in so a rogue
     // formula cannot push a layer off to infinity.
     let pad = 0.08;
@@ -351,6 +399,445 @@ pub fn shape_ink_bounds(
     let w = w.min(max_x - x);
     let h = h.min(max_y - y);
     Some((x, y, w.max(0.01), h.max(0.01)))
+}
+
+/// One node's own ink box in page space (inches, y-down), with the
+/// affine that maps its local frame there: the per-node half of the
+/// ink-bounds walk ([`shape_ink_bounds_focused`]) and of the #236
+/// cull's subtree-box pass. `chain` includes `s`. The box unions the
+/// transformed [0..w]×[-h..0] XForm box, every geometry row's real
+/// extent (#202 — curve hulls and arc apexes), and the text block's
+/// placement box; no padding, no clamping (the callers decide).
+/// Mirrored master content maps into the instance box, so this box
+/// bounds it too.
+fn node_ink_box(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    page_h: f64,
+    top: bool,
+    to_page: Affine,
+) -> ((f64, f64, f64, f64), Affine) {
+    let env = shape_env(doc, s, chain);
+    // Takes the env per call (not by capture) so `env` can move into
+    // the shared frame env below (#218 review).
+    let get = |n: &str, env: &vsdx::formula::Env| -> Option<f64> {
+        doc.resolve_cell(s, chain, n)
+            .and_then(|c| cell_num(&c, env))
+    };
+    let width = get("Width", &env).unwrap_or(1.0);
+    let height = get("Height", &env).unwrap_or(1.0);
+    // The exact transform string render_shape/render_shape_local
+    // emit for this node, composed into one affine.
+    let local = if top {
+        let (sx, sy) = (
+            if get("FlipX", &env).unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+            if get("FlipY", &env).unwrap_or(0.0) != 0.0 {
+                -1.0
+            } else {
+                1.0
+            },
+        );
+        Affine::translate(
+            get("PinX", &env).unwrap_or(0.0),
+            page_h - get("PinY", &env).unwrap_or(0.0),
+        )
+        .then(&Affine::rotate_deg(
+            -get("Angle", &env).unwrap_or(0.0).to_degrees(),
+        ))
+        .then(&Affine::scale(sx, sy))
+        .then(&Affine::translate(
+            -get("LocPinX", &env).unwrap_or(width / 2.0),
+            get("LocPinY", &env).unwrap_or(height / 2.0),
+        ))
+    } else {
+        Affine::translate(get("PinX", &env).unwrap_or(0.0), -get("PinY", &env).unwrap_or(0.0))
+            .then(&Affine::rotate_deg(
+                -get("Angle", &env).unwrap_or(0.0).to_degrees(),
+            ))
+            .then(&Affine::translate(
+                -get("LocPinX", &env).unwrap_or(width / 2.0),
+                get("LocPinY", &env).unwrap_or(height / 2.0),
+            ))
+    };
+    let a = to_page.then(&local);
+    let mut u = Focus {
+        acc: None,
+        focus: None,
+        inside: true,
+    };
+    // The node's own ink box (local y-down) — mirrored master
+    // content maps into the instance box, so this bounds it too.
+    let box_union = |x0: f64, y0: f64, x1: f64, y1: f64, a: &Affine, u: &mut Focus| {
+        let c = [
+            a.apply(x0, y0),
+            a.apply(x1, y0),
+            a.apply(x1, y1),
+            a.apply(x0, y1),
+        ];
+        let xs = [c[0].0, c[1].0, c[2].0, c[3].0];
+        let ys = [c[0].1, c[1].1, c[2].1, c[3].1];
+        u.union((
+            xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::INFINITY, f64::min),
+            xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - xs.iter().cloned().fold(f64::INFINITY, f64::min),
+            ys.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - ys.iter().cloned().fold(f64::INFINITY, f64::min),
+        ));
+    };
+    box_union(0.0, -height, width, 0.0, &a, &mut u);
+    // #202: the geometry rows' REAL extent — a curved connector's
+    // arc belly leaves the begin-corner box (a 1D connector's
+    // Height is 0), and a layer viewBox built from the box alone
+    // clips the belly into a straight line (every arc-pair
+    // connector in utilisation.vsdx rendered flat). Union every
+    // row's endpoint and control points: every path this module
+    // emits is a line/quad/cubic whose curve stays inside the
+    // hull of those points, plus the elliptical arc's apex
+    // (2·on-curve − chord mid) as the conservative bound.
+    // What the renderer draws: the instance's own Geometry when it
+    // carries any, else the MASTER source's rows scaled into the
+    // instance frame (render_all_geometry's master path) — a fresh
+    // stencil-drop instance renders entirely through it, and its
+    // arrowheads and arc bellies must bound the ink too or the
+    // layer viewBox clips them and the #236 cull skips them
+    // (#218 review round 3).
+    let own = s.sheet.sections_named("Geometry");
+    // ONE env per frame, shared across every walked section (#218
+    // review): the per-entry clones discarded row-coordinate
+    // writebacks, so a Geometry2 referencing `Geometry1.X2` fell
+    // back to the authored pose (#249's cross-row case, across
+    // sections). A shape walks either its OWN sections (instance
+    // env) or its master's (the prepared menv) — never both.
+    let mut walk: Vec<(&vsdx::Section, (f64, f64))> =
+        own.iter().map(|g| (*g, (1.0, 1.0))).collect();
+    // Starts as the instance env; the master branch below REPLACES it.
+    // The text block after the walk still reads the INSTANCE env's
+    // Txt* cells (they are the shape's own), so a copy survives the move.
+    let text_env = env.clone();
+    let mut frame_env = env;
+    if own.is_empty() {
+        if let Some(src) = doc.instance_source(s, chain) {
+            let mw = src
+                .sheet
+                .cell("Width")
+                .and_then(|c| c.numeric())
+                .filter(|v| v.abs() > 1e-9);
+            let mh = src
+                .sheet
+                .cell("Height")
+                .and_then(|c| c.numeric())
+                .filter(|v| v.abs() > 1e-9);
+            let scale = (
+                mw.map_or(1.0, |mw| width / mw),
+                mh.map_or(1.0, |mh| height / mh),
+            );
+            // The master env builds ONCE with the instance's GLUED
+            // Begin/End and the Scratch/Controls formulas
+            // RE-EVALUATED against them — the cached V is the
+            // authored pose, and the band masters derive their whole
+            // vertical span from them (`Scratch.Y2 =
+            // ABS(BeginY-EndY)`, #249).
+            let mut menv = shape_env(doc, src, &[]);
+            for n in ["BeginX", "BeginY", "EndX", "EndY"] {
+                if let Some(v) = doc.resolve_cell(s, chain, n).and_then(|c| c.numeric()) {
+                    menv.insert(n.to_string(), v);
+                }
+            }
+            for sec_name in ["Scratch", "Controls"] {
+                for sec in src.sheet.sections_named(sec_name) {
+                    for row in &sec.rows {
+                        for (name, cell) in &row.cells {
+                            let key = match sec_name {
+                                "Scratch" => format!("Scratch.{}{}", name, row.ix + 1),
+                                _ => {
+                                    let rn = row
+                                        .n
+                                        .clone()
+                                        .unwrap_or_else(|| format!("Row_{}", row.ix));
+                                    format!("Controls.{}.{}", rn, name)
+                                }
+                            };
+                            let v = cell
+                                .f
+                                .as_deref()
+                                .filter(|f| *f != "Inh" && *f != "No Formula")
+                                .and_then(|f| vsdx::formula::eval(f, &menv).ok())
+                                .and_then(|v| v.as_f64())
+                                .filter(|v| v.is_finite())
+                                .or_else(|| cell.numeric());
+                            if let Some(v) = v {
+                                menv.insert(key, v);
+                            }
+                        }
+                    }
+                }
+            }
+            walk.extend(
+                src.sheet
+                    .sections_named("Geometry")
+                    .into_iter()
+                    .map(|g| (g, scale)),
+            );
+            frame_env = menv;
+        }
+    }
+    for (walk_ix, (geo, gscale)) in walk.into_iter().enumerate() {
+        // Shared: writebacks persist for later sections of the frame.
+        let genv = &mut frame_env;
+        let gname = format!("Geometry{}", walk_ix + 1);
+        let mut cur = (0.0f64, 0.0f64);
+        let mut first_pt: Option<(f64, f64)> = None;
+        fn row_num_in(
+            env: &vsdx::formula::Env,
+            row: &vsdx::Row,
+            n: &str,
+        ) -> f64 {
+            row.cell(n)
+                .and_then(|c| {
+                    c.f.as_deref()
+                        .and_then(|f| vsdx::formula::eval(f, env).ok())
+                        .and_then(|v| v.as_f64())
+                        .filter(|v| v.is_finite())
+                        .or(c.numeric())
+                })
+                .unwrap_or(0.0)
+        }
+        for row in &geo.rows {
+            let Some(t) = row.t.as_deref() else { continue };
+            let rel = t.starts_with("Rel");
+            let (mut x, mut y) = (
+                row_num_in(genv, row, "X"),
+                row_num_in(genv, row, "Y"),
+            );
+            if rel {
+                // Raw signed dims — rel_adjust (which the renderer
+                // uses) multiplies raw, so the bound must match.
+                x *= width;
+                y *= height;
+            }
+            // Feed the section-local coordinates back for cross-row
+            // references (`Geometry1.X2`, #249) — before the scale,
+            // which maps onto the page but not into the next row's
+            // frame.
+            genv.insert(format!("{}.X{}", gname, row.ix), x);
+            genv.insert(format!("{}.Y{}", gname, row.ix), y);
+            // Master-frame rows scale into the instance like the
+            // renderer's emit (every point, literals and evaluated
+            // formulas alike).
+            x *= gscale.0;
+            y *= gscale.1;
+            // The affine maps local y-DOWN ([0..w]×[-h..0]) like the
+            // box union above; the row coordinates are y-UP.
+            let pt = |x: f64, y: f64, u: &mut Focus| {
+                let (px, py) = a.apply(x, -y);
+                u.union((px, py, 0.0, 0.0));
+            };
+            pt(x, y, &mut u);
+            match t {
+                "ArcTo" | "RelArcTo" => {
+                    // The apex: chord mid + A·right-of-travel.
+                    let sag = row_num_in(genv, row, "A");
+                    let (dx, dy) = (x - cur.0, y - cur.1);
+                    let len = dx.hypot(dy).max(1e-9);
+                    let mid = ((cur.0 + x) / 2.0, (cur.1 + y) / 2.0);
+                    pt(mid.0 + dy / len * sag, mid.1 - dx / len * sag, &mut u);
+                }
+                "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                    let (mut mx, mut my) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
+                    if rel {
+                        // Raw signed dims — rel_adjust multiplies
+                        // raw (negative widths mirror the bound).
+                        mx *= width;
+                        my *= height;
+                    }
+                    mx *= gscale.0;
+                    my *= gscale.1;
+                    pt(mx, my, &mut u);
+                    // The arc's apex beyond the on-curve point.
+                    pt(
+                        2.0 * mx - (cur.0 + x) / 2.0,
+                        2.0 * my - (cur.1 + y) / 2.0,
+                        &mut u,
+                    );
+                }
+                "CubicBezTo" | "RelCubBezTo" => {
+                    // (A,B) and (C,D): two control points.
+                    let (mut a, mut b) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
+                    let (mut c, mut d) = (row_num_in(genv, row, "C"), row_num_in(genv, row, "D"));
+                    if rel {
+                        a *= width.max(1e-6);
+                        b *= height.max(1e-6);
+                        c *= width.max(1e-6);
+                        d *= height.max(1e-6);
+                    }
+                    pt(a * gscale.0, b * gscale.1, &mut u);
+                    pt(c * gscale.0, d * gscale.1, &mut u);
+                }
+                "QuadBezTo" | "RelQuadBezTo" => {
+                    let (mut a, mut b) = (row_num_in(genv, row, "A"), row_num_in(genv, row, "B"));
+                    if rel {
+                        a *= width.max(1e-6);
+                        b *= height.max(1e-6);
+                    }
+                    pt(a * gscale.0, b * gscale.1, &mut u);
+                }
+                "NURBSTo" => {
+                    // #188: the interior control points live in the
+                    // E formula's (x, y, knot, weight) groups.
+                    let e_text = row
+                        .cell("E")
+                        .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                        .unwrap_or_default();
+                    if let Some(f) = crate::curve::parse_nurbs(&e_text) {
+                        // Per-axis: a fraction lands directly in
+                        // instance units (the frame's own Width/
+                        // Height); an absolute axis carries
+                        // master-unit literals and takes the scale
+                        // once — mirroring the render arm (#218
+                        // review round: no squared stretch).
+                        let fx = if f.x_type == 0.0 { width } else { gscale.0 };
+                        let fy = if f.y_type == 0.0 { height } else { gscale.1 };
+                        for (gx, gy, _, _) in &f.points {
+                            pt(gx * fx, gy * fy, &mut u);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            cur = (x, y);
+            if first_pt.is_none() {
+                first_pt = Some((x, y));
+            }
+        }
+        // #185: arrowheads draw at physical size beyond the row-point
+        // hull — a size-5/6 head on a horizontal 1D connector reaches
+        // ±0.125/±0.25 in sideways against the 0.08 in bleed pad, so
+        // union a conservative square (the gallery's largest reach) at
+        // each end that carries a head. Same gate as the renderer's.
+        let arrowed = |arrow: f64| arrow >= 0.5 && !(46.0..=50.5).contains(&arrow);
+        if get("BeginArrow", &text_env).is_some_and(arrowed) || get("EndArrow", &text_env).is_some_and(arrowed) {
+            let weight = get("LineWeight", &text_env).unwrap_or(0.75 / 72.0);
+            let pad = |pt: (f64, f64), arrow: Option<f64>, sz: f64, u: &mut Focus| {
+                if !arrow.is_some_and(arrowed) {
+                    return;
+                }
+                let r = arrow_head_reach(weight, sz);
+                // LOCAL y-down corners — box_union applies the affine
+                // itself; pre-applying it here doubled the transform
+                // and threw the pad square across the page (#218
+                // review).
+                let (lx, ly) = (pt.0, -pt.1);
+                box_union(lx - r, ly - r, lx + r, ly + r, &a, u);
+            };
+            if let Some((x, y)) = first_pt {
+                pad(
+                    (x, y),
+                    get("BeginArrow", &text_env),
+                    get("BeginArrowSize", &text_env).unwrap_or(2.0),
+                    &mut u,
+                );
+            }
+
+            pad(
+                cur,
+                get("EndArrow", &text_env),
+                get("EndArrowSize", &text_env).unwrap_or(2.0),
+                &mut u,
+            );
+        }
+    }
+    // Text can overflow the shape box (TxtWidth/TxtHeight are
+    // independent cells); bound it with emit_text's placement math.
+    let has_text = s
+        .sheet
+        .text
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|t| !t.is_empty());
+    if has_text {
+        let tw = get("TxtWidth", &text_env).unwrap_or(width).max(0.02);
+        let th = get("TxtHeight", &text_env).unwrap_or(height).max(0.02);
+        let (tlx, tly) = (
+            get("TxtLocPinX", &text_env).unwrap_or(tw / 2.0),
+            get("TxtLocPinY", &text_env).unwrap_or(th / 2.0),
+        );
+        let (tx, ty) = (
+            get("TxtPinX", &text_env).unwrap_or(width / 2.0),
+            get("TxtPinY", &text_env).unwrap_or(height / 2.0),
+        );
+        if get("TxtAngle", &text_env).unwrap_or(0.0) != 0.0 {
+            // Rotated text: bound by the circumscribed square.
+            let side = tw.max(th);
+            let (cx, cy) = (tx - tlx + tw / 2.0, -(ty - tly + th / 2.0));
+            box_union(
+                cx - side / 2.0,
+                cy - side / 2.0,
+                cx + side / 2.0,
+                cy + side / 2.0,
+                &a,
+                &mut u,
+            );
+        } else {
+            let (x0, y0) = (tx - tlx, -(ty - tly + th));
+            box_union(x0, y0, x0 + tw, y0 + th, &a, &mut u);
+        }
+    }
+    (u.acc.unwrap_or((0.0, 0.0, 0.0, 0.0)), a)
+}
+
+/// The page-space ink box of every shape in `shape_id`'s subtree —
+/// each entry unions the node's own box with all its descendants'
+/// ([`node_ink_box`], one shared walk). This is the #236 patch cull's
+/// predicate source: a node whose SUBTREE box misses the padded
+/// damage rect paints nothing inside it and is omitted from the patch
+/// serialization. The top-level root's own entry covers its whole
+/// subtree.
+pub fn subtree_ink_boxes(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+) -> Option<HashMap<i64, (f64, f64, f64, f64)>> {
+    let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
+    let root = page.shapes.iter().find(|s| s.id == shape_id)?;
+    let mut map: HashMap<i64, (f64, f64, f64, f64)> = HashMap::new();
+    fn walk(
+        doc: &Document,
+        s: &Shape,
+        chain: &[&Shape],
+        page_h: f64,
+        top: bool,
+        to_page: Affine,
+        map: &mut HashMap<i64, (f64, f64, f64, f64)>,
+    ) -> (f64, f64, f64, f64) {
+        let mut chain: Vec<&Shape> = chain.to_vec();
+        chain.push(s);
+        let (own, a) = node_ink_box(doc, s, &chain, page_h, top, to_page);
+        let mut acc = own;
+        for sub in &s.sub_shapes {
+            let sub_box = walk(doc, sub, &chain, page_h, false, a, map);
+            acc = union_box(acc, sub_box);
+        }
+        map.insert(s.id, acc);
+        acc
+    }
+    walk(doc, root, &[], page_h, true, Affine::IDENTITY, &mut map);
+    Some(map)
+}
+
+/// Union two (x, y, w, h) page rects — the bounds-walk's accumulator
+/// as a plain function (the #236 subtree-box pass unions bottom-up).
+fn union_box(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> (f64, f64, f64, f64) {
+    let x1 = (a.0 + a.2).max(b.0 + b.2);
+    let y1 = (a.1 + a.3).max(b.1 + b.3);
+    let nx = a.0.min(b.0);
+    let ny = a.1.min(b.1);
+    (nx, ny, x1 - nx, y1 - ny)
 }
 
 /// One top-level shape's subtree as a standalone layer SVG (#93): the
@@ -366,13 +853,17 @@ pub fn render_shape_layer(
     hidden: &[i64],
     bounds: (f64, f64, f64, f64),
 ) -> anyhow::Result<String> {
-    render_shape_layer_opts(doc, page, shape_id, hidden, bounds, None)
+    render_shape_layer_opts(doc, page, shape_id, hidden, bounds, None, None).map(|(_, svg)| svg)
 }
 
-/// [`render_shape_layer`] with one shape's text suppressed (GitHub
-/// #22): while the GUI's in-place editor is open on `skip_text_shape`,
-/// its layer renders every stroke except that shape's own text — the
-/// editor overlay is the only copy of the text on screen.
+/// [`render_shape_layer`] with the canvas-only options (GitHub #22,
+/// #124): `skip_text_shape` suppresses one shape's text while the
+/// GUI's in-place editor is open on it, and `greek_ppi` turns on text
+/// greeking for layers rasterized at `ppi` — text blocks whose em
+/// height would fall under [`TEXT_GREEK_PX`] device pixels emit gray
+/// bars instead of glyphs. Returns the SVG plus every text size the
+/// walk met (inches), the cache's greek profile for deciding whether
+/// a ppi-bucket change re-renders or re-serializes.
 pub fn render_shape_layer_opts(
     doc: &Document,
     page: &vsdx::Page,
@@ -380,7 +871,88 @@ pub fn render_shape_layer_opts(
     hidden: &[i64],
     bounds: (f64, f64, f64, f64),
     skip_text: Option<i64>,
-) -> anyhow::Result<String> {
+    greek_ppi: Option<f32>,
+) -> anyhow::Result<(Vec<f64>, String)> {
+    render_shape_layer_inner(
+        doc, page, shape_id, hidden, bounds, skip_text, greek_ppi, None,
+    )
+}
+
+/// [`render_shape_layer_opts`] for the #236 damage-region patch: only
+/// the subtree nodes whose ink box intersects `cull_rect` (page
+/// inches) are serialized. Omitted nodes lie entirely outside the
+/// patch rect (the caller pads it past stroke bleed and anti-aliasing
+/// reach), so pixels inside the patch are unchanged — the
+/// `layers::culled_patch_pixels_match_the_full_layer_render` pin
+/// holds the patch-vs-full byte comparison for the culled tree.
+/// `bounds` stays the FULL layer's viewBox: the patch renders through
+/// the same grid as the existing texture.
+#[allow(clippy::too_many_arguments)] // the layer's full identity + the cull rect (#236)
+pub fn render_shape_layer_opts_culled(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+    skip_text: Option<i64>,
+    greek_ppi: Option<f32>,
+    cull_rect: (f64, f64, f64, f64),
+) -> anyhow::Result<(Vec<f64>, String)> {
+    let boxes = subtree_ink_boxes(doc, page, shape_id)
+        .ok_or_else(|| anyhow::anyhow!("shape {shape_id} not found on page {}", page.id))?;
+    let cull = InkCull {
+        rect: cull_rect,
+        boxes: &boxes,
+    };
+    render_shape_layer_inner(
+        doc,
+        page,
+        shape_id,
+        hidden,
+        bounds,
+        skip_text,
+        greek_ppi,
+        Some(&cull),
+    )
+}
+
+/// The #236 cull predicate: a shape id → its subtree ink box, plus the
+/// padded damage rect. `skips` is the render walk's per-node test — a
+/// node whose SUBTREE box misses the rect paints nothing inside it
+/// (the full render's own viewBox clips anything beyond the box), so
+/// omitting it changes no pixel the patch will show.
+struct InkCull<'a> {
+    rect: (f64, f64, f64, f64),
+    boxes: &'a HashMap<i64, (f64, f64, f64, f64)>,
+}
+
+impl InkCull<'_> {
+    fn skips(&self, id: i64) -> bool {
+        // A node missing from the map cannot happen (the pass walks
+        // the same subtree); keep it if it does — conservative.
+        self.boxes
+            .get(&id)
+            .is_some_and(|b| !boxes_intersect(*b, self.rect))
+    }
+}
+
+/// Two (x, y, w, h) page rects intersect (closed test — a shared edge
+/// counts, so the caller's padding is what creates distance).
+fn boxes_intersect(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
+    a.0 <= b.0 + b.2 && b.0 <= a.0 + a.2 && a.1 <= b.1 + b.3 && b.1 <= a.1 + a.3
+}
+
+#[allow(clippy::too_many_arguments)] // shared body of the plain and culled serializers
+fn render_shape_layer_inner(
+    doc: &Document,
+    page: &vsdx::Page,
+    shape_id: i64,
+    hidden: &[i64],
+    bounds: (f64, f64, f64, f64),
+    skip_text: Option<i64>,
+    greek_ppi: Option<f32>,
+    cull: Option<&InkCull>,
+) -> anyhow::Result<(Vec<f64>, String)> {
     let page_h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
     let Some(shape) = page.shapes.iter().find(|s| s.id == shape_id) else {
         anyhow::bail!("shape {shape_id} not found on page {}", page.id);
@@ -391,6 +963,7 @@ pub fn render_shape_layer_opts(
             .and_then(|c| c.numeric())
             .is_some_and(|m| hidden.contains(&(m as i64)))
     };
+    let greek = greek_ppi.map(GreekCtx::new);
     let mut svg = String::new();
     let (bx, by, bw, bh) = bounds;
     let _ = writeln!(
@@ -400,10 +973,21 @@ pub fn render_shape_layer_opts(
         ph = bh * PX_PER_IN,
     );
     if !hidden_member(shape) {
-        render_shape(doc, shape, page_h, &[], &page.part, skip_text, &mut svg);
+        render_shape(
+            doc,
+            shape,
+            page_h,
+            &[],
+            &page.part,
+            skip_text,
+            greek.as_ref(),
+            cull,
+            &mut svg,
+        );
     }
     let _ = writeln!(svg, "</svg>");
-    Ok(svg)
+    let sizes = greek.map(|g| g.sizes.into_inner()).unwrap_or_default();
+    Ok((sizes, svg))
 }
 
 /// [`render_page_with`] restricted to one top-level shape's subtree —
@@ -426,6 +1010,23 @@ fn render_page_opts(
     only: Option<i64>,
     skip_text: Option<i64>,
 ) -> anyhow::Result<String> {
+    render_page_full(doc, page, hidden, only, skip_text, true, true)
+}
+
+/// [`render_page_opts`] with the page chrome gated: `border` drops the
+/// gray sheet frame, `background` drops the white page fill — the
+/// file exports (#35) produce the ink only (Visio's own SVG/PDF/PNG
+/// exports carry no sheet chrome), while the canvas and `dc render`
+/// keep the full picture.
+fn render_page_full(
+    doc: &Document,
+    page: &vsdx::Page,
+    hidden: &[i64],
+    only: Option<i64>,
+    skip_text: Option<i64>,
+    border: bool,
+    background: bool,
+) -> anyhow::Result<String> {
     let w = num(page.sheet().and_then(|s| s.cell("PageWidth"))).unwrap_or(8.5);
     let h = num(page.sheet().and_then(|s| s.cell("PageHeight"))).unwrap_or(11.0);
 
@@ -438,18 +1039,23 @@ fn render_page_opts(
     );
     let _ = writeln!(
         svg,
-        r#"<!-- DiagramCraft (cleanroom VSDX renderer); page '{}' -->"#,
+        r#"<!-- Tarahi (cleanroom VSDX renderer); page '{}' -->"#,
         escape_attr(&page.name)
     );
-    let _ = writeln!(
-        svg,
-        r##"<rect x="0" y="0" width="{w}" height="{h}" fill="none" stroke="#c8c8c8" stroke-width="0.01"/>"##
-    );
-    // White background under the sheet (Visio page is white).
-    let _ = writeln!(
-        svg,
-        r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
-    );
+    if border {
+        let _ = writeln!(
+            svg,
+            r##"<rect x="0" y="0" width="{w}" height="{h}" fill="none" stroke="#c8c8c8" stroke-width="0.01"/>"##
+        );
+    }
+    // White background under the sheet (Visio page is white); an
+    // export with `--transparent` omits it so the alpha channel shows.
+    if background {
+        let _ = writeln!(
+            svg,
+            r##"<rect x="0" y="0" width="{w}" height="{h}" fill="#ffffff"/>"##,
+        );
+    }
     let hidden_member = |s: &Shape| -> bool {
         s.sheet
             .cell("LayerMember")
@@ -471,10 +1077,125 @@ fn render_page_opts(
                 continue;
             }
         }
-        render_shape(doc, shape, h, &[], &page.part, skip_text, &mut svg);
+        render_shape(
+            doc,
+            shape,
+            h,
+            &[],
+            &page.part,
+            skip_text,
+            None,
+            None,
+            &mut svg,
+        );
+    }
+    // #187: line jumps — Visio prints hops. The export appends the
+    // same treatment the canvas paints (white gap, under redraw, hop
+    // arc) as a page-space group above the ink. The gap/extension
+    // paddings pin the canvas's screen-px extras at 96 dpi. Scoped
+    // renders (`only`) draw one shape's subtree — page-wide jumps
+    // would drag in crossings from connectors outside the scope.
+    // The page's Show-Line-Jumps switch gates the overlay (#251).
+    let jumps = if only.is_none() && page.line_jumps_shown() {
+        crate::geom::page_jumps(doc, page, hidden)
+    } else {
+        Vec::new()
+    };
+    if !jumps.is_empty() {
+        let factor = page.line_jump_factor();
+        let _ = writeln!(svg, r#"<g data-dc="line-jumps">"#);
+        for j in &jumps {
+            append_jump_scaled(&mut svg, h, j, factor);
+        }
+        let _ = writeln!(svg, "</g>");
     }
     let _ = writeln!(svg, "</svg>");
     Ok(svg)
+}
+
+/// The page-space paddings of the canvas overlay's screen-px extras
+/// (2 px gap weight, 1 px under extension), pinned at 96 dpi.
+const JUMP_GAP_EXTRA_IN: f64 = 2.0 / 96.0;
+const JUMP_UNDER_EXT_IN: f64 = 1.0 / 96.0;
+
+/// One hop in page-space SVG (y-down: `sy = page_h − y`), the canvas
+/// overlay's three strokes — the white gap across the jumper, the
+/// under line redrawn straight through it, and the hop arc bulging
+/// page-up (`canvas.rs`'s screen-up flip, computed here in page
+/// space so rotated jumpers stay correct).
+#[allow(dead_code)] // the factor-1 form; tests call the scaled one
+fn append_jump(svg: &mut String, page_h: f64, j: &crate::geom::Jump) {
+    append_jump_scaled(svg, page_h, j, 1.0);
+}
+
+/// [`append_jump`] with the page's jump-size multiplier (#251 — the
+/// PageSheet's `LineJumpFactorX`).
+fn append_jump_scaled(
+    svg: &mut String,
+    page_h: f64,
+    j: &crate::geom::Jump,
+    factor: f64,
+) {
+    let (r, w, uw) = (
+        crate::geom::JUMP_RADIUS_IN * factor,
+        j.weight,
+        j.under_weight,
+    );
+    let sy = |y: f64| page_h - y;
+    let pt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, sy(p.1));
+    let hex = |c: (u8, u8, u8)| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
+    // 1. the gap — paper-white, slightly wider than the jumper.
+    let g1 = (j.at.0 - j.dir.0 * r, j.at.1 - j.dir.1 * r);
+    let g2 = (j.at.0 + j.dir.0 * r, j.at.1 + j.dir.1 * r);
+    let white = "#ffffff";
+    let _ = writeln!(
+        svg,
+        r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{white}" stroke-width="{gw:.4}"/>"#,
+        x1 = g1.0,
+        y1 = sy(g1.1),
+        x2 = g2.0,
+        y2 = sy(g2.1),
+        gw = w + JUMP_GAP_EXTRA_IN,
+    );
+    // 2. the under line passes straight through the gap.
+    let ext = r + uw + JUMP_UNDER_EXT_IN;
+    let u1 = (j.at.0 - j.under.0 * ext, j.at.1 - j.under.1 * ext);
+    let u2 = (j.at.0 + j.under.0 * ext, j.at.1 + j.under.1 * ext);
+    let _ = writeln!(
+        svg,
+        r#"<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{c}" stroke-width="{uw:.4}"/>"#,
+        x1 = u1.0,
+        y1 = sy(u1.1),
+        x2 = u2.0,
+        y2 = sy(u2.1),
+        c = hex(j.under_color),
+        uw = uw,
+    );
+    // 3. the hop arc — a 9-point semicircle from g1 around to g2
+    // through at + n·r, the normal flipped toward page-up.
+    let mut n = (-j.dir.1, j.dir.0);
+    if n.1 < 0.0 {
+        n = (-n.0, -n.1);
+    }
+    let mut path = String::new();
+    for k in 0..=8 {
+        let t = k as f64 / 8.0;
+        let ang = std::f64::consts::PI * t;
+        let local = (
+            -j.dir.0 * r * ang.cos() + n.0 * r * ang.sin(),
+            -j.dir.1 * r * ang.cos() + n.1 * r * ang.sin(),
+        );
+        let p = (j.at.0 + local.0, j.at.1 + local.1);
+        path.push_str(if k == 0 { "M " } else { "L " });
+        path.push_str(&pt(p));
+        path.push(' ');
+    }
+    let _ = writeln!(
+        svg,
+        r#"<path d="{path}" fill="none" stroke="{c}" stroke-width="{w:.4}"/>"#,
+        c = hex(j.color),
+        w = w,
+    );
 }
 
 /// An SVG-order affine: `x' = a·x + c·y + e`, `y' = b·x + d·y + f`
@@ -554,12 +1275,7 @@ impl Affine {
     /// chains, which carry non-zero scales).
     pub fn invert(&self) -> Affine {
         let det = self.a * self.d - self.b * self.c;
-        let (a, b, c, d) = (
-            self.d / det,
-            -self.b / det,
-            -self.c / det,
-            self.a / det,
-        );
+        let (a, b, c, d) = (self.d / det, -self.b / det, -self.c / det, self.a / det);
         Affine {
             a,
             b,
@@ -591,9 +1307,8 @@ fn level_affine(doc: &Document, chain: &[&Shape], idx: usize, page_h: f64) -> Af
         get("LocPinY").unwrap_or(height / 2.0),
     );
     let deg = -get("Angle").unwrap_or(0.0).to_degrees();
-    let t = Affine::translate(px, if idx == 0 { page_h - py } else { -py }).then(&Affine::rotate_deg(
-        deg,
-    ));
+    let t = Affine::translate(px, if idx == 0 { page_h - py } else { -py })
+        .then(&Affine::rotate_deg(deg));
     // Flip scale exists only at the page root (group-local rendering
     // applies no flip of its own).
     let t = if idx == 0 {
@@ -712,6 +1427,10 @@ pub fn parent_local_point_to_page(
     (sx, page_h - sy)
 }
 
+/// Render a shape in absolute page coordinates: the XForm transform
+/// wraps geometry, master mirroring, sub-shape recursion, and the
+/// text block.
+#[allow(clippy::too_many_arguments)] // the walk carries its whole environment
 fn render_shape<'a>(
     doc: &'a Document,
     s: &'a Shape,
@@ -719,6 +1438,8 @@ fn render_shape<'a>(
     chain: &[&'a Shape],
     part: &str,
     skip_text: Option<i64>,
+    greek: Option<&GreekCtx>,
+    cull: Option<&InkCull>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -775,22 +1496,41 @@ fn render_shape<'a>(
     }
     // Sub-shapes of a group live in the parent's local frame.
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, out);
+        // #236: a sub whose subtree box misses the cull rect paints
+        // nothing inside the patch — skip it and its whole subtree.
+        if cull.is_some_and(|c| c.skips(sub.id)) {
+            continue;
+        }
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, cull, out);
     }
-    mirror_master(doc, s, &chain, width, height, out);
+    mirror_master(doc, s, &chain, width, height, greek, out);
 
-    emit_text(doc, s, &chain, width, height, sx, sy, skip_text == Some(s.id), out);
+    emit_text(
+        doc,
+        s,
+        &chain,
+        width,
+        height,
+        sx,
+        sy,
+        skip_text == Some(s.id),
+        greek,
+        out,
+    );
     let _ = writeln!(out, "</g>");
 }
 
 /// Render a shape whose XForm is relative to its parent's local frame
 /// (used for sub-shapes of groups).
+#[allow(clippy::too_many_arguments)] // the render walk's context rides one call (#236 cull)
 fn render_shape_local<'a>(
     doc: &'a Document,
     s: &'a Shape,
     chain: &[&'a Shape],
     part: &str,
     skip_text: Option<i64>,
+    greek: Option<&GreekCtx>,
+    cull: Option<&InkCull>,
     out: &mut String,
 ) {
     let mut chain: Vec<&'a Shape> = chain.to_vec();
@@ -827,12 +1567,27 @@ fn render_shape_local<'a>(
         }
     }
     for sub in &s.sub_shapes {
-        render_shape_local(doc, sub, &chain, part, skip_text, out);
+        // #236: the cull test, at every subtree level.
+        if cull.is_some_and(|c| c.skips(sub.id)) {
+            continue;
+        }
+        render_shape_local(doc, sub, &chain, part, skip_text, greek, cull, out);
     }
-    mirror_master(doc, s, &chain, width, height, out);
+    mirror_master(doc, s, &chain, width, height, greek, out);
     // Group-local rendering applies no flip scale of its own, so the text
     // needs no flip compensation here.
-    emit_text(doc, s, &chain, width, height, 1.0, 1.0, skip_text == Some(s.id), out);
+    emit_text(
+        doc,
+        s,
+        &chain,
+        width,
+        height,
+        1.0,
+        1.0,
+        skip_text == Some(s.id),
+        greek,
+        out,
+    );
     let _ = writeln!(out, "</g>");
 }
 
@@ -865,6 +1620,7 @@ fn mirror_master(
     chain: &[&Shape],
     width: f64,
     height: f64,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     if !s.sub_shapes.is_empty() {
@@ -912,7 +1668,10 @@ fn mirror_master(
             ty = -(by + bh),
         );
         for r in &m.shapes {
-            render_shape_local(doc, r, &[], mpart, None, out);
+            // Master-canvas roots of a multi-root master: the union
+            // bbox maps into the instance rect, which the node's own
+            // ink box bounds — no cull of their own (#236).
+            render_shape_local(doc, r, &[], mpart, None, greek, None, out);
         }
         let _ = writeln!(out, "</g>");
     } else if let Some(root) = m.shapes.first() {
@@ -936,7 +1695,10 @@ fn mirror_master(
             if let Some(t) = &wrapper {
                 let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(t));
             }
-            render_shape_local(doc, sub, chain, mpart, None, out);
+            // Mirrored master children map into the instance's local
+            // frame, bounded by the node's own ink box — no cull of
+            // their own (#236).
+            render_shape_local(doc, sub, chain, mpart, None, greek, None, out);
             if wrapper.is_some() {
                 let _ = writeln!(out, "</g>");
             }
@@ -1318,7 +2080,10 @@ pub(crate) fn resolve_text_block(
     TextBlock {
         pin: (tx, ty),
         size: (tw, th),
-        loc_pin: (get("TxtLocPinX").unwrap_or(tw / 2.0), get("TxtLocPinY").unwrap_or(th / 2.0)),
+        loc_pin: (
+            get("TxtLocPinX").unwrap_or(tw / 2.0),
+            get("TxtLocPinY").unwrap_or(th / 2.0),
+        ),
         angle,
         insets: (ins_l, ins_r, ins_t, ins_b),
         line_height,
@@ -1406,7 +2171,7 @@ pub(crate) fn wrap_block_text(
     lines
 }
 
-#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip flag
+#[allow(clippy::too_many_arguments)] // placement + flip axes + the #22 skip + #124 greek ctx
 fn emit_text(
     doc: &Document,
     s: &Shape,
@@ -1416,6 +2181,7 @@ fn emit_text(
     sx: f64,
     sy: f64,
     skip: bool,
+    greek: Option<&GreekCtx>,
     out: &mut String,
 ) {
     if skip {
@@ -1479,8 +2245,42 @@ fn emit_text(
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
     let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
-    let lines = wrap_block_text(&face, text, size, usable_w);
-    let n_lines = lines.len() as f64;
+    // Greeking (#124 item 2): a block whose on-screen em height falls
+    // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
+    // at paragraph granularity (one width_in per paragraph, no greedy
+    // word wrap and no <text> node for usvg to turn into glyph
+    // outlines). Every met size is recorded regardless, so the layer
+    // cache can tell when a ppi-bucket change flips the decision.
+    let greeked = greek.is_some_and(|g| {
+        g.sizes.borrow_mut().push(size);
+        g.greeks(size)
+    });
+    let (lines, bar_widths) = if greeked {
+        let mut bars = Vec::new();
+        for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+            let w = face.width_in(para, size);
+            if w <= usable_w {
+                bars.push(w.max(usable_w * 0.2));
+            } else {
+                // Chunk the paragraph across an estimated wrap: full
+                // bars of the usable width plus one remainder bar.
+                let full = (w / usable_w).floor() as usize; // ≥ 1: w > usable_w
+                let rem = w - full as f64 * usable_w;
+                bars.extend(std::iter::repeat_n(usable_w, full));
+                if rem > usable_w * 0.05 {
+                    bars.push(rem);
+                }
+            }
+        }
+        (Vec::new(), bars)
+    } else {
+        (wrap_block_text(&face, text, size, usable_w), Vec::new())
+    };
+    let n_lines = if greeked {
+        bar_widths.len()
+    } else {
+        lines.len()
+    } as f64;
     let total_h = n_lines * line_h;
 
     // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
@@ -1501,6 +2301,25 @@ fn emit_text(
     };
 
     let mut body = String::new();
+    if greeked {
+        // Greek bars (#124 item 2): one neutral-gray rect per line,
+        // anchored like the tspan it replaces (left/center/right).
+        // Height sits in the x-height band of the line's em box.
+        for (i, w) in bar_widths.iter().enumerate() {
+            let y = first_baseline + i as f64 * line_h;
+            let (bx, bw) = match anchor {
+                "start" => (x, *w),
+                "end" => (x - *w, *w),
+                _ => (x - *w / 2.0, *w),
+            };
+            let _ = write!(
+                body,
+                r##"<rect x="{bx:.4}" y="{y:.4}" width="{bw:.4}" height="{h:.4}" fill="#7f7f7f"/>"##,
+                y = y - size * 0.72,
+                h = size * 0.62,
+            );
+        }
+    }
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
         let _ = write!(
@@ -1534,7 +2353,20 @@ fn emit_text(
     // spaces the splitter now preserves would be dropped again at
     // raster time. usvg (resvg 0.49) honors the attribute — inherited
     // by every tspan — and skips its stripping only for preserve, so
-    // the authored spacing reaches the pixels.
+    // the authored spacing reaches the pixels. Greeked blocks (#124)
+    // carry plain rects in `body`, never glyph nodes: they emit as a
+    // bare <g> (a <text> wrapper's content model has no place for
+    // shapes, and no font attributes are needed).
+    if greeked {
+        if flipped || net_txt_deg.abs() > 1e-6 {
+            let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
+            let _ = writeln!(out, r#"<g>{b}</g>"#, b = body);
+            let _ = writeln!(out, "</g>");
+        } else {
+            let _ = writeln!(out, r#"<g>{b}</g>"#, b = body);
+        }
+        return;
+    }
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
@@ -1632,7 +2464,7 @@ fn extract_rid(inner: &str) -> Option<String> {
     Some(rest[1..end].to_string())
 }
 
-fn base64(data: &[u8]) -> String {
+pub(crate) fn base64(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
@@ -1676,6 +2508,7 @@ fn render_all_geometry(
     // carry the visuals) but container groups DO carry a visible rect,
     // so group geometry renders too; degenerate leftover rows collapse
     // to invisible zero-area paths after the row-cell merge below.
+    let env = shape_env(doc, s, chain);
     let own: Vec<&vsdx::Section> = s.sheet.sections_named("Geometry");
     if !own.is_empty() {
         // Row-cell inheritance: inline copies often keep only the Y cells
@@ -1799,10 +2632,46 @@ fn render_all_geometry(
                             .map(|f| f.contains("Width") || f.contains("Height"))
                             .unwrap_or(true);
                         let placed = |v: f64| if proportional { scaled(cname, v) } else { v };
-                        let Some(sv) = scell.numeric().filter(|v| placed(*v).abs() <= bound) else {
+                        // Formula-authoritative for PROPORTIONAL master
+                        // cells (the same rule the row walk uses):
+                        // corpus connector masters carry stale zero
+                        // caches (`Y V=0 F=Height/2` — utilisation
+                        // master3) that would collapse the inherited
+                        // arcs to flat lines (#202). The formula
+                        // evaluates against the INSTANCE dims — for a
+                        // proportional formula that IS the
+                        // master→instance scaling. Non-proportional
+                        // formulas (`Controls.Row_1`, `User.*`) have no
+                        // instance meaning; their cached value (if any)
+                        // stands, unfilled otherwise.
+                        // Formula-authoritative cells evaluate against
+                        // the INSTANCE env — the value is already in
+                        // instance units and must NOT be placed-scaled
+                        // again (#203 review). Cached master-unit
+                        // numerics are master-unit and keep placed().
+                        // A value-only master cell (no formula — the
+                        // common plain-geometry case) or a formula the
+                        // instance env can't evaluate falls back to the
+                        // scaled cache; skipping would let row_num
+                        // default the axis to 0 and collapse the
+                        // inherited geometry (#185 review).
+                        let sv = if proportional {
+                            scell
+                                .f
+                                .as_deref()
+                                .and_then(|f| vsdx::formula::eval(f, &env).ok())
+                                .and_then(|v| v.as_f64())
+                                .filter(|v| v.is_finite() && v.abs() <= bound)
+                                .or_else(|| {
+                                    scell.numeric().map(placed).filter(|v| v.abs() <= bound)
+                                })
+                        } else {
+                            scell.numeric().map(placed).filter(|v| v.abs() <= bound)
+                        };
+                        let Some(sv) = sv else {
                             continue;
                         };
-                        let patched = Cell::value(format!("{}", placed(sv)));
+                        let patched = Cell::value(format!("{sv}"));
                         match row.cells.iter_mut().find(|(n, _)| n == cname) {
                             Some((_, cell)) => {
                                 // A local numeric V wins even under F='Inh':
@@ -1823,10 +2692,11 @@ fn render_all_geometry(
             }
             merged.push(m);
         }
-        for geo in &merged {
+        for (i, geo) in merged.iter().enumerate() {
             // Instance frame: formulas and cached values are both in
             // instance units.
-            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, out);
+            let gname = format!("Geometry{}", i + 1);
+            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, &gname, out);
         }
         return;
     }
@@ -1847,20 +2717,70 @@ fn render_all_geometry(
         mw.map_or(1.0, |mw| width / mw),
         mh.map_or(1.0, |mh| height / mh),
     );
-    for geo in src.sheet.sections_named("Geometry") {
+    // The master env builds ONCE for all sections (knee rows
+    // cross-reference sibling sections) and RE-EVALUATES the master's
+    // Scratch/Controls against the instance's glued Begin/End — their
+    // cached V is the authored pose, and the band masters derive
+    // their whole vertical span from them (`Scratch.Y2 =
+    // ABS(BeginY-EndY)`, #249).
+    let mut menv = shape_env(doc, src, &[]);
+    for n in ["BeginX", "BeginY", "EndX", "EndY"] {
+        if let Some(v) = doc.resolve_cell(s, chain, n).and_then(|c| c.numeric()) {
+            menv.insert(n.to_string(), v);
+        }
+    }
+    for sec_name in ["Scratch", "Controls"] {
+        for sec in src.sheet.sections_named(sec_name) {
+            for row in &sec.rows {
+                for (name, cell) in &row.cells {
+                    let key = match sec_name {
+                        "Scratch" => format!("Scratch.{}{}", name, row.ix + 1),
+                        _ => {
+                            let rn = row
+                                .n
+                                .clone()
+                                .unwrap_or_else(|| format!("Row_{}", row.ix));
+                            format!("Controls.{}.{}", rn, name)
+                        }
+                    };
+                    let v = cell
+                        .f
+                        .as_deref()
+                        .filter(|f| *f != "Inh" && *f != "No Formula")
+                        .and_then(|f| vsdx::formula::eval(f, &menv).ok())
+                        .and_then(|v| v.as_f64())
+                        .filter(|v| v.is_finite())
+                        .or_else(|| cell.numeric());
+                    if let Some(v) = v {
+                        menv.insert(key, v);
+                    }
+                }
+            }
+        }
+    }
+    for (i, geo) in src.sheet.sections_named("Geometry").into_iter().enumerate() {
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, chain, geo, scale, Frame::Master(src), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(&mut menv), &format!("Geometry{}", i + 1), out);
     }
 }
 
 /// Which frame geometry rows live in — picks the formula environment.
+/// The master variant carries the PREPARED env (master cells, the
+/// instance's glued Begin/End seeded in).
 enum Frame<'a> {
     Instance,
-    Master(&'a Shape),
+    /// The PREPARED env (master cells, the instance's glued Begin/End
+    /// seeded in), SHARED by reference across every Geometry section
+    /// of the frame (#218 review): render_geometry feeds evaluated row
+    /// coordinates back into it (`Geometry1.X2`), and per-section
+    /// clones discarded those writes — a Geometry2 referencing
+    /// Geometry1 fell back to the authored pose.
+    Master(&'a mut vsdx::formula::Env),
 }
 
+#[allow(clippy::too_many_arguments)] // the walk's natural inputs (+gname, #249)
 fn render_geometry(
     doc: &Document,
     s: &Shape,
@@ -1868,6 +2788,7 @@ fn render_geometry(
     section: &vsdx::Section,
     scale: (f64, f64),
     frame: Frame<'_>,
+    gname: &str,
     out: &mut String,
 ) {
     let rows = &section.rows;
@@ -1877,9 +2798,13 @@ fn render_geometry(
     // The cached V already lives in that frame; evaluating a formula in
     // the WRONG frame (e.g. master rows against instance Width) skews
     // rectangles into triangles.
-    let env = match frame {
-        Frame::Instance => shape_env_for(doc, s, chain, rows),
-        Frame::Master(src) => shape_env_for(doc, src, &[], rows),
+    let mut inst_env;
+    let env: &mut vsdx::formula::Env = match frame {
+        Frame::Instance => {
+            inst_env = shape_env_for(doc, s, chain, rows);
+            &mut inst_env
+        }
+        Frame::Master(env) => env,
     };
     // Section-level cells carry NoFill/NoLine/NoShow. Formula first,
     // cached V as fallback (the row-cell convention): the master's
@@ -1894,7 +2819,7 @@ fn render_geometry(
                         if f == "Inh" || f == "No Formula" {
                             None
                         } else {
-                            vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                            vsdx::formula::eval(f, env).ok().and_then(|v| v.as_f64())
                         }
                     })
                     .filter(|v| v.is_finite());
@@ -1911,9 +2836,9 @@ fn render_geometry(
     // testing but must not stroke.
     let line_pattern = doc
         .resolve_cell(s, chain, "LinePattern")
-        .and_then(|c| cell_num(&c, &env));
+        .and_then(|c| cell_num(&c, env));
     let no_line = flag("NoLine") || line_pattern.is_some_and(|p| p == 0.0);
-    let row_num = |r: &Row, c: &str| -> Option<f64> {
+    fn row_num(env: &vsdx::formula::Env, r: &Row, c: &str) -> Option<f64> {
         r.cell(c).and_then(|cell| {
             // Geometry rows: the formula is authoritative (Visio evaluates
             // F at load; page copies can carry a stale cached V — e.g.
@@ -1926,20 +2851,20 @@ fn render_geometry(
                     if f == "Inh" || f == "No Formula" {
                         None
                     } else {
-                        vsdx::formula::eval(f, &env).ok().and_then(|v| v.as_f64())
+                        vsdx::formula::eval(f, env).ok().and_then(|v| v.as_f64())
                     }
                 })
                 .filter(|v| v.is_finite());
             by_formula.or_else(|| cell.numeric())
         })
-    };
+    }
 
     let fill_color = themed_color_string(doc, s, chain, "FillForegnd");
     let line_color = themed_color_string(doc, s, chain, "LineColor");
     let fill_bkgnd = themed_color_string(doc, s, chain, "FillBkgnd");
     let line_weight = doc
         .resolve_cell(s, chain, "LineWeight")
-        .and_then(|c| cell_num(&c, &env))
+        .and_then(|c| cell_num(&c, env))
         .unwrap_or(0.0104);
     // Visio never fills a 1-D shape (a line/arc has no interior): some
     // line masters carry decorative FillPattern cells (28/30) that must
@@ -1950,7 +2875,7 @@ fn render_geometry(
         0.0
     } else {
         doc.resolve_cell_explicit(s, chain, "FillPattern")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(1.0)
     };
     // Gradient fills: Visio theme fill patterns 24-40 are gradients
@@ -1962,7 +2887,7 @@ fn render_geometry(
     } else if (24.0..=40.0).contains(&fill_pattern) {
         let angle_deg = doc
             .resolve_cell_explicit(s, chain, "FillGradientAngle")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .map(|rad| rad.to_degrees())
             .unwrap_or(90.0);
         let id = format!(
@@ -2007,14 +2932,64 @@ fn render_geometry(
         let p = sc(p);
         format!("{:.5} {:.5} ", p.0, -p.1)
     };
+    // #188: the spline-family accumulator — a SplineStart row opens a
+    // spline, SplineKnot rows extend it, and any other row (or the
+    // section's end) flushes the evaluated curve. 16 samples per knot
+    // span: smooth at print scale, and the hit walk flattens with the
+    // same constant so hit-testing agrees with the ink.
+    let mut spline_acc: Option<crate::curve::SplineAcc> = None;
+    macro_rules! flush_spline {
+        () => {
+            if let Some(acc) = spline_acc.take() {
+                if let Some(data) = acc.flush() {
+                    let pts = data.flatten(16);
+                    for p in pts.iter().skip(1) {
+                        let _ = write!(d, "L {}", emit_pt(*p));
+                    }
+                    if let Some(last) = pts.last() {
+                        cur = *last;
+                    }
+                }
+            }
+        };
+    }
+
+    // The section-end flush: no further rows follow, so the walk's
+    // current point is not updated (that assignment would be dead).
+    macro_rules! flush_spline_tail {
+        () => {
+            if let Some(acc) = spline_acc.take() {
+                if let Some(data) = acc.flush() {
+                    let pts = data.flatten(16);
+                    for p in pts.iter().skip(1) {
+                        let _ = write!(d, "L {}", emit_pt(*p));
+                    }
+                }
+            }
+        };
+    }
 
     for row in rows.iter().filter(|r| r.t.is_some()) {
         let Some(t) = row.t.as_deref() else { continue };
+        // Any row type except SplineKnot ends an open spline (#188,
+        // #185 review): flush the accumulated curve BEFORE the row's
+        // own command so the path keeps its drawn order — a LineTo
+        // after a knot used to land in `d` first, jumping the pen
+        // back when the spline finally flushed.
+        if t != "SplineKnot" {
+            flush_spline!();
+        }
         let (mx, my) = (
-            row_num(row, "X").unwrap_or(0.0),
-            row_num(row, "Y").unwrap_or(0.0),
+            row_num(env, row, "X").unwrap_or(0.0),
+            row_num(env, row, "Y").unwrap_or(0.0),
         );
         let (x, y) = rel_adjust(t, mx, my, width, height);
+        // Feed the evaluated coordinates back into the env (#249):
+        // later rows reference earlier ones section-qualified
+        // (`Geometry1.X2`), and the stale cached V would keep the
+        // whole chain at the authored pose.
+        env.insert(format!("{}.X{}", gname, row.ix), x);
+        env.insert(format!("{}.Y{}", gname, row.ix), y);
         match t {
             "MoveTo" | "RelMoveTo" => {
                 let _ = write!(d, "M {}", emit_pt((x, y)));
@@ -2030,7 +3005,7 @@ fn render_geometry(
                 // verified against the Process master's rounded rect, which
                 // traverses CCW (y-up, interior on the left) with positive-A
                 // corner arcs bulging outward.
-                let h = row_num(row, "A").unwrap_or(0.0);
+                let h = row_num(env, row, "A").unwrap_or(0.0);
                 let (sx, sy) = cur;
                 let chord = ((x - sx).powi(2) + (y - sy).powi(2)).sqrt();
                 if h.abs() < 1e-9 || chord < 1e-9 {
@@ -2060,11 +3035,11 @@ fn render_geometry(
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
                 let m = (
-                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                 );
-                let c_ang = row_num(row, "C").unwrap_or(0.0);
-                let ratio = row_num(row, "D").unwrap_or(1.0).abs().max(1e-6);
+                let c_ang = row_num(env, row, "C").unwrap_or(0.0);
+                let ratio = row_num(env, row, "D").unwrap_or(1.0).abs().max(1e-6);
                 // Sane bounds: the arc must fit (loosely) inside the
                 // shape's scaled extent — a solved ellipse or on-arc point
                 // far outside means the numeric solver diverged on a tiny
@@ -2105,10 +3080,10 @@ fn render_geometry(
             }
             "Ellipse" => {
                 // (X,Y) center, (A,B) major-axis endpoint, (C,D) minor-axis endpoint.
-                let a = row_num(row, "A").unwrap_or(x + 1.0);
-                let b = row_num(row, "B").unwrap_or(y);
-                let c2 = row_num(row, "C").unwrap_or(x);
-                let d2 = row_num(row, "D").unwrap_or(y + 1.0);
+                let a = row_num(env, row, "A").unwrap_or(x + 1.0);
+                let b = row_num(env, row, "B").unwrap_or(y);
+                let c2 = row_num(env, row, "C").unwrap_or(x);
+                let d2 = row_num(env, row, "D").unwrap_or(y + 1.0);
                 let rx = ((a - x).powi(2) + (b - y).powi(2)).sqrt().max(1e-6);
                 let ry = ((c2 - x).powi(2) + (d2 - y).powi(2)).sqrt().max(1e-6);
                 let ang = (b - y).atan2(a - x); // major-axis angle, y-up frame
@@ -2134,15 +3109,15 @@ fn render_geometry(
                 // relative fractions of Width/Height.
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(row, "A").unwrap_or(cur.0),
-                    row_num(row, "B").unwrap_or(cur.1),
+                    row_num(env, row, "A").unwrap_or(cur.0),
+                    row_num(env, row, "B").unwrap_or(cur.1),
                     width,
                     height,
                 );
                 let (c2, d2) = rel_adjust(
                     t,
-                    row_num(row, "C").unwrap_or(x),
-                    row_num(row, "D").unwrap_or(y),
+                    row_num(env, row, "C").unwrap_or(x),
+                    row_num(env, row, "D").unwrap_or(y),
                     width,
                     height,
                 );
@@ -2158,8 +3133,8 @@ fn render_geometry(
             "QuadBezTo" | "RelQuadBezTo" => {
                 let (a, b) = rel_adjust(
                     t,
-                    row_num(row, "A").unwrap_or((cur.0 + x) / 2.0),
-                    row_num(row, "B").unwrap_or((cur.1 + y) / 2.0),
+                    row_num(env, row, "A").unwrap_or((cur.0 + x) / 2.0),
+                    row_num(env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                     width,
                     height,
                 );
@@ -2171,159 +3146,195 @@ fn render_geometry(
                 );
                 cur = (x, y);
             }
-            "SplineStart" | "SplineKnot" | "NURBSTo" | "PolylineTo" | "InfiniteLine" => {
-                // v0.2: approximate splines/polylines with chords.
+            "SplineStart" => {
+                // #188: a SplineStart opens a spline (§2.4.2.15): X/Y
+                // is the SECOND control point (the previous row's end
+                // is the first); A/B/C/D are second/first/last knots
+                // and the degree. Any non-SplineKnot row flushes it
+                // (the loop-top flush).
+                spline_acc = Some(crate::curve::SplineAcc::start(
+                    cur,
+                    (x, y),
+                    row_num(env, row, "A").unwrap_or(0.0),
+                    row_num(env, row, "B").unwrap_or(0.0),
+                    row_num(env, row, "C").unwrap_or(1.0),
+                    row_num(env, row, "D").unwrap_or(3.0),
+                ));
+                cur = (x, y);
+            }
+            "SplineKnot" => {
+                match spline_acc.as_mut() {
+                    Some(acc) => {
+                        acc.knot((x, y), row_num(env, row, "A").unwrap_or(0.0));
+                        cur = (x, y);
+                    }
+                    None => {
+                        // A knot row without an opener degenerates to
+                        // the chord (the v0.2 behavior).
+                        let _ = write!(d, "L {}", emit_pt((x, y)));
+                        cur = (x, y);
+                    }
+                }
+            }
+            "NURBSTo" => {
+                // #188: one self-contained rational B-spline row
+                // (§2.4.2.7). The E cell's NURBS() formula carries the
+                // interior points/knots/weights; the row cells frame
+                // them (C/D first knot/weight, A/B second-to-last
+                // knot/last weight, X/Y the endpoint). The loop-top
+                // flush already ended any open spline.
+                let e_text = row
+                    .cell("E")
+                    .and_then(|c| c.v.clone().or_else(|| c.f.clone()))
+                    .unwrap_or_default();
+                let mut drew = false;
+                if let Some(f) = crate::curve::parse_nurbs(&e_text) {
+                    // Fractions are of the GEOMETRY frame's own size:
+                    // the master's dims in the master frame (`width/
+                    // scale` recovers them; `emit_pt` applies the
+                    // instance scale exactly once), the instance's
+                    // own dims inline (scale = 1). Scaling by the
+                    // instance dims here too would square the stretch
+                    // (#218 review round).
+                    let fx = if f.x_type == 0.0 {
+                        width / scale.0.max(1e-12)
+                    } else {
+                        1.0
+                    };
+                    let fy = if f.y_type == 0.0 {
+                        height / scale.1.max(1e-12)
+                    } else {
+                        1.0
+                    };
+                    let mut points = vec![cur];
+                    let mut knots = vec![row_num(env, row, "C").unwrap_or(0.0)];
+                    let mut weights = vec![row_num(env, row, "D").unwrap_or(1.0)];
+                    for (gx, gy, gk, gw) in &f.points {
+                        points.push((gx * fx, gy * fy));
+                        knots.push(*gk);
+                        weights.push(*gw);
+                    }
+                    knots.push(row_num(env, row, "A").unwrap_or(0.0));
+                    knots.push(f.last_knot);
+                    weights.push(row_num(env, row, "B").unwrap_or(1.0));
+                    points.push((x, y));
+                    let built = crate::curve::SplineData {
+                        degree: f.degree,
+                        points,
+                        weights,
+                        knots,
+                    }
+                    .sanitized();
+                    if let Some(data) = built {
+                        let pts = data.flatten(16);
+                        for p in pts.iter().skip(1) {
+                            let _ = write!(d, "L {}", emit_pt(*p));
+                        }
+                        if let Some(last) = pts.last() {
+                            cur = *last;
+                        }
+                        drew = true;
+                    }
+                }
+                if !drew {
+                    let _ = write!(d, "L {}", emit_pt((x, y)));
+                    cur = (x, y);
+                }
+            }
+            "PolylineTo" | "InfiniteLine" => {
+                // v0.2: approximate polylines/infinite lines with chords.
                 let _ = write!(d, "L {}", emit_pt((x, y)));
                 cur = (x, y);
             }
             _ => {}
         }
     }
+    // A spline open through the section's end flushes here.
+    flush_spline_tail!();
     if !d.is_empty() {
         // Connector arrowheads: BeginArrow/EndArrow cells (0 = none, ≥1 an
-        // arrow; sizes 0–6, 2 = medium). One marker def per distinct
-        // (direction, color, weight, size), reused across shapes.
+        // arrow; sizes 0–6, 2 = medium).
         let begin_arrow = doc
             .resolve_cell(s, chain, "BeginArrow")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(0.0);
         let end_arrow = doc
             .resolve_cell(s, chain, "EndArrow")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(0.0);
         let bsz = doc
             .resolve_cell(s, chain, "BeginArrowSize")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(2.0);
         let esz = doc
             .resolve_cell(s, chain, "EndArrowSize")
-            .and_then(|c| cell_num(&c, &env))
+            .and_then(|c| cell_num(&c, env))
             .unwrap_or(2.0);
-        let mut attrs = String::new();
-        // #72/#169/#199: per-value arrowheads — Visio 2016's
-        // Begin/EndArrow gallery, drawn from our own paths (behavior
-        // reference: the shipped Visio 2016 gallery plus the
-        // Visio-authored fixture with EndArrow 0–50 printed at 600 dpi
-        // — see Analysis/arrow-gallery-visio2016.md; artwork ours).
-        // The table lives in [`arrow_spec`], pinned from the 2026-11-06
-        // full-resolution re-read of the print: 14–22 are Visio's
-        // OPEN-head set (triangles, ring, square, diamond), 23–26 the
-        // ticks, 27/28 the crow's-foot fork, 29–38 the dimension
-        // composites (tick counts + ring/dot/diamond), 39/40 the double
-        // triangles, 46–50 bare ends. Unmapped values fall back to the
-        // filled triangle; per-value size variants share the family
-        // glyph. Sizes ride markerUnits=strokeWidth (LineWeight) times
-        // the ArrowSize factor.
-        let mut marker = |begin: bool, arrow: f64, sz: f64, out_all: &mut String| {
-            if arrow < 0.5 || (46.0..=50.5).contains(&arrow) {
-                return;
-            }
-            let scale = 2.5 + sz.max(0.0) * 1.5;
-            let kind = arrow.round() as i64;
-            let id = format!(
-                "dc-ah{}k{:x}",
-                if begin { 'b' } else { 'e' },
-                fnv(&format!("{kind}|{line_weight:.5}|{scale:.2}|{line_color}"))
-            );
-            if !out_all.contains(&format!(r#"id="{id}""#)) {
-                let Some((parts, tip, box_w)) = arrow_spec(kind) else {
-                    return;
-                };
-                let mirror_x = |d: &str| -> String {
-                    // "M0,0 L10,5" → every x mirrored about box_w/2's
-                    // frame (x → box_w - x), keeping command letters.
-                    let mut m = String::new();
-                    for tok in d.split(' ') {
-                        let head: String = tok.chars().take_while(|c| c.is_alphabetic()).collect();
-                        let rest = &tok[head.len()..];
-                        if rest.is_empty() {
-                            m.push_str(tok);
-                        } else {
-                            let nums: Vec<String> = rest
-                                .split(',')
-                                .enumerate()
-                                .map(|(i, n)| {
-                                    // Only mirror the X of each x,y pair.
-                                    if i % 2 == 0 {
-                                        n.parse::<f64>()
-                                            .map(|v| format!("{}", box_w - v))
-                                            .unwrap_or_else(|_| n.to_string())
-                                    } else {
-                                        n.to_string()
-                                    }
-                                })
-                                .collect();
-                            m.push_str(&head);
-                            m.push_str(&nums.join(","));
-                        }
-                        m.push(' ');
-                    }
-                    m.trim_end().to_string()
-                };
-                // Composite heads are several parts sharing one marker:
-                // paths mirror for begin markers, circles mirror their
-                // center about the same frame.
-                let mut body = String::new();
-                for part in parts {
-                    let c = &line_color;
-                    if let Some((cx, cy, r)) = part.circle {
-                        let cx = if begin { box_w - cx } else { cx };
-                        body += &if part.filled {
-                            format!(
-                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#
-                            )
-                        } else {
-                            format!(
-                                r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
-                            )
-                        };
-                    } else {
-                        let d = if begin {
-                            mirror_x(part.d)
-                        } else {
-                            part.d.to_string()
-                        };
-                        body += &if part.filled {
-                            format!(r#"<path d="{d}" fill="{c}" stroke="{c}" stroke-width="0.5"/>"#)
-                        } else {
-                            format!(
-                                r#"<path d="{d}" fill="none" stroke="{c}" stroke-width="1.2"/>"#
-                            )
-                        };
-                    }
-                }
-                let _ = writeln!(
-                    out_all,
-                    r#"<defs><marker id="{id}" viewBox="0 0 {w} 10" refX="{rx}" refY="5" markerWidth="{scale}" markerHeight="{scale}" markerUnits="strokeWidth" orient="auto">{body}</marker></defs>"#,
-                    w = box_w,
-                    rx = if begin { 0.0 } else { tip },
-                );
-            }
-            // Begin markers mirror their parts (paths and circle
-            // centers) so the head faces the path start; orient=auto
-            // supplies the direction.
-            if begin {
-                attrs.push_str(&format!(r#" marker-start="url(#{id})""#));
+        // #185/#170: physical per-value arrow geometry. The head unit is
+        // LineWeight + C[EndArrowSize] (C = [1.44, 1.8, 2.52, 3.24, 3.96,
+        // 9, 18] pt — witnessed across all 45 types and sizes 0–6), each
+        // gallery kind draws at its measured proportions in that unit
+        // ([`GALLERY`]), and the shaft trims back by the per-kind
+        // setback ([`arrow_setback`]) so hollow heads keep their
+        // interiors clear. Evidence: the owner-authored 600 dpi print
+        // (Sample/test files/arrows.vsdx + arrows.png — the
+        // authoritative oracle) cross-checked against the #223 parity
+        // witnesses; see Analysis/arrow-gallery-visio2016.md.
+        let kind = |a: f64| -> Option<i64> {
+            if a < 0.5 || (46.0..=50.5).contains(&a) {
+                None
             } else {
-                attrs.push_str(&format!(r#" marker-end="url(#{id})""#));
+                Some(a.round() as i64)
             }
         };
-        marker(true, begin_arrow, bsz, out);
-        marker(false, end_arrow, esz, out);
-        let _ = writeln!(
-            out,
-            r#"<path d="{}" {style}{attrs}/>"#,
-            escape_attr(d.trim()),
-            style = style,
-            attrs = attrs
-        );
+        // Zero-weight exception (the SVG rule): the head draws with the
+        // 0.75 pt nominal pen, so its unit is C[size] + 0.75 pt.
+        let head_weight = if line_weight > 0.0 {
+            line_weight
+        } else {
+            0.75 / 72.0
+        };
+        let head_unit = |sz: f64| -> f64 {
+            let i = (sz.round() as i64).clamp(0, 6) as usize;
+            head_weight + ARROW_SIZE_PT[i] / 72.0
+        };
+        let end_setback = kind(end_arrow).map_or(0.0, |k| arrow_setback(k) * head_unit(esz));
+        let begin_setback = kind(begin_arrow).map_or(0.0, |k| {
+            arrow_begin_setback(arrow_setback(k) * head_unit(bsz))
+        });
+        // The shaft stops at (or under) the head's rear; the heads
+        // themselves anchor at the ORIGINAL endpoints, so the trim must
+        // not move them. Closed loops and multi-subpath data trim
+        // never (Visio gives them no heads either — #227 tracks that).
+        let shaft = if end_setback > 0.0 || begin_setback > 0.0 {
+            trim_path(&d, begin_setback, end_setback)
+        } else {
+            d.clone()
+        };
+        let _ = writeln!(out, r#"<path d="{}" {style}/>"#, escape_attr(shaft.trim()));
+        // Heads as inline translate·rotate·scale groups of the
+        // unit-space parts (begin faces outward along the reversed
+        // start tangent, end along the end tangent) — no marker defs,
+        // so the size law holds without markerUnits scaling.
+        if let Some((begin, end)) = path_frames(&d) {
+            if let Some(k) = kind(begin_arrow) {
+                emit_arrow_head(out, k, bsz, head_weight, &line_color, begin.0, begin.1);
+            }
+            if let Some(k) = kind(end_arrow) {
+                emit_arrow_head(out, k, esz, head_weight, &line_color, end.0, end.1);
+            }
+        }
     }
 }
 
-/// One drawable piece of a marker head (#199): a path — filled when
-/// `filled`, stroked (fill="none") otherwise — or a circle (filled
-/// dot vs open ring). Composite heads (the dimension set's tick +
-/// glyph rows) are just several parts in one marker.
+/// One drawable piece of an arrow head (#199, #185): a path — filled
+/// when `filled`, stroked (fill="none") otherwise — or a circle
+/// (filled dot vs open ring). Composite heads (the dimension set's
+/// tick + glyph rows) are just several parts in one head.
+/// Coordinates live in MARKER UNITS with the tip at the origin, +x
+/// pointing PAST the tip (the body extends into -x) and +y down; the
+/// head frame is placed with a translate·rotate·scale group, so the
+/// same table serves both ends without mirroring.
 struct HeadPart {
     d: &'static str,
     circle: Option<(f64, f64, f64)>,
@@ -2366,194 +3377,753 @@ const fn dot(cx: f64, cy: f64, r: f64) -> HeadPart {
     }
 }
 
-/// The Visio 2016 Begin/EndArrow gallery, pinned from the owner-
-/// authored fixture printed at 600 dpi (Analysis/
-/// arrow-gallery-visio2016.md, 2026-11-06 re-read; artwork ours —
-/// reimplemented from the observed glyphs, no Microsoft assets).
-/// Returns `(parts, tip_x, box_w)`: paths point along +x with the
-/// shaft on y=5 in a 10-high viewBox, and `tip_x` anchors the marker
-/// on the line end (refX). `None` = no head (the bare ends 46–50).
-/// Per-value size variants share one glyph (see the analysis's open
-/// refinements).
-/// The gallery: (EndArrow value, parts, tip_x, box_w). A const table
-/// so every parts slice is 'static.
-const GALLERY: &[(i64, &[HeadPart], f64, f64)] = &[
-    // 1 — narrow open V (unfilled 2-prong).
-    (1, &[sp("M0,1 L7,5 L0,9")], 7.0, 7.0),
-    // 2 — small filled triangle.
-    (2, &[fp("M0,1.5 L8,5 L0,8.5 z")], 8.0, 8.0),
-    // 3 — open wide V.
-    (3, &[sp("M0,0 L9,5 L0,10")], 9.0, 9.0),
-    // 4 — the classic filled triangle (the corpus default).
-    (4, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
-    // 5 — filled triangle, wide (curved-in base).
-    (5, &[fp("M0,0 L11,5 L0,10 Q4,5 0,0 z")], 11.0, 11.0),
-    // 6 — narrow filled triangle, long.
-    (6, &[fp("M0,1 L12,5 L0,9 z")], 12.0, 12.0),
-    // 7 — open fork (curved concave-back barbs).
-    (7, &[sp("M0,0 Q2.5,3.5 9,5 Q2.5,6.5 0,10")], 9.0, 9.0),
-    // 8 — filled stealth dart (concave back).
-    (8, &[fp("M0,0 L10,5 L0,10 L3,5 z")], 10.0, 10.0),
-    // 9 — the slanted dimension tick (line passes through).
-    (9, &[sp("M2,-1 L6,9")], 8.0, 8.0),
-    // 10 — the filled circle (dot at the end).
-    (10, &[dot(5.0, 5.0, 5.0)], 10.0, 10.0),
-    // 11 — the filled square.
-    (11, &[fp("M2,0 L10,0 L10,10 L2,10 z")], 10.0, 10.0),
-    // 12 — the open double chevron (shaft passes through).
-    (12, &[sp("M0,0 L6,5 L0,10 M6,0 L12,5 L6,10")], 12.0, 12.0),
-    // 13 — single filled triangle, plain base (NOT a double — the
-    // #169 report).
-    (13, &[fp("M0,0 L10,5 L0,10 z")], 10.0, 10.0),
-    // 14–19 — Visio's open-head set: large→medium triangles, concave
-    // bases, then the open barbs.
-    (14, &[sp("M0,0 L10,5 L0,10")], 10.0, 10.0),
-    (15, &[sp("M0,1.5 L7.5,5 L0,8.5")], 7.5, 7.5),
-    (16, &[sp("M0,0.5 L9,5 L0,9.5")], 9.0, 9.0),
-    (17, &[sp("M0,1 L8.4,5 L0,9")], 8.4, 8.4),
-    (18, &[sp("M0,0 L9,5 L0,10 Q3,5 0,0")], 9.0, 9.0),
-    (19, &[sp("M0,0 Q4,4 9,5 Q4,6 0,10")], 9.0, 9.0),
-    // 20 — the open circle (ring).
-    (20, &[ring(4.5, 5.0, 4.2)], 9.0, 9.0),
-    // 21 — the open square.
-    (21, &[sp("M1,0 L9,0 L9,10 L1,10 z")], 9.0, 9.0),
-    // 22 — the open diamond.
-    (22, &[sp("M0,5 L5,0 L10,5 L5,10 z")], 10.0, 10.0),
-    // 23 — single slanted tick (line passes through).
-    (23, &[sp("M2,-1 L6,9")], 8.0, 8.0),
-    // 24 — single perpendicular tick.
-    (24, &[sp("M4,-1 L4,11")], 7.0, 7.0),
-    // 25 — double perpendicular tick.
-    (25, &[sp("M2.5,-1 L2.5,11 M6,-1 L6,11")], 9.5, 9.5),
-    // 26 — triple perpendicular tick.
-    (26, &[sp("M1,-1 L1,11 M4,-1 L4,11 M7,-1 L7,11")], 10.5, 10.5),
+/// The Visio 2016 Begin/EndArrow gallery in unit space (#185): every
+/// kind at its measured proportions in the head unit
+/// LineWeight + C[EndArrowSize]. Pinned against the owner-authored
+/// 600 dpi print (`Sample/test files/arrows.png` — the fixture
+/// `arrows.vsdx` carries EndArrow = n per labeled line; the print is
+/// the authoritative oracle) and cross-checked against the #223
+/// parity witnesses; artwork ours, no Microsoft assets.
+///
+/// Geometry conventions: the tip sits at the origin, the body
+/// extends into -x, +y is down. Per-kind proportions are the
+/// measured ones — triangles 2 units tall with per-kind lengths
+/// (2/15: 1, 3/4/16: 2, 12/13/14: 3), ticks/bars 1.5 tall, circles
+/// r 0.75 (the 35–37 dots 0.825), the diamond 4.5 × 2.25 — and the
+/// 5/6/8/18 rears are circular arcs (concave for 5/8, convex —
+/// centered at the tip, R = √5 — for 6/18) emitted as exact cubic
+/// approximations (k = 4/3·(√5−2)). Corrections the print forced
+/// against the earlier table: 12 is ONE wide open V (len 3) and 43
+/// is the double chevron (len 4); 10/11/20/21 straddle the tip
+/// centered; 9's tick leans "/" through the tip while 23's leans
+/// "\" behind it.
+const GALLERY: &[(i64, &[HeadPart])] = &[
+    // 1 — narrow open V (unfilled 2-prong), len 1.
+    (1, &[sp("M-1,-1 L0,0 L-1,1")]),
+    // 2 — small filled triangle, len 1.
+    (2, &[fp("M0,0 L-1,-1 L-1,1 Z")]),
+    // 3 — open wide V, len 2.
+    (3, &[sp("M-2,-1 L0,0 L-2,1")]),
+    // 4 — the classic filled triangle (the corpus default), len 2.
+    (4, &[fp("M0,0 L-2,-1 L-2,1 Z")]),
+    // 5 — filled triangle, concave circular rear (the stealth-dart
+    // family; the native SVG alias 8→5 and the print agree).
+    (
+        5,
+        &[fp("M0,0 L-2,-1 C-1.68524,-0.37049 -1.68524,0.37049 -2,1 Z")],
+    ),
+    // 6 — filled triangle with a convex rear arc centered at the
+    // tip: reads "long" next to 4's flat base.
+    (
+        6,
+        &[fp("M0,0 L-2,-1 C-2.31476,-0.37049 -2.31476,0.37049 -2,1 Z")],
+    ),
+    // 7 — open fork (curved barbs).
+    (
+        7,
+        &[sp("M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1")],
+    ),
+    // 8 — the stealth dart: the concave-rear dart (the 5 glyph).
+    (
+        8,
+        &[fp("M0,0 L-2,-1 C-1.68524,-0.37049 -1.68524,0.37049 -2,1 Z")],
+    ),
+    // 9 — the slanted dimension tick: 45° through the tip ("/").
+    (9, &[sp("M1,-1 L-1,1")]),
+    // 10 — the filled circle, centered ON the endpoint.
+    (10, &[dot(0.0, 0.0, 0.75)]),
+    // 11 — the filled square, centered ON the endpoint.
+    (
+        11,
+        &[fp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")],
+    ),
+    // 12 — ONE wide open V (len 3; the old "double chevron" label
+    // was a print misread).
+    (12, &[sp("M-3,-1 L0,0 L-3,1")]),
+    // 13 — single filled triangle, plain base, len 3 (NOT a double —
+    // the #169 report).
+    (13, &[fp("M0,0 L-3,-1 L-3,1 Z")]),
+    // 14–18 — the open-head set: CLOSED triangle outlines whose
+    // interiors stay hollow (the shaft trims at the base).
+    (14, &[sp("M0,0 L-3,-1 L-3,1 Z")]),
+    (15, &[sp("M0,0 L-1,-1 L-1,1 Z")]),
+    (16, &[sp("M0,0 L-2,-1 L-2,1 Z")]),
+    // 17 — open triangle, concave rear (cubic through ±0.33).
+    (17, &[sp("M0,0 L-2,-1 C-1.55,-0.33 -1.55,0.33 -2,1 Z")]),
+    // 18 — open triangle, convex rear arc (centered at the tip).
+    (
+        18,
+        &[sp("M0,0 L-2,-1 C-2.31476,-0.37049 -2.31476,0.37049 -2,1 Z")],
+    ),
+    // 19 — open barbed head: curved barbs closed by a concave rear.
+    (
+        19,
+        &[sp(
+            "M-2,-1 C-1.5,-0.3 -0.7,0 0,0 C-0.7,0 -1.5,0.3 -2,1 C-1.55,0.3 -1.55,-0.3 -2,-1 Z",
+        )],
+    ),
+    // 20 — the open ring, centered ON the endpoint.
+    (20, &[ring(0.0, 0.0, 0.75)]),
+    // 21 — the open square, centered ON the endpoint.
+    (
+        21,
+        &[sp("M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z")],
+    ),
+    // 22 — the open diamond, 4.5 × 2.25.
+    (22, &[sp("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z")]),
+    // 23 — single slanted tick: 45° behind the tip ("\"), shaft
+    // through.
+    (23, &[sp("M-2.9,-1 L-0.9,1")]),
+    // 24–26 — perpendicular ticks at 1.5 + 0.75·i behind the tip.
+    (24, &[sp("M-1.5,-0.75 L-1.5,0.75")]),
+    (25, &[sp("M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75")]),
+    (
+        26,
+        &[sp(
+            "M-1.5,-0.75 L-1.5,0.75 M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75",
+        )],
+    ),
     // 27 — the three-pronged open fork (crow's foot).
-    (27, &[sp("M0,0 L8,5 L0,10 M8,5 L1,5")], 8.0, 8.0),
+    (27, &[sp("M0,-0.75 L-1.5,0 L0,0.75")]),
     // 28 — crow's-foot fork + perpendicular tick behind it.
     (
         28,
-        &[sp("M2,0 L10,5 L2,10 M10,5 L3,5"), sp("M0.5,-1 L0.5,11")],
-        10.0,
-        10.0,
+        &[sp("M0,-0.75 L-1.5,0 L0,0.75"), sp("M-2,-0.75 L-2,0.75")],
     ),
-    // 29 — open fork barbs, then the open ring at the tip.
+    // 29 — crow's-foot fork, then the open ring at 2.25.
     (
         29,
-        &[sp("M0,0 L4,5 L0,10"), ring(7.2, 5.0, 2.8)],
-        10.0,
-        10.0,
+        &[sp("M0,-0.75 L-1.5,0 L0,0.75"), ring(-2.25, 0.0, 0.75)],
     ),
-    // 30 — open ring, then a perpendicular tick toward the tip.
-    (30, &[ring(3.2, 5.0, 3.0), sp("M8,-1 L8,11")], 11.0, 11.0),
-    // 31 — perpendicular tick, then the open ring at the tip.
+    // 30 — open ring at 2.25, then a tick toward the tip.
+    (
+        30,
+        &[ring(-2.25, 0.0, 0.75), sp("M-0.75,-0.75 L-0.75,0.75")],
+    ),
+    // 31–33 — 1–3 ticks behind an open ring at the tip.
     (
         31,
-        &[sp("M1.5,-1 L1.5,11"), ring(7.2, 5.0, 3.2)],
-        10.8,
-        10.8,
+        &[sp("M-2.25,-0.75 L-2.25,0.75"), ring(-0.75, 0.0, 0.75)],
     ),
-    // 32 — double tick + open ring.
     (
         32,
-        &[sp("M1,-1 L1,11 M3.5,-1 L3.5,11"), ring(7.6, 5.0, 3.0)],
-        10.8,
-        10.8,
+        &[
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75"),
+            ring(-0.75, 0.0, 0.75),
+        ],
     ),
-    // 33 — triple tick + open ring.
     (
         33,
         &[
-            sp("M0.5,-1 L0.5,11 M2.8,-1 L2.8,11 M5,-1 L5,11"),
-            ring(8.2, 5.0, 2.9),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75 M-3.75,-0.75 L-3.75,0.75"),
+            ring(-0.75, 0.0, 0.75),
         ],
-        11.3,
-        11.3,
     ),
-    // 34 — open diamond, then the open ring at the tip.
+    // 34 — open diamond (1.5–6) + open ring at the tip.
     (
         34,
-        &[sp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), ring(9.6, 5.0, 2.4)],
-        12.0,
-        12.0,
+        &[
+            ring(-0.75, 0.0, 0.75),
+            sp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
+        ],
     ),
-    // 35 — perpendicular tick + filled dot.
-    (35, &[sp("M1.5,-1 L1.5,11"), dot(7.4, 5.0, 3.4)], 11.0, 11.0),
-    // 36 — double tick + filled dot.
+    // 35–37 — 1–3 ticks behind a filled 0.825-radius dot at the tip.
+    (
+        35,
+        &[dot(-0.75, 0.0, 0.825), sp("M-2.25,-0.75 L-2.25,0.75")],
+    ),
     (
         36,
-        &[sp("M0.8,-1 L0.8,11 M3.2,-1 L3.2,11"), dot(7.8, 5.0, 3.3)],
-        11.3,
-        11.3,
+        &[
+            dot(-0.75, 0.0, 0.825),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75"),
+        ],
     ),
-    // 37 — triple tick + filled dot.
     (
         37,
         &[
-            sp("M0.4,-1 L0.4,11 M2.6,-1 L2.6,11 M4.8,-1 L4.8,11"),
-            dot(8.4, 5.0, 3.2),
+            dot(-0.75, 0.0, 0.825),
+            sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75 M-3.75,-0.75 L-3.75,0.75"),
         ],
-        11.8,
-        11.8,
     ),
-    // 38 — filled diamond, then the filled dot at the tip.
+    // 38 — filled diamond (1.5–6) + the filled dot.
     (
         38,
-        &[fp("M0.5,5 L4,1.5 L7.5,5 L4,8.5 z"), dot(9.6, 5.0, 2.6)],
-        12.2,
-        12.2,
+        &[
+            dot(-0.75, 0.0, 0.825),
+            fp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
+        ],
     ),
     // 39 — double filled triangle (two solid heads).
-    (
-        39,
-        &[fp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
-        10.0,
-        10.0,
-    ),
+    (39, &[fp("M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z")]),
     // 40 — double open triangle (two hollow heads).
-    (
-        40,
-        &[sp("M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z")],
-        10.0,
-        10.0,
-    ),
-    // 41 — the open ring (line ends at it).
-    (41, &[ring(4.3, 5.0, 4.0)], 8.5, 8.5),
-    // 42 — the filled dot (line ends at it).
-    (42, &[dot(4.5, 5.0, 4.5)], 9.0, 9.0),
-    // 43 — open double chevron, large (shaft passes through).
-    (43, &[sp("M0,0 L7,5 L0,10 M7,0 L14,5 L7,10")], 14.0, 14.0),
-    // 44 — perpendicular tick + open chevron at the tip.
-    (
-        44,
-        &[sp("M1,-1 L1,11"), sp("M3.5,0 L10,5 L3.5,10")],
-        10.0,
-        10.0,
-    ),
-    // 45 — perpendicular tick + open double chevron.
+    (40, &[sp("M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z")]),
+    // 41 — the open ring (front edge at the tip).
+    (41, &[ring(-0.75, 0.0, 0.75)]),
+    // 42 — the filled dot (front edge at the tip).
+    (42, &[dot(-0.75, 0.0, 0.75)]),
+    // 43 — the open double chevron (two 2-unit V's, len 4; each V is
+    // corner→apex→corner so no base edge closes it).
+    (43, &[sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1")]),
+    // 44 — perpendicular tick behind a single open V.
+    (44, &[sp("M-2,-1 L0,0 L-2,1"), sp("M-3,-0.75 L-3,0.75")]),
+    // 45 — perpendicular tick behind the double chevron.
     (
         45,
         &[
-            sp("M0.8,-1 L0.8,11"),
-            sp("M3.2,0 L6.8,5 L3.2,10 M6.8,0 L10.4,5 L6.8,10"),
+            sp("M-2,-1 L0,0 L-2,1 M-4,-1 L-2,0 L-4,1"),
+            sp("M-5,-0.75 L-5,0.75"),
         ],
-        10.4,
-        10.4,
     ),
 ];
 
-/// The unmapped-value fallback: the filled triangle.
-const FALLBACK_TRIANGLE: &[HeadPart] = &[fp("M0,0 L10,5 L0,10 z")];
-fn arrow_spec(kind: i64) -> Option<(&'static [HeadPart], f64, f64)> {
-    // 46–50 — no head: Visio draws bare ends past the gallery.
+/// The unmapped-value fallback: the classic filled triangle.
+const FALLBACK_TRIANGLE: &[HeadPart] = &[fp("M0,0 L-2,-1 L-2,1 Z")];
+
+/// The gallery lookup: `None` = no head (values 46–50 print bare
+/// line ends); unmapped values fall back to the filled triangle.
+fn arrow_spec(kind: i64) -> Option<&'static [HeadPart]> {
     if (46..=50).contains(&kind) {
         return None;
     }
-    for (k, parts, tip, w) in GALLERY.iter().copied() {
-        if k == kind {
-            return Some((parts, tip, w));
+    Some(
+        GALLERY
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .map_or(FALLBACK_TRIANGLE, |(_, parts)| *parts),
+    )
+}
+
+/// EndArrowSize 0–6, in points: the physical head unit is
+/// LineWeight + C[size] — witnessed across all 45 head types and
+/// sizes 0–6, independent of export scale, group resize, drawing
+/// scale and dash pattern (#185).
+const ARROW_SIZE_PT: [f64; 7] = [1.44, 1.8, 2.52, 3.24, 3.96, 9.0, 18.0];
+
+/// The gallery's largest head reach in units (the 34/38 diamond's
+/// rear vertex; kind 9 reaches 1 unit forward and the diamonds 1.125
+/// sideways, both inside this square). The conservative bound the
+/// ink-box walk pads around arrowed endpoints.
+const ARROW_MAX_REACH_UNITS: f64 = 6.0;
+
+/// The physical half-extent an arrowhead reaches beyond a line
+/// endpoint: `reach × (LineWeight + C[size])` with the zero-weight
+/// SVG floor — the same unit law [`emit_arrow_head`] draws with, so
+/// the ink-box padding never clips a head.
+fn arrow_head_reach(weight: f64, sz: f64) -> f64 {
+    let head_weight = if weight > 0.0 { weight } else { 0.75 / 72.0 };
+    let i = (sz.round() as i64).clamp(0, 6) as usize;
+    ARROW_MAX_REACH_UNITS * (head_weight + ARROW_SIZE_PT[i] / 72.0)
+}
+
+/// Per-kind shaft setback in head units (#185): how far back from the
+/// line end the shaft stops. Closed/hollow heads trim to their rear
+/// (the measured values ARE the glyph rear extents); pass-through
+/// heads — the open V/barbs (1, 3, 7), the ticks (9, 23–26), the
+/// crow's-foot set (27/28), the chevrons (12, 43–45) — ride 0 and the
+/// shaft runs beneath them to the tip. Filled heads trim under their
+/// own fill, so the value only has to reach covered ground.
+fn arrow_setback(kind: i64) -> f64 {
+    match kind {
+        2 | 15 => 1.0,
+        4 | 16 => 2.0,
+        5 | 8 | 17 => 1.75,
+        6 | 18 => 2.25,
+        10 | 11 | 20 | 21 | 42 => 0.75,
+        13 | 14 | 29 | 30 => 3.0,
+        19 => 1.65,
+        22 => 4.5,
+        31..=33 | 35..=37 | 41 => 1.5,
+        34 | 38 => 6.0,
+        39 | 40 => 4.0,
+        _ => 0.0,
+    }
+}
+
+/// The BEGIN head's setback: the end setback minus max(1% of it,
+/// 0.36 pt) — Visio's begin end trims marginally less — floored at
+/// zero (#185).
+fn arrow_begin_setback(end_setback: f64) -> f64 {
+    (end_setback - (end_setback * 0.01).max(0.36 / 72.0)).max(0.0)
+}
+
+fn path_command_arity(c: char) -> Option<usize> {
+    match c {
+        'M' | 'L' => Some(2),
+        'Q' => Some(4),
+        'C' => Some(6),
+        'A' => Some(7),
+        _ => None,
+    }
+}
+
+/// Parse emitted path data into (letter, floats) commands; None when
+/// anything deviates from the emitter's strict absolute M/L/Q/C/A
+/// shape (the caller keeps the untrimmed path).
+fn parse_path_commands(d: &str) -> Option<Vec<(char, Vec<f64>)>> {
+    let mut cmds: Vec<(char, Vec<f64>)> = Vec::new();
+    let mut cur: Option<(char, Vec<f64>)> = None;
+    for tok in d.split_whitespace() {
+        let mut chars = tok.chars();
+        let first = chars.next().unwrap_or(' ');
+        if chars.count() == 0 && first.is_ascii_alphabetic() {
+            if let Some((c, f)) = cur.take() {
+                if path_command_arity(c) != Some(f.len()) {
+                    return None;
+                }
+                cmds.push((c, f));
+            }
+            cur = Some((first, Vec::new()));
+        } else {
+            cur.as_mut()?.1.push(tok.parse::<f64>().ok()?);
         }
     }
-    Some((FALLBACK_TRIANGLE, 10.0, 10.0))
+    if let Some((c, f)) = cur.take() {
+        if path_command_arity(c) != Some(f.len()) {
+            return None;
+        }
+        cmds.push((c, f));
+    }
+    Some(cmds)
+}
+
+/// One drawing segment: (letter, params, start, end). `M` resets the
+/// current point without drawing.
+type PathSeg = (char, Vec<f64>, (f64, f64), (f64, f64));
+
+fn path_segments(cmds: &[(char, Vec<f64>)]) -> Option<Vec<PathSeg>> {
+    let mut segs: Vec<PathSeg> = Vec::new();
+    let mut cur: Option<(f64, f64)> = None;
+    for (c, f) in cmds {
+        match c {
+            'M' => cur = Some((f[0], f[1])),
+            'L' | 'Q' | 'C' | 'A' => {
+                let s = cur?;
+                let e = match c {
+                    'Q' => (f[2], f[3]),
+                    'C' => (f[4], f[5]),
+                    'A' => (f[5], f[6]),
+                    _ => (f[0], f[1]),
+                };
+                segs.push((*c, f.clone(), s, e));
+                cur = Some(e);
+            }
+            _ => return None,
+        }
+    }
+    Some(segs)
+}
+
+/// An SVG arc's center-form parameters: (rx, ry, φ rad, θ1, Δθ,
+/// center). `s` is the arc's start point, `f` the full A parameters.
+type ArcGeo = (f64, f64, f64, f64, f64, (f64, f64));
+
+fn arc_geo(f: &[f64], s: (f64, f64)) -> Option<ArcGeo> {
+    let (mut rx, mut ry) = (f[0], f[1]);
+    if rx <= 0.0 || ry <= 0.0 {
+        return None;
+    }
+    let phi = f[2].to_radians();
+    let (sp, cp) = phi.sin_cos();
+    let e = (f[5], f[6]);
+    let (dx2, dy2) = ((s.0 - e.0) / 2.0, (s.1 - e.1) / 2.0);
+    let x1 = cp * dx2 + sp * dy2;
+    let y1 = -sp * dx2 + cp * dy2;
+    let lam = x1 * x1 / (rx * rx) + y1 * y1 / (ry * ry);
+    if lam > 1.0 {
+        let r = lam.sqrt();
+        rx *= r;
+        ry *= r;
+    }
+    let den = rx * rx * y1 * y1 + ry * ry * x1 * x1;
+    if den <= 1e-18 {
+        return None; // coincident endpoints
+    }
+    let num = rx * rx * ry * ry - den;
+    let sign = if f[3] != f[4] { 1.0 } else { -1.0 };
+    let co = sign * (num / den).max(0.0).sqrt();
+    let (cxp, cyp) = (co * rx * y1 / ry, -co * ry * x1 / rx);
+    let center = (
+        cp * cxp - sp * cyp + (s.0 + e.0) / 2.0,
+        sp * cxp + cp * cyp + (s.1 + e.1) / 2.0,
+    );
+    let th1 = ((y1 - cyp) / ry).atan2((x1 - cxp) / rx);
+    let mut dth = ((-y1 - cyp) / ry).atan2((-x1 - cxp) / rx) - th1;
+    if f[4] == 0.0 && dth > 0.0 {
+        dth -= std::f64::consts::TAU;
+    }
+    if f[4] != 0.0 && dth < 0.0 {
+        dth += std::f64::consts::TAU;
+    }
+    Some((rx, ry, phi, th1, dth, center))
+}
+
+/// The point and tangent direction at parameter t ∈ [0, 1] of an arc.
+fn arc_point_tangent(g: &ArcGeo, t: f64) -> ((f64, f64), (f64, f64)) {
+    let (rx, ry, phi, th1, dth, c) = *g;
+    let th = th1 + t * dth;
+    let (st, ct) = th.sin_cos();
+    let (sp, cp) = phi.sin_cos();
+    let p = (
+        c.0 + cp * rx * ct - sp * ry * st,
+        c.1 + sp * rx * ct + cp * ry * st,
+    );
+    let dir = (-cp * rx * st - sp * ry * ct, -sp * rx * st + cp * ry * ct);
+    let dir = if dth < 0.0 { (-dir.0, -dir.1) } else { dir };
+    (p, dir)
+}
+
+/// Chord length of a sample polyline.
+fn polyline_length(samples: &[(f64, f64)]) -> f64 {
+    samples
+        .windows(2)
+        .map(|w| ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt())
+        .sum()
+}
+
+/// Polyline approximation of one segment (16 chords) for arc-length
+/// walks.
+fn segment_samples(c: char, f: &[f64], s: (f64, f64)) -> Vec<(f64, f64)> {
+    match c {
+        'L' => vec![s, (f[0], f[1])],
+        'Q' => (0..=16)
+            .map(|i| {
+                let t = i as f64 / 16.0;
+                let mt = 1.0 - t;
+                (
+                    mt * mt * s.0 + 2.0 * mt * t * f[0] + t * t * f[2],
+                    mt * mt * s.1 + 2.0 * mt * t * f[1] + t * t * f[3],
+                )
+            })
+            .collect(),
+        'C' => (0..=16)
+            .map(|i| {
+                let t = i as f64 / 16.0;
+                let mt = 1.0 - t;
+                (
+                    mt * mt * mt * s.0
+                        + 3.0 * mt * mt * t * f[0]
+                        + 3.0 * mt * t * t * f[2]
+                        + t * t * t * f[4],
+                    mt * mt * mt * s.1
+                        + 3.0 * mt * mt * t * f[1]
+                        + 3.0 * mt * t * t * f[3]
+                        + t * t * t * f[5],
+                )
+            })
+            .collect(),
+        'A' => arc_geo(f, s)
+            .map(|g| {
+                (0..=16)
+                    .map(|i| arc_point_tangent(&g, i as f64 / 16.0).0)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![s, (f[5], f[6])]),
+        _ => vec![s, s],
+    }
+}
+
+/// Parameter t for the arc-length `target` along a segment's sample
+/// polyline (exact for lines, sub-chord for curves).
+fn sample_time_at_length(samples: &[(f64, f64)], target: f64) -> f64 {
+    let n = samples.len().saturating_sub(1) as f64;
+    if n <= 0.0 {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for i in 0..samples.len() - 1 {
+        let (a, b) = (samples[i], samples[i + 1]);
+        let l = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        if l <= 0.0 {
+            continue;
+        }
+        if acc + l >= target {
+            let frac = ((target - acc) / l).clamp(0.0, 1.0);
+            return (i as f64 + frac) / n;
+        }
+        acc += l;
+    }
+    1.0
+}
+
+fn quad_at(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), t: f64) -> (f64, f64) {
+    let mt = 1.0 - t;
+    (
+        mt * mt * p0.0 + 2.0 * mt * t * p1.0 + t * t * p2.0,
+        mt * mt * p0.1 + 2.0 * mt * t * p1.1 + t * t * p2.1,
+    )
+}
+
+fn cubic_at(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
+    let mt = 1.0 - t;
+    (
+        mt * mt * mt * p0.0 + 3.0 * mt * mt * t * p1.0 + 3.0 * mt * t * t * p2.0 + t * t * t * p3.0,
+        mt * mt * mt * p0.1 + 3.0 * mt * mt * t * p1.1 + 3.0 * mt * t * t * p2.1 + t * t * t * p3.1,
+    )
+}
+
+/// The point at parameter t on one segment (t=0 start, t=1 end).
+fn segment_point(c: char, f: &[f64], s: (f64, f64), t: f64) -> (f64, f64) {
+    match c {
+        'Q' => quad_at(s, (f[0], f[1]), (f[2], f[3]), t),
+        'C' => cubic_at(s, (f[0], f[1]), (f[2], f[3]), (f[4], f[5]), t),
+        'A' => arc_geo(f, s).map_or(s, |g| arc_point_tangent(&g, t).0),
+        _ => (s.0 + (f[0] - s.0) * t, s.1 + (f[1] - s.1) * t),
+    }
+}
+
+/// Quadratic restricted to [t1, t2] → (start, control, end); the
+/// control comes from B'(t1)·(t2−t1)/2.
+fn quad_sub(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    t1: f64,
+    t2: f64,
+) -> ((f64, f64), (f64, f64), (f64, f64)) {
+    let h = t2 - t1;
+    let start = quad_at(p0, p1, p2, t1);
+    let end = quad_at(p0, p1, p2, t2);
+    let d = (
+        (1.0 - t1) * (p1.0 - p0.0) + t1 * (p2.0 - p1.0),
+        (1.0 - t1) * (p1.1 - p0.1) + t1 * (p2.1 - p1.1),
+    );
+    (start, (start.0 + d.0 * h, start.1 + d.1 * h), end)
+}
+
+/// Cubic restricted to [t1, t2] → (start, c1, c2, end); the handles
+/// come from C'(t1)·(t2−t1)/3 and −C'(t2)·(t2−t1)/3.
+type CubicSub = ((f64, f64), (f64, f64), (f64, f64), (f64, f64));
+
+/// One head frame: an anchor point and its direction angle (radians).
+type HeadFrame = ((f64, f64), f64);
+
+/// Cubic restricted to [t1, t2] → (start, c1, c2, end); the handles
+/// come from C'(t1)·(t2−t1)/3 and −C'(t2)·(t2−t1)/3.
+fn cubic_sub(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    t1: f64,
+    t2: f64,
+) -> CubicSub {
+    let h = t2 - t1;
+    let start = cubic_at(p0, p1, p2, p3, t1);
+    let end = cubic_at(p0, p1, p2, p3, t2);
+    let deriv = |t: f64| {
+        let mt = 1.0 - t;
+        (
+            mt * mt * (p1.0 - p0.0) + 2.0 * mt * t * (p2.0 - p1.0) + t * t * (p3.0 - p2.0),
+            mt * mt * (p1.1 - p0.1) + 2.0 * mt * t * (p2.1 - p1.1) + t * t * (p3.1 - p2.1),
+        )
+    };
+    let d1 = deriv(t1);
+    let d2 = deriv(t2);
+    (
+        start,
+        (start.0 + d1.0 * h, start.1 + d1.1 * h),
+        (end.0 - d2.0 * h, end.1 - d2.1 * h),
+        end,
+    )
+}
+
+/// Trim one open contour of an emitted path by physical lengths at
+/// each end (#185): `begin` off the start, `end` off the end, in user
+/// units. Only a single open contour trims — closed loops and
+/// multi-subpath data come back untouched (Visio gives them no
+/// arrowheads either), and a cut that would consume the whole path
+/// keeps the original. Curves split exactly (Blossom
+/// re-parameterization for Q/C, the angular subrange for A); the cut
+/// parameter comes from a 16-sample chord walk, exact for lines.
+fn trim_path(d: &str, begin: f64, end: f64) -> String {
+    let keep = |d: &str| d.to_string();
+    let Some(cmds) = parse_path_commands(d) else {
+        return keep(d);
+    };
+    let Some(segs) = path_segments(&cmds) else {
+        return keep(d);
+    };
+    if segs.is_empty() || cmds.iter().filter(|(c, _)| *c == 'M').count() != 1 {
+        return keep(d);
+    }
+    let start = segs[0].2;
+    let last_end = segs[segs.len() - 1].3;
+    if ((last_end.0 - start.0).powi(2) + (last_end.1 - start.1).powi(2)).sqrt() < 1e-9 {
+        return keep(d); // closed loop
+    }
+    let polys: Vec<Vec<(f64, f64)>> = segs
+        .iter()
+        .map(|(c, f, s, _)| segment_samples(*c, f, *s))
+        .collect();
+    let lens: Vec<f64> = polys.iter().map(|p| polyline_length(p)).collect();
+    let total: f64 = lens.iter().sum();
+    let cut_end = total - end;
+    if cut_end <= begin + 1e-9 {
+        return keep(d); // nothing remains
+    }
+    let fmt = |p: (f64, f64)| format!("{:.5} {:.5}", p.0, p.1);
+    let mut out_d = String::new();
+    let mut offset = 0.0;
+    for (i, (c, f, s, _)) in segs.iter().enumerate() {
+        let len = lens[i];
+        let seg_start = offset;
+        offset += len;
+        let a = begin.max(seg_start);
+        let b = cut_end.min(offset);
+        if b <= a + 1e-12 {
+            continue;
+        }
+        let poly = &polys[i];
+        let t1 = sample_time_at_length(poly, a - seg_start);
+        let t2 = sample_time_at_length(poly, b - seg_start);
+        if out_d.is_empty() {
+            out_d = format!("M {}", fmt(segment_point(*c, f, *s, t1)));
+        }
+        match c {
+            'L' => {
+                out_d += &format!(
+                    " L {}",
+                    fmt((s.0 + (f[0] - s.0) * t2, s.1 + (f[1] - s.1) * t2))
+                );
+            }
+            'Q' => {
+                let (_, p1, p2) = quad_sub(*s, (f[0], f[1]), (f[2], f[3]), t1, t2);
+                out_d += &format!(" Q {} {}", fmt(p1), fmt(p2));
+            }
+            'C' => {
+                let (_, p1, p2, p3) =
+                    cubic_sub(*s, (f[0], f[1]), (f[2], f[3]), (f[4], f[5]), t1, t2);
+                out_d += &format!(" C {} {} {}", fmt(p1), fmt(p2), fmt(p3));
+            }
+            'A' => {
+                if let Some(g) = arc_geo(f, *s) {
+                    let (p, _) = arc_point_tangent(&g, t2);
+                    let large = ((t2 - t1) * g.4.abs() > std::f64::consts::PI) as u8;
+                    out_d += &format!(
+                        " A {:.5} {:.5} {:.4} {} {} {}",
+                        g.0,
+                        g.1,
+                        f[2],
+                        large,
+                        f[4] as u8,
+                        fmt(p)
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    if out_d.is_empty() {
+        return keep(d);
+    }
+    out_d
+}
+
+/// A segment's start tangent (the true curve tangent where the
+/// segment has one).
+fn seg_start_tangent(c: char, f: &[f64], s: (f64, f64)) -> Option<(f64, f64)> {
+    let d = match c {
+        'A' => arc_geo(f, s).map(|g| arc_point_tangent(&g, 0.0).1)?,
+        _ => (f[0] - s.0, f[1] - s.1),
+    };
+    (d.0 * d.0 + d.1 * d.1 > 1e-18).then_some(d)
+}
+
+/// A segment's end tangent.
+fn seg_end_tangent(c: char, f: &[f64], s: (f64, f64)) -> Option<(f64, f64)> {
+    let d = match c {
+        'L' => (f[0] - s.0, f[1] - s.1),
+        'Q' => (f[2] - f[0], f[3] - f[1]),
+        'C' => (f[4] - f[2], f[5] - f[3]),
+        'A' => arc_geo(f, s).map(|g| arc_point_tangent(&g, 1.0).1)?,
+        _ => return None,
+    };
+    (d.0 * d.0 + d.1 * d.1 > 1e-18).then_some(d)
+}
+
+/// The path's two head frames: the BEGIN tip with its OUTWARD
+/// direction (the reversed start tangent) and the END tip with the
+/// travel direction. True segment tangents where available, the
+/// chord otherwise; needs two distinct points. `M`-only or malformed
+/// data returns None (the caller skips the heads but keeps the
+/// shaft).
+fn path_frames(d: &str) -> Option<(HeadFrame, HeadFrame)> {
+    let cmds = parse_path_commands(d)?;
+    let segs = path_segments(&cmds)?;
+    let eps = 1e-12;
+    let first = segs.first()?;
+    let last = segs.last()?;
+    let begin = seg_start_tangent(first.0, &first.1, first.2)
+        .or_else(|| {
+            let (dx, dy) = (first.3 .0 - first.2 .0, first.3 .1 - first.2 .1);
+            (dx * dx + dy * dy > eps).then_some((dx, dy))
+        })
+        .map(|d| (first.2, (-d.1).atan2(-d.0)))?;
+    let end = seg_end_tangent(last.0, &last.1, last.2)
+        .or_else(|| {
+            let (dx, dy) = (last.3 .0 - last.2 .0, last.3 .1 - last.2 .1);
+            (dx * dx + dy * dy > eps).then_some((dx, dy))
+        })
+        .map(|d| (last.3, d.1.atan2(d.0)))?;
+    Some((begin, end))
+}
+
+/// Emit one arrow head at `tip` facing along `dir` (radians; the +x
+/// of the head frame): a translate·rotate·scale group of the
+/// unit-space gallery parts. Open parts stroke with the head pen
+/// (the line weight, or the 0.75 pt zero-weight nominal) with round
+/// caps/joins like the print; filled parts fill only — the print
+/// shows no pen inflation on filled glyphs (#185).
+fn emit_arrow_head(
+    out: &mut String,
+    kind: i64,
+    sz: f64,
+    weight: f64,
+    color: &str,
+    tip: (f64, f64),
+    dir: f64,
+) {
+    let i = (sz.round() as i64).clamp(0, 6) as usize;
+    let unit = weight + ARROW_SIZE_PT[i] / 72.0;
+    if !unit.is_finite() || unit <= 0.0 {
+        return;
+    }
+    let Some(parts) = arrow_spec(kind) else {
+        return;
+    };
+    // The group scales unit-space geometry by `unit`; open strokes
+    // divide the pen back out so the ink is `weight` wide on paper.
+    let pen = weight / unit;
+    let color = escape_attr(color);
+    let mut body = String::new();
+    for part in parts {
+        if let Some((cx, cy, r)) = part.circle {
+            body += &if part.filled {
+                format!(r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="{color}"/>"#)
+            } else {
+                format!(
+                    r#"<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="{pen:.5}"/>"#
+                )
+            };
+        } else if part.filled {
+            body += &format!(r#"<path d="{}" fill="{color}"/>"#, part.d);
+        } else {
+            body += &format!(
+                r#"<path d="{}" fill="none" stroke="{color}" stroke-width="{pen:.5}" stroke-linecap="round" stroke-linejoin="round"/>"#,
+                part.d
+            );
+        }
+    }
+    let _ = writeln!(
+        out,
+        r#"<g class="dc-ah" transform="translate({:.5} {:.5}) rotate({:.4}) scale({:.5})">{}</g>"#,
+        tip.0 + 0.0, // normalize -0.0
+        tip.1 + 0.0,
+        dir.to_degrees() + 0.0,
+        unit,
+        body
+    );
 }
 /// Tiny FNV-1a for stable marker-id hashing (no external deps).
 fn fnv(s: &str) -> u64 {
@@ -2747,13 +4317,13 @@ fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
     // stroke-width units (Analysis/line-patterns-visio2016.md). 0/1
     // stay None (0 hides the line entirely at the call site).
     let spec: &[f64] = match pattern as i64 {
-        2 => &[8.0, 4.0], // dash
-        3 => &[1.0, 4.0], // dot
-        4 => &[8.0, 4.0, 1.0, 4.0], // dash-dot
-        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0], // dash-dot-dot
-        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0], // dash-dash-dot
-        7 => &[20.0, 4.0, 8.0, 4.0], // long + short dash
-        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0], // long + 2 short dashes
+        2 => &[8.0, 4.0],                         // dash
+        3 => &[1.0, 4.0],                         // dot
+        4 => &[8.0, 4.0, 1.0, 4.0],               // dash-dot
+        5 => &[8.0, 4.0, 1.0, 4.0, 1.0, 4.0],     // dash-dot-dot
+        6 => &[8.0, 4.0, 8.0, 4.0, 1.0, 4.0],     // dash-dash-dot
+        7 => &[20.0, 4.0, 8.0, 4.0],              // long + short dash
+        8 => &[20.0, 4.0, 8.0, 4.0, 8.0, 4.0],    // long + 2 short dashes
         9 => &[4.0, 2.0], // short dash (the corpus legend "long dash" label was wrong)
         10 => &[1.0, 2.0], // fine dot
         11 => &[4.0, 2.0, 1.0, 2.0], // short dash-dot
@@ -2843,7 +4413,12 @@ fn color_value(doc: &Document, v: &str, f: Option<&str>) -> String {
     }
 }
 
-fn themed_color_string(doc: &Document, s: &Shape, chain: &[&Shape], cell: &str) -> String {
+pub(crate) fn themed_color_string(
+    doc: &Document,
+    s: &Shape,
+    chain: &[&Shape],
+    cell: &str,
+) -> String {
     match doc.resolve_cell(s, chain, cell) {
         Some(c) => color_value(doc, c.v.as_deref().unwrap_or(""), c.f.as_deref()),
         None => palette(-1),
@@ -3004,10 +4579,7 @@ fn quote_family(name: &str) -> String {
     if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         name.to_string()
     } else {
-        format!(
-            "'{}'",
-            name.replace('\\', "\\\\").replace('\'', "\\'")
-        )
+        format!("'{}'", name.replace('\\', "\\\\").replace('\'', "\\'"))
     }
 }
 
@@ -3118,6 +4690,41 @@ pub fn shape_env(doc: &Document, s: &Shape, chain: &[&Shape]) -> vsdx::formula::
             for row in user.rows.iter().filter(|r| r.n.is_some()) {
                 if let Some(v) = row.cell("Value").and_then(|c| c.numeric()) {
                     env.insert(format!("User.{}", row.n.as_deref().unwrap_or("")), v);
+                }
+            }
+        }
+        // Scratch + Controls numeric cells (#249): the connector
+        // stencil's band/knee masters derive their geometry rows
+        // through them (`LineTo(F:Scratch.X2*Scratch.C1)`,
+        // `Controls.Row_1.Y`) — without them every such row fell to
+        // its authored cached pose and the ink never tracked the
+        // endpoints. Scratch references are `Scratch.X1` (row 1's X
+        // cell); Controls references carry the row's name
+        // (`Controls.Row_1.Y`).
+        for scratch in sheet.sections_named("Scratch") {
+            for row in &scratch.rows {
+                for (name, cell) in &row.cells {
+                    if let Some(v) = cell.numeric() {
+                        // Visio's Scratch references are 1-BASED
+                        // (`Scratch.X1` is the first row's X).
+                        env.insert(
+                            format!("Scratch.{}{}", name, row.ix + 1),
+                            v,
+                        );
+                    }
+                }
+            }
+        }
+        for controls in sheet.sections_named("Controls") {
+            for row in &controls.rows {
+                let rn = row
+                    .n
+                    .clone()
+                    .unwrap_or_else(|| format!("Row_{}", row.ix));
+                for (name, cell) in &row.cells {
+                    if let Some(v) = cell.numeric() {
+                        env.insert(format!("Controls.{}.{}", rn, name), v);
+                    }
                 }
             }
         }
@@ -3399,10 +5006,7 @@ mod tests {
         let arr = |p: f64| line_dasharray(p, w);
         assert_eq!(arr(2.0).as_deref(), Some("0.16000 0.08000"));
         assert_eq!(arr(3.0).as_deref(), Some("0.02000 0.08000"));
-        assert_eq!(
-            arr(4.0).as_deref(),
-            Some("0.16000 0.08000 0.02000 0.08000")
-        );
+        assert_eq!(arr(4.0).as_deref(), Some("0.16000 0.08000 0.02000 0.08000"));
         assert_eq!(
             arr(5.0).as_deref(),
             Some("0.16000 0.08000 0.02000 0.08000 0.02000 0.08000")
@@ -3430,7 +5034,10 @@ mod tests {
             arr(13.0).as_deref(),
             Some("0.08000 0.04000 0.08000 0.04000 0.02000 0.04000")
         );
-        assert_eq!(arr(14.0).as_deref(), Some("0.20000 0.04000 0.08000 0.04000"));
+        assert_eq!(
+            arr(14.0).as_deref(),
+            Some("0.20000 0.04000 0.08000 0.04000")
+        );
         assert_eq!(
             arr(15.0).as_deref(),
             Some("0.20000 0.04000 0.08000 0.04000 0.08000 0.04000")
@@ -3449,7 +5056,10 @@ mod tests {
             arr(20.0).as_deref(),
             Some("0.32000 0.16000 0.32000 0.16000 0.02000 0.16000")
         );
-        assert_eq!(arr(21.0).as_deref(), Some("0.80000 0.16000 0.32000 0.16000"));
+        assert_eq!(
+            arr(21.0).as_deref(),
+            Some("0.80000 0.16000 0.32000 0.16000")
+        );
         assert_eq!(
             arr(22.0).as_deref(),
             Some("0.80000 0.16000 0.32000 0.16000 0.32000 0.16000")
@@ -3490,11 +5100,108 @@ mod tests {
         s
     }
 
-    /// #72 + #199: arrowheads render per value — each gallery entry
-    /// emits its own marker matching the 600 dpi Visio print (the
-    /// 2026-11-06 re-read: open heads 14–22 stroke, the dimension set
-    /// composes ticks with rings/dots), the head scales with
-    /// LineWeight (markerUnits=strokeWidth), and 0 emits none.
+    /// #72 + #199 + #185: arrowheads render per value at their
+    /// measured physical sizes — each gallery entry emits its own
+    /// head group matching the 600 dpi Visio print (open heads 14–22
+    /// stroke, the dimension set composes ticks with rings/dots, 12
+    /// is the single wide V, 43 the double chevron), the head scales
+    /// with the LineWeight + C[size] unit law, and 0/46–50 emit none.
+    /// #218 review round: fractional NURBS controls (xType/yType = 0)
+    /// in the MASTER frame scale exactly once — a fraction lands at
+    /// gx·W instance units (gx·mw master units through the one
+    /// master→instance scale), never the old gx·W·scale. A degree-1
+    /// NURBS flattens through its control points, so the emitted
+    /// path pins them.
+    #[test]
+    fn nurbs_fractional_controls_scale_once_in_master_frame() {
+        // Master: a 2×2 canvas; a degree-1 NURBS whose interior
+        // controls sit at x fractions 0.5 and 0.75, y fraction 0.5.
+        let mut mroot = Shape {
+            id: 1,
+            ..Shape::default()
+        };
+        for (n, v) in [("Width", "2"), ("Height", "2")] {
+            mroot.sheet.set_cell(n, Cell::value(v));
+        }
+        mroot.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                Row {
+                    ix: 1,
+                    t: Some("MoveTo".into()),
+                    cells: vec![
+                        ("X".into(), Cell::value("0")),
+                        ("Y".into(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                Row {
+                    ix: 2,
+                    t: Some("NURBSTo".into()),
+                    cells: vec![
+                        ("X".into(), Cell::value("2")),
+                        ("Y".into(), Cell::value("2")),
+                        ("A".into(), Cell::value("2")),
+                        ("B".into(), Cell::value("1")),
+                        ("C".into(), Cell::value("0")),
+                        ("D".into(), Cell::value("1")),
+                        (
+                            "E".into(),
+                            Cell {
+                                v: Some(
+                                    "NURBS(3, 1, 0, 0, 0.5,0.5,1,1, 0.75,0.5,2,1)".into(),
+                                ),
+                                ..Cell::default()
+                            },
+                        ),
+                    ],
+                    ..Row::default()
+                },
+            ],
+            ..Section::default()
+        }));
+        let doc = Document {
+            masters: vec![vsdx::model::Master {
+                id: 7,
+                shapes: vec![mroot],
+                ..vsdx::model::Master::default()
+            }],
+            ..Document::default()
+        };
+        // Instance: 4×2 — double the master width, equal height.
+        let mut inst = Shape {
+            id: 9,
+            master: Some(7),
+            ..Shape::default()
+        };
+        for (n, v) in [
+            ("PinX", "3"),
+            ("PinY", "3"),
+            ("Width", "4"),
+            ("Height", "2"),
+            ("LocPinX", "0"),
+            ("LocPinY", "0"),
+        ] {
+            inst.sheet.set_cell(n, Cell::value(v));
+        }
+        let chain: Vec<&Shape> = Vec::new();
+        let mut out = String::new();
+        render_shape(&doc, &inst, 8.5, &chain, "", None, None, None, &mut out);
+        // The controls land at gx·W: 0.5 → 2.0 and 0.75 → 3.0; the y
+        // fraction 0.5 of H=2 → 1.0 (emitted negated). The old
+        // double-scale put them at 4.0 and 6.0.
+        assert!(
+            out.contains("2.00000 -1.00000"),
+            "control 1 (0.5·W) missing: {out}"
+        );
+        assert!(
+            out.contains("3.00000 -1.00000"),
+            "control 2 (0.75·W) missing: {out}"
+        );
+        assert!(!out.contains("6.00000"), "double-scaled control leaked: {out}");
+    }
+
     #[test]
     fn arrow_heads_render_per_value_and_scale() {
         let doc = Document::default();
@@ -3530,58 +5237,63 @@ mod tests {
             }));
             let chain = [&s];
             let mut out = String::new();
-            render_shape(&doc, &s, 11.0, &chain, "", None, &mut out);
+            render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
             out
         };
-        // 0 = no marker at all.
+        // 0 = no head at all.
         let none = line_with(&[("EndArrow", "0")]);
-        assert!(!none.contains("marker"), "value 0 emits no head: {none}");
-        // Each gallery value emits a marker with its own kind id and
-        // the expected body shape (#169 + the #199 re-read: pinned to
-        // the Visio print's glyphs).
+        assert!(!none.contains("dc-ah"), "value 0 emits no head: {none}");
+        // Each gallery value emits a head group with its own unit-space
+        // shape (#169 + #199 + the #185 print re-measure).
         for (v, needle) in [
-            (1, "M0,1 L7,5 L0,9"),
-            (2, "M0,1.5 L8,5 L0,8.5 z"),
-            (3, "M0,0 L9,5 L0,10"),
-            (4, "M0,0 L10,5 L0,10 z"),
-            (5, "Q4,5"),
-            (6, "M0,1 L12,5 L0,9 z"),
-            (7, "Q2.5,3.5 9,5"),
-            (8, "L3,5 z"),
-            (9, "M2,-1 L6,9"),
-            (11, "M2,0 L10,0 L10,10 L2,10 z"),
-            (12, "M6,0 L12,5 L6,10"),
-            (13, "M0,0 L10,5 L0,10 z"),
-            (14, "M0,0 L10,5 L0,10"),
-            (15, "M0,1.5 L7.5,5 L0,8.5"),
-            (22, "M0,5 L5,0 L10,5 L5,10 z"),
-            (25, "M2.5,-1 L2.5,11 M6,-1 L6,11"),
-            (27, "M0,0 L8,5 L0,10 M8,5 L1,5"),
-            (35, "M1.5,-1 L1.5,11"),
-            (40, "M0,0 L5,5 L0,10 z M5,0 L10,5 L5,10 z"),
-            (43, "M0,0 L7,5 L0,10 M7,0 L14,5 L7,10"),
+            (1, "M-1,-1 L0,0 L-1,1"),
+            (2, "M0,0 L-1,-1 L-1,1 Z"),
+            (3, "M-2,-1 L0,0 L-2,1"),
+            (4, "M0,0 L-2,-1 L-2,1 Z"),
+            (5, "C-1.68524,-0.37049"),
+            (6, "C-2.31476,-0.37049"),
+            (9, "M1,-1 L-1,1"),
+            (11, "M-0.75,-0.75 L0.75,-0.75 L0.75,0.75 L-0.75,0.75 Z"),
+            (12, "M-3,-1 L0,0 L-3,1"),
+            (13, "M0,0 L-3,-1 L-3,1 Z"),
+            (14, "M0,0 L-3,-1 L-3,1 Z"),
+            (15, "M0,0 L-1,-1 L-1,1 Z"),
+            (22, "M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z"),
+            (25, "M-2.25,-0.75 L-2.25,0.75"),
+            (27, "M0,-0.75 L-1.5,0 L0,0.75"),
+            (40, "M0,0 L-2,-1 L-2,1 Z M-2,0 L-4,-1 L-4,1 Z"),
+            (43, "M-4,-1 L-2,0 L-4,1"),
+            (45, "M-5,-0.75 L-5,0.75"),
         ] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            assert!(
-                out.contains("dc-ahek"),
-                "value {v} emits a kind-tagged marker: {out}"
-            );
+            assert!(out.contains("dc-ah"), "value {v} emits a head group: {out}");
             assert!(out.contains(needle), "value {v} draws its shape: {out}");
         }
-        // The dots/rings are circle elements (10 filled, 20/41 rings).
-        for (v, ring) in [(10i64, false), (20, true), (41, true)] {
+        // The dots/rings are circle elements (10/42 filled, 20/41
+        // rings; the 35–37 dots carry the measured 0.825 radius).
+        for (v, ring) in [(10i64, false), (20, true), (41, true), (42, false)] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
             assert!(out.contains("<circle"), "value {v} is a circle: {out}");
-            // Rings stroke unfilled; the dot fills. (The shape's own
-            // white path fill means the marker part decides it.)
-            let head = out.split("<marker").nth(1).expect("marker def");
+            let head = out.split(r#"class="dc-ah""#).nth(1).expect("head group");
             assert_eq!(head.contains("fill=\"none\""), ring, "value {v}: {out}");
         }
+        let dot35 = line_with(&[("EndArrow", "35")]);
+        assert!(
+            dot35.contains(r#"r="0.825""#) && dot35.contains("M-2.25,-0.75 L-2.25,0.75"),
+            "value 35 composes tick + 0.825 dot: {dot35}"
+        );
+        // 8 shares the stealth-dart glyph with 5 (the native SVG alias;
+        // the print's concave rear agrees).
+        let a5 = line_with(&[("EndArrow", "5")]);
+        let a8 = line_with(&[("EndArrow", "8")]);
+        let d5 = a5.split(r#"class="dc-ah""#).nth(1).expect("5");
+        let d8 = a8.split(r#"class="dc-ah""#).nth(1).expect("8");
+        assert_eq!(d5, d8, "8 renders the 5 glyph");
         // #169 regression: 13 is a SINGLE head — one closed triangle —
         // and the other filled singles (2, 4) never stack.
         for v in [2i64, 4, 13] {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            let closes = out.matches(" z").count();
+            let closes = out.matches(" Z").count();
             assert!(closes <= 1, "value {v} must not stack triangles: {out}");
         }
         // #199: the open heads 14–22 stroke (fill="none"), never fill;
@@ -3594,34 +5306,59 @@ mod tests {
             );
         }
         let d39 = line_with(&[("EndArrow", "39")]);
-        assert_eq!(d39.matches(" z").count(), 2, "39 stacks two: {d39}");
+        assert_eq!(d39.matches(" Z").count(), 2, "39 stacks two: {d39}");
         let d40 = line_with(&[("EndArrow", "40")]);
-        assert_eq!(d40.matches(" z").count(), 2, "40 stacks two: {d40}");
+        assert_eq!(d40.matches(" Z").count(), 2, "40 stacks two: {d40}");
         assert!(d40.contains("fill=\"none\""), "40 is the open double");
         // #158: past the gallery, Visio draws a bare end (fixture
         // values 46–50 print no head).
         for v in 46..=50i64 {
             let out = line_with(&[("EndArrow", &v.to_string())]);
-            assert!(!out.contains("marker"), "value {v} emits no head: {out}");
+            assert!(!out.contains("dc-ah"), "value {v} emits no head: {out}");
         }
-        // 35 is the dimension composite: tick + filled dot.
-        let dbl = line_with(&[("EndArrow", "35")]);
+        // The unit law (#185): the head scales by LineWeight + C[size]
+        // — size 1 (C=1.8 pt) at a 0.05 in pen gives 0.075 in.
+        let heavy = line_with(&[
+            ("EndArrow", "1"),
+            ("EndArrowSize", "1"),
+            ("LineWeight", "0.05"),
+        ]);
         assert!(
-            dbl.contains("M1.5,-1 L1.5,11") && dbl.contains("<circle"),
-            "value 35 composes tick + dot: {dbl}"
+            heavy.contains("scale(0.07500)"),
+            "the head rides LineWeight + C[size]: {heavy}"
         );
-        // Weight scaling: the head rides stroke width.
-        let heavy = line_with(&[("EndArrow", "1"), ("LineWeight", "0.05")]);
-        assert!(
-            heavy.contains("markerUnits=\"strokeWidth\""),
-            "the head rides stroke width: {heavy}"
-        );
-        // Begin markers mirror: the begin open V faces -x.
+        // Begin + end heads face outward/along the travel: the
+        // diagonal runs to (1, -1) in the y-down frame, so the end
+        // head points at -45° and the begin head outward at 135°.
         let both = line_with(&[("BeginArrow", "1"), ("EndArrow", "1")]);
-        assert!(both.contains("dc-ahbk"), "the begin head carries its id");
         assert!(
-            both.contains("M7,1 L0,5 L7,9"),
-            "the begin V mirrors: {both}"
+            both.contains("rotate(-45.0000)"),
+            "end head along the travel: {both}"
+        );
+        assert!(
+            both.contains("rotate(135.0000)"),
+            "begin head faces outward: {both}"
+        );
+        // The shaft trims at the head's rear (setback 2 × unit for the
+        // classic triangle), the head anchoring at the ORIGINAL end.
+        let unit = 0.75 / 72.0 + 2.52 / 72.0;
+        let t = (2.0f64.sqrt() - 2.0 * unit) / 2.0f64.sqrt();
+        let trimmed = line_with(&[("EndArrow", "4")]);
+        assert!(
+            trimmed.contains(&format!("L {:.5} -{:.5}", t, t)),
+            "the shaft stops at the setback: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("translate(1.00000"),
+            "the head keeps the original endpoint: {trimmed}"
+        );
+        // The begin setback is the end setback minus max(1%, 0.36 pt).
+        let both4 = line_with(&[("BeginArrow", "4"), ("EndArrow", "4")]);
+        let begin_setback = 2.0 * unit - (2.0 * unit * 0.01).max(0.36 / 72.0);
+        let bt = begin_setback / 2.0f64.sqrt();
+        assert!(
+            both4.contains(&format!("M {:.5} -{:.5}", bt, bt)),
+            "the begin trim is the smaller one: {both4}"
         );
     }
 
@@ -3647,7 +5384,7 @@ mod tests {
             }));
             let chain = [&s];
             let mut out = String::new();
-            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
             out
         };
         let hex = emit("#ED7D31");
@@ -3662,10 +5399,7 @@ mod tests {
             emit("4").contains(r##"fill="#0000FF""##),
             "an index Char.Color resolves through the palette table"
         );
-        assert!(
-            emit("2").contains(r##"fill="#FF0000""##),
-            "index 2 is red"
-        );
+        assert!(emit("2").contains(r##"fill="#FF0000""##), "index 2 is red");
         // No Color cell: the built-in default is black.
         let mut s = Shape::default();
         s.sheet.text = Some("plain".into());
@@ -3673,8 +5407,11 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
-        assert!(out.contains(r##"fill="#000000""##), "default text is black: {out}");
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        assert!(
+            out.contains(r##"fill="#000000""##),
+            "default text is black: {out}"
+        );
     }
 
     #[test]
@@ -3784,12 +5521,97 @@ mod tests {
         s.sheet.text = Some("hello".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert!(
             out.contains(r#"font-family="Arial, 'Liberation Sans', Carlito, sans-serif""#),
             "emitted text element: {out}"
         );
         assert!(out.contains("hello"), "emitted: {out}");
+    }
+
+    /// #124 item 2: a text block whose on-screen em height falls under
+    /// TEXT_GREEK_PX emits gray bars (no glyph nodes for usvg to turn
+    /// into outlines) and records its size in the greek profile; above
+    /// the threshold — or with no ppi at all (export/print/thumbnail
+    /// paths pass None) — glyphs emit exactly as before.
+    #[test]
+    fn text_greeks_below_the_pixel_threshold() {
+        let doc = Document::default();
+        let tiny = |size: &str| {
+            // sizes floor at 0.02 in in resolve_text_block
+            let mut s = Shape::default();
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Character".into(),
+                rows: vec![Row {
+                    cells: vec![("Size".to_string(), Cell::value(size))],
+                    ..Row::default()
+                }],
+                ..Section::default()
+            }));
+            s.sheet.text = Some("tiny text".into());
+            s
+        };
+        // 0.02 in em (the resolver floor) at 96 ppi = 1.92 px: greeked to bars.
+        let s = tiny("0.02");
+        let chain = [&s];
+        let ctx = GreekCtx::new(96.0);
+        let mut out = String::new();
+        emit_text(
+            &doc,
+            &s,
+            &chain,
+            2.0,
+            1.0,
+            1.0,
+            1.0,
+            false,
+            Some(&ctx),
+            &mut out,
+        );
+        assert!(
+            out.contains(r##"fill="#7f7f7f""##),
+            "greek bars emitted: {out}"
+        );
+        assert!(!out.contains("<text"), "no glyph node when greeked: {out}");
+        assert!(!out.contains("<tspan"), "no tspan when greeked: {out}");
+        assert_eq!(ctx.sizes.into_inner(), vec![0.02]);
+        assert_eq!(greeked_count(&[0.02], 96.0), 1);
+
+        // 0.13889 in em (the 10 pt default) at 96 ppi ≈ 13.3 px: glyphs.
+        let s = tiny("0.13889");
+        let chain = [&s];
+        let ctx = GreekCtx::new(96.0);
+        let mut out = String::new();
+        emit_text(
+            &doc,
+            &s,
+            &chain,
+            2.0,
+            1.0,
+            1.0,
+            1.0,
+            false,
+            Some(&ctx),
+            &mut out,
+        );
+        assert!(out.contains("tiny text"), "glyph path unchanged: {out}");
+        assert!(
+            !out.contains("#7f7f7f"),
+            "no bars above the threshold: {out}"
+        );
+        assert_eq!(
+            greeked_count(&[0.13889], 96.0),
+            0,
+            "13 px text does not greek"
+        );
+
+        // No greek context (export/print/thumbnails): glyphs regardless
+        // of size — greeking never enters those paths.
+        let s = tiny("0.02");
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        assert!(out.contains("tiny text"), "export never greeks: {out}");
     }
 
     /// Compose an SVG transform list (`translate(a,b) scale(c,d)
@@ -3799,10 +5621,7 @@ mod tests {
         let mut total = Mat::identity();
         for cmd in list.split(')').filter(|s| !s.trim().is_empty()) {
             let body = cmd.trim().split('(').nth(1).unwrap_or("");
-            let n: Vec<f64> = body
-                .split(',')
-                .map(|v| v.trim().parse().unwrap())
-                .collect();
+            let n: Vec<f64> = body.split(',').map(|v| v.trim().parse().unwrap()).collect();
             let m = if cmd.trim().starts_with("translate") {
                 Mat::translate(n[0], n[1])
             } else if cmd.trim().starts_with("scale") {
@@ -3847,7 +5666,7 @@ mod tests {
         let s = shape_with_pinned_text(txt_angle_deg);
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, sx, sy, false, None, &mut out);
         let t = out
             .split("transform=\"")
             .nth(1)?
@@ -4145,7 +5964,12 @@ mod tests {
         g.id = 9;
         g.type_ = Some("Group".into());
         let mut m = unit_member();
-        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+        for (n, v) in [
+            ("PinX", 1.0),
+            ("PinY", 1.0),
+            ("Width", 1.0),
+            ("Height", 1.0),
+        ] {
             m.sheet.set_cell(
                 n,
                 Cell {
@@ -4155,7 +5979,10 @@ mod tests {
             );
         }
         let chain = vec![&g, &m];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((0.5, 2.5, 1.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((0.5, 2.5, 1.0, 1.0))
+        );
     }
 
     #[test]
@@ -4176,7 +6003,12 @@ mod tests {
         g.id = 9;
         g.type_ = Some("Group".into());
         let mut m = unit_member();
-        for (n, v) in [("PinX", 1.0), ("PinY", 1.0), ("Width", 1.0), ("Height", 1.0)] {
+        for (n, v) in [
+            ("PinX", 1.0),
+            ("PinY", 1.0),
+            ("Width", 1.0),
+            ("Height", 1.0),
+        ] {
             m.sheet.set_cell(
                 n,
                 Cell {
@@ -4186,7 +6018,10 @@ mod tests {
             );
         }
         let chain = vec![&g, &m];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((3.5, 3.5, 1.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((3.5, 3.5, 1.0, 1.0))
+        );
     }
 
     #[test]
@@ -4230,12 +6065,294 @@ mod tests {
             ("Height", 1.0),
         ]);
         let chain = vec![&s];
-        assert_eq!(shape_page_rect(&doc, &chain, 11.0), Some((2.0, 3.5, 2.0, 1.0)));
+        assert_eq!(
+            shape_page_rect(&doc, &chain, 11.0),
+            Some((2.0, 3.5, 2.0, 1.0))
+        );
     }
 
     // ---- #93: per-shape layer bounds + renderer ----
 
     /// A minimal page: PageWidth/Height sheet plus `shapes`.
+    /// #187: the export draws line jumps — a crossing fixture's page
+    /// SVG carries the jump group with the white gap, the under
+    /// redraw, and an arc that bulges page-up (smaller SVG y).
+    #[test]
+    fn export_renders_line_jumps() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        // A horizontal connector crossed by a vertical one at (3, 5)
+        // strictly inside both segments.
+        let (doc, page) = page_fixture(vec![
+            connector(1, (3.0, 5.0), 4.0, 0.0),
+            connector(2, (3.0, 5.0), 0.0, 4.0),
+        ]);
+        let svg = render_page(&doc, &page).unwrap();
+        assert!(
+            svg.contains(r#"data-dc="line-jumps""#),
+            "the jump overlay group is present"
+        );
+        assert!(
+            svg.contains(r##"stroke="#ffffff""##),
+            "the white gap stroke is present"
+        );
+        // The arc bulges page-UP: the apex sits at a SMALLER SVG y
+        // than the crossing's (page y 5 → SVG y 6 on an 11in page).
+        let apex = format!("{:.5} {:.5}", 3.0, 6.0 - crate::geom::JUMP_RADIUS_IN);
+        assert!(svg.contains(&apex), "the arc apex is page-up: {apex}");
+    }
+
+    /// #251: the page's Show-Line-Jumps switch (`ConLineJumpCode=1`
+    /// on the PageSheet) suppresses the jump overlay entirely; the
+    /// `LineJumpFactorX` size multiplier scales the hop arc.
+    #[test]
+    fn export_gates_line_jumps_on_the_page_setting() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        let (doc, _page) = page_fixture(vec![
+            connector(1, (3.0, 5.0), 4.0, 0.0),
+            connector(2, (3.0, 5.0), 0.0, 4.0),
+        ]);
+        // Hidden: the PageSheet switch suppresses the group (0 =
+        // visPLOJumpNone, the documented off switch per [MS-Learn];
+        // #218 review — 6 was never in the enumeration, and a page
+        // set to None must not draw hop arcs).
+        for off in ["0", "6"] {
+            let mut hidden = doc.clone();
+            hidden.pages[0]
+                .sheet_mut()
+                .unwrap()
+                .set_cell("LineJumpCode", Cell::value(off));
+            let svg = render_page(&hidden, &hidden.pages[0]).unwrap();
+            assert!(
+                !svg.contains(r#"data-dc="line-jumps""#),
+                "the page set to LineJumpCode {off} draws no jump group"
+            );
+        }
+        // Shown at 2×: the hop arc's radius doubles.
+        let mut big = doc.clone();
+        big.pages[0]
+            .sheet_mut()
+            .unwrap()
+            .set_cell("LineJumpFactorX", Cell::value("2"));
+        let svg = render_page(&big, &big.pages[0]).unwrap();
+        let apex = format!(
+            "{:.5} {:.5}",
+            3.0,
+            6.0 - crate::geom::JUMP_RADIUS_IN * 2.0
+        );
+        assert!(svg.contains(&apex), "the 2× arc apex: {apex}");
+    }
+
+    /// #187: a page with NO crossings draws no jump group.
+    #[test]
+    fn export_without_crossings_has_no_jump_group() {
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64| {
+            let mut s = shape_at(id, pin, w, h, 0.0);
+            s.sheet.set_cell("ObjType", Cell::value("2"));
+            let line = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                line(2, w, h),
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        let (doc, page) = page_fixture(vec![connector(1, (3.0, 5.0), 4.0, 0.0)]);
+        let svg = render_page(&doc, &page).unwrap();
+        assert!(
+            !svg.contains(r##"data-dc="line-jumps""##),
+            "no crossings, no overlay"
+        );
+    }
+
+    /// #203: a NURBSTo row's E cell (formula text) — the interior
+    /// points/knots/weights ride in `E`, the endpoint in X/Y.
+    fn nurbs_row(ix: i64, x: f64, y: f64, e_text: &str) -> Row {
+        Row {
+            t: Some("NURBSTo".into()),
+            ix,
+            cells: vec![
+                ("X".to_string(), Cell::value(format!("{x}"))),
+                ("Y".to_string(), Cell::value(format!("{y}"))),
+                ("A".to_string(), Cell::value("0")),
+                ("B".to_string(), Cell::value("1")),
+                ("C".to_string(), Cell::value("0")),
+                ("D".to_string(), Cell::value("1")),
+                (
+                    "E".to_string(),
+                    vsdx::Cell {
+                        v: Some(e_text.to_string()),
+                        f: Some(e_text.to_string()),
+                        ..Cell::default()
+                    },
+                ),
+            ],
+            ..Row::default()
+        }
+    }
+
+    /// #203: the golden fixture page — (1) a SplineStart+2×SplineKnot
+    /// cubic, (2) a NURBSTo with uniform weights, (3) a NURBSTo with
+    /// NON-uniform weights (the rational case the chord approximates
+    /// wrongly). Committed as an SVG golden; regenerate with
+    /// UPDATE_SPLINE_GOLDENS=1.
+    #[test]
+    fn spline_nurbs_goldens() {
+        // 1. the spline: MoveTo(0,0), SplineStart (second control
+        //    point) with knots 0/0.3/1 degree 3, knots at 0.6/1.
+        let mut spline = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut spline,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(
+                    2,
+                    "SplineStart",
+                    &[
+                        ("X", 1.0),
+                        ("Y", 1.5),
+                        ("A", 0.3),
+                        ("B", 0.0),
+                        ("C", 1.0),
+                        ("D", 3.0),
+                    ],
+                ),
+                geo_row(3, "SplineKnot", &[("X", 2.5), ("Y", 0.4), ("A", 0.6)]),
+                geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
+            ],
+        );
+        // 2. NURBS uniform: M(0,0) → NURBSTo(4,2), interior points
+        //    (1.2, 1.6) and (2.8, 0.2), weights 1.
+        let mut nurbs_u = shape_at(2, (7.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut nurbs_u,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,1, 2.8,0.2,0,1)"),
+            ],
+        );
+        // 3. NURBS rational: the same geometry with the middle
+        //    control weighted 2 — the belly pulls toward that point.
+        let mut nurbs_r = shape_at(3, (12.0, 2.0), 4.0, 2.0, 0.0);
+        push_geo(
+            &mut nurbs_r,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                nurbs_row(2, 4.0, 2.0, "NURBS(1, 3, 0, 0, 1.2,1.6,0,2, 2.8,0.2,0,1)"),
+            ],
+        );
+        let (doc, page) = page_fixture(vec![spline, nurbs_u, nurbs_r]);
+        let svg = render_page(&doc, &page).unwrap();
+
+        let regenerate = std::env::var("UPDATE_SPLINE_GOLDENS").is_ok();
+        let golden_path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/goldens/spline_nurbs.svg");
+        if regenerate {
+            let _ = std::fs::create_dir_all(golden_path.parent().unwrap());
+            std::fs::write(&golden_path, &svg).unwrap();
+        }
+        let golden = std::fs::read_to_string(&golden_path)
+            .expect("the spline/NURBS golden exists (regenerate with UPDATE_SPLINE_GOLDENS=1)");
+        // Git's autocrlf normalizes text files to CRLF on Windows
+        // checkouts; the renderer emits LF. Compare newline-normalized.
+        let norm = |s: &str| s.replace('\r', "");
+        assert_eq!(
+            norm(&svg).trim(),
+            norm(&golden).trim(),
+            "the spline/NURBS golden drifted — if the change is intended, \
+             regenerate with UPDATE_SPLINE_GOLDENS=1 and review the diff"
+        );
+        // Each curve emits a multi-point polyline well above the
+        // chord: count `L` segments (16 per knot span, >8 per curve).
+        let segments = svg.match_indices("L ").count();
+        assert!(
+            segments > 24,
+            "three flattened curves produce many segments: {segments}"
+        );
+    }
+
     fn page_fixture(shapes: Vec<Shape>) -> (Document, Page) {
         let mut sheet = Sheet::default();
         sheet.set_cell("PageWidth", Cell::value("8.5"));
@@ -4250,11 +6367,20 @@ mod tests {
             shapes,
             ..Page::default()
         };
-        (Document { pages: vec![page.clone()], ..Document::default() }, page)
+        (
+            Document {
+                pages: vec![page.clone()],
+                ..Document::default()
+            },
+            page,
+        )
     }
 
     fn shape_at(id: i64, pin: (f64, f64), w: f64, h: f64, angle_deg: f64) -> Shape {
-        let mut sh = Shape { id, ..Shape::default() };
+        let mut sh = Shape {
+            id,
+            ..Shape::default()
+        };
         for (n, v) in [
             ("PinX", pin.0),
             ("PinY", pin.1),
@@ -4269,6 +6395,198 @@ mod tests {
         sh
     }
 
+    /// A geometry row built from (type, [(cell, value)]).
+    fn geo_row(ix: i64, t: &str, cells: &[(&str, f64)]) -> Row {
+        Row {
+            t: Some(t.into()),
+            ix,
+            cells: cells
+                .iter()
+                .map(|(n, v)| (n.to_string(), Cell::value(format!("{v}"))))
+                .collect(),
+            ..Row::default()
+        }
+    }
+
+    fn push_geo(s: &mut Shape, rows: Vec<Row>) {
+        let mut sec = Section {
+            name: "Geometry".into(),
+            ix: 0,
+            ..Section::default()
+        };
+        sec.rows = rows;
+        s.sheet.children.push(SheetChild::Section(sec));
+    }
+
+    /// #219: the focused bounds of a sub-shape's own subtree — the
+    /// damage region a localized edit re-rasters — stay inside the
+    /// whole-subtree bounds, equal the member's own box (plus the
+    /// stroke pad), and move with the member's cells.
+    #[test]
+    fn focused_bounds_scope_the_walk_to_one_subtree() {
+        let mut member = shape_at(2, (0.4, 0.3), 0.5, 0.4, 0.0);
+        push_geo(
+            &mut member,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", 0.5), ("Y", 0.0)]),
+                geo_row(3, "LineTo", &[("X", 0.5), ("Y", 0.4)]),
+                geo_row(4, "LineTo", &[("X", 0.0), ("Y", 0.4)]),
+                geo_row(5, "LineTo", &[("X", 0.0), ("Y", 0.0)]),
+            ],
+        );
+        let mut group = shape_at(1, (2.0, 2.0), 2.0, 1.5, 0.0);
+        group.type_ = Some("Group".into());
+        let mut far = shape_at(3, (1.8, 1.3), 0.4, 0.3, 0.0);
+        push_geo(
+            &mut far,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", 0.4), ("Y", 0.3)]),
+            ],
+        );
+        group.sub_shapes = vec![member, far];
+        let (doc, page) = page_fixture(vec![group]);
+
+        let whole = shape_ink_bounds(&doc, &page, 1).unwrap();
+        let focused = shape_ink_bounds_focused(&doc, &page, 1, Some(2)).unwrap();
+        // The member's box (0.5×0.4 at group-local (0.15..0.65, …))
+        // plus the same stroke-bleed pad — not the whole group.
+        assert!((focused.2 - (0.5 + 0.16)).abs() < 1e-9, "w={}", focused.2);
+        assert!((focused.3 - (0.4 + 0.16)).abs() < 1e-9, "h={}", focused.3);
+        // Containment: the focused region sits inside the subtree's.
+        assert!(focused.0 >= whole.0 - 1e-9 && focused.1 >= whole.1 - 1e-9);
+        assert!(focused.0 + focused.2 <= whole.0 + whole.2 + 1e-9);
+        assert!(focused.1 + focused.3 <= whole.1 + whole.3 + 1e-9);
+
+        // The walk is honest about WHICH member: the far sibling's
+        // focused bounds sit elsewhere.
+        let far_focus = shape_ink_bounds_focused(&doc, &page, 1, Some(3)).unwrap();
+        assert!((far_focus.0 - focused.0).abs() > 0.5);
+        // An unknown focus yields nothing.
+        assert!(shape_ink_bounds_focused(&doc, &page, 1, Some(99)).is_none());
+    }
+
+    /// #188: SplineStart + SplineKnot rows render the EVALUATED
+    /// B-spline — a multi-segment path that leaves the control-point
+    /// chord — not the v0.2 single chord.
+    #[test]
+    fn spline_rows_render_the_evaluated_curve() {
+        let mut s = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        // P0=(0,0); P1=SplineStart (1,1); P2/P3=SplineKnots; cubic.
+        push_geo(
+            &mut s,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(
+                    2,
+                    "SplineStart",
+                    &[
+                        ("X", 1.0),
+                        ("Y", 1.5),
+                        ("A", 0.4),
+                        ("B", 0.0),
+                        ("C", 1.0),
+                        ("D", 3.0),
+                    ],
+                ),
+                geo_row(3, "SplineKnot", &[("X", 2.0), ("Y", 0.5), ("A", 0.6)]),
+                geo_row(4, "SplineKnot", &[("X", 4.0), ("Y", 2.0), ("A", 1.0)]),
+            ],
+        );
+        let (doc, page) = page_fixture(vec![s]);
+        let svg = render_page(&doc, &page).unwrap();
+        let path = svg.match_indices("L ").count();
+        assert!(
+            path > 8,
+            "the spline flattens to many segments, not a chord: {} L segments",
+            path
+        );
+        // The ink leaves the P0→P3 chord (the S bulge through P1/P2).
+        // The chord from (0,0) to (4,2): at x=2 the chord y is 1; the
+        // spline's belly passes well below (through ~(2, 0.9±)) — assert
+        // some emitted coordinate off the chord line instead of exact.
+        let off = svg
+            .match_indices("L ")
+            .map(|(i, _)| &svg[i + 2..i + 30])
+            .filter_map(|seg| {
+                let mut it = seg.split_whitespace();
+                let x: f64 = it.next()?.parse().ok()?;
+                let y: f64 = it.next()?.parse().ok()?;
+                Some((x, y))
+            })
+            .find(|(x, y)| (0.5 * x + 2.0 - y).abs() > 0.05);
+        assert!(off.is_some(), "some flattened point leaves the chord");
+    }
+
+    /// #188: the corpus NURBSTo row (E = NURBS(...) with the row-cell
+    /// frame) renders off its chord — the v0.2 single chord is gone.
+    #[test]
+    fn nurbs_to_row_renders_from_the_e_formula() {
+        let mut s = shape_at(1, (2.0, 2.0), 4.0, 2.0, 0.0);
+        let e = "NURBS(1, 3, 0, 0, 0.35,0.9,0,1, 0.65,0.1,0,1)";
+        push_geo(
+            &mut s,
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(
+                    2,
+                    "NURBSTo",
+                    &[
+                        ("X", 4.0),
+                        ("Y", 2.0),
+                        ("A", 0.0),
+                        ("B", 1.0),
+                        ("C", 0.0),
+                        ("D", 1.0),
+                    ],
+                ),
+            ],
+        );
+        // The E cell with its formula text.
+        {
+            let sec = s
+                .sheet
+                .children
+                .iter_mut()
+                .find_map(|c| match c {
+                    SheetChild::Section(sec) if sec.name == "Geometry" => Some(sec),
+                    _ => None,
+                })
+                .unwrap();
+            let r2 = sec.rows.iter_mut().find(|r| r.ix == 2).unwrap();
+            r2.cells.push((
+                "E".to_string(),
+                Cell {
+                    v: Some(e.to_string()),
+                    f: Some(e.to_string()),
+                    ..Cell::default()
+                },
+            ));
+        }
+        let (doc, page) = page_fixture(vec![s]);
+        let svg = render_page(&doc, &page).unwrap();
+        let segments = svg.match_indices("L ").count();
+        assert!(
+            segments > 8,
+            "the NURBS flattens to many segments: {segments}"
+        );
+        // Interior points (0.35·4=1.4, 0.9·2=1.8) and (2.6, 0.2) pull
+        // the curve off the (0,0)→(4,2) chord; some emitted point must
+        // sit off it (chord: y = 0.5x).
+        let off = svg
+            .match_indices("L ")
+            .map(|(i, _)| &svg[i + 2..i + 30])
+            .filter_map(|seg| {
+                let mut it = seg.split_whitespace();
+                let x: f64 = it.next()?.parse().ok()?;
+                let y: f64 = it.next()?.parse().ok()?;
+                Some((x, y))
+            })
+            .find(|(x, y)| (0.5 * x + 2.0 - y).abs() > 0.05);
+        assert!(off.is_some(), "some flattened point leaves the chord");
+    }
+
     const PAD: f64 = 0.08;
 
     #[test]
@@ -4276,7 +6594,13 @@ mod tests {
         // 2×1 shape rotated 90° about its pin (the Angle cell is
         // radians, like render_shape reads it): the ink swaps extents —
         // a plain W×H box (what master_bbox computes) would clip it.
-        let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, std::f64::consts::FRAC_PI_2)]);
+        let (doc, page) = page_fixture(vec![shape_at(
+            1,
+            (4.0, 5.0),
+            2.0,
+            1.0,
+            std::f64::consts::FRAC_PI_2,
+        )]);
         let (x, y, w, h) = shape_ink_bounds(&doc, &page, 1).unwrap();
         assert!((w - (1.0 + 2.0 * PAD)).abs() < 1e-9, "w={w}");
         assert!((h - (2.0 + 2.0 * PAD)).abs() < 1e-9, "h={h}");
@@ -4291,7 +6615,9 @@ mod tests {
         // edge (local pin 2.5 of a 2-wide box) and whose text block is
         // wider than the shape: the union must cover both.
         let mut group = shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0);
-        group.sub_shapes.push(shape_at(2, (2.5, 0.8), 1.0, 1.0, 0.0));
+        group
+            .sub_shapes
+            .push(shape_at(2, (2.5, 0.8), 1.0, 1.0, 0.0));
         group.sheet.text = Some("hello".into());
         group.sheet.set_cell("TxtWidth", Cell::value("3"));
         let (doc, page) = page_fixture(vec![group]);
@@ -4321,7 +6647,57 @@ mod tests {
         hidden_shape.sheet.set_cell("LayerMember", Cell::value("2"));
         let (doc, page) = page_fixture(vec![hidden_shape]);
         let svg = render_shape_layer(&doc, &page, 1, &[2], bounds).unwrap();
-        assert!(!svg.contains("<g transform"), "hidden root must not draw: {svg}");
+        assert!(
+            !svg.contains("<g transform"),
+            "hidden root must not draw: {svg}"
+        );
+    }
+
+    /// #236: the culled patch serialization omits every subtree node
+    /// whose ink box misses the (padded) cull rect and keeps the ones
+    /// it covers — the serialize+parse saving is real, and a
+    /// regression to full serialization would re-include the far
+    /// shape's ink. The group node itself always stays (its subtree
+    /// box spans both leaves).
+    #[test]
+    fn culled_serialization_omits_shapes_outside_the_cull_rect() {
+        // A group with two disjoint leaves: red left, green right.
+        // Real Geometry rows, so the leaves actually paint.
+        let rect_rows = |w: f64, h: f64| {
+            vec![
+                geo_row(1, "MoveTo", &[("X", 0.0), ("Y", 0.0)]),
+                geo_row(2, "LineTo", &[("X", w), ("Y", 0.0)]),
+                geo_row(3, "LineTo", &[("X", w), ("Y", h)]),
+                geo_row(4, "LineTo", &[("X", 0.0), ("Y", h)]),
+                geo_row(5, "LineTo", &[("X", 0.0), ("Y", 0.0)]),
+            ]
+        };
+        let mut left = shape_at(2, (0.5, 0.5), 0.6, 0.4, 0.0);
+        left.sheet.set_cell("FillForegnd", Cell::value("#ff2200"));
+        push_geo(&mut left, rect_rows(0.6, 0.4));
+        let mut right = shape_at(3, (2.5, 0.5), 0.6, 0.4, 0.0);
+        right.sheet.set_cell("FillForegnd", Cell::value("#22cc00"));
+        push_geo(&mut right, rect_rows(0.6, 0.4));
+        let mut group = shape_at(1, (3.0, 5.0), 3.0, 1.0, 0.0);
+        group.sub_shapes = vec![left, right];
+        let (doc, page) = page_fixture(vec![group]);
+        let bounds = shape_ink_bounds(&doc, &page, 1).unwrap();
+        // The cull rect covers the LEFT leaf's x range only (the
+        // leaves share their y range, so x does the separating).
+        let cull = (bounds.0, bounds.1, 1.4, bounds.3);
+        let (_, culled) =
+            render_shape_layer_opts_culled(&doc, &page, 1, &[], bounds, None, None, cull).unwrap();
+        assert!(
+            culled.contains("#ff2200"),
+            "the covered leaf stays in the patch: {culled}"
+        );
+        assert!(
+            !culled.contains("#22cc00"),
+            "the far leaf is omitted from the patch serialization: {culled}"
+        );
+        // The full serialization keeps both.
+        let (_, full) = render_shape_layer_opts(&doc, &page, 1, &[], bounds, None, None).unwrap();
+        assert!(full.contains("#ff2200") && full.contains("#22cc00"));
     }
 
     /// GitHub #22: the shared TextBlock resolution must agree with the
@@ -4405,19 +6781,30 @@ mod tests {
         let (doc, page) = page_fixture(vec![shape_at(1, (4.0, 5.0), 2.0, 1.0, 0.0)]);
         let (x, y, w, h) = text_block_page_rect(&doc, &page, 1).unwrap();
         // Shape rect: pin (4,5) center → (3, 4.5)..(5, 5.5), y-up.
-        assert!((x - 3.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!(
+            (x - 3.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9,
+            "x={x} y={y}"
+        );
         assert!((w - 2.0).abs() < 1e-9 && (h - 1.0).abs() < 1e-9);
 
         // Off-center pin: TxtPin (1.5, 0.25) with a centered 1×0.5
         // block → shape-local (1.0, 0.0)..(2.0, 0.5) → page
         // (4.0, 4.5)..(5.0, 5.0) (pin − LocPin = (3.0, 4.5) offset).
         let mut sh = shape_at(2, (4.0, 5.0), 2.0, 1.0, 0.0);
-        for (n, v) in [("TxtPinX", 1.5), ("TxtPinY", 0.25), ("TxtWidth", 1.0), ("TxtHeight", 0.5)] {
+        for (n, v) in [
+            ("TxtPinX", 1.5),
+            ("TxtPinY", 0.25),
+            ("TxtWidth", 1.0),
+            ("TxtHeight", 0.5),
+        ] {
             sh.sheet.set_cell(n, Cell::value(format!("{v}")));
         }
         let (doc, page) = page_fixture(vec![sh]);
         let (x, y, w, h) = text_block_page_rect(&doc, &page, 2).unwrap();
-        assert!((x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9, "x={x} y={y}");
+        assert!(
+            (x - 4.0).abs() < 1e-9 && (y - 4.5).abs() < 1e-9,
+            "x={x} y={y}"
+        );
         assert!((w - 1.0).abs() < 1e-9 && (h - 0.5).abs() < 1e-9);
     }
 
@@ -4425,7 +6812,15 @@ mod tests {
     fn text_lines(out: &str) -> Vec<String> {
         out.split("<tspan")
             .skip(1)
-            .map(|l| l.split('>').nth(1).unwrap_or("").split('<').next().unwrap_or("").to_string())
+            .map(|l| {
+                l.split('>')
+                    .nth(1)
+                    .unwrap_or("")
+                    .split('<')
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
+            })
             .collect()
     }
 
@@ -4471,7 +6866,7 @@ mod tests {
         let s = shape_1065();
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
         assert_eq!(
             lines,
@@ -4495,7 +6890,7 @@ mod tests {
         {
             let chain = [&s];
             let mut out = String::new();
-            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+            emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
             assert!(out.is_empty(), "no text, no text element: {out}");
         }
 
@@ -4506,7 +6901,7 @@ mod tests {
         s.sheet.text = Some("  opened\r\na  b\n   \n\nend ".into());
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["  opened", "a  b", "   ", "", "end"],
@@ -4531,12 +6926,13 @@ mod tests {
         let mut s = Shape::default();
         s.sheet.text = Some("a  b".into());
         s.sheet.set_cell("Width", Cell::value("2.0"));
-        s.sheet.set_cell("TxtWidth", Cell::value(format!("{usable:.6}")));
+        s.sheet
+            .set_cell("TxtWidth", Cell::value(format!("{usable:.6}")));
         s.sheet.set_cell("LeftMargin", Cell::value("0"));
         s.sheet.set_cell("RightMargin", Cell::value("0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["a", " ", "b"],
@@ -4550,14 +6946,13 @@ mod tests {
     fn measured_wrap_splits_genuinely_overflowing_runs() {
         let doc = Document::default();
         let mut s = Shape::default();
-        s.sheet.text =
-            Some("considerable label text beyond the block".into());
+        s.sheet.text = Some("considerable label text beyond the block".into());
         s.sheet.set_cell("Width", Cell::value("0.8"));
         s.sheet.set_cell("Height", Cell::value("1.0"));
         s.sheet.set_cell("TxtWidth", Cell::value("0.8"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
         assert!(lines.len() > 1, "must wrap: {lines:?}");
         // The greedy invariant: every line except the last is full —
@@ -4586,9 +6981,12 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("0.5"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
         let lines = text_lines(&out);
-        assert!(lines.len() > 1, "a 26-em-ish run cannot fit 0.3 in: {lines:?}");
+        assert!(
+            lines.len() > 1,
+            "a 26-em-ish run cannot fit 0.3 in: {lines:?}"
+        );
         assert!(
             lines.iter().all(|l| !l.is_empty()),
             "hard splits keep every line non-empty: {lines:?}"
@@ -4608,7 +7006,7 @@ mod tests {
         s.sheet.set_cell("TxtWidth", Cell::value("8.0"));
         let chain = [&s];
         let mut out = String::new();
-        emit_text(&doc, &s, &chain, 8.0, 1.0, 1.0, 1.0, false, &mut out);
+        emit_text(&doc, &s, &chain, 8.0, 1.0, 1.0, 1.0, false, None, &mut out);
         assert_eq!(
             text_lines(&out),
             vec!["one", "two", "three"],
@@ -4657,15 +7055,17 @@ mod tests {
         assert!(skipped.contains("<g transform"), "geometry keeps rendering");
     }
 
-    /// #199: the gallery matches the 600 dpi Visio print (the 2026-11-06
-    /// re-read in Analysis/arrow-gallery-visio2016.md) — the open-head
-    /// set 14–22 strokes instead of filling, the dimension set composes
-    /// ticks with rings/dots, and the bare ends 46–50 have no head.
+    /// #199 + #185: the gallery matches the 600 dpi Visio print (the
+    /// authoritative oracle in Analysis/arrow-gallery-visio2016.md) —
+    /// the open-head set 14–22 strokes instead of filling, the
+    /// dimension set composes ticks with rings/dots, 12 is the single
+    /// wide V while 43 is the double chevron, the rear arcs of
+    /// 5/6/8/18 are circular, and the bare ends 46–50 have no head.
     #[test]
     fn arrow_gallery_matches_the_visio_print() {
         // The open heads 14–22: stroked paths, never filled.
         for kind in [14, 15, 16, 17, 18, 19, 20, 21, 22] {
-            let Some((parts, _, _)) = arrow_spec(kind) else {
+            let Some(parts) = arrow_spec(kind) else {
                 panic!("arrow {kind} should exist");
             };
             assert!(
@@ -4673,41 +7073,70 @@ mod tests {
                 "arrow {kind} is an open head"
             );
         }
-        // 22 is the stroked diamond.
-        let (parts, _, _) = arrow_spec(22).unwrap();
-        assert!(parts[0].d.contains("L5,0 L10,5"), "diamond profile");
+        // 22 is the stroked diamond (4.5 × 2.25 units).
+        let parts = arrow_spec(22).unwrap();
+        assert!(
+            parts[0].d.contains("L-2.25,-1.125 L-4.5,0"),
+            "diamond profile"
+        );
+        // 12 is ONE wide open V; 43 is the double chevron (the print
+        // correction — the old table had the two swapped up).
+        let v12 = arrow_spec(12).unwrap();
+        assert_eq!(v12[0].d, "M-3,-1 L0,0 L-3,1", "12 is the single wide V");
+        let v43 = arrow_spec(43).unwrap();
+        assert_eq!(v43[0].d.matches('M').count(), 2, "43 is the double chevron");
+        // The 5/6/8/18 rears are circular arcs (exact cubic handles);
+        // 5/8 concave, 6/18 convex.
+        for kind in [5, 8, 6, 18] {
+            let parts = arrow_spec(kind).unwrap();
+            assert!(
+                parts.iter().all(|p| p.d.contains('C')),
+                "arrow {kind} carries the circular rear arc"
+            );
+        }
+        let concave = arrow_spec(5).unwrap()[0].d;
+        let convex = arrow_spec(6).unwrap()[0].d;
+        assert!(concave.contains("C-1.68524"), "5 bows toward the tip");
+        assert!(convex.contains("C-2.31476"), "6 bows away from the tip");
         // 39/40: double triangles — filled vs stroked.
-        let (filled, _, _) = arrow_spec(39).unwrap();
+        let filled = arrow_spec(39).unwrap();
         assert!(filled.iter().all(|p| p.filled));
         assert_eq!(filled[0].d.matches('M').count(), 2, "two heads");
-        let (open, _, _) = arrow_spec(40).unwrap();
+        let open = arrow_spec(40).unwrap();
         assert!(open.iter().all(|p| !p.filled));
         // 20/41: rings; 42: a filled dot.
         for kind in [20, 41] {
-            let (parts, _, _) = arrow_spec(kind).unwrap();
+            let parts = arrow_spec(kind).unwrap();
             assert!(parts.iter().all(|p| p.circle.is_some() && !p.filled));
         }
-        let (dot_parts, _, _) = arrow_spec(42).unwrap();
+        let dot_parts = arrow_spec(42).unwrap();
         assert!(dot_parts[0].circle.is_some() && dot_parts[0].filled);
         // 25/26: two / three tick strokes in one part.
-        let (t2, _, _) = arrow_spec(25).unwrap();
+        let t2 = arrow_spec(25).unwrap();
         assert_eq!(t2[0].d.matches('M').count(), 2);
-        let (t3, _, _) = arrow_spec(26).unwrap();
+        let t3 = arrow_spec(26).unwrap();
         assert_eq!(t3[0].d.matches('M').count(), 3);
-        // 35: a tick part plus a filled-dot part (composite).
-        let (comp, _, _) = arrow_spec(35).unwrap();
+        // 35: a filled-dot part plus a tick part (composite).
+        let comp = arrow_spec(35).unwrap();
         assert_eq!(comp.len(), 2);
-        assert!(!comp[0].filled && comp[0].circle.is_none());
-        assert!(comp[1].filled && comp[1].circle.is_some());
+        assert!(comp[0].filled && comp[0].circle.is_some());
+        assert!(!comp[1].filled && comp[1].circle.is_none());
+        // 9 leans "/" through the tip; 23 leans "\" behind it (the
+        // print's two slanted ticks oppose).
+        assert_eq!(arrow_spec(9).unwrap()[0].d, "M1,-1 L-1,1");
+        assert_eq!(arrow_spec(23).unwrap()[0].d, "M-2.9,-1 L-0.9,1");
         // 46–50: bare ends.
         for kind in [46, 47, 48, 49, 50] {
             assert!(arrow_spec(kind).is_none(), "arrow {kind} is bare");
         }
     }
 
-    /// #199 smoke: a line with EndArrow renders the marker from the
-    /// verified table — the open diamond 22 strokes, the classic
-    /// triangle 4 fills, and the bare end 46 carries no marker.
+    /// #199 + #185 smoke: a line with EndArrow renders the head from
+    /// the verified table at its measured size — the open diamond 22
+    /// strokes with its shaft trimmed to the rear, the classic
+    /// triangle 4 fills with the shaft under its fill, the zero-weight
+    /// line uses the C[size] + 0.75 pt unit, and the bare end 46
+    /// carries no head.
     #[test]
     fn arrow_markers_render_from_the_verified_table() {
         let fixture = |kind: i64| -> String {
@@ -4715,7 +7144,9 @@ mod tests {
                 id: 1,
                 ..Shape::default()
             };
-            shape.sheet.set_cell("EndArrow", Cell::value(kind.to_string()));
+            shape
+                .sheet
+                .set_cell("EndArrow", Cell::value(kind.to_string()));
             shape.sheet.children.push(SheetChild::Section(Section {
                 name: "Geometry".into(),
                 rows: vec![
@@ -4750,18 +7181,100 @@ mod tests {
             doc.pages.push(page);
             render_page(&doc, &doc.pages[0]).expect("render")
         };
-        // The open diamond 22 strokes (fill="none" inside its marker).
+        // The unit at the default 0.75 pt pen, size 2: 0.75/72 +
+        // 2.52/72 = 0.045417 in.
+        let unit = 0.75 / 72.0 + 2.52 / 72.0;
+        // The open diamond 22 strokes, and its 4.5-unit setback trims
+        // the shaft to 2 − 4.5·unit.
         let open22 = fixture(22);
-        assert!(open22.contains("marker-end"), "marker attached: {open22}");
-        assert!(open22.contains("M0,5 L5,0 L10,5 L5,10 z"));
+        assert!(open22.contains("dc-ah"), "head attached: {open22}");
+        assert!(open22.contains("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z"));
         assert!(open22.contains("fill=\"none\" stroke=\"#000000\""));
-        // The classic triangle 4 fills.
+        let cut = 2.0 - 4.5 * unit;
+        assert!(
+            open22.contains(&format!("{cut:.5}")),
+            "the shaft trims at the diamond's rear: {open22}"
+        );
+        // The classic triangle 4 fills; its 2-unit setback hides under
+        // the fill (trim to 2 − 2·unit).
         let classic4 = fixture(4);
-        assert!(classic4.contains("marker-end"), "marker attached: {classic4}");
-        assert!(classic4.contains("<path d=\"M0,0 L10,5 L0,10 z\" fill=\"#000000\""));
-        // The bare end 46 carries no marker at all.
+        assert!(classic4.contains("dc-ah"), "head attached: {classic4}");
+        assert!(classic4.contains("<path d=\"M0,0 L-2,-1 L-2,1 Z\" fill=\"#000000\"/>"));
+        assert!(classic4.contains(&format!("{:.5}", 2.0 - 2.0 * unit)));
+        // The bare end 46 carries no head at all.
         let bare46 = fixture(46);
-        assert!(!bare46.contains("marker-end"), "bare ends carry no marker");
+        assert!(!bare46.contains("dc-ah"), "bare ends carry no head");
+    }
+
+    /// #185: the shaft trim — a straight line shortens from each end
+    /// by the physical setbacks, closed loops and multi-subpath data
+    /// stay untouched, a cut that would consume the path keeps the
+    /// original, a quadratic splits exactly onto the original curve,
+    /// and an arc sub-span lands on the cut angle.
+    #[test]
+    fn trim_path_cuts_open_contours_only_and_exactly() {
+        // Straight line: symmetric and one-sided trims.
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.1, 0.1),
+            "M 0.10000 0.00000 L 0.90000 0.00000"
+        );
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.0, 0.25),
+            "M 0.00000 0.00000 L 0.75000 0.00000"
+        );
+        assert_eq!(
+            trim_path("M 0 0 L 1 0 ", 0.25, 0.0),
+            "M 0.25000 0.00000 L 1.00000 0.00000"
+        );
+        // A closed loop never trims.
+        let closed = "M 0 0 L 1 0 L 1 1 L 0 0";
+        assert_eq!(trim_path(closed, 0.1, 0.1), closed);
+        // Multi-subpath data never trims.
+        let multi = "M 0 0 L 1 0 M 2 0 L 3 0";
+        assert_eq!(trim_path(multi, 0.1, 0.1), multi);
+        // A cut that would consume the whole path keeps the original.
+        assert_eq!(trim_path("M 0 0 L 1 0 ", 0.6, 0.6), "M 0 0 L 1 0 ");
+        // Malformed data comes back untouched.
+        assert_eq!(trim_path("garbage", 1.0, 1.0), "garbage");
+        // A quadratic splits exactly: the trimmed sub-curve's endpoint
+        // is the original at the cut parameter, and its own middle is
+        // the original at half the kept span.
+        let q = "M 0 0 Q 1 2 2 0 ";
+        let samples = segment_samples('Q', &[1.0, 2.0, 2.0, 0.0], (0.0, 0.0));
+        let total = polyline_length(&samples);
+        let t_cut = sample_time_at_length(&samples, total - 0.5);
+        let trimmed = trim_path(q, 0.0, 0.5);
+        let expected_end = quad_at((0.0, 0.0), (1.0, 2.0), (2.0, 0.0), t_cut);
+        assert!(
+            trimmed.contains(&format!("{:.5} {:.5}", expected_end.0, expected_end.1)),
+            "the cut lands on the curve: {trimmed}"
+        );
+        let q_part = trimmed.split("Q ").nth(1).expect("sub-quadratic");
+        let nums: Vec<f64> = q_part
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        let got = quad_at((0.0, 0.0), (nums[0], nums[1]), (nums[2], nums[3]), 0.5);
+        let want = quad_at((0.0, 0.0), (1.0, 2.0), (2.0, 0.0), t_cut * 0.5);
+        assert!(
+            (got.0 - want.0).abs() < 1e-4 && (got.1 - want.1).abs() < 1e-4,
+            "the sub-quadratic tracks the original: {got:?} vs {want:?}"
+        );
+        // An arc sub-span: trimming a semicircle by a quarter of its
+        // length lands the endpoint at the 270° point (1, -1), small
+        // arc, sweep preserved.
+        let a = "M 0 0 A 1 1 0 0 1 2 0 ";
+        let trimmed = trim_path(a, 0.0, std::f64::consts::PI / 2.0);
+        let a_part = trimmed.split("A ").nth(1).expect("sub-arc");
+        let nums: Vec<f64> = a_part
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert!(
+            (nums[5] - 1.0).abs() < 5e-3 && (nums[6] + 1.0).abs() < 5e-3,
+            "the arc cut lands at the quarter point: {trimmed}"
+        );
+        assert_eq!(nums[3], 0.0, "the quarter arc is not large");
+        assert_eq!(nums[4], 1.0, "the sweep survives the split");
     }
 }
-

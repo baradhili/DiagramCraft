@@ -20,11 +20,11 @@ pub mod layers;
 pub mod scope;
 
 pub use commands::{
-    AddConnect, AddLayer, AddMasterInstance, AddPage, AddShape, DuplicateShape, ImportMaster,
-    Macro, MovePage, RemoveConnect, RemoveLayer, RemovePage, RemoveShape, RenameLayer, RenamePage,
-    ReorderShape, SetCell, SetRowCell, SetText, find_imported, next_master_id,
-    place_master_from_stencil, scale_group_members, container_membership_cleanup,
-    SetGluedCell, SetCellCache, effective_formula,
+    container_membership_cleanup, effective_formula, find_imported, next_master_id,
+    place_master_from_stencil, scale_group_members, AddConnect, AddLayer, AddMasterInstance,
+    AddPage, AddShape, DuplicateShape, ImportMaster, Macro, MovePage, RemoveConnect, RemoveLayer,
+    RemovePage, RemoveShape, RenameLayer, RenamePage, ReorderShape, SetCell, SetCellCache,
+    SetGluedCell, SetRowCell, SetText,
 };
 pub use connects::{Connect, Connects, ConnectsOwner};
 pub use scope::{find_shape_mut, shape_chain, Scope};
@@ -61,6 +61,13 @@ pub struct Touched {
     pub page: i64,
     pub shape: i64,
     pub touch: Touch,
+    /// The command's EDITED shape when it is a nested sub-shape
+    /// (`None` for top-level edits and commands that don't pin one).
+    /// #219: the canvas layer store computes a damage rect for this
+    /// sub-shape's own subtree — old∪new ink bounds — and patches the
+    /// layer texture through `TextureHandle::set_partial` instead of
+    /// re-rendering the whole top-level layer.
+    pub sub: Option<i64>,
 }
 
 /// What a command invalidated: per-shape touches plus any fully-dirty
@@ -95,12 +102,19 @@ impl TouchList {
     /// Union (used by composites). Per shape, the strongest touch wins:
     /// Ink > Membership > Move > Order (an ink re-render subsumes the
     /// others; membership and move are handled alongside it anyway).
+    /// Entries with different `sub`s stay separate even for the same
+    /// top-level shape — each sub carries its own damage region (#219),
+    /// and collapsing them would drop all but one.
     pub fn merge(&mut self, other: TouchList) {
         self.pages.extend(other.pages);
         self.pages.sort();
         self.pages.dedup();
         for t in other.shapes {
-            if let Some(have) = self.shapes.iter_mut().find(|h| h.page == t.page && h.shape == t.shape) {
+            if let Some(have) = self
+                .shapes
+                .iter_mut()
+                .find(|h| h.page == t.page && h.shape == t.shape && h.sub == t.sub)
+            {
                 if t.touch.rank() > have.touch.rank() {
                     have.touch = t.touch;
                 }
@@ -160,7 +174,11 @@ impl History {
     /// Execute `cmd` against `doc`, push it on the undo stack, and clear
     /// the redo stack. Returns the command's label and its canvas
     /// invalidation (`Command::touched`, #93).
-    pub fn apply(&mut self, mut cmd: Box<dyn Command>, doc: &mut Document) -> Result<(String, TouchList)> {
+    pub fn apply(
+        &mut self,
+        mut cmd: Box<dyn Command>,
+        doc: &mut Document,
+    ) -> Result<(String, TouchList)> {
         cmd.apply(doc)?;
         let label = cmd.label();
         let touched = cmd.touched(doc);
@@ -246,7 +264,7 @@ impl Editor {
     }
 
     /// A fresh blank drawing: one US-Letter page, no masters (File →
-    /// New). The embedded template is DiagramCraft's own synthetic
+    /// New). The embedded template is Tarahi's own synthetic
     /// package (no Microsoft content).
     pub fn new_blank() -> Editor {
         const BLANK: &[u8] = include_bytes!("../assets/blank.vsdx");

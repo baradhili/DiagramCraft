@@ -1420,7 +1420,11 @@ mod tests {
                 checked += 1;
             }
         }
-        assert_eq!(checked, recorded.len(), "no asset drifted from the manifest");
+        assert_eq!(
+            checked,
+            recorded.len(),
+            "no asset drifted from the manifest"
+        );
     }
 
     /// Variant selection (#85 follow-up): metric when asked for and
@@ -1429,7 +1433,10 @@ mod tests {
     fn bytes_for_picks_the_variant_with_fallback() {
         let basic = by_slug("basic").expect("basic ships");
         let us = basic.bytes.as_ptr();
-        let metric = basic.metric_bytes.expect("basic has a metric twin").as_ptr();
+        let metric = basic
+            .metric_bytes
+            .expect("basic has a metric twin")
+            .as_ptr();
         assert_eq!(basic.bytes_for(false).as_ptr(), us);
         assert_eq!(basic.bytes_for(true).as_ptr(), metric);
         // dimarc ships US-only: metric falls back to the default.

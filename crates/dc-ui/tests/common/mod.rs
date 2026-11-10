@@ -1,11 +1,19 @@
 //! Shared integration-test fixtures (#97 section 4 dedup): the
 //! many-shape .vsdx builder that raster_async and render_perf carried
 //! as byte-identical copies (modulo comments and a filename prefix —
-//! each suite writes into its own tempdir, so one filename serves).
+//! each suite writes into its own tempdir, so one filename serves),
+//! and the shell .vsdx builder (#184 keytips shares shell.rs's).
+// Every test binary compiles this module on its own and uses a
+// different subset — dead-code is structural, not drift.
+#![allow(dead_code)]
 /// A synthetic document: `n_shapes` text-bearing rectangles on a grid
 /// (shape 1 sits at the page center so a center click selects it) and
 /// `n_masters` stencil masters, packaged as a minimal .vsdx.
-pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usize) -> std::path::PathBuf {
+pub fn many_shape_fixture(
+    dir: &std::path::Path,
+    n_shapes: usize,
+    n_masters: usize,
+) -> std::path::PathBuf {
     let rect = |id: usize, pin_x: f64, pin_y: f64, w: f64, h: f64, text: &str| {
         let (lw, lh) = (w / 2.0, h / 2.0);
         format!(
@@ -150,7 +158,10 @@ pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usi
         ("visio/masters/_rels/masters.xml.rels".into(), master_rels),
     ];
     for i in 0..n_masters {
-        parts.push((format!("visio/masters/master{}.xml", i + 1), master_body(i + 1)));
+        parts.push((
+            format!("visio/masters/master{}.xml", i + 1),
+            master_body(i + 1),
+        ));
     }
     for (name, data) in &parts {
         w.start_file(name.as_str(), opts).unwrap();
@@ -159,3 +170,168 @@ pub fn many_shape_fixture(dir: &std::path::Path, n_shapes: usize, n_masters: usi
     w.finish().unwrap();
     path
 }
+
+// The shell fixture (#184 keytests share it with shell.rs): a one-page
+// (or N-page) synthetic .vsdx with one text rectangle and one master.
+pub fn shell_fixture(dir: &std::path::Path) -> std::path::PathBuf {
+    shell_fixture_pages(dir, &["Page-1"])
+}
+
+/// The shell fixture with N named pages (#54): identical page bodies,
+/// sequential rIds and parts, all through the same zip layout.
+pub fn shell_fixture_pages(dir: &std::path::Path, names: &[&str]) -> std::path::PathBuf {
+    let document = r#"<?xml version="1.0" encoding="utf-8"?>
+<VisioDocument xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<StyleSheets><StyleSheet ID='0' NameU='No Style'>
+  <Cell N='LineWeight' V='0.01041666666666667'/><Cell N='LineColor' V='0'/>
+  <Cell N='FillForegnd' V='1'/><Cell N='FillPattern' V='1'/>
+</StyleSheet></StyleSheets>
+</VisioDocument>"#;
+    let entries: String = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            format!(
+                "<Page ID='{i}' NameU='{name}' Name='{name}'>\n\
+<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'>\n  \
+<Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/>\n\
+</PageSheet>\n\
+<Rel r:id='rId{}'/>\n\
+</Page>\n",
+                i + 1
+            )
+        })
+        .collect();
+    let pages = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+{entries}</Pages>"#
+    );
+    let page1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<PageContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='1' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='4.25'/><Cell N='PinY' V='8'/>
+  <Cell N='Width' V='2'/><Cell N='Height' V='1'/>
+  <Cell N='LocPinX' V='1'/><Cell N='LocPinY' V='0.5'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='2'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='2'/><Cell N='Y' V='1'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+  <Text>hello visio</Text>
+</Shape>
+</Shapes>
+</PageContents>"#;
+    let masters = r#"<?xml version="1.0" encoding="utf-8"?>
+<Masters xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Master ID='7' NameU='Box'>
+<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'><Cell N='PageHeight' V='1'/></PageSheet>
+<Rel r:id='rId1'/>
+</Master>
+</Masters>"#;
+    let master1 = r#"<?xml version="1.0" encoding="utf-8"?>
+<MasterContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
+<Shapes>
+<Shape ID='1' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
+  <Cell N='PinX' V='0.5'/><Cell N='PinY' V='0.5'/>
+  <Cell N='Width' V='0.8'/><Cell N='Height' V='0.6'/>
+  <Cell N='LocPinX' V='0.4'/><Cell N='LocPinY' V='0.3'/>
+  <Section N='Geometry' IX='0'>
+    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='2'><Cell N='X' V='0.8'/><Cell N='Y' V='0'/></Row>
+    <Row T='LineTo' IX='3'><Cell N='X' V='0.8'/><Cell N='Y' V='0.6'/></Row>
+    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='0.6'/></Row>
+    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
+  </Section>
+</Shape>
+</Shapes>
+</MasterContents>"#;
+    let page_rels = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+{}</Relationships>"#,
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!(
+                "<Relationship Id='rId{}' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page{}.xml'/>",
+                i + 1,
+                i + 1
+            ))
+            .collect::<String>()
+    );
+    let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/master" Target="master1.xml"/>
+</Relationships>"#;
+    let page_overrides: String = names
+        .iter()
+        .enumerate()
+        .map(|(i, _)| {
+            format!(
+                "<Override PartName=\"/visio/pages/page{}.xml\" ContentType=\"application/vnd.ms-visio.pages+xml\"/>\n",
+                i + 1
+            )
+        })
+        .collect();
+    let content_types = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
+<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
+{page_overrides}<Override PartName="/visio/masters/masters.xml" ContentType="application/vnd.ms-visio.masters+xml"/>
+<Override PartName="/visio/masters/master1.xml" ContentType="application/vnd.ms-visio.master+xml"/>
+</Types>"#
+    );
+    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/>
+</Relationships>"#;
+    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/>
+<Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/masters" Target="masters/masters.xml"/>
+</Relationships>"#;
+
+    let path = dir.join("shell.vsdx");
+    let file = std::fs::File::create(&path).unwrap();
+    let mut w = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default();
+    let mut parts: Vec<(String, String)> = [
+        ("[Content_Types].xml".to_string(), content_types),
+        ("_rels/.rels".to_string(), root_rels.to_string()),
+        ("visio/document.xml".to_string(), document.to_string()),
+        (
+            "visio/_rels/document.xml.rels".to_string(),
+            doc_rels.to_string(),
+        ),
+        ("visio/pages/pages.xml".to_string(), pages),
+        ("visio/pages/_rels/pages.xml.rels".to_string(), page_rels),
+        ("visio/masters/masters.xml".to_string(), masters.to_string()),
+        (
+            "visio/masters/_rels/masters.xml.rels".to_string(),
+            master_rels.to_string(),
+        ),
+        ("visio/masters/master1.xml".to_string(), master1.to_string()),
+    ]
+    .into_iter()
+    .collect();
+    for i in 0..names.len() {
+        parts.insert(
+            6 + i,
+            (format!("visio/pages/page{}.xml", i + 1), page1.to_string()),
+        );
+    }
+    for (name, data) in &parts {
+        w.start_file(name.as_str(), opts).unwrap();
+        std::io::Write::write_all(&mut w, data.as_bytes()).unwrap();
+    }
+    w.finish().unwrap();
+    path
+}
+

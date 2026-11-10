@@ -1,4 +1,4 @@
-//! dc — DiagramCraft command line.
+//! dc — Tarahi command line.
 //!
 //! Subcommands:
 //!   dc info      <file>              package/part inventory
@@ -7,18 +7,14 @@
 //!   dc roundtrip <file> -o out.vsdx  re-write the package from the model
 //!   dc edit      <file> -o out.vsdx  apply undoable edits, save (M4)
 
-use dc::{edit, svg};
+use dc::{edit, export, svg};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
-#[command(
-    name = "dc",
-    version,
-    about = "DiagramCraft — Linux Visio (VSDX) toolchain"
-)]
+#[command(name = "dc", version, about = "Tarahi — Linux Visio (VSDX) toolchain")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -57,6 +53,25 @@ enum Cmd {
         /// parts, byte equality of untouched parts, model and render equality
         #[arg(long)]
         verify: bool,
+    },
+    /// Export pages to SVG / PNG / PDF (#35)
+    Export {
+        file: PathBuf,
+        /// Output file; format comes from the extension (.svg/.png/.pdf).
+        /// SVG/PNG write one file per page (`-N` suffix for multi-page);
+        /// PDF merges every selected page into one file.
+        #[arg(short, long, default_value = "out.svg")]
+        out: PathBuf,
+        /// Pages to export: 1-based, comma-separated ranges ("1,3-5");
+        /// default is every page
+        #[arg(long, value_name = "PAGES")]
+        pages: Option<String>,
+        /// Omit the white page fill (PNG gets a real alpha channel)
+        #[arg(long)]
+        transparent: bool,
+        /// PNG raster density, pixels per inch
+        #[arg(long, default_value_t = 96.0, value_name = "DPI")]
+        dpi: f32,
     },
     /// Edit a document through the command layer (undo/redo history)
     Edit {
@@ -128,6 +143,13 @@ fn main() -> Result<()> {
             masters,
         } => render(&file, &out, page, masters),
         Cmd::Roundtrip { file, out, verify } => roundtrip(&file, &out, verify),
+        Cmd::Export {
+            file,
+            out,
+            pages,
+            transparent,
+            dpi,
+        } => run_export(&file, &out, pages.as_deref(), transparent, dpi),
         Cmd::Edit {
             file,
             out,
@@ -211,8 +233,7 @@ fn main() -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
-    let pkg = vsdx::Package::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let pkg = vsdx::Package::open(path).with_context(|| format!("opening {}", path.display()))?;
     println!("OPC package: {}", path.display());
     for name in pkg.part_names() {
         let ct = pkg.content_type_of(name).unwrap_or_default();
@@ -359,6 +380,80 @@ fn roundtrip(path: &Path, out: &Path, verify: bool) -> Result<()> {
     Ok(())
 }
 
+/// The #35 export subcommand: format from the output extension, page
+/// selection as 1-based ranges, transparent background and PNG dpi.
+fn run_export(
+    path: &Path,
+    out: &Path,
+    pages: Option<&str>,
+    transparent: bool,
+    dpi: f32,
+) -> Result<()> {
+    let Some(format) = out
+        .extension()
+        .and_then(|e| e.to_str())
+        .and_then(export::Format::from_extension)
+    else {
+        bail!(
+            "cannot infer an export format from {} — use .svg, .png or .pdf",
+            out.display()
+        );
+    };
+    // #218 review: reject nonsense densities before any rendering —
+    // NaN/inf parse fine and a zero/negative dpi asks for nothing (or
+    // gigabytes via a negative scale).
+    if !dpi.is_finite() || dpi <= 0.0 {
+        bail!("--dpi must be a positive finite number, got {dpi}");
+    }
+    let doc = vsdx::parse::parse(path).with_context(|| format!("opening {}", path.display()))?;
+    if doc.pages.is_empty() {
+        bail!("document has no pages");
+    }
+    let selection = parse_page_ranges(pages, doc.pages.len())?;
+    let opts = export::Options {
+        transparent,
+        png_dpi: dpi,
+    };
+    let (written, notes) = export::write_document(&doc, out, &selection, format, &opts)?;
+    for f in &written {
+        println!("wrote {}", f.display());
+    }
+    // #218 review: a density the memory ceiling reduced is REPORTED,
+    // never silently applied.
+    for n in &notes {
+        println!("note: {n}");
+    }
+    Ok(())
+}
+
+/// "1,3-5" → 0-based indices; None/empty = every page.
+fn parse_page_ranges(spec: Option<&str>, total: usize) -> Result<Vec<usize>> {
+    let Some(spec) = spec.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok((0..total).collect());
+    };
+    let mut out = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        let (lo, hi) = match part.split_once('-') {
+            Some((a, b)) => (a.trim().parse::<usize>(), Some(b.trim().parse::<usize>())),
+            None => (part.trim().parse::<usize>(), None),
+        };
+        let lo = lo.with_context(|| format!("page range {part:?}"))?;
+        let hi = match hi {
+            Some(h) => h.with_context(|| format!("page range {part:?}"))?,
+            None => lo,
+        };
+        if lo == 0 || hi < lo || hi > total {
+            bail!("page range {part:?} out of range (1..={total})");
+        }
+        out.extend(lo - 1..hi);
+    }
+    if out.is_empty() {
+        bail!("page range {spec:?} selects no pages");
+    }
+    Ok(out)
+}
+
 /// Round-trip verification per the v0.2 definition of done: identical part
 /// inventory; canonical-XML equality for re-serialized parts; byte equality
 /// for verbatim parts; equal re-parsed model; identical rendered output.
@@ -432,4 +527,41 @@ fn verify_roundtrip(source: &vsdx::Document, src_path: &Path, out_path: &Path) -
         src_path.display()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod page_range_tests {
+    use super::parse_page_ranges;
+
+    #[test]
+    fn selects_comma_and_range_parts() {
+        assert_eq!(parse_page_ranges(Some("1,3-5"), 6).unwrap(), vec![0, 2, 3, 4]);
+    }
+
+    #[test]
+    fn trims_whitespace() {
+        assert_eq!(parse_page_ranges(Some(" 2 "), 3).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn a_single_page_range_degenerates_to_one_page() {
+        assert_eq!(parse_page_ranges(Some("2-2"), 3).unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn none_or_empty_selects_every_page() {
+        assert_eq!(parse_page_ranges(None, 2).unwrap(), vec![0, 1]);
+        assert_eq!(parse_page_ranges(Some(""), 2).unwrap(), vec![0, 1]);
+        assert_eq!(parse_page_ranges(Some("   "), 2).unwrap(), vec![0, 1]);
+    }
+
+    #[test]
+    fn rejects_nonsense() {
+        for bad in ["0", "3-1", "9", "a", "1-"] {
+            assert!(
+                parse_page_ranges(Some(bad), 3).is_err(),
+                "{bad:?} must not parse against 3 pages"
+            );
+        }
+    }
 }

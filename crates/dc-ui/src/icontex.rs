@@ -6,7 +6,6 @@
 //! All artwork is from the MDI open-source set — never extracted from
 //! Microsoft products (see assets/icons/README.md).
 
-
 use std::collections::HashMap;
 
 use egui::{Color32, Context, TextureHandle};

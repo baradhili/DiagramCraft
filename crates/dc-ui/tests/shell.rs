@@ -6,167 +6,8 @@
 use dc_ui::app::App;
 use egui_kittest::Harness;
 
-fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
-    fixture_pages(dir, &["Page-1"])
-}
-
-/// The shell fixture with N named pages (#54): identical page bodies,
-/// sequential rIds and parts, all through the same zip layout.
-fn fixture_pages(dir: &std::path::Path, names: &[&str]) -> std::path::PathBuf {
-    let document = r#"<?xml version="1.0" encoding="utf-8"?>
-<VisioDocument xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-<StyleSheets><StyleSheet ID='0' NameU='No Style'>
-  <Cell N='LineWeight' V='0.01041666666666667'/><Cell N='LineColor' V='0'/>
-  <Cell N='FillForegnd' V='1'/><Cell N='FillPattern' V='1'/>
-</StyleSheet></StyleSheets>
-</VisioDocument>"#;
-    let entries: String = names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            format!(
-                "<Page ID='{i}' NameU='{name}' Name='{name}'>\n\
-<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'>\n  \
-<Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/>\n\
-</PageSheet>\n\
-<Rel r:id='rId{}'/>\n\
-</Page>\n",
-                i + 1
-            )
-        })
-        .collect();
-    let pages = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<Pages xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-{entries}</Pages>"#
-    );
-    let page1 = r#"<?xml version="1.0" encoding="utf-8"?>
-<PageContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-<Shapes>
-<Shape ID='1' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
-  <Cell N='PinX' V='4.25'/><Cell N='PinY' V='8'/>
-  <Cell N='Width' V='2'/><Cell N='Height' V='1'/>
-  <Cell N='LocPinX' V='1'/><Cell N='LocPinY' V='0.5'/>
-  <Section N='Geometry' IX='0'>
-    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
-    <Row T='LineTo' IX='2'><Cell N='X' V='2'/><Cell N='Y' V='0'/></Row>
-    <Row T='LineTo' IX='3'><Cell N='X' V='2'/><Cell N='Y' V='1'/></Row>
-    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row>
-    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
-  </Section>
-  <Text>hello visio</Text>
-</Shape>
-</Shapes>
-</PageContents>"#;
-    let masters = r#"<?xml version="1.0" encoding="utf-8"?>
-<Masters xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-<Master ID='7' NameU='Box'>
-<PageSheet LineStyle='0' FillStyle='0' TextStyle='0'><Cell N='PageHeight' V='1'/></PageSheet>
-<Rel r:id='rId1'/>
-</Master>
-</Masters>"#;
-    let master1 = r#"<?xml version="1.0" encoding="utf-8"?>
-<MasterContents xmlns='http://schemas.microsoft.com/office/visio/2012/main' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>
-<Shapes>
-<Shape ID='1' Type='Shape' LineStyle='0' FillStyle='0' TextStyle='0'>
-  <Cell N='PinX' V='0.5'/><Cell N='PinY' V='0.5'/>
-  <Cell N='Width' V='0.8'/><Cell N='Height' V='0.6'/>
-  <Cell N='LocPinX' V='0.4'/><Cell N='LocPinY' V='0.3'/>
-  <Section N='Geometry' IX='0'>
-    <Row T='MoveTo' IX='1'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
-    <Row T='LineTo' IX='2'><Cell N='X' V='0.8'/><Cell N='Y' V='0'/></Row>
-    <Row T='LineTo' IX='3'><Cell N='X' V='0.8'/><Cell N='Y' V='0.6'/></Row>
-    <Row T='LineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='0.6'/></Row>
-    <Row T='LineTo' IX='5'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row>
-  </Section>
-</Shape>
-</Shapes>
-</MasterContents>"#;
-    let page_rels = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-{}</Relationships>"#,
-        names
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!(
-                "<Relationship Id='rId{}' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page{}.xml'/>",
-                i + 1,
-                i + 1
-            ))
-            .collect::<String>()
-    );
-    let master_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/master" Target="master1.xml"/>
-</Relationships>"#;
-    let page_overrides: String = names
-        .iter()
-        .enumerate()
-        .map(|(i, _)| {
-            format!(
-                "<Override PartName=\"/visio/pages/page{}.xml\" ContentType=\"application/vnd.ms-visio.pages+xml\"/>\n",
-                i + 1
-            )
-        })
-        .collect();
-    let content_types = format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-<Default Extension="xml" ContentType="application/xml"/>
-<Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/>
-<Override PartName="/visio/pages/pages.xml" ContentType="application/vnd.ms-visio.pages+xml"/>
-{page_overrides}<Override PartName="/visio/masters/masters.xml" ContentType="application/vnd.ms-visio.masters+xml"/>
-<Override PartName="/visio/masters/master1.xml" ContentType="application/vnd.ms-visio.master+xml"/>
-</Types>"#
-    );
-    let root_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/>
-</Relationships>"#;
-    let doc_rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-<Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/pages" Target="pages/pages.xml"/>
-<Relationship Id="rId2" Type="http://schemas.microsoft.com/visio/2010/relationships/masters" Target="masters/masters.xml"/>
-</Relationships>"#;
-
-    let path = dir.join("shell.vsdx");
-    let file = std::fs::File::create(&path).unwrap();
-    let mut w = zip::ZipWriter::new(file);
-    let opts = zip::write::SimpleFileOptions::default();
-    let mut parts: Vec<(String, String)> = [
-        ("[Content_Types].xml".to_string(), content_types),
-        ("_rels/.rels".to_string(), root_rels.to_string()),
-        ("visio/document.xml".to_string(), document.to_string()),
-        (
-            "visio/_rels/document.xml.rels".to_string(),
-            doc_rels.to_string(),
-        ),
-        ("visio/pages/pages.xml".to_string(), pages),
-        ("visio/pages/_rels/pages.xml.rels".to_string(), page_rels),
-        ("visio/masters/masters.xml".to_string(), masters.to_string()),
-        (
-            "visio/masters/_rels/masters.xml.rels".to_string(),
-            master_rels.to_string(),
-        ),
-        ("visio/masters/master1.xml".to_string(), master1.to_string()),
-    ]
-    .into_iter()
-    .collect();
-    for i in 0..names.len() {
-        parts.insert(
-            6 + i,
-            (format!("visio/pages/page{}.xml", i + 1), page1.to_string()),
-        );
-    }
-    for (name, data) in &parts {
-        w.start_file(name.as_str(), opts).unwrap();
-        std::io::Write::write_all(&mut w, data.as_bytes()).unwrap();
-    }
-    w.finish().unwrap();
-    path
-}
+mod common;
+use common::{shell_fixture as fixture, shell_fixture_pages as fixture_pages};
 
 fn run_shell(name: &str, app: App) {
     run_shell_mode(name, app, false);
@@ -286,6 +127,7 @@ fn info_thumbnail_refreshes_after_edit() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -320,6 +162,7 @@ fn info_thumbnail_placeholder_on_render_failure() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -342,6 +185,19 @@ fn shell_snapshot_backstage_recent() {
     app.set_recent_for_test(vec![doc, ghost]);
     app.open_backstage_for_test();
     run_shell("dc_ui_shell_backstage_recent", app);
+}
+
+#[test]
+fn shell_snapshot_backstage_export() {
+    // The #35 Export page: format cards, page scope, options, path row
+    // and the Export… action. The path is pinned like the Info golden —
+    // the pane's suggestion derives from the document path.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut app = App::with_doc(&fixture(tmp.path()));
+    app.set_path_for_test(std::path::PathBuf::from("/golden/shell.vssx"));
+    app.open_backstage_for_test();
+    app.set_backstage_page_for_test("export");
+    run_shell("dc_ui_shell_backstage_export", app);
 }
 
 #[test]
@@ -381,6 +237,7 @@ fn recent_entry_click_reopens() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -394,6 +251,22 @@ fn recent_entry_click_reopens() {
     // screen; the document opens.
     harness.get_by_label_contains("shell.vsdx").click();
     harness.run();
+    // #242: the open rides the async flight (parse worker + the scrim's
+    // minimum display + the first render) — pump until the editor
+    // lands.
+    // Wall-clock deadline, sleeping every iteration (#218 review
+    // round 3): the scrim holds LOADING_MIN_SECS of real time, and
+    // 20,000 iterations of a fast runner finish before it — and spin
+    // the CPU while at it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while harness.state().debug_shape_count() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the recent reopen never landed"
+        );
+        harness.run();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     assert_eq!(
         harness.state().debug_shape_count(),
         1,
@@ -412,6 +285,7 @@ fn painted_shell_controls_carry_accessible_labels() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -506,6 +380,7 @@ fn page_tabs_switch_restore_selection_and_name_status() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -562,6 +437,7 @@ fn page_tab_context_menu_manages_pages() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -638,6 +514,7 @@ fn inserted_page_carries_the_source_page_size() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -670,9 +547,11 @@ fn inserted_page_carries_the_source_page_size() {
     // tab) seeds the same way — from the now-active Page-2.
     h.state_mut().set_tab_for_test(dc_ui::ribbon::Tab::Insert);
     h.run();
-    let add = h.get(egui_kittest::kittest::By::default()
-        .role(egui::Role::Button)
-        .label("New Page"));
+    let add = h.get(
+        egui_kittest::kittest::By::default()
+            .role(egui::Role::Button)
+            .label("New Page"),
+    );
     add.click();
     h.run();
     assert_eq!(h.state().debug_active_page_name(), "Page-3");
@@ -691,6 +570,7 @@ fn window_title_tracks_document_and_dirty_state() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());
@@ -702,7 +582,7 @@ fn window_title_tracks_document_and_dirty_state() {
     h.run();
     assert_eq!(
         h.state().debug_window_title_for_test(),
-        "Drawing1 - DiagramCraft",
+        "Drawing1 - Tarahi",
         "an unsaved blank drawing titles the OS window"
     );
 
@@ -712,7 +592,7 @@ fn window_title_tracks_document_and_dirty_state() {
     h.run();
     assert_eq!(
         h.state().debug_window_title_for_test(),
-        "Drawing1 - DiagramCraft *",
+        "Drawing1 - Tarahi *",
         "the dirty marker reaches the OS window title"
     );
     // (Undo keeps the dirty flag under the current save-point
@@ -728,6 +608,7 @@ fn page_tab_rename_edits_inline() {
     dc_ui::svgimg::pin_determinism_for_tests();
     let mut h = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
+        .with_max_steps(16)
         .build_ui_state(
             |ui, app: &mut App| {
                 dc_ui::theme::install(ui.ctx());

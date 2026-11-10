@@ -1,4 +1,4 @@
-# DiagramCraft
+# Tarahi
 
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=flat-square)](LICENSE-MIT)
 [![Rust](https://img.shields.io/badge/Rust-1.88%2B-orange?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -6,6 +6,7 @@
 [![Powered by Z.ai GLM](https://img.shields.io/badge/Powered_by-Z.ai_GLM_5.x-0066FF?style=flat-square)](https://z.ai)
 [![AI harness: ZCode](https://img.shields.io/badge/AI_harness-ZCode-000000?style=flat-square)](https://z.ai)
 [![RE tooling: morluto/rea](https://img.shields.io/badge/RE_tooling-morluto/rea-555555?style=flat-square)](https://github.com/morluto/rea)
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?style=flat-square&logo=githubsponsors&logoColor=ea4aaa)](https://github.com/sponsors/baradhili)
 
 A Linux/Windows/MacOS-native reimplementation of the Visio 2016 drawing experience in Rust: read and write `.vsdx`/`.vstx`/`.vssx` packages losslessly, render
 them to SVG/PNG, edit them through an undoable command layer, and work in
@@ -16,9 +17,9 @@ observations. No Microsoft code, content, or assets.
 
 ## Powered by
 
-DiagramCraft is built in public using **[Z.ai GLM-5.x](https://z.ai)** for long-horizon agentic coding on a 1M-token context window, with deep binary-format reverse engineering supported by **[morluto/rea](https://github.com/morluto/rea)**.
+Tarahi is built in public using **[Z.ai GLM-5.x](https://z.ai)** for long-horizon agentic coding on a 1M-token context window, with deep binary-format reverse engineering supported by **[morluto/rea](https://github.com/morluto/rea)**.
 
-The workload — multi-file refactors across a real binary format reverse-engineering effort — is exactly the long-running software-engineering task that GLM-5.x was designed for. The project would not be moving at this pace without Z.ai's Coding Plan. Hint Hint - sponsorship?..
+The workload — multi-file refactors across a real binary format reverse-engineering effort — is exactly the long-running software-engineering task that GLM-5.x was designed for. The project would not be moving at this pace without Z.ai's Coding Plan. Hint Hint - [sponsorship?..](https://github.com/sponsors/baradhili)
 
 If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or [inquire about Z.ai open source sponsorships](https://z.ai/contact).
 
@@ -34,7 +35,7 @@ How can you help?
 
 1. Create issues - it gives me and my agent a way to track what could be fixed
 
-2. Close issues - there are plenty now and I only have so much token quota 
+2. Close issues - there are plenty now and I only have so much token quota
 
 2. Create PR - awesome! - but please keep the PRs on a narrow feature (no 10000 line PRs please!) and make sure they are at least checked by CodeRabbit - or better Greptile
 
@@ -210,8 +211,7 @@ for Graphviz layout (untracked sample, like all of `Sample/`).
 
 - Plugin architecture: out-of-tree diagram sources, shape mappers, and command packs with a stable API over `dc-core`.
 
-- Language import-renderers with **configurable shape mapping** (bind language node/edge types to masters/stencil shapes): **d2**, **Graphviz DOT** (synergy: GraphVizio is a Graphviz add-in — 
-  
+- Language import-renderers with **configurable shape mapping** (bind language node/edge types to masters/stencil shapes): **d2**, **Graphviz DOT** (synergy: GraphVizio is a Graphviz add-in —
   its public behavior is a useful oracle), and **Mermaid**.
 
 ## License

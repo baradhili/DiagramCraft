@@ -235,8 +235,7 @@ fn fresh_save_binds_contents_without_rel_children() {
             ),
             (
                 "xmlns:r".to_string(),
-                "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-                    .to_string(),
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships".to_string(),
             ),
         ]
     };
@@ -252,7 +251,12 @@ fn fresh_save_binds_contents_without_rel_children() {
 
     // One master, one page, both built in code: no IndexChild::Rel.
     let mut sheet = Sheet::default();
-    for (n, v) in [("PinX", "1"), ("PinY", "1"), ("Width", "1"), ("Height", "1")] {
+    for (n, v) in [
+        ("PinX", "1"),
+        ("PinY", "1"),
+        ("Width", "1"),
+        ("Height", "1"),
+    ] {
         sheet.set_cell(n, Cell::value(v));
     }
     sheet.children.push(SheetChild::Section(Section {
@@ -265,7 +269,10 @@ fn fresh_save_binds_contents_without_rel_children() {
             ix: 1,
             n: None,
             attrs: vec![("T".into(), "MoveTo".into()), ("IX".into(), "1".into())],
-            cells: vec![("X".into(), Cell::value("0")), ("Y".into(), Cell::value("0"))],
+            cells: vec![
+                ("X".into(), Cell::value("0")),
+                ("Y".into(), Cell::value("0")),
+            ],
         }],
     }));
     doc.masters.push(Master {
@@ -305,18 +312,14 @@ fn fresh_save_binds_contents_without_rel_children() {
     // The written index carries a synthesized Rel per entry, and the
     // rels parts bind them to the contents parts.
     let pkg = vsdx::Package::open(&path).unwrap();
-    let masters_index = String::from_utf8(
-        pkg.part("visio/masters/masters.xml").unwrap().to_vec(),
-    )
-    .unwrap();
+    let masters_index =
+        String::from_utf8(pkg.part("visio/masters/masters.xml").unwrap().to_vec()).unwrap();
     assert!(
         masters_index.contains("<Rel r:id=\"rId1\"/>"),
         "master entry synthesized its Rel binding: {masters_index}"
     );
-    let pages_index = String::from_utf8(
-        pkg.part("visio/pages/pages.xml").unwrap().to_vec(),
-    )
-    .unwrap();
+    let pages_index =
+        String::from_utf8(pkg.part("visio/pages/pages.xml").unwrap().to_vec()).unwrap();
     assert!(
         pages_index.contains("<Rel r:id=\"rId1\"/>"),
         "page entry synthesized its Rel binding: {pages_index}"
@@ -407,7 +410,10 @@ fn retained_package_without_masters_keeps_added_master() {
     // Parse: no masters anywhere.
     let mut doc = vsdx::parse::parse(&path).unwrap();
     assert!(doc.masters.is_empty());
-    assert!(doc.masters_part.is_none(), "the package ships no masters part");
+    assert!(
+        doc.masters_part.is_none(),
+        "the package ships no masters part"
+    );
 
     // Import a master the way ImportMaster does (fresh id, its own
     // part, no Rel child — the writer must bind it).
@@ -446,10 +452,8 @@ fn retained_package_without_masters_keeps_added_master() {
         names.contains(&"visio/masters/master1.xml"),
         "the imported master's part was materialized"
     );
-    let doc_rels = String::from_utf8(
-        pkg.part("visio/_rels/document.xml.rels").unwrap().to_vec(),
-    )
-    .unwrap();
+    let doc_rels =
+        String::from_utf8(pkg.part("visio/_rels/document.xml.rels").unwrap().to_vec()).unwrap();
     assert!(
         doc_rels.contains("masters/masters.xml"),
         "the document relationship was added: {doc_rels}"
@@ -621,12 +625,13 @@ fn container_user_rows_resolve_through_the_master_chain() {
             .and_then(|c| c.v.clone())
     };
     assert_eq!(v(inst, "msvStructureType").as_deref(), Some("Container"));
-    assert_eq!(
-        v(inst, "msvSDContainerNoHighlight").as_deref(),
-        Some("0")
-    );
+    assert_eq!(v(inst, "msvSDContainerNoHighlight").as_deref(), Some("0"));
     assert_eq!(v(inst, "msvSDContainerMargin").as_deref(), Some("0.125"));
-    assert_eq!(v(inst, "msvSDContainerLocked"), None, "unknown row stays None");
+    assert_eq!(
+        v(inst, "msvSDContainerLocked"),
+        None,
+        "unknown row stays None"
+    );
 
     // An instance-local User row shadows the master's same-name row
     // (shape 11 has no master, so its own row is all there is).

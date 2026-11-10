@@ -23,7 +23,11 @@ fn corpus_files() -> Vec<PathBuf> {
         .filter(|p| p.extension().is_some_and(|e| e == "vssx"))
         .collect();
     vssx.sort();
-    assert!(vssx.len() > 300, "expected the full #87 catalog, found {}", vssx.len());
+    assert!(
+        vssx.len() > 300,
+        "expected the full #87 catalog, found {}",
+        vssx.len()
+    );
     files.extend(vssx);
     files
 }
@@ -65,15 +69,24 @@ fn round_trip_all(files: &[PathBuf], dir: &std::path::Path) {
             Err(e) => panic!("corpus {name}: parse failed: {e:#}"),
         };
         let out = dir.join(format!("rt-{i}.vsdx"));
-        vsdx::write::save(&doc, &out).unwrap_or_else(|e| panic!("corpus {name}: save failed: {e:#}"));
+        vsdx::write::save(&doc, &out)
+            .unwrap_or_else(|e| panic!("corpus {name}: save failed: {e:#}"));
         let back = vsdx::parse::parse(&out)
             .unwrap_or_else(|e| panic!("corpus {name}: re-parse failed: {e:#}"));
         assert!(
             doc.same_model(&back),
             "corpus {name}: model changed across the round-trip"
         );
-        let before: Vec<_> = doc.package.as_ref().map(|p| p.part_names()).unwrap_or_default();
-        let after: Vec<_> = back.package.as_ref().map(|p| p.part_names()).unwrap_or_default();
+        let before: Vec<_> = doc
+            .package
+            .as_ref()
+            .map(|p| p.part_names())
+            .unwrap_or_default();
+        let after: Vec<_> = back
+            .package
+            .as_ref()
+            .map(|p| p.part_names())
+            .unwrap_or_default();
         assert_eq!(before, after, "corpus {name}: part inventory changed");
     }
 }

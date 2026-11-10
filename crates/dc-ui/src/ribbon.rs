@@ -7,6 +7,68 @@ use egui::{Align2, Color32, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 use crate::theme;
 
+/// Per-tab content modules (#252): each tab's group layout lives in
+/// its own file under `ribbon/`; `app.rs` keeps only the [`TabCtx`]
+/// snapshot and the dispatch glue (owner decomposition direction,
+/// 2026-10-26).
+pub mod container_tools;
+pub mod data;
+pub mod design;
+pub mod developer;
+pub mod home;
+pub mod insert;
+pub mod review;
+pub mod view;
+
+/// Everything a tab's group builder needs from the app — one snapshot
+/// computed per frame in `app.rs`, so the per-tab modules never borrow
+/// the app and stay pure layout.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TabCtx {
+    pub has_doc: bool,
+    pub has_sel: bool,
+    /// 2+ shapes selected on the current page (aligns arm).
+    pub multi_sel: bool,
+    /// 3+ shapes selected on the current page (distribution arms).
+    pub tri_sel: bool,
+    pub tool: crate::app::Tool,
+    pub painter_armed: bool,
+    pub selby_open: bool,
+    pub align_to_page: bool,
+    pub pagesetup_open: bool,
+    pub backgrounds_open: bool,
+    pub contgal_open: bool,
+    pub show_rulers: bool,
+    pub show_grid: bool,
+    pub show_comments: bool,
+    pub dynamic_grid: bool,
+    pub snap_dlg_open: bool,
+    /// A shapesheet window is open for the selection.
+    pub shapesheet_open: bool,
+    /// The selection includes at least one group (Ungroup arms).
+    pub sel_group: bool,
+    /// The selection is a container (Container Tools arms Disband).
+    pub sel_container: bool,
+    pub container_highlight: bool,
+}
+
+/// The tab-strip content dispatcher: the fixed tabs' layouts plus the
+/// contextual Container Tools tab (File opens the backstage view
+/// instead of ribbon content).
+pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
+    match tab {
+        Tab::File => Vec::new(),
+        Tab::Home => home::groups(ctx),
+        Tab::Insert => insert::groups(ctx),
+        Tab::Design => design::groups(ctx),
+        Tab::Data => data::groups(ctx),
+        Tab::Review => review::groups(ctx),
+        Tab::View => view::groups(ctx),
+        Tab::Developer => developer::groups(ctx),
+        Tab::ContainerTools => container_tools::groups(ctx),
+    }
+}
+
 /// Everything the ribbon can ask the app to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -22,6 +84,8 @@ pub enum Action {
     ZoomOut,
     Zoom100,
     FitPage,
+    ZoomSelection,
+    About,
     ToggleGrid,
     ToggleRulers,
     ToggleComments,
@@ -43,10 +107,21 @@ pub enum Action {
     SelectByType,
     LassoTool,
     ConnPointTool,
+    FreeformTool,
     FormatPainter,
     /// Double-clicked Format Painter (#110): stay armed across
     /// applications until Esc or a cancel click.
     FormatPainterSticky,
+    /// #252 Home ▸ Arrange: group the selection (Visio's Group).
+    Group,
+    /// #252 Home ▸ Arrange: ungroup the selected group(s).
+    Ungroup,
+    /// #252 Insert ▸ Links: open the Hyperlinks dialog (#28/#71) on
+    /// the primary selection.
+    Hyperlink,
+    /// #252 Container Tools ▸ Membership: release the container's
+    /// members and delete it (one undo step).
+    ContainerDisband,
     /// #156: apply the SDCONT style (master NameU) — wraps the
     /// selection, or re-wraps the selected container's members.
     ContainerStyle(&'static str),
@@ -76,7 +151,6 @@ pub enum Tab {
     Insert,
     Design,
     Data,
-    Process,
     Review,
     View,
     Developer,
@@ -85,14 +159,15 @@ pub enum Tab {
     ContainerTools,
 }
 
-/// Visio 2016 order (Layout is not a Visio tab; Data precedes Process).
+/// The strip's fixed tabs (owner 2026-11-09: the Process tab is
+/// dropped — its Re-layout command moves to Design ▸ Layout; Layout
+/// is not a Visio tab).
 pub const TABS: &[Tab] = &[
     Tab::File,
     Tab::Home,
     Tab::Insert,
     Tab::Design,
     Tab::Data,
-    Tab::Process,
     Tab::Review,
     Tab::View,
     Tab::Developer,
@@ -155,6 +230,8 @@ pub enum Icon {
     NewPage,
     Theme,
     Fit,
+    ZoomSelection,
+    Help,
     ZoomIn,
     ZoomOut,
     Grid,
@@ -174,6 +251,24 @@ pub enum Icon {
     AlignBottom,
     DistH,
     DistV,
+    /// #252 Home fidelity wave additions.
+    Justify,
+    TextTool,
+    RectTool,
+    EllipseTool,
+    LineTool,
+    Stamp,
+    Find,
+    FindReplace,
+    SelectionPane,
+    Eraser,
+    /// #252 Insert wave.
+    DateTime,
+    Title,
+    /// #252 Review wave.
+    Eye,
+    /// #252 Container Tools wave.
+    Lock,
 }
 
 impl Icon {
@@ -206,6 +301,20 @@ impl Icon {
             Icon::LineSpacing => "linespacing",
             Icon::Effects => "effects",
             Icon::Bucket => "bucket",
+            Icon::Justify => "justify",
+            Icon::TextTool => "texttool",
+            Icon::RectTool => "rect",
+            Icon::EllipseTool => "selection-ellipse",
+            Icon::LineTool => "line",
+            Icon::Stamp => "stamp",
+            Icon::Find => "magnify-expand",
+            Icon::FindReplace => "findreplace",
+            Icon::SelectionPane => "selectionpane",
+            Icon::Eraser => "clear",
+            Icon::DateTime => "datetime",
+            Icon::Title => "title",
+            Icon::Eye => "eye",
+            Icon::Lock => "lock",
             Icon::Pen => "pen",
             Icon::BringFront => "bringfront",
             Icon::SendBack => "sendback",
@@ -233,6 +342,8 @@ impl Icon {
             Icon::NewPage => "newpage",
             Icon::Theme => "theme",
             Icon::Fit => "fit",
+            Icon::ZoomSelection => "magnify-expand",
+            Icon::Help => "help-circle-outline",
             Icon::ZoomIn => "zoomin",
             Icon::ZoomOut => "zoomout",
             Icon::Grid => "grid",
@@ -1026,6 +1137,58 @@ impl Icon {
                     Stroke::new(1.8, blue),
                 );
             }
+            Icon::Help => {
+                // help-circle-outline: ring + the question mark strokes.
+                p.circle_stroke(
+                    c,
+                    8.0,
+                    Stroke::new(1.8, lit(Color32::from_rgb(0x2a, 0x6f, 0xb5))),
+                );
+                let ink = lit(Color32::from_rgb(0x31, 0x31, 0x31));
+                p.line_segment(
+                    [c + Vec2::new(-3.0, -2.5), c + Vec2::new(-2.0, -4.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(-2.0, -4.5), c + Vec2::new(0.5, -5.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.5, -5.0), c + Vec2::new(3.0, -3.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(3.0, -3.5), c + Vec2::new(1.5, -1.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, -1.0), c + Vec2::new(0.5, 0.0)],
+                    Stroke::new(1.8, ink),
+                );
+                p.line_segment(
+                    [c + Vec2::new(0.5, 0.0), c + Vec2::new(0.5, 2.5)],
+                    Stroke::new(1.8, ink),
+                );
+                p.circle_filled(c + Vec2::new(0.5, 5.5), 1.3, ink);
+            }
+            Icon::ZoomSelection => {
+                // The magnify-expand glyph: magnifier over frame corners.
+                p.circle_stroke(
+                    c + Vec2::new(-1.5, -1.5),
+                    4.5,
+                    Stroke::new(2.0, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                p.line_segment(
+                    [c + Vec2::new(1.5, 1.5), c + Vec2::new(5.5, 5.5)],
+                    Stroke::new(2.4, lit(Color32::from_rgb(0x31, 0x31, 0x31))),
+                );
+                let s = Stroke::new(1.6, accent_ink);
+                for (dx, dy) in [(-8.0, -8.0), (6.0, -8.0), (-8.0, 6.0), (6.0, 6.0)] {
+                    let q = c + Vec2::new(dx, dy);
+                    p.line_segment([q, q + Vec2::new(3.0, 0.0)], s);
+                    p.line_segment([q, q + Vec2::new(0.0, 3.0)], s);
+                }
+            }
             Icon::Grid => {
                 for i in -1..=1 {
                     let t = i as f32;
@@ -1155,8 +1318,14 @@ impl Icon {
                 };
                 p.line_segment([c + a, c + b], Stroke::new(1.6, gray));
                 for v in [a, b] {
-                    p.line_segment([c + v + Vec2::new(-2.0, 4.0), c + v], Stroke::new(1.2, gray));
-                    p.line_segment([c + v + Vec2::new(-2.0, -4.0), c + v], Stroke::new(1.2, gray));
+                    p.line_segment(
+                        [c + v + Vec2::new(-2.0, 4.0), c + v],
+                        Stroke::new(1.2, gray),
+                    );
+                    p.line_segment(
+                        [c + v + Vec2::new(-2.0, -4.0), c + v],
+                        Stroke::new(1.2, gray),
+                    );
                 }
             }
             Icon::Connector => {
@@ -1211,10 +1380,7 @@ impl Icon {
                     gray,
                 );
                 p.line_segment(
-                    [
-                        c + Vec2::new(-4.5, 4.0),
-                        c + Vec2::new(0.0, 8.5),
-                    ],
+                    [c + Vec2::new(-4.5, 4.0), c + Vec2::new(0.0, 8.5)],
                     Stroke::new(3.0, gray),
                 );
                 p.line_segment(
@@ -1231,6 +1397,24 @@ impl Icon {
                     0.5,
                     blue,
                 );
+            }
+            // #252 wave additions all carry MDI assets; this glyph
+            // fallback only draws if an asset ever fails to load.
+            Icon::Justify
+            | Icon::TextTool
+            | Icon::RectTool
+            | Icon::EllipseTool
+            | Icon::LineTool
+            | Icon::Stamp
+            | Icon::Find
+            | Icon::FindReplace
+            | Icon::SelectionPane
+            | Icon::Eraser
+            | Icon::DateTime
+            | Icon::Title
+            | Icon::Eye
+            | Icon::Lock => {
+                p.rect_filled(r.shrink(6.0), 2.0, gray);
             }
         }
     }
@@ -1251,6 +1435,10 @@ pub struct RibbonButton {
     pub split: bool,
     /// Fixed control width (comboboxes: font 140 / size 52, Office-style).
     pub width: Option<f32>,
+    /// Accessible name when the painted label is empty (#252): the
+    /// compact icon-only tier keeps screen-reader and kittest label
+    /// lookups working (e.g. the align buttons paint icons only).
+    pub alt: Option<&'static str>,
 }
 
 impl RibbonButton {
@@ -1265,6 +1453,7 @@ impl RibbonButton {
             combo: false,
             split: false,
             width: None,
+            alt: None,
         }
     }
     pub fn tip(mut self, tip: &'static str) -> Self {
@@ -1287,6 +1476,19 @@ impl RibbonButton {
         self.split = true;
         self
     }
+    /// Set the accessible name (#252 compact tier).
+    pub fn alt(mut self, a: &'static str) -> Self {
+        self.alt = Some(a);
+        self
+    }
+
+    /// The name assistive tech / kittest sees (the #184 keytip
+    /// letters also key off this — the compact icon-only tier keeps
+    /// its name in `alt`).
+    pub(crate) fn a11y_label(&self) -> &'static str {
+        self.alt.unwrap_or(self.label)
+    }
+
     pub fn width(mut self, w: f32) -> Self {
         self.width = Some(w);
         self
@@ -1321,14 +1523,16 @@ impl RibbonButton {
         }
     }
 
-    /// Visio "hero" button: large icon above the label.
-    pub fn show_big(self, ui: &mut Ui) -> ButtonClick {
+    /// Visio "hero" button: large icon above the label. `on_rect`
+    /// observes the laid-out rect (the #184 keytip badge collector).
+    pub fn show_big(self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+        on_rect(&self, r);
         // The caption is a painted galley — attach its text for
         // screen readers and keyboard focus (GitHub #56).
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
@@ -1355,8 +1559,13 @@ impl RibbonButton {
     }
 
     /// Compact button: small icon beside the label (stacked in a
-    /// narrow column, Visio small-button style).
-    pub fn show_small(self, ui: &mut Ui) -> ButtonClick {
+    /// narrow column, Visio small-button style). `on_rect` observes
+    /// the laid-out rect (the #184 keytip badge collector).
+    pub fn show_small(
+        self,
+        ui: &mut Ui,
+        on_rect: &mut dyn FnMut(&RibbonButton, Rect),
+    ) -> ButtonClick {
         let h = 22.0;
         let gal = ui.painter().layout_no_wrap(
             self.label.to_string(),
@@ -1367,9 +1576,11 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-        // Painted galley caption — name the control (GitHub #56).
+        on_rect(&self, r);
+        // Painted galley caption — name the control (GitHub #56); the
+        // compact icon-only tier carries its name in `alt` (#252).
         resp.widget_info(|| {
-            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.label)
+            egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
         let resp = resp.on_hover_text(self.tip);
         self.paint_frame(ui, r, &resp);
@@ -1504,17 +1715,20 @@ impl Group {
 const CONTENT_H: f32 = 74.0;
 const LABEL_H: f32 = 18.0;
 
-fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
-    let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| {
-        match c {
-            ButtonClick::None => {}
-            ButtonClick::Single => on_action(b.action),
-            ButtonClick::Double => on_action(b.action.double_click_action()),
-        }
+fn show_col(
+    ui: &mut Ui,
+    col: &Col,
+    on_action: &mut dyn FnMut(Action),
+    on_rect: &mut dyn FnMut(&RibbonButton, Rect),
+) {
+    let fire = |on_action: &mut dyn FnMut(Action), b: &RibbonButton, c: ButtonClick| match c {
+        ButtonClick::None => {}
+        ButtonClick::Single => on_action(b.action),
+        ButtonClick::Double => on_action(b.action.double_click_action()),
     };
     match col {
         Col::Big(b) => {
-            let c = (*b).show_big(ui);
+            let c = (*b).show_big(ui, on_rect);
             fire(on_action, b, c);
         }
         Col::Stack(v) => {
@@ -1522,7 +1736,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.vertical(|ui| {
                     for b in v {
-                        let c = (*b).show_small(ui);
+                        let c = (*b).show_small(ui, on_rect);
                         fire(on_action, b, c);
                     }
                 });
@@ -1535,7 +1749,7 @@ fn show_col(ui: &mut Ui, col: &Col, on_action: &mut dyn FnMut(Action)) {
                     for row in rows {
                         ui.horizontal(|ui| {
                             for b in row {
-                                let c = (*b).show_small(ui);
+                                let c = (*b).show_small(ui, on_rect);
                                 fire(on_action, b, c);
                             }
                         });
@@ -1551,6 +1765,7 @@ pub fn content_row(
     groups: &[Group],
     on_action: &mut dyn FnMut(Action),
     on_launcher: &mut dyn FnMut(&'static str),
+    on_rect: &mut dyn FnMut(&RibbonButton, Rect),
 ) {
     let t = theme::shell_tokens(ui.visuals());
     let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
@@ -1565,7 +1780,7 @@ pub fn content_row(
                 // top of the tall hero buttons, like Office)
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                     for col in &g.cols {
-                        show_col(ui, col, on_action);
+                        show_col(ui, col, on_action, on_rect);
                     }
                 });
                 let x1 = ui.next_widget_position().x - ui.spacing().item_spacing.x;

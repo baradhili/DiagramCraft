@@ -230,6 +230,7 @@ pub fn install(ctx: &egui::Context) {
 /// theme and egui's fallback is Dark, so the preference must come from
 /// OS detection (`crate::os_theme`) instead of the integration (#48).
 pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
+    install_fonts(ctx);
     let mut style = Style::default();
     let mut v = Visuals::light();
     v.panel_fill = RIBBON_BG;
@@ -295,6 +296,49 @@ pub fn install_for(ctx: &egui::Context, pref: egui::ThemePreference) {
         });
     }
     ctx.set_theme(pref);
+}
+
+/// Chrome font (#252 plan): Open Sans — the ONLYOFFICE suite's UI
+/// typeface (OFL; vendored under `assets/fonts/opensans`) — leads the
+/// `Proportional` family, with egui's stock faces as glyph fallback.
+/// SemiBold sits second: egui has no weight axis, so it only serves
+/// glyphs the Regular face lacks. Canvas text measurement/raster is
+/// untouched (Liberation/Carlito stack in `dc`).
+///
+/// ONCE per context: `set_fonts` REPLACES the live definitions, which
+/// would wipe the canvas overlay's `add_font` name-families when a
+/// host re-asserts the theme every frame (the kittest harness does;
+/// #22's re-assert design only tolerates a reset BEFORE the first
+/// layout of a pass). The temp flag makes repeat `install_for` calls
+/// no-ops; a fresh context installs on its first frame.
+pub(crate) fn install_fonts(ctx: &egui::Context) {
+    const KEY: &str = "dc-opensans-installed";
+    if ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(KEY)) == Some(true)) {
+        return;
+    }
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "opensans".into(),
+        egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/opensans/OpenSans-Regular.ttf"
+        ))
+        .into(),
+    );
+    fonts.font_data.insert(
+        "opensans-semibold".into(),
+        egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/opensans/OpenSans-SemiBold.ttf"
+        ))
+        .into(),
+    );
+    let prop = fonts
+        .families
+        .get_mut(&egui::FontFamily::Proportional)
+        .expect("proportional family always exists");
+    prop.insert(0, "opensans".into());
+    prop.insert(1, "opensans-semibold".into());
+    ctx.set_fonts(fonts);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::unique(KEY), true));
 }
 
 /// Context-menu color tokens, resolved from the active visuals so the
@@ -527,7 +571,10 @@ mod tests {
             "accent lines must read on dark surfaces"
         );
         assert_ne!(dark.accent_band, dark.accent, "band vs line accent split");
-        assert_eq!(dark.accent_band, ACCENT, "the chrome band stays grey (#154)");
+        assert_eq!(
+            dark.accent_band, ACCENT,
+            "the chrome band stays grey (#154)"
+        );
         assert_eq!(
             light.selection, HIGHLIGHT,
             "the selection frame is the highlight blue (#154)"
@@ -572,5 +619,4 @@ mod tests {
             );
         }
     }
-
 }

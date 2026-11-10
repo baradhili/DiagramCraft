@@ -143,7 +143,10 @@ mod tests {
         assert!(q.is_member(DOCUMENT, 2, true), "a default head is a member");
         assert!(!q.is_member(DOCUMENT, 8, false), "a non-head is not");
         q.add(DOCUMENT, 8);
-        assert!(q.is_member(DOCUMENT, 8, false), "an added extra is a member");
+        assert!(
+            q.is_member(DOCUMENT, 8, false),
+            "an added extra is a member"
+        );
         q.remove(DOCUMENT, 2);
         assert!(!q.is_member(DOCUMENT, 2, true), "a removed default leaves");
         q.add(DOCUMENT, 2);

@@ -44,9 +44,7 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let (Some(sample_dir), Some(manifest), Some(out_dir)) = (args.next(), args.next(), args.next())
     else {
-        eprintln!(
-            "usage: extract-stencils <Visio Content/1033 dir> <manifest.txt> <output dir>"
-        );
+        eprintln!("usage: extract-stencils <Visio Content/1033 dir> <manifest.txt> <output dir>");
         std::process::exit(2);
     };
     let sample_dir = PathBuf::from(sample_dir);
@@ -55,13 +53,13 @@ fn main() -> anyhow::Result<()> {
 
     let mut digests = String::new();
     let emit = |_slug: &str,
-                    category: &str,
-                    title: &str,
-                    source: &str,
-                    out_name: String,
-                    out_dir: &Path,
-                    sample_dir: &Path,
-                    digests: &mut String|
+                category: &str,
+                title: &str,
+                source: &str,
+                out_name: String,
+                out_dir: &Path,
+                sample_dir: &Path,
+                digests: &mut String|
      -> anyhow::Result<()> {
         let doc = extract(&sample_dir.join(source))?;
         let out_path = out_dir.join(&out_name);
@@ -97,7 +95,16 @@ fn main() -> anyhow::Result<()> {
         let (slug, category, title, us, metric) =
             (parts[0], parts[1], parts[2], parts[3], parts[4]);
         if us != "-" {
-            emit(slug, category, title, us, format!("{slug}.vssx"), &out_dir, &sample_dir, &mut digests)?;
+            emit(
+                slug,
+                category,
+                title,
+                us,
+                format!("{slug}.vssx"),
+                &out_dir,
+                &sample_dir,
+                &mut digests,
+            )?;
         }
         if metric != "-" {
             let name = if us != "-" {
@@ -105,7 +112,16 @@ fn main() -> anyhow::Result<()> {
             } else {
                 format!("{slug}.vssx") // metric-only entry: default asset
             };
-            emit(slug, category, title, metric, name, &out_dir, &sample_dir, &mut digests)?;
+            emit(
+                slug,
+                category,
+                title,
+                metric,
+                name,
+                &out_dir,
+                &sample_dir,
+                &mut digests,
+            )?;
         }
     }
     std::fs::write(out_dir.join("digests.txt"), digests)?;

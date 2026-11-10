@@ -134,11 +134,7 @@ impl SnapTarget {
 #[derive(Debug, Clone, Copy)]
 pub enum Guide {
     /// A horizontal guide constrains y; a vertical one constrains x.
-    Line {
-        id: i64,
-        horizontal: bool,
-        at: f64,
-    },
+    Line { id: i64, horizontal: bool, at: f64 },
     /// A guide point constrains both axes.
     Point { id: i64, x: f64, y: f64 },
 }
@@ -284,8 +280,20 @@ pub fn snap_translation(rect: (f64, f64, f64, f64), ctx: &SnapCtx, s: &SnapSetti
     if s.snap_guides {
         for g in ctx.guides {
             if let Guide::Point { id, x, y } = *g {
-                consider_axis(x, SnapHit::Guide(id), &sources_x, ctx.threshold_in, &mut best_x);
-                consider_axis(y, SnapHit::Guide(id), &sources_y, ctx.threshold_in, &mut best_y);
+                consider_axis(
+                    x,
+                    SnapHit::Guide(id),
+                    &sources_x,
+                    ctx.threshold_in,
+                    &mut best_x,
+                );
+                consider_axis(
+                    y,
+                    SnapHit::Guide(id),
+                    &sources_y,
+                    ctx.threshold_in,
+                    &mut best_y,
+                );
             }
         }
     }
@@ -498,11 +506,7 @@ pub fn dynamic_hints(rect: (f64, f64, f64, f64), ctx: &SnapCtx) -> Vec<Hint> {
     let tol = (ctx.threshold_in / 4.0).max(1e-3);
     let (x0, y0, w, h) = rect;
     for vertical in [false, true] {
-        let (drag_lo, drag_hi) = if vertical {
-            (y0, y0 + h)
-        } else {
-            (x0, x0 + w)
-        };
+        let (drag_lo, drag_hi) = if vertical { (y0, y0 + h) } else { (x0, x0 + w) };
         let axis_extent = |t: &SnapTarget| {
             if vertical {
                 (t.rect.1, t.rect.1 + t.rect.3)
@@ -537,16 +541,10 @@ pub fn dynamic_hints(rect: (f64, f64, f64, f64), ctx: &SnapCtx) -> Vec<Hint> {
             if (gb - ga).abs() <= tol && gb > 1e-4 {
                 let (a, b) = if vertical {
                     let cx = x0 + w / 2.0;
-                    (
-                        (cx, y0 - gb, cx, y0),
-                        (pa, y0 + h, pa, y0 + h + ga),
-                    )
+                    ((cx, y0 - gb, cx, y0), (pa, y0 + h, pa, y0 + h + ga))
                 } else {
                     let cy = y0 + h / 2.0;
-                    (
-                        (x0 - gb, cy, x0, cy),
-                        (x0 + w, cy, x0 + w + ga, cy),
-                    )
+                    ((x0 - gb, cy, x0, cy), (x0 + w, cy, x0 + w + ga, cy))
                 };
                 hints.push(Hint::Spacing {
                     a,
@@ -684,7 +682,7 @@ mod tests {
         SnapCtx {
             targets,
             guides,
-            grid_step_in: 5.0 / 25.4, // 5 mm
+            grid_step_in: 5.0 / 25.4,  // 5 mm
             ruler_step_in: 1.0 / 25.4, // 1 mm subdivision
             threshold_in: THRESH,
         }
@@ -785,7 +783,10 @@ mod tests {
             ..Default::default()
         }];
         let r = snap_translation(box_at(0.95, 0.0, 1.0, 1.0), &ctx(&targets, &[]), &s);
-        assert_eq!(r.x_hit.as_ref().map(|(at, h)| (*at, *h)), Some((1.0, SnapHit::AlignmentBox(7))));
+        assert_eq!(
+            r.x_hit.as_ref().map(|(at, h)| (*at, *h)),
+            Some((1.0, SnapHit::AlignmentBox(7)))
+        );
         assert!((r.dx - 0.05).abs() < 1e-9);
     }
 
@@ -860,7 +861,10 @@ mod tests {
             ..Default::default()
         }];
         let r = snap_translation(box_at(0.95, 0.0, 1.0, 1.0), &ctx(&targets, &[]), &s);
-        assert!(r.x_hit.is_none() && r.y_hit.is_none(), "must not snap: {r:?}");
+        assert!(
+            r.x_hit.is_none() && r.y_hit.is_none(),
+            "must not snap: {r:?}"
+        );
         assert_eq!((r.dx, r.dy), (0.0, 0.0));
     }
 
@@ -1163,7 +1167,11 @@ mod guide_tests {
             snap_connection_points: false,
             ..SnapSettings::default()
         };
-        let guides = [Guide::Point { id: 8, x: 3.0, y: 4.0 }];
+        let guides = [Guide::Point {
+            id: 8,
+            x: 3.0,
+            y: 4.0,
+        }];
         let ctx = SnapCtx {
             targets: &[],
             guides: &guides,
@@ -1172,14 +1180,8 @@ mod guide_tests {
             threshold_in: THRESH,
         };
         let r = snap_translation((2.96, 3.94, 1.0, 1.0), &ctx, &s);
-        assert_eq!(
-            r.x_hit.as_ref().map(|(_, h)| *h),
-            Some(SnapHit::Guide(8))
-        );
-        assert_eq!(
-            r.y_hit.as_ref().map(|(_, h)| *h),
-            Some(SnapHit::Guide(8))
-        );
+        assert_eq!(r.x_hit.as_ref().map(|(_, h)| *h), Some(SnapHit::Guide(8)));
+        assert_eq!(r.y_hit.as_ref().map(|(_, h)| *h), Some(SnapHit::Guide(8)));
     }
 
     #[test]
@@ -1191,7 +1193,11 @@ mod guide_tests {
                 horizontal: false,
                 at: 2.5,
             },
-            Guide::Point { id: 8, x: 3.0, y: 4.0 },
+            Guide::Point {
+                id: 8,
+                x: 3.0,
+                y: 4.0,
+            },
         ];
         let ctx = SnapCtx {
             targets: &[],

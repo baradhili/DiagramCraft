@@ -115,6 +115,39 @@ impl View {
         self.fit_mode = false;
         self.fit_pending = false;
     }
+
+    /// Zoom so the selection fills the view (GitHub #237 — Visio's
+    /// Zoom ▸ Selected): the rect is scaled to FILL the content area
+    /// and its center lands at the content center. Unlike the #22
+    /// text-edit zoom the clamps are general — a selection larger
+    /// than the view zooms OUT to center it, and the result is
+    /// bucket-floored like [`View::apply_fit`] so the layer store's
+    /// ppi quantization never re-rasters across nudges. Leaves fit
+    /// mode; a later manual zoom is respected as always. `rect` is
+    /// page inches, y-up `(x, y, w, h)`.
+    pub fn zoom_to_selection(
+        &mut self,
+        rect: (f64, f64, f64, f64),
+        content: Vec2,
+        origin: Vec2,
+        page: &PageGeom,
+    ) {
+        let (x, y, w, h) = rect;
+        // The zoom floors each side at 0.25 in (a hairline selection
+        // must not produce an absurd zoom); the CENTER uses the RAW
+        // dimensions — a 1D connector's h=0 selection would land
+        // 0.125 in off-center otherwise (#218 review).
+        let (wf, hf) = ((w as f32).max(0.25), (h as f32).max(0.25));
+        let zx = content.x / (wf * 96.0);
+        let zy = content.y / (hf * 96.0);
+        self.zoom = ((zx.min(zy) * 384.0).floor() / 384.0).clamp(0.1, 8.0);
+        let cx = x as f32 + w as f32 / 2.0;
+        let cy = page.h_in as f32 - (y as f32 + h as f32 / 2.0);
+        let ppi = self.px_per_in();
+        self.pan = origin + content / 2.0 - Vec2::new(cx * ppi, cy * ppi);
+        self.fit_mode = false;
+        self.fit_pending = false;
+    }
 }
 
 /// Page geometry in inches (y-down on screen after the flip).
@@ -207,6 +240,9 @@ pub struct CanvasOut {
     /// trail in page inches, y-up. The app selects every shape the
     /// trail touches or encloses.
     pub lasso_done: Option<Vec<(f64, f64)>>,
+    /// Freeform drag finished (#132, URS-1225): the sampled pen
+    /// stroke in page inches, y-up. The app builds the geometry shape.
+    pub freeform_done: Option<Vec<(f64, f64)>>,
     /// A ruler drag released over the page (#113 guides slice): the
     /// guide kind and its page position (inches, y-up).
     pub guide_drop: Option<(GuideSource, (f64, f64))>,
@@ -218,6 +254,8 @@ pub struct CanvasOut {
     pub marquee_live: Option<Rect>,
     /// Lasso trail this frame while dragging (screen px).
     pub lasso_live: Option<Vec<Pos2>>,
+    /// The Freeform tool's live pen trail (screen px, #132).
+    pub freeform_live: Option<Vec<Pos2>>,
     /// Shift held at click time (multi-select toggle).
     pub shift_click: bool,
     /// Ctrl/Cmd+click: follow the hit shape's first hyperlink (#28).
@@ -268,6 +306,8 @@ pub struct JumpFx {
     pub under_weight: f64,
     pub color: Color32,
     pub under_color: Color32,
+    /// The page's jump-size multiplier (#251).
+    pub factor: f32,
 }
 
 /// The guide color: Visio's teal guide lines.
@@ -304,16 +344,19 @@ pub enum GeoCell {
     Y,
     Apex,
     OnCurve,
+    /// A CubicBezTo row's first control (A,B) — #202 curve handles.
+    Ctrl,
+    /// A CubicBezTo row's second control (C,D) — #202 curve handles.
+    Ctrl2,
+    /// A NURBSTo row's E-formula interior control point by group
+    /// index — #188 handles; the drag re-emits the formula.
+    NurbsPt(usize),
 }
 
 /// The ArcTo sagitta implied by a pointer position (#157): |A| is the
 /// arc's height over the chord, positive bulging RIGHT of travel
 /// (the renderer's own convention). Pure page/local-agnostic math.
-pub fn arc_sagitta_from_pointer(
-    cur: (f64, f64),
-    end: (f64, f64),
-    p: (f64, f64),
-) -> f64 {
+pub fn arc_sagitta_from_pointer(cur: (f64, f64), end: (f64, f64), p: (f64, f64)) -> f64 {
     let d = (end.0 - cur.0, end.1 - cur.1);
     let len = d.0.hypot(d.1).max(1e-9);
     let right = (d.1 / len, -d.0 / len); // rot90 CW: right of travel
@@ -484,6 +527,16 @@ pub struct DragFx {
     /// inches y-up — painted as dashed full-canvas alignment lines and
     /// labeled gap segments while a drag is live.
     pub hints: Vec<crate::snap::Hint>,
+    /// #226: a styled endpoint-drag ghost is live — the bare
+    /// begin→end live line stands down (the ghost IS the styled ink).
+    pub endpoint_ghost: bool,
+}
+
+/// The currently armed selection handle — the app reads the same
+/// egui temp slot the canvas arms on press (#226: the live
+/// endpoint-drag preview keys off a `LineBegin`/`LineEnd` gesture).
+pub fn armed_handle(ctx: &egui::Context) -> Option<HandleId> {
+    ctx.memory(|m| m.data.get_temp::<HandleId>(egui::Id::unique("dc-handle-drag")))
 }
 
 /// The dynamic-grid hint color: Visio's blue dashed alignment aid.
@@ -545,15 +598,20 @@ pub fn show(
     layers: &[crate::layers::ShapeQuad],
     sel_rect: Option<Rect>,   // primary selection (page-inches, y-down)
     extra_sel_rects: &[Rect], // other multi-selection members
-    member_hl: &[Rect], // #156: selected container's members (page-inches, y-down)
+    member_hl: &[Rect],       // #156: selected container's members (page-inches, y-down)
     handles: &[Handle],       // grab points for the primary selection
-    drag: &DragFx,           // live gesture feedback (#96)
-    guides: &[GuideFx],      // #113: guide overlay, above ink
-    jumps: &[JumpFx],        // #108: line-jump hops, above ink
+    drag: &DragFx,            // live gesture feedback (#96)
+    guides: &[GuideFx],       // #113: guide overlay, above ink
+    jumps: &[JumpFx],         // #108: line-jump hops, above ink
     underlays: &[crate::layers::ShapeQuad], // #113: background pages, beneath ink
-    connector_tool: bool,    // #108: the Connector Tool is active
-    lasso_tool: bool, // #110: the Lasso Select tool is active
+    connector_tool: bool,     // #108: the Connector Tool is active
+    lasso_tool: bool,         // #110: the Lasso Select tool is active
+    freeform_tool: bool,      // #132: the Freeform tool is active
     stencil_hover: bool,
+    // #202: the selected 1D shape's geometry carries a curve row —
+    // the selection layer then skips its begin→end chord stroke (the
+    // ink is the line; a straight chord over it reads as flattened).
+    sel_line_curved: bool,
     // #177: connection-point reveal / glue highlight / glued sites,
     // computed by the app for the live endpoint position (None when
     // no endpoint gesture is live).
@@ -579,10 +637,12 @@ pub fn show(
         press_page_pos: None,
         marquee_done: None,
         lasso_done: None,
+        freeform_done: None,
         guide_drop: None,
         connector_drop: None,
         marquee_live: None,
         lasso_live: None,
+        freeform_live: None,
         shift_click: false,
         ctrl_click: false,
         zoom_changed: false,
@@ -594,17 +654,40 @@ pub fn show(
     // Content area origin (below/right of rulers).
     let (content_origin, content) = content_area(canvas_r, view.show_rulers);
 
-    // Wheel zoom around the hovered point — a manual zoom: leaves fit
-    // mode so later resizes keep the user's view.
+    // Wheel zoom — a manual zoom: leaves fit mode so later resizes
+    // keep the user's view. With an active selection the anchor is the
+    // selection's center (the union of the primary + multi-select
+    // rects — the selection is what the user is working on, #237);
+    // without one the hovered point anchors, as before.
     if let Some(hp) = resp.hover_pos() {
         let scroll = ui.input(|i| i.smooth_scroll_delta.y);
         if scroll != 0.0 {
             let factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
+            // The anchor's screen position uses the PRE-zoom ppi — the
+            // selection's on-screen center before this step.
+            let old_ppi = view.px_per_in();
+            let anchor = sel_rect
+                .into_iter()
+                .chain(extra_sel_rects.iter().copied())
+                .reduce(|a, b| a.union(b))
+                .map(|r| {
+                    Pos2::new(
+                        view.pan.x + r.center().x * old_ppi,
+                        view.pan.y + r.center().y * old_ppi,
+                    )
+                })
+                // An off-screen selection center must not anchor the
+                // zoom (#218 review): after a pan away from the
+                // selection, holding it fixed drags the visible area
+                // off the cursor — the hovered point anchors instead.
+                .filter(|a| canvas_r.contains(*a))
+                .unwrap_or(hp);
             let old = view.zoom;
             view.zoom = (view.zoom * factor).clamp(0.1, 8.0);
             let k = view.zoom / old;
-            // keep the point under the cursor stationary
-            view.pan = hp.to_vec2() - (hp.to_vec2() - view.pan) * k;
+            // Keep the anchor point stationary — the hovered pixel, or
+            // the selection's center when a selection is active.
+            view.pan = anchor.to_vec2() - (anchor.to_vec2() - view.pan) * k;
             view.fit_mode = false;
             out.zoom_changed = true;
         }
@@ -654,7 +737,10 @@ pub fn show(
         );
         Rect::from_min_size(
             tl,
-            Vec2::new(sr.width() * view.px_per_in(), sr.height() * view.px_per_in()),
+            Vec2::new(
+                sr.width() * view.px_per_in(),
+                sr.height() * view.px_per_in(),
+            ),
         )
     });
     let autoc_arrows: Option<Vec<(Rect, (f64, f64))>> = sel_screen.map(|sr| {
@@ -676,15 +762,16 @@ pub fn show(
             .find(|(r, _)| r.contains(pos))
             .map(|(_, d)| *d)
     };
-    let hover_in_sel = resp.hover_pos().is_some_and(|p| {
-        sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some()
-    });
+    let hover_in_sel = resp
+        .hover_pos()
+        .is_some_and(|p| sel_screen.is_some_and(|sr| sr.contains(p)) || arrow_at(p).is_some());
 
     // Stable literal ids are intended for the drag-state memory keys.
     let mem_handle = egui::Id::unique("dc-handle-drag");
     let mem_start = egui::Id::unique("dc-drag-start");
     let mem_marquee = egui::Id::unique("dc-marquee");
     let mem_lasso = egui::Id::unique("dc-lasso");
+    let mem_freeform = egui::Id::unique("dc-freeform");
     let mem_guide = egui::Id::unique("dc-guide-drag");
     let mem_connector = egui::Id::unique("dc-connector-drag");
     let mem_autoc = egui::Id::unique("dc-autoclick");
@@ -707,8 +794,7 @@ pub fn show(
             if let Some(id) = handle_at(p) {
                 ui.ctx().memory_mut(|m| m.data.insert_temp(mem_handle, id));
             } else if let Some(dir) = arrow_at(p) {
-                ui.ctx()
-                    .memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
+                ui.ctx().memory_mut(|m| m.data.insert_temp(mem_autoc, dir));
             } else if connector_tool {
                 // The Connector Tool (#108) owns the gesture: press
                 // anywhere (on a shape = glue start), release on the
@@ -716,6 +802,14 @@ pub fn show(
                 let page_pos = screen_to_page(p, view, page);
                 ui.ctx()
                     .memory_mut(|m| m.data.insert_temp(mem_connector, page_pos));
+            } else if freeform_tool && !ui.input(|i| i.modifiers.command) {
+                // The Freeform Tool (#132) owns the gesture the same
+                // way (#218 review): a press OVER an existing shape
+                // starts the pen stroke, not a shape move — the empty-
+                // page-only branch below never saw those presses. The
+                // command modifier keeps its old pass-through.
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
             } else if view.show_rulers
                 && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
             {
@@ -796,7 +890,8 @@ pub fn show(
     let mut guide_live: Option<(GuideSource, (f64, f64))> = None;
     if let Some(src) = guide_armed {
         if primary_released || !ui.input(|i| i.pointer.primary_down()) {
-            ui.ctx().memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<GuideSource>(mem_guide));
             if primary_released {
                 if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
                     let page_pos = screen_to_page(p, view, page);
@@ -847,9 +942,7 @@ pub fn show(
     // release selects every shape the trail touches or encloses. A
     // near-zero-length trail is just a click on empty page — the click
     // path handles selection.
-    let lasso_armed = ui
-        .ctx()
-        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
+    let lasso_armed = ui.ctx().memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_lasso));
     if let Some(mut trail) = lasso_armed {
         if primary_released || !ui.input(|i| i.pointer.primary_down()) {
             ui.ctx()
@@ -873,6 +966,37 @@ pub fn show(
                     .memory_mut(|m| m.data.insert_temp(mem_lasso, trail.clone()));
             }
             out.lasso_live = Some(trail);
+        }
+    }
+
+    // Freeform (#132, URS-1225): armed on an empty-page press while
+    // the tool is active; the pen trail samples the pointer; release
+    // hands the stroke to the app, which builds the geometry shape.
+    let freeform_armed = ui
+        .ctx()
+        .memory(|m| m.data.get_temp::<Vec<Pos2>>(mem_freeform));
+    if let Some(mut trail) = freeform_armed {
+        if primary_released || !ui.input(|i| i.pointer.primary_down()) {
+            ui.ctx()
+                .memory_mut(|m| m.data.remove::<Vec<Pos2>>(mem_freeform));
+            if primary_released {
+                let len_px: f32 = trail.windows(2).map(|w| w[0].distance(w[1])).sum();
+                if len_px > 2.0 && trail.len() >= 2 {
+                    out.freeform_done = Some(
+                        trail
+                            .iter()
+                            .map(|p| screen_to_page(*p, view, page))
+                            .collect(),
+                    );
+                }
+            }
+        } else if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+            if trail.last().is_none_or(|l| l.distance(p) > 0.75) {
+                trail.push(p);
+                ui.ctx()
+                    .memory_mut(|m| m.data.insert_temp(mem_freeform, trail.clone()));
+            }
+            out.freeform_live = Some(trail);
         }
     }
 
@@ -907,8 +1031,9 @@ pub fn show(
     }
 
     // The Connector Tool draws with a crosshair (Visio); the Lasso
-    // trails freehand, also a crosshair.
-    if connector_tool || lasso_tool {
+    // trails freehand and the Freeform pen lays down a stroke — all
+    // crosshairs (#218 review round 3).
+    if connector_tool || lasso_tool || freeform_tool {
         ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
     }
     // AutoConnect arrow cursor.
@@ -1031,7 +1156,11 @@ pub fn show(
     // ink, below the selection chrome. A selected guide draws solid;
     // a live ruler-drag preview follows the pointer.
     let draw_guide = |g: GuideFx, live: bool| {
-        let color = if g.selected { Color32::from_rgb(0x00, 0x6D, 0x7D) } else { GUIDE };
+        let color = if g.selected {
+            Color32::from_rgb(0x00, 0x6D, 0x7D)
+        } else {
+            GUIDE
+        };
         match g.vertical {
             Some(true) => {
                 let x = page_to_screen(g.x, 0.0, view, page).x;
@@ -1135,7 +1264,12 @@ pub fn show(
         beg.zip(end)
     };
     if let Some((beg, end)) = line_handles {
-        p.line_segment([beg, end], Stroke::new(1.2, t.selection));
+        // #202: a curved connector's ink IS the line — stroking the
+        // straight begin→end chord over it reads as "the drag
+        // flattened the curve". Only all-straight rows keep the chord.
+        if !sel_line_curved {
+            p.line_segment([beg, end], Stroke::new(1.2, t.selection));
+        }
     } else if let Some(sr) = sel_rect.map(to_screen) {
         p.rect_stroke(
             sr,
@@ -1159,7 +1293,11 @@ pub fn show(
                         t.selection,
                     );
                 }
-                GeoCell::Apex | GeoCell::OnCurve => {
+                GeoCell::Apex
+                | GeoCell::OnCurve
+                | GeoCell::Ctrl
+                | GeoCell::Ctrl2
+                | GeoCell::NurbsPt(_) => {
                     p.circle_filled(*pos, 4.0, t.selection);
                     p.circle_stroke(*pos, 5.0, Stroke::new(1.0, Color32::WHITE));
                 }
@@ -1228,13 +1366,10 @@ pub fn show(
     let mut outlines: Vec<Rect> = drag.outlines.clone();
     let mut lines: Vec<(Pos2, Pos2)> = drag.lines.clone();
     let mut handle_ghosts: Vec<crate::layers::ShapeQuad> = Vec::new();
-    if let (Some(hid), Some(ptr)) = (
-        armed_handle,
-        ui.input(|i| i.pointer.interact_pos()),
-    ) {
+    if let (Some(hid), Some(ptr)) = (armed_handle, ui.input(|i| i.pointer.interact_pos())) {
         let ptr_page = screen_to_page(ptr, view, page); // y-up inches
-        // The primary's landed layer quad (matched by bbox center —
-        // the ink bbox and the selection rect share it).
+                                                        // The primary's landed layer quad (matched by bbox center —
+                                                        // the ink bbox and the selection rect share it).
         let primary_quad = sel_rect.and_then(|sr| {
             let (cx, cy) = (sr.center().x as f64, sr.center().y as f64);
             layers.iter().find(|q| {
@@ -1261,12 +1396,7 @@ pub fn show(
                             ui.ctx()
                                 .memory(|m| m.data.get_temp::<Pos2>(mem_start))
                                 .map(|st| screen_to_page(st, view, page))
-                                .map(|st| {
-                                    (
-                                        o.0 + ptr_page.0 - st.0,
-                                        o.1 + ptr_page.1 - st.1,
-                                    )
-                                })
+                                .map(|st| (o.0 + ptr_page.0 - st.0, o.1 + ptr_page.1 - st.1))
                         })
                         .unwrap_or(ptr_page);
                     let ptr_page = snap_resize(corner_page).unwrap_or(ptr_page);
@@ -1339,7 +1469,12 @@ pub fn show(
                 let snapped = snap_endpoint(true, ptr_page);
                 let sn_screen = page_to_screen(snapped.0, snapped.1, view, page);
                 if let Some((_, o)) = handles_screen.iter().find(|(id, _)| *id == other) {
-                    lines.push((*o, sn_screen));
+                    // #226: when the styled endpoint ghost paints the
+                    // whole styled ink, the bare chord stands down —
+                    // it only serves as the raster-missing fallback.
+                    if !drag.endpoint_ghost {
+                        lines.push((*o, sn_screen));
+                    }
                 }
             }
             HandleId::GeoPoint { .. } => {
@@ -1436,11 +1571,7 @@ pub fn show(
     if let Some(q) = fx.glue_target {
         // The live glue target: Visio's filled green square.
         let c = page_to_screen(q.0, q.1, view, page);
-        p.rect_filled(
-            Rect::from_center_size(c, Vec2::splat(9.0)),
-            1.5,
-            GLUE,
-        );
+        p.rect_filled(Rect::from_center_size(c, Vec2::splat(9.0)), 1.5, GLUE);
         p.rect_stroke(
             Rect::from_center_size(c, Vec2::splat(9.0)),
             1.5,
@@ -1459,7 +1590,12 @@ pub fn show(
         // square ring in the selection color — Delete removes it.
         let c = page_to_screen(q.0, q.1, view, page);
         let r = Rect::from_center_size(c, Vec2::splat(10.0));
-        p.rect_stroke(r, 0.0, Stroke::new(2.0, t.selection), egui::StrokeKind::Middle);
+        p.rect_stroke(
+            r,
+            0.0,
+            Stroke::new(2.0, t.selection),
+            egui::StrokeKind::Middle,
+        );
         let d = 2.5;
         for (a, b) in [
             (c - Vec2::new(d, d), c + Vec2::new(d, d)),
@@ -1476,10 +1612,16 @@ pub fn show(
             crate::snap::Hint::Align { vertical, at } => {
                 let (a, b) = if vertical {
                     let x = page_to_screen(at, 0.0, view, page).x;
-                    (Pos2::new(x, canvas_r.top()), Pos2::new(x, canvas_r.bottom()))
+                    (
+                        Pos2::new(x, canvas_r.top()),
+                        Pos2::new(x, canvas_r.bottom()),
+                    )
                 } else {
                     let y = page_to_screen(0.0, at, view, page).y;
-                    (Pos2::new(canvas_r.left(), y), Pos2::new(canvas_r.right(), y))
+                    (
+                        Pos2::new(canvas_r.left(), y),
+                        Pos2::new(canvas_r.right(), y),
+                    )
                 };
                 dashed(&p, a, b, HINT);
             }
@@ -1526,16 +1668,23 @@ pub fn show(
         }
     }
 
+    // Freeform pen trail (#132) — SOLID: it previews the shape's
+    // future ink, not a selection aid.
+    if let Some(trail) = &out.freeform_live {
+        if trail.len() >= 2 {
+            p.add(egui::Shape::line(
+                trail.clone(),
+                Stroke::new(1.5, t.selection),
+            ));
+        }
+    }
+
     // Container member highlight (#156): Visio tints the selected
     // container's members — a translucent accent fill + thin stroke
     // above the ink, never exported.
     for r in member_hl {
         let sr = to_screen(*r);
-        p.rect_filled(
-            sr,
-            1.0,
-            Color32::from_rgba_premultiplied(46, 117, 182, 36),
-        );
+        p.rect_filled(sr, 1.0, Color32::from_rgba_premultiplied(46, 117, 182, 36));
         p.rect_stroke(
             sr,
             1.0,
@@ -1569,11 +1718,7 @@ pub fn show(
                         Stroke::new(1.0, Color32::from_rgb(0x2e, 0x75, 0xb6)),
                     )
                 };
-                p.add(egui::Shape::convex_polygon(
-                    vec![tip, b1, b2],
-                    fill,
-                    stroke,
-                ));
+                p.add(egui::Shape::convex_polygon(vec![tip, b1, b2], fill, stroke));
             }
         }
     }
@@ -1583,7 +1728,7 @@ pub fn show(
     // the jumper over the crossing (Visio's default arc style).
     for j in jumps {
         let ppi = view.px_per_in();
-        let r = crate::connectors::JUMP_RADIUS_IN as f32 * ppi;
+        let r = crate::connectors::JUMP_RADIUS_IN as f32 * j.factor * ppi;
         let at = page_to_screen(j.at.0, j.at.1, view, page);
         let dir = Vec2::new(j.dir.0 as f32, -(j.dir.1 as f32)); // y flip
         let under = Vec2::new(j.under.0 as f32, -(j.under.1 as f32));
@@ -1825,20 +1970,21 @@ mod tests {
         // A trail far away does not.
         assert!(!lasso_hits_rect(&trail, 1.0, 4.0, 2.0, 1.0, 1e-6));
         // A sample inside selects.
-        assert!(lasso_hits_rect(&[(0.0, 5.0), (1.5, 1.5)], 1.0, 1.0, 2.0, 1.0, 1e-6));
+        assert!(lasso_hits_rect(
+            &[(0.0, 5.0), (1.5, 1.5)],
+            1.0,
+            1.0,
+            2.0,
+            1.0,
+            1e-6
+        ));
     }
 
     #[test]
     fn lasso_loop_selects_the_enclosed() {
         // A loop around the rect without any sample inside or segment
         // crossing: the enclosed center (2, 1.5) selects.
-        let loop_trail = [
-            (0.0, 0.0),
-            (5.0, 0.0),
-            (5.0, 4.0),
-            (0.0, 4.0),
-            (0.0, 0.0),
-        ];
+        let loop_trail = [(0.0, 0.0), (5.0, 0.0), (5.0, 4.0), (0.0, 4.0), (0.0, 0.0)];
         assert!(lasso_hits_rect(&loop_trail, 1.0, 1.0, 2.0, 1.0, 1e-6));
         // The same loop does not select a shape outside it.
         assert!(!lasso_hits_rect(&loop_trail, 6.0, 1.0, 2.0, 1.0, 1e-6));
@@ -1940,6 +2086,97 @@ mod tests {
             (view.pan.y - (22.0 + ((600.0 - ph).max(0.0) / 2.0).max(12.0))).abs() < 0.5,
             "pan.y {}",
             view.pan.y
+        );
+    }
+
+    /// #237: zoom-to-selection fills the content with the rect and
+    /// centers it, leaves fit mode, and zooms OUT for a selection
+    /// larger than the view (general clamps, unlike the #22 text-edit
+    /// zoom that never zooms out).
+    #[test]
+    fn zoom_to_selection_fills_and_centers() {
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
+        // A 1×1 in selection: the height axis governs — 600 px / 96 =
+        // 6.25× fills exactly (the width axis would want 8.33×).
+        view.zoom_to_selection((1.0, 1.0, 1.0, 1.0), Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
+        assert!((view.zoom - 6.25).abs() < 1e-4, "fills at 6.25×: {}", view.zoom);
+        assert!(!view.fit_mode, "leaves fit mode");
+        assert!(!view.fit_pending, "no pending fit");
+        // The selection's page center sits at the content center.
+        let ppi = view.px_per_in();
+        let cx = view.pan.x + (1.5 * ppi);
+        let cy = view.pan.y + (11.0 - 1.5) * ppi;
+        assert!((cx - 400.0).abs() < 0.5, "center x on-screen: {cx}");
+        assert!((cy - 300.0).abs() < 0.5, "center y on-screen: {cy}");
+
+        // A 2×1 in rect in a 400×400 area: zx = 400/192 = 2.083, zy =
+        // 400/96 = 4.17 → fill zoom = 2.083 (the min axis fills).
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::ZERO, &page);
+        view.zoom_to_selection((0.0, 0.0, 2.0, 1.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        let want = ((400.0f32 / (2.0 * 96.0)) * 384.0).floor() / 384.0;
+        assert!((view.zoom - want).abs() < 1e-4, "fill zoom: {}", view.zoom);
+        // The rect's center lands at the content center.
+        let ppi = view.px_per_in();
+        assert!((view.pan.x + 1.0 * ppi - 200.0).abs() < 0.5);
+        assert!((view.pan.y + (11.0 - 0.5) * ppi - 200.0).abs() < 0.5);
+
+        // A selection larger than the view zooms OUT to center it —
+        // the general clamp, against the text-edit zoom's ≥100 % rule.
+        let mut view = View {
+            zoom: 2.0,
+            fit_mode: false,
+            ..View::default()
+        };
+        view.zoom_to_selection((0.0, 0.0, 16.0, 20.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        assert!(
+            (view.zoom - (400.0 / (20.0 * 96.0))).abs() < 0.01,
+            "zoomed out to fit: {}",
+            view.zoom
+        );
+        // Degenerate rects floor at 0.25 in instead of absurd zooms.
+        let mut view = View::default();
+        view.zoom_to_selection((0.0, 0.0, 0.0, 0.0), Vec2::new(400.0, 400.0), Vec2::ZERO, &page);
+        assert!((view.zoom - 8.0).abs() < 1e-4, "hairline caps at 8×: {}", view.zoom);
+    }
+
+    /// #237: the wheel zoom anchors on the selection's center — the
+    /// point stays stationary across the zoom (a pure view-state
+    /// assertion over the same pan math `show` runs).
+    #[test]
+    fn wheel_anchor_math_holds_the_selection_center() {
+        let page = PageGeom {
+            w_in: 8.5,
+            h_in: 11.0,
+        };
+        let mut view = View::default();
+        view.apply_fit(Vec2::new(800.0, 600.0), Vec2::new(22.0, 22.0), &page);
+        // The selection's screen-space center (page y-down inches →
+        // screen, the mapping `show`'s wheel handler uses).
+        let sel = Rect::from_min_size(Pos2::new(4.0, 5.0), Vec2::new(1.0, 1.0));
+        let center = |v: &View| {
+            Pos2::new(
+                v.pan.x + sel.center().x * v.px_per_in(),
+                v.pan.y + sel.center().y * v.px_per_in(),
+            )
+        };
+        let before = center(&view);
+        // The handler's math: k = new/old, pan = anchor − (anchor −
+        // pan)·k.
+        let factor = 1.1;
+        let old = view.zoom;
+        view.zoom = (view.zoom * factor).clamp(0.1, 8.0);
+        let k = view.zoom / old;
+        view.pan = before.to_vec2() - (before.to_vec2() - view.pan) * k;
+        let after = center(&view);
+        assert!(
+            before.distance(after) < 0.01,
+            "the selection center is stationary: {before} vs {after}"
         );
     }
 

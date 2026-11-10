@@ -121,21 +121,19 @@ impl RelativePaths {
             .ok()
             .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
             .and_then(|v| {
-                v.get("on")
-                    .and_then(|a| a.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|e| {
-                                let p = e.get(0)?.as_str()?;
-                                if p.is_empty() {
-                                    // The unsaved-document key never
-                                    // persists (session-only, below).
-                                    return None;
-                                }
-                                Some((PathBuf::from(p), e.get(1)?.as_bool()?))
-                            })
-                            .collect()
-                    })
+                v.get("on").and_then(|a| a.as_array()).map(|a| {
+                    a.iter()
+                        .filter_map(|e| {
+                            let p = e.get(0)?.as_str()?;
+                            if p.is_empty() {
+                                // The unsaved-document key never
+                                // persists (session-only, below).
+                                return None;
+                            }
+                            Some((PathBuf::from(p), e.get(1)?.as_bool()?))
+                        })
+                        .collect()
+                })
             })
             .unwrap_or_default();
         RelativePaths {
@@ -229,7 +227,11 @@ mod tests {
         // Single-letter schemes are Windows drive letters, not URLs —
         // a relative drive path must resolve against the doc dir, not
         // pass through as a link.
-        for p in ["C:\\Users\\me\\notes.txt", "c:/Users/me/notes.txt", "Q:sibling.txt"] {
+        for p in [
+            "C:\\Users\\me\\notes.txt",
+            "c:/Users/me/notes.txt",
+            "Q:sibling.txt",
+        ] {
             assert!(!is_url(p), "{p} is a filesystem path");
         }
         // Bare names and scheme-less text are paths too.
@@ -282,7 +284,9 @@ mod tests {
         assert_eq!(stored, "sub/spec.pdf");
         assert_eq!(
             resolve_address(&stored, Some(dir)),
-            PathBuf::from("/drawings").join("sub/spec.pdf").to_string_lossy()
+            PathBuf::from("/drawings")
+                .join("sub/spec.pdf")
+                .to_string_lossy()
         );
         // An unsaved document passes the relative form through.
         assert_eq!(resolve_address(&stored, None), stored);
@@ -326,10 +330,8 @@ mod tests {
             "version": 1,
             "on": [["", true], ["/docs/b.vsdx", true]]
         });
-        let v: serde_json::Value = serde_json::from_str(
-            &serde_json::to_string(&poisoned).unwrap(),
-        )
-        .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&poisoned).unwrap()).unwrap();
         let loaded: Vec<_> = v
             .get("on")
             .unwrap()
@@ -350,7 +352,10 @@ mod tests {
 
     #[test]
     fn doc_dir_of_a_saved_file() {
-        assert_eq!(doc_dir(Path::new("/drawings/a.vsdx")), Some(Path::new("/drawings")));
+        assert_eq!(
+            doc_dir(Path::new("/drawings/a.vsdx")),
+            Some(Path::new("/drawings"))
+        );
         assert_eq!(doc_dir(Path::new("a.vsdx")), None);
     }
 }
