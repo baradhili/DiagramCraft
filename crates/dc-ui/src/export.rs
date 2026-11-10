@@ -220,7 +220,9 @@ impl ExportPane {
             return;
         }
         let format = self.format;
-        let transparent = self.transparent;
+        // #218 review: PDF has no alpha — a stale hidden-toggle value
+        // must not strip its white page fill (png/svg keep it).
+        let transparent = self.transparent && self.format != Format::Pdf;
         // Finite and bounded (#218 review): "inf" parses, and an
         // unbounded density asks gigabytes of RGBA from the raster.
         let dpi = self

@@ -215,16 +215,36 @@ impl<'db> PdfContext<'db> {
         }
         let mut found: Option<FaceKey> = None;
         for face in self.db.faces() {
-            let Some((data, index)) = self.face_data(FaceKey(face.id)) else {
-                continue;
-            };
-            if face_covers(&data, index, c) {
+            // Coverage scans probe WITHOUT face_data (#218 review):
+            // the memo would retain every probed font's bytes for the
+            // rest of the export — a system font directory is
+            // hundreds of faces for one char lookup. Only faces that
+            // actually shape or embed go through face_data.
+            if self.face_covers_uncached(face.id, c) {
                 found = Some(FaceKey(face.id));
                 break;
             }
         }
         self.fallbacks.insert(c, found);
         found
+    }
+
+    /// A coverage probe that holds no font bytes past the call:
+    /// binary sources borrow the db's own arc, file sources read and
+    /// drop. Never touches `face_cache`.
+    fn face_covers_uncached(&self, id: fontdb::ID, c: char) -> bool {
+        let Some(info) = self.db.face(id) else {
+            return false;
+        };
+        match &info.source {
+            fontdb::Source::Binary(arc) => face_covers((**arc).as_ref(), info.index, c),
+            fontdb::Source::SharedFile(_, arc) => face_covers((**arc).as_ref(), info.index, c),
+            fontdb::Source::File(path) => std::fs::read(path)
+                .map(|bytes| face_covers(&bytes, info.index, c))
+                .unwrap_or(false),
+            #[allow(unreachable_patterns)] // memmap-off builds
+            _ => false,
+        }
     }
 
     /// Resolve a face key to refs, registering on first use.

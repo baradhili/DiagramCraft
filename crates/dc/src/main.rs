@@ -399,6 +399,12 @@ fn run_export(
             out.display()
         );
     };
+    // #218 review: reject nonsense densities before any rendering —
+    // NaN/inf parse fine and a zero/negative dpi asks for nothing (or
+    // gigabytes via a negative scale).
+    if !dpi.is_finite() || dpi <= 0.0 {
+        bail!("--dpi must be a positive finite number, got {dpi}");
+    }
     let doc = vsdx::parse::parse(path).with_context(|| format!("opening {}", path.display()))?;
     if doc.pages.is_empty() {
         bail!("document has no pages");

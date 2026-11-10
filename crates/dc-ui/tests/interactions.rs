@@ -921,14 +921,17 @@ fn file_open_parses_on_the_worker_and_lands() {
     vsdx::write::save(&doc, &path).unwrap();
     h.state_mut().open_file_for_test(path);
     // The parse is async now: pump frames until the editor lands.
-    let mut waited = 0;
+    // Wall-clock deadline, sleeping every iteration (#218 review
+    // round 3): iteration counts race slow machines and spin fast
+    // ones.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while !h.state().debug_doc_open() {
-        waited += 1;
-        assert!(waited < 20_000, "the worker parse never landed");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker parse never landed"
+        );
         h.run();
-        if waited % 500 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert_eq!(
         h.state().debug_shape_count(),
@@ -941,14 +944,15 @@ fn file_open_parses_on_the_worker_and_lands() {
     );
     // #242: the scrim runs until the first RENDER completes — pump
     // until the rendering phase clears too (the layer store drained).
-    let mut waited = 0;
+    // Same wall-clock deadline pattern as the parse loop above.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while h.state().debug_rendering_for_test() {
-        waited += 1;
-        assert!(waited < 20_000, "the rendering phase never drained");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rendering phase never drained"
+        );
         h.run();
-        if waited % 500 == 0 {
-            std::thread::sleep(std::time::Duration::from_millis(1));
-        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
 }
 
