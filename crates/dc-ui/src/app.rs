@@ -3054,6 +3054,10 @@ impl App {
         let mut letter: Option<char> = None;
         let mut click = false;
         let mut clean = self.keytips.alt_down_clean;
+        // The combo path (Alt held) must not steal from a text field:
+        // on macOS egui reports Option as Alt, and Option+letter is
+        // how accents/layout characters are typed (#218 review round).
+        let kb_owned = ctx.egui_wants_keyboard_input();
         ctx.input(|i| {
             click = i.pointer.any_click();
             for e in &i.events {
@@ -3088,7 +3092,7 @@ impl App {
                         // tap state stays truthful.
                         if !m.ctrl
                             && !m.command
-                            && (m.alt || armed)
+                            && (armed || (m.alt && !kb_owned))
                             && is_keytip_key(*k)
                             && letter.is_none()
                         {
@@ -11946,9 +11950,13 @@ impl App {
         }
         let n = cmds.len();
         self.apply(dc_core::Macro::new(format!("ungroup {n} group(s)"), cmds));
-        if let Some((_, Some(m))) = groups.first() {
-            self.set_selection(Some((page_id, *m)));
-        }
+        // The selection becomes the first EX-MEMBER of a group that
+        // was actually ungrouped — `groups.first()` can be a plain
+        // shape (None member), which left sel_set holding the removed
+        // group ids and rolled back a following Delete (#218 review
+        // round). Reset either way: the old ids are gone.
+        let first = groups.iter().find_map(|(_, m)| *m);
+        self.set_selection(first.map(|m| (page_id, m)));
     }
 
     fn rotate_selection(&mut self, deg: f64) {

@@ -131,7 +131,17 @@ pub fn tab_keytip(t: Tab) -> Option<&'static str> {
 /// Labels whose alphabet and digits are exhausted get `None` (no
 /// badge — with a tab's worth of controls this does not happen).
 pub fn assign_control_letters(labels: &[&'static str]) -> Vec<Option<char>> {
-    let mut taken: Vec<char> = Vec::new();
+    assign_control_letters_reserved(labels, &[])
+}
+
+/// [`assign_control_letters`] with keys other visible badges already
+/// carry — the QAT digits stay visible at the Controls level, so a
+/// fallback digit must never repeat one (#218 review round).
+pub fn assign_control_letters_reserved(
+    labels: &[&'static str],
+    reserved: &[char],
+) -> Vec<Option<char>> {
+    let mut taken: Vec<char> = reserved.to_vec();
     let mut out = Vec::with_capacity(labels.len());
     for label in labels {
         let pick = label
@@ -153,6 +163,13 @@ pub fn assign_control_letters(labels: &[&'static str]) -> Vec<Option<char>> {
 /// Badges that already carry a key (the strip letters, QAT digits)
 /// keep it and never join the letter pool.
 pub(crate) fn assign_badge_letters(badges: &mut [Badge]) {
+    // Keys already visible at the Controls level (the QAT digits) are
+    // taken before any fallback digit collides with them.
+    let reserved: Vec<char> = badges
+        .iter()
+        .filter(|b| !b.key.is_empty() && matches!(b.hit, Hit::Action { .. }))
+        .filter_map(|b| b.key.chars().next())
+        .collect();
     let pending: Vec<usize> = badges
         .iter()
         .enumerate()
@@ -166,7 +183,10 @@ pub(crate) fn assign_badge_letters(badges: &mut [Badge]) {
             _ => "",
         })
         .collect();
-    for (&i, letter) in pending.iter().zip(assign_control_letters(&labels)) {
+    for (&i, letter) in pending
+        .iter()
+        .zip(assign_control_letters_reserved(&labels, &reserved))
+    {
         if let Some(c) = letter {
             badges[i].key = c.to_string();
         }
@@ -289,6 +309,21 @@ mod tests {
         let out = assign_control_letters(&all);
         assert!(out[0..26].iter().all(|c| c.is_some()));
         assert_eq!(out[26], Some('1'));
+    }
+
+    #[test]
+    fn reserved_keys_are_never_reused() {
+        // Every letter already taken: the digit fallback must skip the
+        // reserved digits (a live QAT badge) and start after them.
+        let reserved: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ34".chars().collect();
+        let out = assign_control_letters_reserved(
+            &["Alpha", "Bravo", "Charlie", "Delta", "Echo"],
+            &reserved,
+        );
+        assert_eq!(
+            out,
+            vec![Some('1'), Some('2'), Some('5'), Some('6'), Some('7')]
+        );
     }
 
     #[test]

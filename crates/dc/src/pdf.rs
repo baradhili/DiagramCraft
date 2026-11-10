@@ -1110,7 +1110,7 @@ fn face_bytes(data: &[u8], index: u32) -> Vec<u8> {
                     data[at + 3],
                 ]) as usize;
                 if o + 12 <= data.len() {
-                    if let Some(out) = rebuild_sfnt(&data[o..], o) {
+                    if let Some(out) = rebuild_sfnt(data, o) {
                         return out;
                     }
                 }
@@ -1120,12 +1120,19 @@ fn face_bytes(data: &[u8], index: u32) -> Vec<u8> {
     data.to_vec()
 }
 
-/// Rebuild one sfnt (header at `face`, itself positioned `base` into
-/// the collection) into a standalone font: copy the table directory
-/// and re-point each entry at the table's new position, 4-byte
-/// aligned as the spec requires. The stored offsets count from the
-/// COLLECTION start — translate them through `base`.
-fn rebuild_sfnt(face: &[u8], base: usize) -> Option<Vec<u8>> {
+/// Rebuild one sfnt (its header at `header` into the COLLECTION
+/// `data`) into a standalone font: copy the table directory and
+/// re-point each entry at the table's new position, 4-byte aligned
+/// as the spec requires. The stored offsets count from the
+/// COLLECTION start and may point anywhere in it — collections
+/// share tables across faces, and a shared table can physically
+/// PRECEDE this face's header (Noto CJK .ttc/.otc do exactly that),
+/// so tables are read from the whole collection at their absolute
+/// offsets (#218 review round: rebasing through `header` made any
+/// preceding table fail the rebuild and fall back to embedding the
+/// whole collection as a font program).
+fn rebuild_sfnt(data: &[u8], header: usize) -> Option<Vec<u8>> {
+    let face = data.get(header..)?;
     if face.len() < 12 {
         return None;
     }
@@ -1140,8 +1147,7 @@ fn rebuild_sfnt(face: &[u8], base: usize) -> Option<Vec<u8>> {
         let at = 12 + e * 16;
         let off = u32::from_be_bytes(face[at + 8..at + 12].try_into().ok()?) as usize;
         let len = u32::from_be_bytes(face[at + 12..at + 16].try_into().ok()?) as usize;
-        let off = off.checked_sub(base)?;
-        if off + len > face.len() {
+        if off.checked_add(len)? > data.len() {
             return None;
         }
         spans.push((off, len));
@@ -1153,7 +1159,7 @@ fn rebuild_sfnt(face: &[u8], base: usize) -> Option<Vec<u8>> {
     for (e, (off, len)) in spans.iter().enumerate() {
         let at = 12 + e * 16;
         out[at + 8..at + 12].copy_from_slice(&(cursor as u32).to_be_bytes());
-        out[cursor..cursor + len].copy_from_slice(&face[*off..*off + len]);
+        out[cursor..cursor + len].copy_from_slice(&data[*off..*off + len]);
         cursor += (len + 3) & !3;
     }
     Some(out)
@@ -1433,8 +1439,26 @@ mod tests {
         ttc.extend_from_slice(&embed_at(font, 20));
         ttc.extend_from_slice(&embed_at(font, 20 + head));
 
+        // A shared-table face: face 1's directory still points at
+        // FACE 0's tables (the `embed_at(font, 20)` offsets) —
+        // physically before face 1's header, the Noto-CJK-collection
+        // shape. The rebuild must read them at their absolute
+        // collection offsets.
+        let shared = embed_at(font, 20);
+        let mut ttc_shared = ttc.clone();
+        let face1_at = (20 + head) as usize;
+        ttc_shared[face1_at..face1_at + shared.len()].copy_from_slice(&shared);
+
         let f0 = face_bytes(&ttc, 0);
         let f1 = face_bytes(&ttc, 1);
+        let fs = face_bytes(&ttc_shared, 1);
+        let face = ttf_parser::Face::parse(&fs, 0)
+            .unwrap_or_else(|e| panic!("shared-table face parses standalone: {e}"));
+        assert_eq!(
+            face.number_of_glyphs(),
+            ttf_parser::Face::parse(font, 0).unwrap().number_of_glyphs(),
+            "the shared face carries face 0's tables"
+        );
         let src_face = ttf_parser::Face::parse(font, 0).unwrap();
         for (i, bytes) in [(0usize, &f0), (1, &f1)] {
             let face = ttf_parser::Face::parse(bytes, 0)
