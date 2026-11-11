@@ -6,7 +6,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1360.0, 860.0])
             .with_min_inner_size([980.0, 640.0])
-            .with_title("Tarahi")
+            .with_title(dc_ui::i18n::strs().msg_about_name())
             // The desktop entry's StartupWMClass (#218 review):
             // without an explicit app id, Wayland toplevels get an
             // auto-generated one and the entry cannot group its
@@ -15,7 +15,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "Tarahi",
+        &dc_ui::i18n::strs().msg_about_name(),
         options,
         Box::new(|cc| Ok(Box::new(dc_ui::app::App::new(cc, path)))),
     )

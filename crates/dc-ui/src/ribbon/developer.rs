@@ -7,32 +7,32 @@ use super::{Action, Group, Icon, RibbonButton, TabCtx, big, grid, stack};
 
 pub(crate) fn groups(ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new("Code", code_cols(ctx)),
-        Group::new("Add-ins", addins_cols()),
-        Group::new("Controls", controls_cols()),
-        Group::new("Shape Design", shape_design_grid()),
-        Group::new("Stencil", stencil_cols()),
-        Group::new("Show/Hide", show_hide_grid(ctx)),
+        Group::new(crate::i18n::strs().msg_code(), code_cols(ctx)),
+        Group::new(crate::i18n::strs().msg_add_ins(), addins_cols()),
+        Group::new(crate::i18n::strs().msg_controls(), controls_cols()),
+        Group::new(crate::i18n::strs().msg_shape_design(), shape_design_grid()),
+        Group::new(crate::i18n::strs().msg_stencil(), stencil_cols()),
+        Group::new(crate::i18n::strs().msg_show_hide(), show_hide_grid(ctx)),
     ]
 }
 
 fn code_cols(ctx: &TabCtx) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::ShapeSheet, "ShapeSheet", Action::ShowShapeSheet)
+            RibbonButton::new(Icon::ShapeSheet, crate::i18n::strs().msg_shapesheet(), Action::ShowShapeSheet)
                 .selected(ctx.shapesheet_open)
-                .tip("Inspect the selected shape's cells"),
+                .tip(crate::i18n::strs().msg_inspect_the_selected_shape_s_cel()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::Macro, "", Action::Macros)
-                    .alt("Visual Basic")
+                    .alt(crate::i18n::strs().msg_visual_basic())
                     .enabled(false)
-                    .tip("VBA arrives with M7 (.vsdm)"),
+                    .tip(crate::i18n::strs().msg_vba_arrives_with_m7_vsdm()),
                 RibbonButton::new(Icon::Check, "", Action::Macros)
-                    .alt("Macro Security")
+                    .alt(crate::i18n::strs().msg_macro_security())
                     .enabled(false)
-                    .tip("Macro security — M7"),
+                    .tip(crate::i18n::strs().msg_macro_security_m7()),
             ],
         ]),
     ]
@@ -40,40 +40,40 @@ fn code_cols(ctx: &TabCtx) -> Vec<super::Col> {
 
 fn addins_cols() -> Vec<super::Col> {
     vec![stack(vec![
-        RibbonButton::new(Icon::Link, "COM Add-Ins", Action::Macros)
+        RibbonButton::new(Icon::Link, crate::i18n::strs().msg_com_add_ins(), Action::Macros)
             .enabled(false)
-            .tip("Add-in hosting arrives with M8"),
-        RibbonButton::new(Icon::Shapes, "Add-in Manager", Action::Macros)
+            .tip(crate::i18n::strs().msg_add_in_hosting_arrives_with_m8()),
+        RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_add_in_manager(), Action::Macros)
             .enabled(false)
-            .tip("Add-in manager — M8"),
+            .tip(crate::i18n::strs().msg_add_in_manager_m8()),
     ])]
 }
 
 fn controls_cols() -> Vec<super::Col> {
     vec![stack(vec![
-        RibbonButton::new(Icon::Shapes, "Insert Control", Action::Macros)
+        RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_insert_control(), Action::Macros)
             .enabled(false)
-            .tip("ActiveX-era — likely cut (scope call on #252)"),
-        RibbonButton::new(Icon::Check, "Design Mode", Action::Macros)
+            .tip(crate::i18n::strs().msg_activex_era_likely_cut_scope_cal()),
+        RibbonButton::new(Icon::Check, crate::i18n::strs().msg_design_mode(), Action::Macros)
             .enabled(false)
-            .tip("Design mode — likely cut (scope call on #252)"),
+            .tip(crate::i18n::strs().msg_design_mode_likely_cut_scope_cal()),
     ])]
 }
 
 fn shape_design_grid() -> Vec<super::Col> {
     vec![grid(vec![
         vec![
-            RibbonButton::new(Icon::Shapes, "Operations", Action::Macros)
+            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_operations(), Action::Macros)
                 .enabled(false)
-                .tip("Boolean shape operations — planned"),
-            RibbonButton::new(Icon::Group, "Behavior", Action::Macros)
+                .tip(crate::i18n::strs().msg_boolean_shape_operations_planned()),
+            RibbonButton::new(Icon::Group, crate::i18n::strs().msg_behavior(), Action::Macros)
                 .enabled(false)
-                .tip("Shape behavior — planned"),
+                .tip(crate::i18n::strs().msg_shape_behavior_planned()),
         ],
         vec![
-            RibbonButton::new(Icon::Check, "Protection", Action::Macros)
+            RibbonButton::new(Icon::Check, crate::i18n::strs().msg_protection(), Action::Macros)
                 .enabled(false)
-                .tip("Shape protection — planned"),
+                .tip(crate::i18n::strs().msg_shape_protection_planned()),
         ],
     ])]
 }
@@ -81,20 +81,20 @@ fn shape_design_grid() -> Vec<super::Col> {
 fn stencil_cols() -> Vec<super::Col> {
     vec![grid(vec![
         vec![
-            RibbonButton::new(Icon::Shapes, "Edit Stencil", Action::Macros)
+            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_edit_stencil(), Action::Macros)
                 .enabled(false)
-                .tip("Stencil editing — planned (scope call on #252)"),
-            RibbonButton::new(Icon::New, "New Stencil", Action::Macros)
+                .tip(crate::i18n::strs().msg_stencil_editing_planned_scope_ca()),
+            RibbonButton::new(Icon::New, crate::i18n::strs().msg_new_stencil(), Action::Macros)
                 .enabled(false)
-                .tip("Create a stencil — planned"),
+                .tip(crate::i18n::strs().msg_create_a_stencil_planned()),
         ],
         vec![
-            RibbonButton::new(Icon::Save, "Save Stencil", Action::Macros)
+            RibbonButton::new(Icon::Save, crate::i18n::strs().msg_save_stencil(), Action::Macros)
                 .enabled(false)
-                .tip("Save the stencil — planned"),
-            RibbonButton::new(Icon::Units, "Stencil Settings", Action::Macros)
+                .tip(crate::i18n::strs().msg_save_the_stencil_planned()),
+            RibbonButton::new(Icon::Units, crate::i18n::strs().msg_stencil_settings(), Action::Macros)
                 .enabled(false)
-                .tip("Stencil settings — planned"),
+                .tip(crate::i18n::strs().msg_stencil_settings_planned()),
         ],
     ])]
 }
@@ -104,19 +104,19 @@ fn show_hide_grid(ctx: &TabCtx) -> Vec<super::Col> {
         vec![
             // Visio legitimately double-lists ShapeSheet (Code and
             // Show/Hide) — the Show/Hide copy stays the wired toggle.
-            RibbonButton::new(Icon::ShapeSheet, "Show ShapeSheet", Action::ShowShapeSheet)
+            RibbonButton::new(Icon::ShapeSheet, crate::i18n::strs().msg_show_shapesheet(), Action::ShowShapeSheet)
                 .selected(ctx.shapesheet_open)
-                .tip("Inspect the selected shape's cells"),
-            RibbonButton::new(Icon::Units, "mm/in", Action::ToggleUnits)
-                .tip("Toggle display units (model stays inches)"),
+                .tip(crate::i18n::strs().msg_inspect_the_selected_shape_s_cel()),
+            RibbonButton::new(Icon::Units, crate::i18n::strs().msg_mm_in(), Action::ToggleUnits)
+                .tip(crate::i18n::strs().msg_toggle_display_units_model_stays()),
         ],
         vec![
-            RibbonButton::new(Icon::Shapes, "Drawing Explorer", Action::Macros)
+            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_drawing_explorer(), Action::Macros)
                 .enabled(false)
-                .tip("Drawing explorer — planned"),
-            RibbonButton::new(Icon::Shapes, "Show Document Stencil", Action::Macros)
+                .tip(crate::i18n::strs().msg_drawing_explorer_planned()),
+            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_show_document_stencil(), Action::Macros)
                 .enabled(false)
-                .tip("Document stencil — planned"),
+                .tip(crate::i18n::strs().msg_document_stencil_planned()),
         ],
     ])]
 }

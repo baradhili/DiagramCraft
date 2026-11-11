@@ -231,7 +231,7 @@ pub fn show_overlay(
     );
     let edit = egui::TextEdit::multiline(&mut session.draft)
         .id(id)
-        .hint_text("Shape text")
+        .hint_text(crate::i18n::strs().msg_shape_text())
         .desired_width(f32::INFINITY)
         // One row of the OVERLAY font drives the widget's minimum —
         // egui otherwise floors multiline edits at 4 rows of the

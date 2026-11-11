@@ -30,29 +30,29 @@ pub(crate) const CONTAINER_STYLES: [&str; 14] = [
 
 pub(crate) fn groups(ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new("Size", size_cols()),
-        Group::new("Container Styles", styles_grid()),
-        Group::new("Heading Style", heading_cols()),
-        Group::new("Membership", membership_cols(ctx)),
+        Group::new(crate::i18n::strs().msg_size(), size_cols()),
+        Group::new(crate::i18n::strs().msg_container_styles(), styles_grid()),
+        Group::new(crate::i18n::strs().msg_heading_style(), heading_cols()),
+        Group::new(crate::i18n::strs().msg_membership(), membership_cols(ctx)),
     ]
 }
 
 fn size_cols() -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Grid, "Margins", Action::Macros)
+            RibbonButton::new(Icon::Grid, crate::i18n::strs().msg_margins(), Action::Macros)
                 .enabled(false)
                 .split()
-                .tip("Container margins — planned"),
+                .tip(crate::i18n::strs().msg_container_margins_planned()),
         ),
         stack(vec![
-            RibbonButton::new(Icon::Fit, "Fit to Contents", Action::Macros)
+            RibbonButton::new(Icon::Fit, crate::i18n::strs().msg_fit_to_contents(), Action::Macros)
                 .enabled(false)
-                .tip("Size the container to its members — planned"),
-            RibbonButton::new(Icon::Fit, "Automatic Resize", Action::Macros)
+                .tip(crate::i18n::strs().msg_size_the_container_to_its_member()),
+            RibbonButton::new(Icon::Fit, crate::i18n::strs().msg_automatic_resize(), Action::Macros)
                 .enabled(false)
                 .split()
-                .tip("Grow with the members — planned"),
+                .tip(crate::i18n::strs().msg_grow_with_the_members_planned()),
         ]),
     ]
 }
@@ -62,15 +62,15 @@ fn styles_grid() -> Vec<super::Col> {
         CONTAINER_STYLES[..7]
             .iter()
             .map(|n| {
-                RibbonButton::new(Icon::Container, n, Action::ContainerStyle(n))
-                    .tip("Wrap the selection in this container style")
+                RibbonButton::new(Icon::Container, *n, Action::ContainerStyle(n))
+                    .tip(crate::i18n::strs().msg_wrap_the_selection_in_this_conta())
             })
             .collect::<Vec<_>>(),
         CONTAINER_STYLES[7..]
             .iter()
             .map(|n| {
-                RibbonButton::new(Icon::Container, n, Action::ContainerStyle(n))
-                    .tip("Wrap the selection in this container style")
+                RibbonButton::new(Icon::Container, *n, Action::ContainerStyle(n))
+                    .tip(crate::i18n::strs().msg_wrap_the_selection_in_this_conta())
             })
             .collect::<Vec<_>>(),
     ])]
@@ -78,10 +78,10 @@ fn styles_grid() -> Vec<super::Col> {
 
 fn heading_cols() -> Vec<super::Col> {
     vec![big(
-        RibbonButton::new(Icon::FontA, "Heading Style", Action::Macros)
+        RibbonButton::new(Icon::FontA, crate::i18n::strs().msg_heading_style(), Action::Macros)
             .enabled(false)
             .split()
-            .tip("Heading style gallery — planned"),
+            .tip(crate::i18n::strs().msg_heading_style_gallery_planned()),
     )]
 }
 
@@ -89,23 +89,23 @@ fn membership_cols(ctx: &TabCtx) -> Vec<super::Col> {
     vec![
         grid(vec![
             vec![
-                RibbonButton::new(Icon::Container, "Highlight Members", Action::ContainerHighlight)
+                RibbonButton::new(Icon::Container, crate::i18n::strs().msg_highlight_members(), Action::ContainerHighlight)
                     .selected(ctx.container_highlight)
-                    .tip("Tint the container's members while it is selected"),
+                    .tip(crate::i18n::strs().msg_tint_the_container_s_members_whi()),
                 RibbonButton::new(Icon::Lock, "", Action::Macros)
-                    .alt("Lock Container")
+                    .alt(crate::i18n::strs().msg_lock_container())
                     .enabled(false)
-                    .tip("Lock the container against membership edits — planned"),
+                    .tip(crate::i18n::strs().msg_lock_the_container_against_membe()),
             ],
             vec![
                 RibbonButton::new(Icon::Shapes, "", Action::Macros)
-                    .alt("Select Contents")
+                    .alt(crate::i18n::strs().msg_select_contents())
                     .enabled(false)
-                    .tip("Select the container's members — planned"),
+                    .tip(crate::i18n::strs().msg_select_the_container_s_members_p()),
                 RibbonButton::new(Icon::Delete, "", Action::ContainerDisband)
-                    .alt("Disband Container")
+                    .alt(crate::i18n::strs().msg_disband_container())
                     .enabled(ctx.sel_container)
-                    .tip("Release the members and delete the container (one undo step)"),
+                    .tip(crate::i18n::strs().msg_release_the_members_and_delete_t()),
             ],
         ]),
     ]

@@ -172,6 +172,8 @@ pub struct App {
     snap: crate::snap::SnapSettings,
     /// The Snap & Glue dialog is open (View ▸ Visual Aids, #109).
     snap_dlg_open: bool,
+    /// #246: the Language dialog is open.
+    language_dlg_open: bool,
     /// #218 review: the Jump-size drag's draft — a DragValue commit
     /// per frame flooded history; the draft edits locally and commits
     /// once, when the drag stops (typed input commits immediately).
@@ -573,6 +575,9 @@ struct EndpointPreview {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
+        // #246 i18n: the persisted language (or the system locale on
+        // first run) selects the catalog before the first frame paints.
+        crate::i18n::init_from_disk();
         // OS light/dark (GitHub #52): detect the opening mode (gsettings
         // with the XDG portal as fallback; `detect` debug-prints the
         // source), install BOTH style slots and select it — then follow
@@ -626,6 +631,9 @@ impl App {
 
     /// Headless-friendly constructor (theme applied by the host UI loop).
     pub fn with_doc_opt(path: Option<PathBuf>) -> App {
+        // Headless constructors pin English so kittest goldens never
+        // move with the user's real language (#246).
+        crate::i18n::pin_english();
         let mut app = App {
             ed: None,
             path: PathBuf::new(),
@@ -671,6 +679,7 @@ impl App {
             pending_activate: None,
             snap: crate::snap::SnapSettings::default(),
             snap_dlg_open: false,
+            language_dlg_open: false,
             line_jump_draft: None,
             snap_live: Vec::new(),
             conn_fx_last: crate::connectors::ConnPointFx::default(),
@@ -798,7 +807,7 @@ impl App {
     #[doc(hidden)]
     pub fn debug_keytip_letter(&self, label: &str) -> Option<char> {
         self.keytips.badges.iter().find_map(|b| {
-            match b.hit {
+            match &b.hit {
                 crate::keytips::Hit::Action { label: l, .. } if l == label => {
                     b.key.chars().next()
                 }
@@ -843,7 +852,7 @@ impl App {
         let title = |p: &std::path::Path| {
             p.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".into())
+                .unwrap_or_else(|| crate::i18n::strs().msg_untitled())
         };
         let mut names = vec![title(&self.path)];
         names.extend(self.docs.iter().map(|d| title(&d.path)));
@@ -1048,7 +1057,7 @@ impl App {
                 self.comment_target = None;
                 self.comment_edit = None;
             }
-            Err(e) => self.status = format!("open failed: {e}"),
+            Err(e) => self.status = crate::i18n::strs().msg_open_failed_e(e),
         }
     }
 
@@ -1071,7 +1080,7 @@ impl App {
                 // the slot; an empty slot with a dead sender is a dead
                 // worker.
                 Err(mpsc::TryRecvError::Disconnected) if load.result.is_none() => {
-                    self.status = "open failed: the load worker died".into();
+                    self.status = crate::i18n::strs().msg_open_failed_the_load_worker_died();
                     return None;
                 }
                 Err(_) => {}
@@ -1267,12 +1276,12 @@ impl App {
                     let page =
                         ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))].id;
                     self.layers.touch_damage(&ed.doc, &touched, &[], page);
-                    self.status = format!("undo: {l}");
+                    self.status = crate::i18n::strs().msg_undo_l(l);
                     self.dirty = true;
                     self.version += 1;
                     self.restore_selection_after_history(&touched);
                 }
-                Ok(None) => self.status = "nothing to undo".into(),
+                Ok(None) => self.status = crate::i18n::strs().msg_nothing_to_undo(),
                 Err(e) => self.status = format!("{e:#}"),
             }
         }
@@ -1416,7 +1425,7 @@ impl App {
     fn tab_cmd_delete(&mut self, idx: usize) {
         let Some(ed) = self.ed() else { return };
         if ed.doc.pages.len() < 2 {
-            self.status = "the last page cannot be deleted".into();
+            self.status = crate::i18n::strs().msg_the_last_page_cannot_be_deleted();
             return;
         }
         let Some(id) = ed.doc.pages.get(idx).map(|p| p.id) else {
@@ -1456,7 +1465,7 @@ impl App {
                     let page =
                         ed.doc.pages[self.page_idx.min(ed.doc.pages.len().saturating_sub(1))].id;
                     self.layers.touch_damage(&ed.doc, &touched, &[], page);
-                    self.status = format!("redo: {l}");
+                    self.status = crate::i18n::strs().msg_redo_l(l);
                     self.dirty = true;
                     self.version += 1;
                     // Same selection mapping as undo (#136) — redo never
@@ -1464,7 +1473,7 @@ impl App {
                     // could leave a selection pointing at a removed shape.
                     self.restore_selection_after_history(&touched);
                 }
-                Ok(None) => self.status = "nothing to redo".into(),
+                Ok(None) => self.status = crate::i18n::strs().msg_nothing_to_redo(),
                 Err(e) => self.status = format!("{e:#}"),
             }
         }
@@ -1504,14 +1513,14 @@ impl App {
         let stem = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "stencil".into());
+            .unwrap_or_else(|| crate::i18n::strs().msg_stencil_fallback());
         match self.stencils.open_file(&path) {
             Ok((ix, existing)) => {
                 self.stencil.reveal = Some(StencilId::Open(ix));
                 self.status = if existing {
-                    format!("stencil {stem} is already open — expanded")
+                    crate::i18n::strs().msg_stencil_stem_is_already_open_exp(stem)
                 } else {
-                    format!("opened stencil {stem}")
+                    crate::i18n::strs().msg_opened_stencil_stem(stem)
                 };
             }
             Err(e) => self.status = format!("open stencil failed: {e:#}"),
@@ -1548,7 +1557,7 @@ impl App {
                 .map(|st| st.title.clone())
                 .unwrap_or_else(|| b.title.to_string());
             self.stencil.close_entry(&mut self.stencils, ix);
-            self.status = format!("closed {title}");
+            self.status = crate::i18n::strs().msg_closed_title(title);
             return;
         }
         self.open_builtin_stencil(b);
@@ -1701,7 +1710,7 @@ impl App {
         self.reorder_open = false;
         self.comment_target = None;
         self.comment_edit = None;
-        self.status = "new blank drawing (unsaved)".into();
+        self.status = crate::i18n::strs().msg_new_blank_drawing_unsaved();
     }
 
     fn begin_dialog(&mut self, kind: PendingKind) {
@@ -1730,10 +1739,10 @@ impl App {
                 Some(p) => p,
                 None => match kind {
                     PendingKind::Open => rfd::FileDialog::new()
-                        .add_filter("Visio (VSDX family)", &["vsdx", "vstx", "vssx"])
+                        .add_filter(crate::i18n::strs().msg_visio_vsdx_family(), &["vsdx", "vstx", "vssx"])
                         .pick_file(),
                     PendingKind::OpenStencil => {
-                        let mut dlg = rfd::FileDialog::new().add_filter("Visio stencil", &["vssx"]);
+                        let mut dlg = rfd::FileDialog::new().add_filter(crate::i18n::strs().msg_visio_stencil(), &["vssx"]);
                         if let Some(dir) = Self::my_shapes_dir() {
                             let _ = std::fs::create_dir_all(&dir);
                             dlg = dlg.set_directory(dir);
@@ -1741,11 +1750,11 @@ impl App {
                         dlg.pick_file()
                     }
                     PendingKind::SaveAs => rfd::FileDialog::new()
-                        .add_filter("Visio drawing", &["vsdx", "vstx", "vssx"])
+                        .add_filter(crate::i18n::strs().msg_visio_drawing(), &["vsdx", "vstx", "vssx"])
                         .set_file_name(&default_name)
                         .save_file(),
                     PendingKind::OpenPicture => rfd::FileDialog::new()
-                        .add_filter("Pictures", &["png", "jpg", "jpeg"])
+                        .add_filter(crate::i18n::strs().msg_pictures(), &["png", "jpg", "jpeg"])
                         .pick_file(),
                     // Any file can be a hyperlink target (#71).
                     PendingKind::HyperlinkAddress => rfd::FileDialog::new().pick_file(),
@@ -1786,7 +1795,7 @@ impl App {
         match h.poll() {
             Some(crate::stencil::disk::ExtractionMsg::Progress { done, total }) => {
                 self.status =
-                    format!("Extracting built-in stencils to My Shapes ({done}/{total})…");
+                    crate::i18n::strs().msg_extracting_built_in_stencils_to(done, total);
                 self.stencil_extract = Some(h);
                 ctx.request_repaint_after(Duration::from_millis(100));
             }
@@ -2853,15 +2862,13 @@ impl App {
                 )));
             }
         }
-        self.apply(Macro::new(format!("move vertex {row_ix}"), cmds));
+        self.apply(Macro::new(format!("move vertex {}", row_ix), cmds));
         if customizes {
             if let canvas::GeoCell::NurbsPt(_) = cell {
                 self.status =
-                    "NURBS control customized — the E formula's control point moved".into();
+                    crate::i18n::strs().msg_nurbs_control_customized_the_e_f();
             } else {
-                self.status = format!(
-                    "curve control customized — row {row_ix}'s route formula replaced with the dragged value"
-                );
+                self.status = crate::i18n::strs().msg_curve_control_customized_row_row(row_ix);
             }
         }
     }
@@ -2961,7 +2968,7 @@ impl App {
                     if self.painter_armed.is_some() {
                         self.painter_armed = None;
                         self.painter_sticky = false;
-                        self.status = "format painter cancelled".into();
+                        self.status = crate::i18n::strs().msg_format_painter_cancelled();
                     }
                 }
             }
@@ -3190,17 +3197,17 @@ impl App {
         // letter — "Rulers" R vs the Review tab R — resolved by
         // scope, never by vec order.)
         let is_control = |b: &crate::keytips::Badge| {
-            matches!(b.hit, crate::keytips::Hit::Action { label, .. } if !label.is_empty())
+            matches!(&b.hit, crate::keytips::Hit::Action { label, .. } if !label.is_empty())
         };
         let is_qat = |b: &crate::keytips::Badge| {
-            matches!(b.hit, crate::keytips::Hit::Action { label, .. } if label.is_empty())
+            matches!(&b.hit, crate::keytips::Hit::Action { label, .. } if label.is_empty())
         };
         let find = |pred: &dyn Fn(&crate::keytips::Badge) -> bool| {
             self.keytips
                 .badges
                 .iter()
                 .find(|b| b.key == key && pred(b))
-                .map(|b| b.hit)
+                .map(|b| b.hit.clone())
         };
         let hit = match self.keytips.mode {
             Some(crate::keytips::Mode::Controls) => {
@@ -3218,7 +3225,7 @@ impl App {
                 self.keytips.disarm();
             }
             Some(crate::keytips::Hit::TellMe) => {
-                self.status = "Tell Me search arrives with a later milestone".into();
+                self.status = crate::i18n::strs().msg_tell_me_search_arrives_with_a_la();
                 self.keytips.disarm();
             }
             Some(crate::keytips::Hit::Action {
@@ -3236,7 +3243,7 @@ impl App {
             None => {
                 // Office keeps the mode on an unknown letter (it
                 // beeps); our equivalent is a status note.
-                self.status = format!("no keytip {key}");
+                self.status = crate::i18n::strs().msg_no_keytip_key(key);
             }
         }
     }
@@ -3321,7 +3328,7 @@ impl App {
             }
             cmds.extend(self.connect_cleanup_cmds(page_id, &ids));
             let n = ids.len();
-            self.apply(Macro::new(format!("delete {n} shapes"), cmds));
+            self.apply(Macro::new(format!("delete {} shapes", n), cmds));
         } else {
             let shape_id = self.sel.unwrap().1;
             self.delete_one(page_id, shape_id);
@@ -3346,7 +3353,7 @@ impl App {
                 &[shape_id],
             ));
         }
-        self.apply(Macro::new(format!("delete shape {shape_id}"), cmds));
+        self.apply(Macro::new(format!("delete shape {}", shape_id), cmds));
     }
 
     /// Marquee selection: page-inch rect (y-down) → every top-level
@@ -3415,7 +3422,7 @@ impl App {
         let n = picked.len();
         self.sel_set = picked;
         self.sel = self.sel_set.last().copied();
-        self.status = format!("lasso selected {n} shape{}", if n == 1 { "" } else { "s" });
+        self.status = crate::i18n::strs().msg_lasso_selected_n_shape_s(n);
     }
 
     /// #110 tab-order audit: Esc dismisses the frontmost open dialog
@@ -3429,6 +3436,10 @@ impl App {
     fn close_front_dialog(&mut self) -> bool {
         if self.selby_open {
             self.selby_open = false;
+            return true;
+        }
+        if self.language_dlg_open {
+            self.language_dlg_open = false;
             return true;
         }
         if self.snap_dlg_open {
@@ -3483,7 +3494,7 @@ impl App {
         let resolved = ed.doc.resolve_cell(sh, &chain, size_cell);
         if let Some(f) = resolved.as_ref().and_then(|c| c.f.as_deref()) {
             if f != "Inh" {
-                return Some(format!("{size_cell} is formula-driven ({f})"));
+                return Some(crate::i18n::strs().msg_size_cell_is_formula_driven_f(size_cell, f));
             }
         }
         if protection_flag(&ed.doc, sh, &chain, lock_cell) {
@@ -3566,7 +3577,7 @@ impl App {
             (h + dh).max(0.05)
         };
         if (nw - w).abs() < 1e-9 && (nh - h).abs() < 1e-9 {
-            self.status = "resize refused: shape is protected".into();
+            self.status = crate::i18n::strs().msg_resize_refused_shape_is_protecte();
             return;
         }
         // The partial-guard note is written AFTER `apply`, which
@@ -3633,7 +3644,7 @@ impl App {
         if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
             cmds.push(r);
         }
-        self.apply(Macro::new(format!("resize shape {shape_id}"), cmds));
+        self.apply(Macro::new(format!("resize shape {}", shape_id), cmds));
         if let Some(note) = guard_note {
             self.status = note;
         }
@@ -3658,7 +3669,7 @@ impl App {
         }
         for lock in locks {
             if protection_flag(&ed.doc, sh, &chain, lock) {
-                return Some(format!("{lock} is set (Protection section)"));
+                return Some(crate::i18n::strs().msg_lock_is_set_protection_section(lock));
             }
         }
         None
@@ -3681,7 +3692,7 @@ impl App {
             _ => return,
         };
         if let Some(reason) = self.line_drag_guard(&guard_cells, &[lock]) {
-            self.status = format!("endpoint drag refused: {reason}");
+            self.status = crate::i18n::strs().msg_endpoint_drag_refused_reason(reason);
             return;
         }
         let Some(ed) = self.ed.as_ref() else { return };
@@ -3750,9 +3761,7 @@ impl App {
             // write aborts the whole macro (#172).
             let formula = dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
-                kept_note = Some(format!(
-                    "endpoint moved, but {name} is formula-driven and kept"
-                ));
+                kept_note = Some(crate::i18n::strs().msg_endpoint_moved_but_name_is_formu(name));
                 continue;
             }
             cmds.push(Box::new(SetCell::new(scope.clone(), name, cell(v))));
@@ -3766,7 +3775,7 @@ impl App {
             1.0,
         ));
         self.apply(Macro::new(
-            format!("move line endpoint (shape {shape_id})"),
+            crate::i18n::strs().msg_move_line_endpoint_shape_shape_i(shape_id),
             cmds,
         ));
         if let Some(note) = kept_note {
@@ -3789,7 +3798,7 @@ impl App {
             &["BeginX", "BeginY", "EndX", "EndY"],
             &["LockBegin", "LockEnd"],
         ) {
-            self.status = format!("line move refused: {reason}");
+            self.status = crate::i18n::strs().msg_line_move_refused_reason(reason);
             return;
         }
         let Some(ed) = self.ed.as_ref() else { return };
@@ -3846,7 +3855,7 @@ impl App {
             // master's GUARD would otherwise refuse and abort the move.
             let formula = dc_core::commands::effective_formula(&ed.doc, sh, &chain, name);
             if formula.is_some() {
-                kept_note = Some(format!("line moved, but {name} is formula-driven and kept"));
+                kept_note = Some(crate::i18n::strs().msg_line_moved_but_name_is_formula_d(name));
             } else {
                 cmds.push((name, v));
             }
@@ -3878,7 +3887,7 @@ impl App {
         };
         // Locks refuse; formulas do not (they ride SetGluedCell).
         if let Some(reason) = self.line_lock_guard(&["LockBegin", "LockEnd"]) {
-            self.status = format!("connector move refused: {reason}");
+            self.status = crate::i18n::strs().msg_connector_move_refused_reason(reason);
             return;
         }
         let Some(ed) = self.ed.as_ref() else { return };
@@ -3986,7 +3995,7 @@ impl App {
             }
         }
         if !free[0] && !free[1] && release_ends == 0 {
-            self.status = "connector is glued at both ends — drag past the snap radius to release, or drag an endpoint or its shapes".into();
+            self.status = crate::i18n::strs().msg_connector_is_glued_at_both_ends();
             return;
         }
         // The frame (Pin/Width/Height/LocPin caches) and the route
@@ -4005,11 +4014,9 @@ impl App {
         if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
             cmds.push(r);
         }
-        self.apply(Macro::new(format!("move connector {shape_id}"), cmds));
+        self.apply(Macro::new(format!("move connector {}", shape_id), cmds));
         if release_ends > 0 {
-            self.status = format!(
-                "connector moved — {release_ends} glued end(s) released past the snap radius"
-            );
+            self.status = crate::i18n::strs().msg_connector_moved_release_ends_glu(release_ends);
         }
     }
 
@@ -4024,7 +4031,7 @@ impl App {
         let chain = shape_chain(&ed.doc, page_id, shape_id).ok()?;
         for lock in locks {
             if protection_flag(&ed.doc, sh, &chain, lock) {
-                return Some(format!("{lock} is set (Protection section)"));
+                return Some(crate::i18n::strs().msg_lock_is_set_protection_section(lock));
             }
         }
         None
@@ -4167,7 +4174,7 @@ impl App {
                         .and_then(|r| r.cell("Value"))
                         .and_then(|c| c.v.clone())
                 })
-                .unwrap_or_else(|| "Container".into());
+                .unwrap_or_else(|| crate::i18n::strs().msg_container());
             // The UNION — already-members selected again must not
             // double-count (#75 branch review).
             let mut all = self.container_member_ids(page_id, container);
@@ -4252,6 +4259,7 @@ impl App {
             id,
             &members,
             rect,
+            // heading text is shape CONTENT — stays English (#246)
             "Container",
         ));
         self.set_selection(Some((page_id, id)));
@@ -4341,7 +4349,7 @@ impl App {
             Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
         })
         .collect();
-        Box::new(Macro::new(format!("move line shape {sid}"), cmds))
+        Box::new(Macro::new(format!("move line shape {}", sid), cmds))
     }
 
     // -- snap & glue (GitHub #109) ----------------------------------------
@@ -4713,7 +4721,7 @@ impl App {
                 }
             };
         } else if existing.is_some() {
-            self.status = "connector end released".into();
+            self.status = crate::i18n::strs().msg_connector_end_released();
         }
         // #179: the drop moved an endpoint — a master-based
         // connector's formula-driven frame caches and geometry rows
@@ -4767,7 +4775,7 @@ impl App {
             return;
         };
         if crate::connectors::is_connector(sh) || crate::guides::is_guide(sh) {
-            self.status = "AutoConnect needs a 2D shape".into();
+            self.status = crate::i18n::strs().msg_autoconnect_needs_a_2d_shape();
             return;
         }
         let Some(rect) = self.shape_rect(&ed.doc, page_id, sh) else {
@@ -4824,10 +4832,10 @@ impl App {
                 connect: glue_connect(conn_id, End::End, &end_t),
             }),
         ];
-        self.apply(Macro::new(format!("AutoConnect shape {sid}"), cmds));
+        self.apply(Macro::new(format!("AutoConnect shape {}", sid), cmds));
         self.set_selection(Some((page_id, dup_id)));
         self.sel_set = vec![(page_id, dup_id)];
-        self.status = format!("shape {dup_id} connected to {sid} (AutoConnect)");
+        self.status = crate::i18n::strs().msg_shape_dup_id_connected_to_sid_au(dup_id, sid);
     }
 
     /// #156: is the primary selection a container — the target of a
@@ -4907,7 +4915,7 @@ impl App {
         };
         let on = self.container_highlight_on();
         self.apply(Macro::new(
-            "toggle member highlight",
+            crate::i18n::strs().msg_toggle_member_highlight(),
             vec![Box::new(dc_core::SetRowCell::new(
                 Scope::Shape {
                     page: page_id,
@@ -4921,9 +4929,9 @@ impl App {
             ))],
         ));
         self.status = if on {
-            "member highlight off".into()
+            crate::i18n::strs().msg_member_highlight_off()
         } else {
-            "member highlight on".into()
+            crate::i18n::strs().msg_member_highlight_on()
         };
     }
 
@@ -4984,7 +4992,7 @@ impl App {
                 find_master_by_name(&doc, style).cloned()
             });
         let Some(src) = src_master else {
-            self.status = format!("container style {style} not found");
+            self.status = crate::i18n::strs().msg_container_style_style_not_found(style);
             return;
         };
         // Members: the selected container re-wraps (a restyle);
@@ -5003,7 +5011,7 @@ impl App {
             )
         };
         if members.is_empty() {
-            self.status = "select the shapes to contain first".into();
+            self.status = crate::i18n::strs().msg_select_the_shapes_to_contain_fir();
             return;
         }
         let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
@@ -5098,11 +5106,11 @@ impl App {
         if let Some(old) = old_container {
             cmds.push(Box::new(dc_core::commands::RemoveShape::new(page_id, old)));
         }
-        self.apply(Macro::new(format!("apply container style {style}"), cmds));
+        self.apply(Macro::new(format!("apply container style {}", style), cmds));
         self.set_selection(Some((page_id, new_id)));
         self.sel_set = vec![(page_id, new_id)];
         self.tab = Tab::ContainerTools;
-        self.status = format!("container style {style} applied");
+        self.status = crate::i18n::strs().msg_container_style_style_applied(style);
     }
 
     /// #108: the Connection Point tool's click — near an existing
@@ -5112,7 +5120,7 @@ impl App {
     fn handle_conn_point_click(&mut self, page_pos: (f64, f64)) {
         let Some(hit) = self.shape_hit(page_pos) else {
             self.connpt_sel = None;
-            self.status = "click a shape to add a connection point".into();
+            self.status = crate::i18n::strs().msg_click_a_shape_to_add_a_connectio();
             return;
         };
         let Some(page_id) = self.page_id() else {
@@ -5133,7 +5141,7 @@ impl App {
                 .filter(|(_, p)| (p.0 - page_pos.0).hypot(p.1 - page_pos.1) <= near)
             {
                 self.connpt_sel = Some((hit, *ix));
-                self.status = format!("connection point {ix} selected (Delete removes it)");
+                self.status = crate::i18n::strs().msg_connection_point_ix_selected_del(ix);
                 return;
             }
         }
@@ -5188,11 +5196,11 @@ impl App {
             )),
         ];
         self.apply(Macro::new(
-            format!("add connection point {next_ix} on shape {hit}"),
+            crate::i18n::strs().msg_add_connection_point_next_ix_on(next_ix, hit),
             cmds,
         ));
         self.connpt_sel = Some((hit, next_ix));
-        self.status = format!("connection point {next_ix} added to shape {hit}");
+        self.status = crate::i18n::strs().msg_connection_point_next_ix_added_t(next_ix, hit);
     }
 
     /// #108: Delete on the Connection Point tool's selection — the
@@ -5221,11 +5229,11 @@ impl App {
             .unwrap_or(false);
         if !local {
             self.status =
-                format!("connection point {ix} is inherited from the master — edit it there");
+                crate::i18n::strs().msg_connection_point_ix_is_inherited(ix);
             return;
         }
         self.apply(Macro::new(
-            format!("remove connection point {ix}"),
+            crate::i18n::strs().msg_remove_connection_point_ix(ix),
             vec![Box::new(dc_core::commands::RemoveSectionRow::new(
                 Scope::Shape {
                     page: page_id,
@@ -5237,7 +5245,7 @@ impl App {
             ))],
         ));
         self.connpt_sel = None;
-        self.status = format!("connection point {ix} removed");
+        self.status = crate::i18n::strs().msg_connection_point_ix_removed(ix);
     }
 
     /// #108/URS-1114: set a connector's route style and re-route its
@@ -5320,7 +5328,7 @@ impl App {
                 )));
             }
         }
-        self.apply(Macro::new("set connector route style", cmds));
+        self.apply(Macro::new(crate::i18n::strs().msg_set_connector_route_style(), cmds));
     }
 
     /// The plain endpoint-move command (the #59 derived-cell set) for
@@ -5630,7 +5638,7 @@ impl App {
                 }));
             }
         }
-        self.apply(Macro::new(format!("add connector {id}"), cmds));
+        self.apply(Macro::new(format!("add connector {}", id), cmds));
         self.set_selection(Some((page_id, id)));
         self.sel_set = vec![(page_id, id)];
         self.status = match (beg_t, end_t) {
@@ -5653,7 +5661,7 @@ impl App {
         };
         let id = dc_core::commands::next_shape_id(&ed.doc, page_id);
         let Some(shape) = crate::freeform::build_shape(id, &stroke) else {
-            self.status = "freeform stroke too short to draw".into();
+            self.status = crate::i18n::strs().msg_freeform_stroke_too_short_to_dra();
             return;
         };
         let segs = shape
@@ -5663,7 +5671,7 @@ impl App {
             .map(|g| g.rows.len().saturating_sub(1))
             .unwrap_or(0);
         self.apply(Macro::new(
-            format!("freeform shape {id}"),
+            crate::i18n::strs().msg_freeform_shape_id(id),
             vec![Box::new(dc_core::AddShape {
                 page: page_id,
                 parent: None,
@@ -5772,7 +5780,7 @@ impl App {
                 }
             }
         }
-        self.apply(Macro::new(format!("move guide {guide_id}"), cmds));
+        self.apply(Macro::new(format!("move guide {}", guide_id), cmds));
     }
 
     /// #109: snap a single dragged point — a 1D endpoint under the
@@ -6005,7 +6013,7 @@ impl App {
             }
         }
         if shapes.len() < 2 && !self.align_to_page {
-            self.status = "select two or more shapes to align".into();
+            self.status = crate::i18n::strs().msg_select_two_or_more_shapes_to_ali();
             return;
         }
         if shapes.is_empty() {
@@ -6041,16 +6049,15 @@ impl App {
             }
         }
         match crate::align::distribute_moves(&shapes, vertical) {
-            Some(moves) => self.apply_moves(
-                if vertical {
-                    "distribute vertical spacing"
+            Some(moves) => {
+                let label = if vertical {
+                    crate::i18n::strs().msg_distribute_vertical_spacing()
                 } else {
-                    "distribute horizontal spacing"
-                },
-                page_id,
-                &moves,
-            ),
-            None => self.status = "distribute needs three or more shapes".into(),
+                    crate::i18n::strs().msg_distribute_horizontal_spacing()
+                };
+                self.apply_moves(&label, page_id, &moves);
+            }
+            None => self.status = crate::i18n::strs().msg_distribute_needs_three_or_more_s(),
         }
     }
 
@@ -6076,7 +6083,7 @@ impl App {
             }
         }
         if cmds.is_empty() {
-            self.status = "already aligned".into();
+            self.status = crate::i18n::strs().msg_already_aligned();
             return;
         }
         self.apply(Macro::new(label.to_string(), cmds));
@@ -6098,7 +6105,7 @@ impl App {
             self.sel.map(|(_, s)| vec![s]).unwrap_or_default()
         };
         let moves: Vec<(i64, (f64, f64))> = ids.iter().map(|id| (*id, (dx, dy))).collect();
-        self.apply_moves("nudge selection", page_id, &moves);
+        self.apply_moves(&crate::i18n::strs().msg_nudge_selection(), page_id, &moves);
     }
 
     /// #113 (URS-1122): swap the page's width/height — portrait ↔
@@ -6139,9 +6146,9 @@ impl App {
             vsdx::Cell::value(if show { "1" } else { "0" }),
         ));
         self.status = if show {
-            "line jumps shown".into()
+            crate::i18n::strs().msg_line_jumps_shown()
         } else {
-            "line jumps hidden".into()
+            crate::i18n::strs().msg_line_jumps_hidden()
         };
     }
 
@@ -6175,7 +6182,7 @@ impl App {
                 vsdx::Cell::value(format!("{h:.6}")),
             )),
         ];
-        self.apply(Macro::new("set page size", cmds));
+        self.apply(Macro::new(crate::i18n::strs().msg_set_page_size(), cmds));
         self.view.fit_pending = true;
         self.layers.set_page(-1); // force re-key on the new geometry
         self.status = format!(
@@ -6213,7 +6220,7 @@ impl App {
             let _ = tx.send(img);
         });
         self.os_image_rx = Some(rx);
-        self.status = "checking the clipboard for a picture…".into();
+        self.status = crate::i18n::strs().msg_checking_the_clipboard_for_a_pic();
     }
 
     /// #113: poll the OS image probe; a hit inserts as a picture.
@@ -6234,17 +6241,17 @@ impl App {
                         return;
                     }
                 }
-                self.status = "clipboard image could not be encoded".into();
+                self.status = crate::i18n::strs().msg_clipboard_image_could_not_be_enc();
             }
             Ok(None) => {
-                self.status = "no picture on the clipboard".into();
+                self.status = crate::i18n::strs().msg_no_picture_on_the_clipboard();
             }
             Err(mpsc::TryRecvError::Empty) => {
                 // still probing: keep the receiver and retry next frame
                 self.os_image_rx = Some(rx);
             }
             Err(mpsc::TryRecvError::Disconnected) => {
-                self.status = "clipboard probe failed".into();
+                self.status = crate::i18n::strs().msg_clipboard_probe_failed();
             }
         }
     }
@@ -6299,7 +6306,7 @@ impl App {
                     .find(|p| p.id == id)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| id.to_string());
-                format!("background page: {name}")
+                crate::i18n::strs().msg_background_page_name(name)
             }
             None => "background cleared".into(),
         };
@@ -6329,28 +6336,28 @@ impl App {
             .collect();
         let current = self.back_page_of(page_id);
         let this_is_bg = self.is_background_page(page_id);
-        egui::Window::new("Backgrounds")
+        egui::Window::new(crate::i18n::strs().msg_backgrounds())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(280.0)
             .show(ctx, |ui| {
-                ui.label("This page renders behind:");
+                ui.label(crate::i18n::strs().msg_this_page_renders_behind());
                 if this_is_bg {
-                    ui.weak("(this page is itself a background page)");
+                    ui.weak(crate::i18n::strs().msg_this_page_is_itself_a_background());
                 }
                 ui.separator();
-                if ui.radio(current.is_none(), "No background").clicked() {
+                if ui.radio(current.is_none(), crate::i18n::strs().msg_no_background()).clicked() {
                     pick = Some(None);
                 }
                 if entries.is_empty() {
                     ui.weak(
-                        "No background pages. Right-click a page tab and pick \"Set as Background\".",
+                        crate::i18n::strs().msg_no_background_pages_right_click(),
                     );
                 }
                 for (id, name) in &entries {
                     if ui
-                        .radio(current == Some(*id), format!("{name} (page {id})"))
+                        .radio(current == Some(*id), crate::i18n::strs().msg_name_page_id(name, id))
                         .clicked()
                     {
                         pick = Some(Some(*id));
@@ -6485,12 +6492,12 @@ impl App {
         } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
             "jpeg"
         } else {
-            self.status = "only PNG and JPEG pictures are supported".into();
+            self.status = crate::i18n::strs().msg_only_png_and_jpeg_pictures_are_s();
             return;
         };
-        let compression = if ext == "png" { "PNG" } else { "JPG" };
+        let compression = if ext == "png" { "PNG" } else { &crate::i18n::strs().msg_jpg() };
         let Ok(img) = image::load_from_memory(bytes) else {
-            self.status = "the picture could not be decoded".into();
+            self.status = crate::i18n::strs().msg_the_picture_could_not_be_decoded();
             return;
         };
         // Natural size, capped.
@@ -6748,13 +6755,13 @@ impl App {
         }
         let mut open = true;
         let mut pick: Option<&'static str> = None;
-        egui::Window::new("Container Styles")
+        egui::Window::new(crate::i18n::strs().msg_container_styles())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(260.0)
             .show(ctx, |ui| {
-                ui.weak("Wrap the selection in a container style:");
+                ui.weak(crate::i18n::strs().msg_contgal_prompt());
                 ui.add_space(4.0);
                 egui::Grid::new("dc-contgal")
                     .num_columns(2)
@@ -6782,20 +6789,20 @@ impl App {
         }
         let mut open = true;
         let mut copy = false;
-        egui::Window::new("Copy as Picture")
+        egui::Window::new(crate::i18n::strs().msg_copy_as_picture())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(280.0)
             .show(ctx, |ui| {
-                ui.strong("Resolution");
-                if ui.radio(self.copypic_svg, "Vector (SVG)").clicked() {
+                ui.strong(crate::i18n::strs().msg_resolution());
+                if ui.radio(self.copypic_svg, crate::i18n::strs().msg_vector_svg()).clicked() {
                     self.copypic_svg = true;
                 }
                 for (f, label) in [
-                    (1u32, "Screen (96 dpi)"),
-                    (2, "High (192 dpi)"),
-                    (4, "Print (384 dpi)"),
+                    (1u32, crate::i18n::strs().msg_screen_96_dpi()),
+                    (2, crate::i18n::strs().msg_high_192_dpi()),
+                    (4, crate::i18n::strs().msg_print_384_dpi()),
                 ] {
                     if ui
                         .radio(!self.copypic_svg && self.copypic_factor == f, label)
@@ -6806,13 +6813,13 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
-                if ui.button("Copy Picture").clicked() {
+                if ui.button(crate::i18n::strs().msg_copy_picture()).clicked() {
                     copy = true;
                 }
                 ui.weak(if self.copypic_svg {
-                    "The SVG markup lands on the clipboard as vector text."
+                    crate::i18n::strs().msg_the_svg_markup_lands_on_the_clip()
                 } else {
-                    "The picture lands on the clipboard as a PNG bitmap."
+                    crate::i18n::strs().msg_the_picture_lands_on_the_clipboa()
                 });
             });
         if copy && self.copypic_svg {
@@ -6821,11 +6828,9 @@ impl App {
                     let n = svg.len();
                     self.last_picture = Some(svg.clone().into_bytes());
                     ctx.copy_text(svg);
-                    self.status = format!(
-                        "SVG copied ({n} bytes, vector — paste into editors that accept SVG text)"
-                    );
+                    self.status = crate::i18n::strs().msg_svg_copied_n_bytes_vector_paste(n);
                 }
-                None => self.status = "nothing selected to copy".into(),
+                None => self.status = crate::i18n::strs().msg_nothing_selected_to_copy(),
             }
         }
         if copy && !self.copypic_svg {
@@ -6848,10 +6853,10 @@ impl App {
                                 );
                             }
                         }
-                        Err(e) => self.status = format!("copy as picture failed: {e}"),
+                        Err(e) => self.status = crate::i18n::strs().msg_copy_as_picture_failed_e(e.to_string()),
                     }
                 }
-                None => self.status = "nothing selected to copy".into(),
+                None => self.status = crate::i18n::strs().msg_nothing_selected_to_copy(),
             }
         }
         if !open {
@@ -6952,13 +6957,13 @@ impl App {
         let mut open = true;
         let mut apply: Option<(f64, f64)> = None; // portrait pair, inches
         let mut custom: Option<(f64, f64)> = None;
-        egui::Window::new("Page Size")
+        egui::Window::new(crate::i18n::strs().msg_page_size())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(300.0)
             .show(ctx, |ui| {
-                ui.label("Current:");
+                ui.label(crate::i18n::strs().msg_current());
                 ui.label(format!(
                     "{:.1} × {:.1} {}",
                     cw.max(ch),
@@ -6966,7 +6971,7 @@ impl App {
                     unit.suffix()
                 ));
                 ui.separator();
-                ui.strong("Preset sizes");
+                ui.strong(crate::i18n::strs().msg_preset_sizes());
                 let mut picked: Option<(f64, f64)> = None;
                 egui::Grid::new("dc-sizes")
                     .num_columns(3)
@@ -6985,7 +6990,7 @@ impl App {
                     apply = Some(p);
                 }
                 ui.separator();
-                ui.strong("Custom");
+                ui.strong(crate::i18n::strs().msg_custom());
                 let mut wd = cw;
                 let mut ht = ch;
                 // The range is ~10 mm .. 2 m, expressed in display
@@ -7005,21 +7010,21 @@ impl App {
                             .suffix(unit.suffix()),
                     );
                 });
-                if ui.button("Apply custom size").clicked() && wd > 0.0 && ht > 0.0 {
+                if ui.button(crate::i18n::strs().msg_apply_custom_size()).clicked() && wd > 0.0 && ht > 0.0 {
                     custom = Some((unit.to_in(wd), unit.to_in(ht)));
                 }
                 ui.separator();
-                ui.strong("Orientation");
+                ui.strong(crate::i18n::strs().msg_orientation());
                 ui.horizontal(|ui| {
                     if ui
-                        .selectable_label(geom.w_in <= geom.h_in, "Portrait")
+                        .selectable_label(geom.w_in <= geom.h_in, crate::i18n::strs().msg_portrait())
                         .clicked()
                         && geom.w_in > geom.h_in
                     {
                         apply = Some((geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in)));
                     }
                     if ui
-                        .selectable_label(geom.w_in > geom.h_in, "Landscape")
+                        .selectable_label(geom.w_in > geom.h_in, crate::i18n::strs().msg_landscape())
                         .clicked()
                         && geom.w_in <= geom.h_in
                     {
@@ -7030,7 +7035,7 @@ impl App {
                 // switch and jump size — Visio's Page Setup group,
                 // persisted on the PageSheet.
                 ui.separator();
-                ui.strong("Line jumps");
+                ui.strong(crate::i18n::strs().msg_line_jumps());
                 let mut show_toggle = self
                     .ed
                     .as_ref()
@@ -7040,7 +7045,7 @@ impl App {
                             .line_jumps_shown()
                     })
                     .unwrap_or(true);
-                if ui.checkbox(&mut show_toggle, "Show line jumps").changed() {
+                if ui.checkbox(&mut show_toggle, crate::i18n::strs().msg_show_line_jumps()).changed() {
                     self.apply_line_jumps_shown(show_toggle);
                 }
                 let doc_factor = self
@@ -7054,7 +7059,7 @@ impl App {
                     .unwrap_or(1.0) as f32;
                 let mut jump_factor = self.line_jump_draft.unwrap_or(doc_factor);
                 ui.horizontal(|ui| {
-                    ui.label("Jump size");
+                    ui.label(crate::i18n::strs().msg_jump_size());
                     let r = ui.add(
                         egui::DragValue::new(&mut jump_factor)
                             .range(0.5..=3.0)
@@ -7097,7 +7102,7 @@ impl App {
         }
         self.sel = Some(ids[0]);
         self.sel_set = ids;
-        self.status = "selected all shapes".into();
+        self.status = crate::i18n::strs().msg_selected_all_shapes();
     }
 
     /// #110 (URS-1053): arm the Format Painter on the primary
@@ -7108,21 +7113,19 @@ impl App {
         if self.painter_armed.is_some() && !sticky {
             self.painter_armed = None;
             self.painter_sticky = false;
-            self.status = "format painter cancelled".into();
+            self.status = crate::i18n::strs().msg_format_painter_cancelled();
             return;
         }
         let Some((_, sid)) = self.sel else {
-            self.status = "select a shape to copy formatting from first".into();
+            self.status = crate::i18n::strs().msg_select_a_shape_to_copy_formattin();
             return;
         };
         self.painter_armed = Some(sid);
         self.painter_sticky = sticky;
         self.status = if sticky {
-            format!(
-                "format painter: click shapes to apply shape {sid}'s formatting (Esc to finish)"
-            )
+            crate::i18n::strs().msg_format_painter_click_shapes_to_a(sid)
         } else {
-            format!("format painter: click a shape to apply shape {sid}'s formatting")
+            crate::i18n::strs().msg_format_painter_click_a_shape_to(sid)
         };
     }
 
@@ -7161,17 +7164,15 @@ impl App {
         }
         let n = cmds.len();
         self.apply(Macro::new(
-            format!("paint formatting onto shape {to}"),
+            crate::i18n::strs().msg_paint_formatting_onto_shape_to(to),
             cmds,
         ));
         // #110: the sticky (double-clicked) painter stays armed for
         // the next click; the single-shot one is spent.
         if self.painter_sticky {
-            self.status = format!(
-                "{n} formatting cells copied to shape {to} (click more shapes, Esc to finish)"
-            );
+            self.status = crate::i18n::strs().msg_painter_cells_sticky(n, to);
         } else {
-            self.status = format!("{n} formatting cells copied to shape {to}");
+            self.status = crate::i18n::strs().msg_painter_cells(n, to);
             self.painter_armed = None;
         }
     }
@@ -7427,7 +7428,7 @@ impl App {
                             if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
                                 cmds.push(r);
                             }
-                            self.apply(Macro::new("move container and members", cmds));
+                            self.apply(Macro::new(crate::i18n::strs().msg_move_container_and_members(), cmds));
                         }
                     } else {
                         let Some(ed) = self.ed() else { return };
@@ -7473,7 +7474,7 @@ impl App {
                         if let Some(r) = self.reroute_cmd(page_id, &ids_for_reroute) {
                             cmds.push(r);
                         }
-                        self.apply(Macro::new("move shapes", cmds));
+                        self.apply(Macro::new(crate::i18n::strs().msg_move_shapes(), cmds));
                     }
                     self.set_selection(Some((page_id, d.shape)));
                 }
@@ -7590,7 +7591,7 @@ impl App {
             }
             self.painter_armed = None;
             self.painter_sticky = false;
-            self.status = "format painter cancelled".into();
+            self.status = crate::i18n::strs().msg_format_painter_cancelled();
             return;
         }
         if shift {
@@ -7620,7 +7621,7 @@ impl App {
                     self.sel_set = vec![(page_id, shape_id)];
                 }
                 self.set_selection(Some((page_id, shape_id)));
-                self.status = format!("selected shape {shape_id}");
+                self.status = crate::i18n::strs().msg_selected_shape_shape_id(shape_id);
                 // #156: selecting a container raises the contextual
                 // Container Tools tab (Visio 2016).
                 if self.sel_is_container() {
@@ -7778,7 +7779,7 @@ impl App {
                 // the in-place editor run it.
                 let draft = self.selected_text(shape_id).unwrap_or_default();
                 self.begin_text_edit(shape_id, draft);
-                self.status = format!("editing text of shape {shape_id}");
+                self.status = crate::i18n::strs().msg_editing_text_of_shape_shape_id(shape_id);
             }
             DblClick::Deferred(msg) => self.status = msg,
         }
@@ -7838,6 +7839,7 @@ impl App {
                 self.apply_snap_settings();
             }
             Action::SnapGlue => self.snap_dlg_open = !self.snap_dlg_open,
+            Action::Language => self.language_dlg_open = true,
             Action::PointerTool => {
                 self.tool = Tool::Pointer;
                 self.connpt_sel = None;
@@ -7851,9 +7853,9 @@ impl App {
             Action::AlignToPage => {
                 self.align_to_page = !self.align_to_page;
                 self.status = if self.align_to_page {
-                    "aligning to the page".into()
+                    crate::i18n::strs().msg_aligning_to_the_page()
                 } else {
-                    "aligning to the first-selected shape".into()
+                    crate::i18n::strs().msg_aligning_to_the_first_selected_s()
                 };
             }
             Action::DistributeH => self.distribute_selection(false),
@@ -7862,7 +7864,7 @@ impl App {
             Action::SelectByType => {
                 self.selby_open = !self.selby_open;
                 if self.selby_open {
-                    self.status = "select by type: pick a criterion and value".into();
+                    self.status = crate::i18n::strs().msg_select_by_type_pick_a_criterion();
                 }
             }
             Action::FormatPainter => self.arm_format_painter(false),
@@ -7875,7 +7877,7 @@ impl App {
             Action::ConnectorTool => {
                 self.tool = Tool::Connector;
                 self.status =
-                    "Connector Tool: drag from one shape to another (Esc to finish)".into();
+                    crate::i18n::strs().msg_connector_tool_drag_from_one_sha();
             }
             Action::ContainerStyle(name) => self.apply_container_style(name),
             Action::ContainerGallery => self.contgal_open = !self.contgal_open,
@@ -7884,12 +7886,12 @@ impl App {
                 if self.tool == Tool::ConnectionPoint {
                     self.tool = Tool::Pointer;
                     self.connpt_sel = None;
-                    self.status = "connection point tool off".into();
+                    self.status = crate::i18n::strs().msg_connection_point_tool_off();
                 } else {
                     self.tool = Tool::ConnectionPoint;
                     self.connpt_sel = None;
                     self.status =
-                        "Connection Point tool: click a shape to add a connection point".into();
+                        crate::i18n::strs().msg_connpoint_tool_status();
                 }
             }
             Action::FreeformTool => {
@@ -7897,12 +7899,11 @@ impl App {
                 // empty-page press and the release builds the shape.
                 if self.tool == Tool::Freeform {
                     self.tool = Tool::Pointer;
-                    self.status = "freeform off".into();
+                    self.status = crate::i18n::strs().msg_freeform_off();
                 } else {
                     self.tool = Tool::Freeform;
                     self.status =
-                        "Freeform: drag on the page to draw freehand geometry (Esc to finish)"
-                            .into();
+                        crate::i18n::strs().msg_freeform_drag_on_the_page_to_dra();
                 }
             }
             Action::LassoTool => {
@@ -7910,11 +7911,11 @@ impl App {
                 // the Pointer Tool (or Esc) is Select Area.
                 if self.tool == Tool::Lasso {
                     self.tool = Tool::Pointer;
-                    self.status = "lasso select off".into();
+                    self.status = crate::i18n::strs().msg_lasso_select_off();
                 } else {
                     self.tool = Tool::Lasso;
                     self.status =
-                        "Lasso Select: drag a freehand trail around shapes (Esc to finish)".into();
+                        crate::i18n::strs().msg_lasso_select_drag_a_freehand_tra();
                 }
             }
             Action::ToggleUnits => {
@@ -7934,7 +7935,7 @@ impl App {
                     self.shapesheets.clear();
                 }
             }
-            Action::Macros => self.status = "macros arrive with M7 (VBA/.vsdm milestone)".into(),
+            Action::Macros => self.status = crate::i18n::strs().msg_macros_arrive_with_m7_vba_vsdm_m(),
             Action::FillMenu | Action::LineMenu => {
                 self.color_pick = Some(if a == Action::FillMenu {
                     ColorTarget::Fill
@@ -7957,7 +7958,7 @@ impl App {
                         self.hyperlink_open = Some(sid);
                         self.hyperlink_draft = None;
                     }
-                    None => self.status = "Select a shape to edit its hyperlinks".into(),
+                    None => self.status = crate::i18n::strs().msg_select_a_shape_to_edit_its_hyper(),
                 }
             }
         }
@@ -8010,7 +8011,7 @@ impl App {
                     // The painted text never reaches the accessibility
                     // tree on its own (GitHub #56).
                     fresp.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::Button, true, "File")
+                        egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::strs().msg_file())
                     });
                     ui.painter().rect_filled(
                         fr,
@@ -8025,7 +8026,7 @@ impl App {
                     ui.painter().text(
                         fr.center(),
                         egui::Align2::CENTER_CENTER,
-                        "File",
+                        crate::i18n::strs().msg_file(),
                         egui::FontId::proportional(12.5),
                         Color32::WHITE,
                     );
@@ -8108,7 +8109,7 @@ impl App {
                                         .path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| "Untitled".into());
+                                        .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
                                     let mark = if self.dirty { " •" } else { "" };
                                     ui.add_enabled(
                                         false,
@@ -8124,7 +8125,7 @@ impl App {
                                         .path
                                         .file_name()
                                         .map(|n| n.to_string_lossy().into_owned())
-                                        .unwrap_or_else(|| "Untitled".into());
+                                        .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
                                     let mark = if d.dirty { " •" } else { "" };
                                     if ui.button(format!("  {name}{mark}")).clicked() {
                                         self.pending_activate = Some(ix);
@@ -8145,7 +8146,7 @@ impl App {
                         // Painted placeholder, so name the control for
                         // screen readers (GitHub #56).
                         presp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Button, true, "Tell Me")
+                            egui::WidgetInfo::labeled(egui::Role::Button, true, crate::i18n::strs().msg_tell_me())
                         });
                         let hot = presp.hovered();
                         ui.painter().rect_filled(pr, 2, tk.tellme_bg);
@@ -8166,13 +8167,13 @@ impl App {
                         ui.painter().text(
                             Pos2::new(pr.left() + 24.0, pr.center().y),
                             egui::Align2::LEFT_CENTER,
-                            "Tell me what you want to do",
+                            crate::i18n::strs().msg_tell_me_what_you_want_to_do(),
                             egui::FontId::proportional(11.0),
                             tk.hint_text,
                         );
-                        let presp = presp.on_hover_text("Tell Me — planned for a later milestone");
+                        let presp = presp.on_hover_text(crate::i18n::strs().msg_tell_me_planned_for_a_later_mile());
                         if presp.clicked() {
-                            self.status = "Tell Me search arrives with a later milestone".into();
+                            self.status = crate::i18n::strs().msg_tell_me_search_arrives_with_a_la();
                         }
                         // #184: Tell Me badges Q (Office's Alt+Q).
                         self.keytips.badges.push(crate::keytips::Badge {
@@ -8191,12 +8192,12 @@ impl App {
                         // #184: the digit badges ride the QAT buttons
                         // themselves (1..=9 by position, Office's
                         // rule).
-                        qat_button(ui, Icon::Save, "Save (Ctrl+S)", || Action::Save, self, 1);
-                        qat_button(ui, Icon::Undo, "Undo (Ctrl+Z)", || Action::Undo, self, 2);
-                        qat_button(ui, Icon::Redo, "Redo (Ctrl+Y)", || Action::Redo, self, 3);
+                        qat_button(ui, Icon::Save, &crate::i18n::strs().msg_save_ctrl_s(), || Action::Save, self, 1);
+                        qat_button(ui, Icon::Undo, &crate::i18n::strs().msg_undo_ctrl_z(), || Action::Undo, self, 2);
+                        qat_button(ui, Icon::Redo, &crate::i18n::strs().msg_redo_ctrl_y(), || Action::Redo, self, 3);
                         // #242: Help lives in the QAT (the owner's
                         // placement) — opens the About window.
-                        qat_button(ui, Icon::Help, "Help / About", || Action::About, self, 4);
+                        qat_button(ui, Icon::Help, &crate::i18n::strs().msg_help_about(), || Action::About, self, 4);
                     });
                 });
                 // #184: the armed veil covers the strip's rect
@@ -8223,7 +8224,7 @@ impl App {
         // layouts and never borrow the app.
         let ctx = self.ribbon_ctx();
         let groups = crate::ribbon::groups(self.tab, &ctx);
-        let mut launcher: Option<&'static str> = None;
+        let mut launcher: Option<String> = None;
         // #184: every content-row control captures its rect for the
         // keytip badges (letters assigned at paint time).
         let badges = &mut self.keytips.badges;
@@ -8231,7 +8232,7 @@ impl App {
             ui,
             &groups,
             &mut |a| dispatch(a, &mut act),
-            &mut |label| launcher = Some(label),
+            &mut |label: &str| launcher = Some(label.to_string()),
             &mut |b, r| {
                 badges.push(crate::keytips::Badge {
                     rect: r,
@@ -8239,14 +8240,14 @@ impl App {
                     hit: crate::keytips::Hit::Action {
                         action: b.action,
                         enabled: b.enabled,
-                        label: b.a11y_label(),
+                        label: b.a11y_label().into(),
                     },
                 });
             },
         );
         self.keytips.content_rect = Some(ui.max_rect());
         if let Some(label) = launcher {
-            self.status = format!("{label} dialog — planned for a later milestone");
+            self.status = crate::i18n::strs().msg_label_dialog_planned_for_a_later(label);
         }
         if let Some(a) = act {
             self.dispatch(a);
@@ -8343,22 +8344,22 @@ impl App {
                     self.switch_page(to);
                 }
             };
-            nav(ui, "<<", "First page", page_idx > 0, 0);
+            nav(ui, "<<", &crate::i18n::strs().msg_first_page(), page_idx > 0, 0);
             nav(
                 ui,
                 "<",
-                "Previous page",
+                &crate::i18n::strs().msg_previous_page(),
                 page_idx > 0,
                 page_idx.saturating_sub(1),
             );
             nav(
                 ui,
                 ">",
-                "Next page",
+                &crate::i18n::strs().msg_next_page(),
                 page_idx + 1 < n,
                 (page_idx + 1).min(n - 1),
             );
-            nav(ui, ">>", "Last page", page_idx + 1 < n, n - 1);
+            nav(ui, ">>", &crate::i18n::strs().msg_last_page(), page_idx + 1 < n, n - 1);
             ui.separator();
             // Tabs fill the strip; overflow clips and the nav cluster /
             // wheel scrolling reach the rest (Visio shows no scrollbar).
@@ -8384,7 +8385,7 @@ impl App {
                                         &mut self.tab_rename.as_mut().unwrap().1,
                                     )
                                     .font(egui::TextStyle::Small)
-                                    .hint_text("Page name"),
+                                    .hint_text(crate::i18n::strs().msg_page_name()),
                                 );
                                 let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
                                 let entered = ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -8508,15 +8509,15 @@ impl App {
                     );
                     let mut z = self.view.zoom;
                     let slider = egui::Slider::new(&mut z, 0.1..=8.0).show_value(false);
-                    let sresp = ui.add_sized([110.0, 14.0], slider).on_hover_text("Zoom");
+                    let sresp = ui.add_sized([110.0, 14.0], slider).on_hover_text(crate::i18n::strs().msg_zoom());
                     if sresp.changed() {
                         self.view.zoom = z.clamp(0.1, 8.0);
                         self.view.fit_mode = false;
                     }
-                    if ui.button("−").on_hover_text("Zoom Out").clicked() {
+                    if ui.button("−").on_hover_text(crate::i18n::strs().msg_zoom_out()).clicked() {
                         self.dispatch(Action::ZoomOut);
                     }
-                    if ui.button("+").on_hover_text("Zoom In").clicked() {
+                    if ui.button("+").on_hover_text(crate::i18n::strs().msg_zoom_in()).clicked() {
                         self.dispatch(Action::ZoomIn);
                     }
                     ui.separator();
@@ -8589,7 +8590,7 @@ impl App {
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new(format!("set {name}"), cmds));
+            self.apply(Macro::new(format!("set {}", name), cmds));
         }
     }
 
@@ -8610,7 +8611,7 @@ impl App {
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new(format!("set {section}.{cell}"), cmds));
+            self.apply(Macro::new(format!("set {}.{}", section, cell), cmds));
         }
     }
 
@@ -8621,12 +8622,12 @@ impl App {
         ui: &mut Ui,
         current: &str,
         key_of: &dyn Fn(&str) -> String,
-        choices: &[(&str, &str)], // (key, display)
+        choices: &[(&str, String)], // (key, display)
     ) -> Option<String> {
         let display = choices
             .iter()
             .find(|(k, _)| *k == current)
-            .map(|(_, d)| d.to_string())
+            .map(|(_, d)| d.clone())
             .unwrap_or_else(|| current.to_string());
         let r = ui.button(format!("{display}  ›"));
         let mut picked = None;
@@ -8643,7 +8644,7 @@ impl App {
                     .max_height(max_h)
                     .show(ui, |ui| {
                         for (k, d) in choices {
-                            if ui.selectable_label(*k == current, *d).clicked() {
+                            if ui.selectable_label(*k == current, d.clone()).clicked() {
                                 picked = Some(key_of(k));
                                 // CloseOnClickOutside keeps the menu
                                 // open otherwise — close on a pick.
@@ -8663,7 +8664,7 @@ impl App {
         let t = theme::shell_tokens(ui.visuals());
         ui.set_min_width(200.0);
         ui.heading(
-            egui::RichText::new("Format Shape")
+            egui::RichText::new(crate::i18n::strs().msg_format_shape())
                 .size(13.0)
                 .color(t.label),
         );
@@ -8673,11 +8674,11 @@ impl App {
         let mut set_cell: Option<(String, String)> = None;
         let mut set_row: Option<(String, String, String)> = None;
 
-        egui::CollapsingHeader::new("Fill")
+        egui::CollapsingHeader::new(crate::i18n::strs().msg_fill())
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Foreground");
+                    ui.label(crate::i18n::strs().msg_foreground());
                     if ui
                         .button(
                             self.eff_cell_str("FillForegnd")
@@ -8689,7 +8690,7 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Background");
+                    ui.label(crate::i18n::strs().msg_background());
                     if ui
                         .button(self.eff_cell_str("FillBkgnd").unwrap_or_else(|| "—".into()))
                         .clicked()
@@ -8705,27 +8706,27 @@ impl App {
                     &cur,
                     &|k: &str| k.to_string(),
                     &[
-                        ("0", "None"),
-                        ("1", "Solid"),
-                        ("2", "5%"),
-                        ("3", "10%"),
-                        ("4", "20%"),
-                        ("5", "30%"),
-                        ("6", "40%"),
-                        ("24", "Gradient horiz."),
-                        ("25", "Gradient vert."),
-                        ("28", "Gradient radial"),
+                        ("0", crate::i18n::strs().msg_none()),
+                        ("1", crate::i18n::strs().msg_solid()),
+                        ("2", "5%".to_string()),
+                        ("3", "10%".to_string()),
+                        ("4", "20%".to_string()),
+                        ("5", "30%".to_string()),
+                        ("6", "40%".to_string()),
+                        ("24", crate::i18n::strs().msg_gradient_horiz()),
+                        ("25", crate::i18n::strs().msg_gradient_vert()),
+                        ("28", crate::i18n::strs().msg_gradient_radial()),
                     ],
                 ) {
                     set_cell = Some(("FillPattern".into(), v));
                 }
             });
         ui.add_space(2.0);
-        egui::CollapsingHeader::new("Line")
+        egui::CollapsingHeader::new(crate::i18n::strs().msg_line())
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Color");
+                    ui.label(crate::i18n::strs().msg_color());
                     if ui
                         .button(self.eff_cell_str("LineColor").unwrap_or_else(|| "—".into()))
                         .clicked()
@@ -8734,7 +8735,7 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Weight");
+                    ui.label(crate::i18n::strs().msg_weight());
                     let cur_pt = self.eff_cell_num("LineWeight").unwrap_or(0.0104) * 72.0;
                     let mut pt = cur_pt;
                     let r = ui.add(
@@ -8743,7 +8744,7 @@ impl App {
                             .custom_formatter(|v, _| format!("{v:.2} pt")),
                     );
                     r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::Slider, true, "Line weight")
+                        egui::WidgetInfo::labeled(egui::Role::Slider, true, crate::i18n::strs().msg_line_weight())
                     });
                     if r.drag_stopped() && (pt - cur_pt).abs() > 1e-6 {
                         set_cell = Some(("LineWeight".into(), format!("{:.6}", pt / 72.0)));
@@ -8760,16 +8761,16 @@ impl App {
                     // (Analysis/line-patterns-visio2016.md) — 9 is the
                     // short 4-2 dash, 16 the long dash.
                     &[
-                        ("0", "None"),
-                        ("1", "Solid"),
-                        ("2", "Dash"),
-                        ("3", "Dot"),
-                        ("4", "Dash-dot"),
-                        ("5", "Dash-dot-dot"),
-                        ("9", "Short Dash"),
-                        ("10", "Fine Dot"),
-                        ("16", "Long Dash"),
-                        ("23", "Fine Dash"),
+                        ("0", crate::i18n::strs().msg_none()),
+                        ("1", crate::i18n::strs().msg_solid()),
+                        ("2", crate::i18n::strs().msg_dash()),
+                        ("3", crate::i18n::strs().msg_dot()),
+                        ("4", crate::i18n::strs().msg_dash_dot()),
+                        ("5", crate::i18n::strs().msg_dash_dot_dot()),
+                        ("9", crate::i18n::strs().msg_short_dash()),
+                        ("10", crate::i18n::strs().msg_fine_dot()),
+                        ("16", crate::i18n::strs().msg_long_dash()),
+                        ("23", crate::i18n::strs().msg_fine_dash()),
                     ],
                 ) {
                     set_cell = Some(("LinePattern".into(), v));
@@ -8779,102 +8780,102 @@ impl App {
                 // print (Analysis/arrow-gallery-visio2016.md, the
                 // 2026-11-06 re-read). The picker lists the gallery
                 // per value, Visio-style.
-                const ARROWS: &[(&str, &str)] = &[
-                    ("0", "None"),
-                    ("1", "Open 2-Prong"),
-                    ("2", "Small Arrow"),
-                    ("3", "Open Wide"),
-                    ("4", "Classic Arrow"),
-                    ("5", "Wide Arrow"),
-                    ("6", "Long Arrow"),
-                    ("7", "Open Fork"),
-                    ("8", "Stealth Dart"),
-                    ("9", "Slanted Tick"),
-                    ("10", "Filled Circle"),
-                    ("11", "Filled Square"),
-                    ("12", "Open V (Tall)"),
-                    ("13", "Filled Arrow (Plain)"),
-                    ("14", "Open Triangle (Large)"),
-                    ("15", "Open Triangle (Small)"),
-                    ("16", "Open Triangle (Medium-Large)"),
-                    ("17", "Open Triangle (Medium)"),
-                    ("18", "Open Triangle (Convex Base)"),
-                    ("19", "Open Barbed"),
-                    ("20", "Open Circle"),
-                    ("21", "Open Square"),
-                    ("22", "Open Diamond"),
-                    ("23", "Slanted Tick"),
-                    ("24", "Tick"),
-                    ("25", "Double Tick"),
-                    ("26", "Triple Tick"),
-                    ("27", "Crow's Foot"),
-                    ("28", "Crow's Foot + Tick"),
-                    ("29", "Fork + Ring"),
-                    ("30", "Ring + Tick"),
-                    ("31", "Tick + Ring"),
-                    ("32", "Double Tick + Ring"),
-                    ("33", "Triple Tick + Ring"),
-                    ("34", "Diamond + Ring"),
-                    ("35", "Tick + Dot"),
-                    ("36", "Double Tick + Dot"),
-                    ("37", "Triple Tick + Dot"),
-                    ("38", "Diamond + Dot"),
-                    ("39", "Double Arrow (Filled)"),
-                    ("40", "Double Arrow (Open)"),
-                    ("41", "Ring"),
-                    ("42", "Dot"),
-                    ("43", "Open Double Chevron (Large)"),
-                    ("44", "Tick + Chevron"),
-                    ("45", "Tick + Double Chevron"),
+                let arrows: &[(&str, String)] = &[
+                    ("0", crate::i18n::strs().msg_none()),
+                    ("1", crate::i18n::strs().msg_open_2_prong()),
+                    ("2", crate::i18n::strs().msg_small_arrow()),
+                    ("3", crate::i18n::strs().msg_open_wide()),
+                    ("4", crate::i18n::strs().msg_classic_arrow()),
+                    ("5", crate::i18n::strs().msg_wide_arrow()),
+                    ("6", crate::i18n::strs().msg_long_arrow()),
+                    ("7", crate::i18n::strs().msg_open_fork()),
+                    ("8", crate::i18n::strs().msg_stealth_dart()),
+                    ("9", crate::i18n::strs().msg_slanted_tick()),
+                    ("10", crate::i18n::strs().msg_filled_circle()),
+                    ("11", crate::i18n::strs().msg_filled_square()),
+                    ("12", crate::i18n::strs().msg_open_v_tall()),
+                    ("13", crate::i18n::strs().msg_filled_arrow_plain()),
+                    ("14", crate::i18n::strs().msg_open_triangle_large()),
+                    ("15", crate::i18n::strs().msg_open_triangle_small()),
+                    ("16", crate::i18n::strs().msg_open_triangle_medium_large()),
+                    ("17", crate::i18n::strs().msg_open_triangle_medium()),
+                    ("18", crate::i18n::strs().msg_open_triangle_convex_base()),
+                    ("19", crate::i18n::strs().msg_open_barbed()),
+                    ("20", crate::i18n::strs().msg_open_circle()),
+                    ("21", crate::i18n::strs().msg_open_square()),
+                    ("22", crate::i18n::strs().msg_open_diamond()),
+                    ("23", crate::i18n::strs().msg_slanted_tick()),
+                    ("24", crate::i18n::strs().msg_tick()),
+                    ("25", crate::i18n::strs().msg_double_tick()),
+                    ("26", crate::i18n::strs().msg_triple_tick()),
+                    ("27", crate::i18n::strs().msg_crow_s_foot()),
+                    ("28", crate::i18n::strs().msg_crow_s_foot_tick()),
+                    ("29", crate::i18n::strs().msg_fork_ring()),
+                    ("30", crate::i18n::strs().msg_ring_tick()),
+                    ("31", crate::i18n::strs().msg_tick_ring()),
+                    ("32", crate::i18n::strs().msg_double_tick_ring()),
+                    ("33", crate::i18n::strs().msg_triple_tick_ring()),
+                    ("34", crate::i18n::strs().msg_diamond_ring()),
+                    ("35", crate::i18n::strs().msg_tick_dot()),
+                    ("36", crate::i18n::strs().msg_double_tick_dot()),
+                    ("37", crate::i18n::strs().msg_triple_tick_dot()),
+                    ("38", crate::i18n::strs().msg_diamond_dot()),
+                    ("39", crate::i18n::strs().msg_double_arrow_filled()),
+                    ("40", crate::i18n::strs().msg_double_arrow_open()),
+                    ("41", crate::i18n::strs().msg_ring()),
+                    ("42", crate::i18n::strs().msg_dot()),
+                    ("43", crate::i18n::strs().msg_open_double_chevron_large()),
+                    ("44", crate::i18n::strs().msg_tick_chevron()),
+                    ("45", crate::i18n::strs().msg_tick_double_chevron()),
                 ];
                 let cur = self
                     .eff_cell_str("BeginArrow")
                     .unwrap_or_else(|| "0".into());
-                if let Some(v) = Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS) {
+                if let Some(v) = Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), arrows) {
                     set_cell = Some(("BeginArrow".into(), v));
                 }
                 let cur = self.eff_cell_str("EndArrow").unwrap_or_else(|| "0".into());
-                if let Some(v) = Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), ARROWS) {
+                if let Some(v) = Self::fmt_dropdown(ui, &cur, &|k: &str| k.to_string(), arrows) {
                     set_cell = Some(("EndArrow".into(), v));
                 }
                 ui.horizontal(|ui| {
-                    ui.label("Rounding");
+                    ui.label(crate::i18n::strs().msg_rounding());
                     let cur = self.eff_cell_str("Rounding").unwrap_or_else(|| "0".into());
                     let buf = bufs.entry("rounding".into()).or_insert(cur);
                     let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
                     r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Rounding")
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, crate::i18n::strs().msg_rounding())
                     });
                     if r.lost_focus() {
                         if let Ok(v) = buf.trim().parse::<f64>() {
-                            set_cell = Some(("Rounding".into(), format!("{v:.6}")));
+                            set_cell = Some((crate::i18n::strs().msg_rounding(), format!("{v:.6}")));
                         }
                         bufs.remove("rounding");
                     }
                 });
             });
         ui.add_space(2.0);
-        egui::CollapsingHeader::new("Text")
+        egui::CollapsingHeader::new(crate::i18n::strs().msg_text())
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Font");
+                    ui.label(crate::i18n::strs().msg_font());
                     let cur = self.eff_row_str("Character", "Font").unwrap_or_default();
                     let buf = bufs.entry("font".into()).or_insert(cur);
                     let r = ui.add(egui::TextEdit::singleline(buf).desired_width(120.0));
                     r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Font")
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, crate::i18n::strs().msg_font())
                     });
                     if r.lost_focus() {
                         let v = buf.trim().to_string();
                         if !v.is_empty() {
-                            set_row = Some(("Character".into(), "Font".into(), v));
+                            set_row = Some(("Character".into(), crate::i18n::strs().msg_font(), v));
                         }
                         bufs.remove("font");
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Size (pt)");
+                    ui.label(crate::i18n::strs().msg_size_pt());
                     let cur = self
                         .eff_row_str("Character", "Size")
                         .and_then(|v| v.parse::<f64>().ok())
@@ -8883,13 +8884,13 @@ impl App {
                     let buf = bufs.entry("size".into()).or_insert(format!("{cur:.1}"));
                     let r = ui.add(egui::TextEdit::singleline(buf).desired_width(70.0));
                     r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, "Size (pt)")
+                        egui::WidgetInfo::labeled(egui::Role::TextInput, true, crate::i18n::strs().msg_size_pt())
                     });
                     if r.lost_focus() {
                         if let Ok(pt) = buf.trim().parse::<f64>() {
                             set_row = Some((
                                 "Character".into(),
-                                "Size".into(),
+                                crate::i18n::strs().msg_size(),
                                 format!("{:.6}", pt / 72.0),
                             ));
                         }
@@ -8897,7 +8898,7 @@ impl App {
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Style");
+                    ui.label(crate::i18n::strs().msg_style());
                     let bits = self
                         .eff_row_str("Character", "Style")
                         .and_then(|v| v.parse::<i64>().ok())
@@ -8906,29 +8907,29 @@ impl App {
                     let mut italic = bits & 2 != 0;
                     let rb = ui.checkbox(&mut bold, "B");
                     rb.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Bold")
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, crate::i18n::strs().msg_bold())
                     });
                     if rb.changed() {
                         set_row = Some((
                             "Character".into(),
-                            "Style".into(),
+                            crate::i18n::strs().msg_style(),
                             format!("{}", (bits & !1) | bold as i64),
                         ));
                     }
                     let ri = ui.checkbox(&mut italic, "I");
                     ri.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, "Italic")
+                        egui::WidgetInfo::labeled(egui::Role::CheckBox, true, crate::i18n::strs().msg_italic())
                     });
                     if ri.changed() {
                         set_row = Some((
                             "Character".into(),
-                            "Style".into(),
+                            crate::i18n::strs().msg_style(),
                             format!("{}", (bits & !2) | ((italic as i64) * 2)),
                         ));
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Color");
+                    ui.label(crate::i18n::strs().msg_color());
                     if ui
                         .button(
                             self.eff_row_str("Character", "Color")
@@ -8940,15 +8941,15 @@ impl App {
                     }
                 });
                 let cur = self
-                    .eff_row_str("Paragraph", "HorzAlign")
+                    .eff_row_str(&crate::i18n::strs().msg_paragraph(), "HorzAlign")
                     .unwrap_or_else(|| "0".into());
                 if let Some(v) = Self::fmt_dropdown(
                     ui,
                     &cur,
                     &|k: &str| k.to_string(),
-                    &[("0", "Left"), ("1", "Center"), ("2", "Right")],
+                    &[("0", crate::i18n::strs().msg_align_left()), ("1", crate::i18n::strs().msg_center()), ("2", crate::i18n::strs().msg_align_right())],
                 ) {
-                    set_row = Some(("Paragraph".into(), "HorzAlign".into(), v));
+                    set_row = Some((crate::i18n::strs().msg_paragraph(), "HorzAlign".into(), v));
                 }
             });
 
@@ -8995,7 +8996,7 @@ impl App {
     /// being silently dropped. Returns the clicked path, if any.
     fn recent_list_ui(&self, ui: &mut Ui) -> Option<PathBuf> {
         if self.recent.entries().is_empty() {
-            ui.weak("Files you open will appear here.");
+            ui.weak(crate::i18n::strs().msg_files_you_open_will_appear_here());
             return None;
         }
         let mut clicked = None;
@@ -9055,7 +9056,7 @@ impl App {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".to_string());
+            .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
         let page_name = self
             .ed()
             .and_then(|e| e.doc.pages.get(self.page_idx))
@@ -9118,7 +9119,7 @@ impl App {
                 ui.add_space(40.0);
                 ui.vertical(|ui| {
                     ui.add_space(24.0);
-                    ui.heading("Recent");
+                    ui.heading(crate::i18n::strs().msg_recent());
                     ui.add_space(6.0);
                     if let Some(p) = self.recent_list_ui(ui) {
                         self.load(p);
@@ -9127,18 +9128,18 @@ impl App {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                     ui.vertical(|ui| {
                         ui.add_space(24.0);
-                        ui.heading("New");
+                        ui.heading(crate::i18n::strs().msg_rail_new());
                         ui.add_space(6.0);
                         if ui
-                            .button("Blank drawing")
-                            .on_hover_text("Start an empty US-Letter drawing (Ctrl+N)")
+                            .button(crate::i18n::strs().msg_blank_drawing())
+                            .on_hover_text(crate::i18n::strs().msg_start_an_empty_us_letter_drawing())
                             .clicked()
                         {
                             self.do_new();
                         }
                         if ui
-                            .button("Open a Visio file…")
-                            .on_hover_text("Open .vsdx / .vstx / .vssx (Ctrl+O)")
+                            .button(crate::i18n::strs().msg_open_a_visio_file())
+                            .on_hover_text(crate::i18n::strs().msg_open_vsdx_vstx_vssx_ctrl_o())
                             .clicked()
                         {
                             self.do_open();
@@ -9189,7 +9190,7 @@ impl App {
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
-                if ui.small_button("× Close Group").clicked() {
+                if ui.small_button(crate::i18n::strs().msg_close_group()).clicked() {
                     pop = true;
                 }
             });
@@ -9780,7 +9781,7 @@ impl App {
                     egui::WidgetInfo::labeled(
                         egui::Role::Button,
                         true,
-                        format!("Comments on shape {target} ({count})"),
+                        crate::i18n::strs().msg_comments_on_shape_target_count(target, count),
                     )
                 });
                 let t = theme::shell_tokens(ui.visuals());
@@ -10064,22 +10065,22 @@ impl App {
             ui.visuals_mut().widgets.inactive.bg_fill = egui::Color32::TRANSPARENT;
             ui.visuals_mut().widgets.hovered.bg_fill = tokens.hover_fill;
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
-            if ctx_item(ui, None, "Insert Page…", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_insert_page(), "", true) {
                 act = Some(Act::Insert);
             }
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::Delete),
-                "Delete Page",
+                &crate::i18n::strs().msg_delete_page(),
                 "",
                 n > 1,
             ) {
                 act = Some(Act::Delete);
             }
-            if ctx_item(ui, None, "Rename Page", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_rename_page(), "", true) {
                 act = Some(Act::Rename);
             }
-            if ctx_item(ui, None, "Duplicate Page", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_duplicate_page(), "", true) {
                 act = Some(Act::Duplicate);
             }
             // #113 remainder: mark a page AS a background (Visio's Page
@@ -10089,22 +10090,17 @@ impl App {
                 .ed()
                 .and_then(|e| e.doc.pages.get(idx))
                 .is_some_and(|p| self.is_background_page(p.id));
-            if ctx_item(
-                ui,
-                None,
-                if marked {
-                    "Remove Background Mark"
-                } else {
-                    "Set as Background"
-                },
-                "",
-                true,
-            ) {
+            let bg_label = if marked {
+                crate::i18n::strs().msg_remove_background_mark()
+            } else {
+                crate::i18n::strs().msg_set_as_background()
+            };
+            if ctx_item(ui, None, &bg_label, "", true) {
                 act = Some(Act::MarkBg);
             }
             ui.separator();
-            ctx_item(ui, None, "Page Setup…", "(later milestone)", false);
-            if ctx_item(ui, None, "Reorder Pages…", "", true) {
+            ctx_item(ui, None, &crate::i18n::strs().msg_page_setup_menu(), "(later milestone)", false);
+            if ctx_item(ui, None, &crate::i18n::strs().msg_reorder_pages_menu(), "", true) {
                 act = Some(Act::Reorder);
             }
         });
@@ -10160,14 +10156,14 @@ impl App {
         page.attrs.retain(|(k, _)| k != "Background");
         let name = page.name.clone();
         if !marked {
-            page.attrs.push(("Background".to_string(), "1".to_string()));
+            page.attrs.push((crate::i18n::strs().msg_background(), "1".to_string()));
         }
         self.dirty = true;
         self.version += 1;
         self.status = if marked {
-            format!("page {name} is a foreground page again")
+            crate::i18n::strs().msg_page_name_is_a_foreground_page_a(name)
         } else {
-            format!("page {name} marked as a background")
+            crate::i18n::strs().msg_page_name_marked_as_a_background(name)
         };
     }
 
@@ -10270,7 +10266,7 @@ impl App {
             }
         }
         if address.is_empty() {
-            self.status = "the link has no address".into();
+            self.status = crate::i18n::strs().msg_the_link_has_no_address();
             return;
         }
         // A stored relative address opens against the document's
@@ -10294,7 +10290,7 @@ impl App {
         }
         match cmd.arg(&address).spawn() {
             Ok(_) => self.status = format!("opened {address}"),
-            Err(e) => self.status = format!("could not open {address}: {e}"),
+            Err(e) => self.status = crate::i18n::strs().msg_could_not_open_address_e(address, e.to_string()),
         }
     }
 
@@ -10429,7 +10425,7 @@ impl App {
         cmds.push(user_row("AnnotationRef", &shape_id.to_string()));
         cmds.push(user_row("AnnotationAuthor", &author));
         cmds.push(user_row("AnnotationDate", &date));
-        self.apply(dc_core::Macro::new("add comment", cmds));
+        self.apply(dc_core::Macro::new(crate::i18n::strs().msg_comment_add_inline(), cmds));
     }
 
     /// The shape's comment thread (#29): annotation shapes whose
@@ -10498,13 +10494,13 @@ impl App {
         let mut body = std::mem::take(&mut self.comment_body);
         let mut edit = self.comment_edit.take();
         let mut close = false;
-        egui::Window::new("Comments")
+        egui::Window::new(crate::i18n::strs().msg_comments())
             .resizable(false)
             .collapsible(false)
             .default_width(320.0)
             .show(ctx, |ui| {
                 if thread.is_empty() {
-                    ui.weak("No comments on this shape yet.");
+                    ui.weak(crate::i18n::strs().msg_no_comments_on_this_shape_yet());
                 }
                 for (ann_id, author, date, cbody) in &thread {
                     let card = egui::Frame::new()
@@ -10559,11 +10555,11 @@ impl App {
                                     egui::WidgetInfo::labeled(
                                         egui::Role::TextInput,
                                         true,
-                                        "Edit comment",
+                                        crate::i18n::strs().msg_edit_comment(),
                                     )
                                 });
                                 ui.horizontal(|ui| {
-                                    if ui.button("Save").clicked() && !buf.trim().is_empty() {
+                                    if ui.button(crate::i18n::strs().msg_save()).clicked() && !buf.trim().is_empty() {
                                         let author = author.clone();
                                         let date = date.clone();
                                         let new_text =
@@ -10582,7 +10578,7 @@ impl App {
                                         }
                                         edit_done = true;
                                     }
-                                    if ui.button("Cancel").clicked() {
+                                    if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                                         edit_done = true;
                                     }
                                 });
@@ -10590,10 +10586,10 @@ impl App {
                             if !editing_here {
                                 ui.label(egui::RichText::new(cbody).size(12.0));
                                 ui.horizontal(|ui| {
-                                    if ui.button("Edit").clicked() {
+                                    if ui.button(crate::i18n::strs().msg_edit()).clicked() {
                                         edit = Some((*ann_id, cbody.clone()));
                                     }
-                                    if ui.button("Delete").clicked() {
+                                    if ui.button(crate::i18n::strs().msg_delete()).clicked() {
                                         self.apply(RemoveShape::new(page_id, *ann_id));
                                     }
                                 });
@@ -10618,9 +10614,9 @@ impl App {
                         .desired_rows(2)
                         .desired_width(f32::INFINITY)
                         .hint_text(if thread.is_empty() {
-                            "Add a comment"
+                            crate::i18n::strs().msg_add_a_comment()
                         } else {
-                            "Reply"
+                            crate::i18n::strs().msg_reply()
                         }),
                 );
                 r.widget_info(|| {
@@ -10628,19 +10624,19 @@ impl App {
                         egui::Role::TextInput,
                         true,
                         if thread.is_empty() {
-                            "New comment"
+                            crate::i18n::strs().msg_review_new_comment()
                         } else {
-                            "Reply"
+                            crate::i18n::strs().msg_reply()
                         },
                     )
                 });
                 ui.horizontal(|ui| {
-                    let caption = if thread.is_empty() { "OK" } else { "Reply" };
+                    let caption = if thread.is_empty() { crate::i18n::strs().msg_ok() } else { crate::i18n::strs().msg_reply() };
                     if ui.button(caption).clicked() && !body.trim().is_empty() {
                         self.add_comment(shape_id, &body);
                         body.clear();
                     }
-                    if ui.button("Close").clicked() {
+                    if ui.button(crate::i18n::strs().msg_close()).clicked() {
                         close = true;
                     }
                 });
@@ -10733,7 +10729,7 @@ impl App {
             .map_or(egui::pos2(900.0, 60.0), |r| {
                 r.right_top() + egui::vec2(-360.0, 60.0)
             });
-        egui::Window::new("Shape Data")
+        egui::Window::new(crate::i18n::strs().msg_shape_data())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -10863,7 +10859,7 @@ impl App {
                                             ui.horizontal(|ui| {
                                                 let edit = ui.add(
                                                     egui::TextEdit::singleline(buf)
-                                                        .hint_text("new choice"),
+                                                        .hint_text(crate::i18n::strs().msg_new_choice()),
                                                 );
                                                 edit.widget_info(|| {
                                                     egui::WidgetInfo::labeled(
@@ -10872,7 +10868,7 @@ impl App {
                                                         &label,
                                                     )
                                                 });
-                                                if ui.button("Add").clicked()
+                                                if ui.button(crate::i18n::strs().msg_add()).clicked()
                                                     || (edit.lost_focus()
                                                         && ui.input(|i| {
                                                             i.key_pressed(egui::Key::Enter)
@@ -10880,7 +10876,7 @@ impl App {
                                                 {
                                                     commit = true;
                                                 }
-                                                if ui.button("Cancel").clicked() {
+                                                if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                                                     cancel = true;
                                                 }
                                             });
@@ -10900,7 +10896,7 @@ impl App {
                                                 // phantom choices. Keep the add
                                                 // row open for correction.
                                                 self.status =
-                                                    format!("{label}: a choice cannot contain ';'");
+                                                    crate::i18n::strs().msg_label_a_choice_cannot_contain(label);
                                             } else if !v.is_empty() {
                                                 bufs.remove(&add_key);
                                                 self.prop_add = None;
@@ -10973,7 +10969,7 @@ impl App {
                                                 write_value(self, page_id, shape_id, name, &v);
                                             }
                                             Err(_) => {
-                                                self.status = format!("{label}: not a number");
+                                                self.status = crate::i18n::strs().msg_label_not_a_number(label);
                                             }
                                         }
                                         bufs.remove(name);
@@ -11005,7 +11001,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::i18n::strs().msg_close()).clicked() {
                             close_btn = true;
                         }
                     });
@@ -11054,7 +11050,7 @@ impl App {
                                     .doc
                                     .master(mid)
                                     .and_then(|m| m.name_u.clone())
-                                    .unwrap_or_else(|| format!("master {mid}"));
+                                    .unwrap_or_else(|| crate::i18n::strs().msg_master_mid(mid));
                                 push(name, vec![sh.id]);
                             }
                         }
@@ -11105,15 +11101,15 @@ impl App {
         }
         let mut open = true;
         let mut apply = false;
-        egui::Window::new("Select by Type")
+        egui::Window::new(crate::i18n::strs().msg_select_by_type())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
             .default_width(320.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Select by");
-                    for (i, label) in ["Shape type", "Master", "Layer"].into_iter().enumerate() {
+                    ui.label(crate::i18n::strs().msg_select_by());
+                    for (i, label) in [crate::i18n::strs().msg_shape_type(), crate::i18n::strs().msg_master(), crate::i18n::strs().msg_layer()].into_iter().enumerate() {
                         if ui
                             .selectable_label(self.selby_criterion == i as u8, label)
                             .clicked()
@@ -11125,9 +11121,9 @@ impl App {
                 });
                 ui.separator();
                 if pairs.is_empty() {
-                    ui.weak("(nothing on this page matches the criterion)");
+                    ui.weak(crate::i18n::strs().msg_nothing_on_this_page_matches_the());
                 } else {
-                    ui.label("Value:");
+                    ui.label(crate::i18n::strs().msg_value());
                     for (label, _, ids) in &pairs {
                         if ui
                             .selectable_label(
@@ -11142,7 +11138,7 @@ impl App {
                 }
                 ui.add_space(6.0);
                 let can = !self.selby_value.is_empty();
-                let btn = egui::Button::new("Select");
+                let btn = egui::Button::new(crate::i18n::strs().msg_select());
                 let r = ui.add_enabled(can, btn);
                 if r.clicked() {
                     apply = true;
@@ -11187,7 +11183,7 @@ impl App {
         }
         let mut open = true;
         let mut changed = false;
-        egui::Window::new("Snap & Glue")
+        egui::Window::new(crate::i18n::strs().msg_snap_glue())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -11196,20 +11192,20 @@ impl App {
                 let s = &mut self.snap;
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.strong("Snap");
-                        if ui.checkbox(&mut s.snap_active, "Active").changed() {
+                        ui.strong(crate::i18n::strs().msg_snap());
+                        if ui.checkbox(&mut s.snap_active, crate::i18n::strs().msg_active()).changed() {
                             changed = true;
                         }
                         ui.add_enabled_ui(s.snap_active, |ui| {
-                            ui.label("Snap to:");
+                            ui.label(crate::i18n::strs().msg_snap_to());
                             for (v, label) in [
-                                (&mut s.snap_ruler_subdivisions, "Ruler subdivisions"),
-                                (&mut s.snap_grid, "Grid"),
-                                (&mut s.snap_guides, "Guides"),
-                                (&mut s.snap_alignment_boxes, "Alignment boxes"),
-                                (&mut s.snap_shape_extensions, "Shape extensions"),
-                                (&mut s.snap_shape_intersections, "Shape intersections"),
-                                (&mut s.snap_connection_points, "Connection points"),
+                                (&mut s.snap_ruler_subdivisions, crate::i18n::strs().msg_ruler_subdivisions()),
+                                (&mut s.snap_grid, crate::i18n::strs().msg_grid()),
+                                (&mut s.snap_guides, crate::i18n::strs().msg_guides()),
+                                (&mut s.snap_alignment_boxes, crate::i18n::strs().msg_alignment_boxes()),
+                                (&mut s.snap_shape_extensions, crate::i18n::strs().msg_shape_extensions()),
+                                (&mut s.snap_shape_intersections, crate::i18n::strs().msg_shape_intersections()),
+                                (&mut s.snap_connection_points, crate::i18n::strs().msg_snap_conn_points()),
                             ] {
                                 if ui.checkbox(v, label).changed() {
                                     changed = true;
@@ -11219,17 +11215,17 @@ impl App {
                     });
                     ui.separator();
                     ui.vertical(|ui| {
-                        ui.strong("Glue");
-                        if ui.checkbox(&mut s.glue_active, "Active").changed() {
+                        ui.strong(crate::i18n::strs().msg_glue());
+                        if ui.checkbox(&mut s.glue_active, crate::i18n::strs().msg_active()).changed() {
                             changed = true;
                         }
                         ui.add_enabled_ui(s.glue_active, |ui| {
-                            ui.label("Glue to:");
+                            ui.label(crate::i18n::strs().msg_glue_to());
                             for (v, label) in [
-                                (&mut s.glue_guides, "Guides"),
-                                (&mut s.glue_shape_handles, "Shape handles"),
-                                (&mut s.glue_shape_vertices, "Shape vertices"),
-                                (&mut s.glue_connection_points, "Connection points"),
+                                (&mut s.glue_guides, crate::i18n::strs().msg_guides()),
+                                (&mut s.glue_shape_handles, crate::i18n::strs().msg_shape_handles()),
+                                (&mut s.glue_shape_vertices, crate::i18n::strs().msg_shape_vertices()),
+                                (&mut s.glue_connection_points, crate::i18n::strs().msg_snap_conn_points()),
                             ] {
                                 if ui.checkbox(v, label).changed() {
                                     changed = true;
@@ -11239,8 +11235,8 @@ impl App {
                     });
                 });
                 ui.separator();
-                ui.strong("Drawing aids");
-                if ui.checkbox(&mut s.dynamic_grid, "Dynamic grid").changed() {
+                ui.strong(crate::i18n::strs().msg_drawing_aids());
+                if ui.checkbox(&mut s.dynamic_grid, crate::i18n::strs().msg_snap_dynamic_grid()).changed() {
                     changed = true;
                 }
                 ui.add_space(3.0);
@@ -11304,7 +11300,7 @@ impl App {
         // too (#110 audit).
         let mut close_btn = false;
         let mut esc_close = false;
-        egui::Window::new("Hyperlinks")
+        egui::Window::new(crate::i18n::strs().msg_hyperlinks())
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
@@ -11326,13 +11322,13 @@ impl App {
                 }
                 // The 2016 storage toggle (#71) sits above the list.
                 if ui
-                    .checkbox(&mut relative_paths, "Use relative paths for hyperlinks")
+                    .checkbox(&mut relative_paths, crate::i18n::strs().msg_use_relative_paths_for_hyperlink())
                     .changed()
                 {
                     self.relative_paths.set(&self.path, relative_paths);
                 }
                 if rows.is_empty() && draft.is_none() {
-                    ui.weak("No hyperlinks on this shape.");
+                    ui.weak(crate::i18n::strs().msg_no_hyperlinks_on_this_shape());
                 }
                 for row in &rows {
                     ui.horizontal(|ui| {
@@ -11350,13 +11346,13 @@ impl App {
                             // inherited row sets read-only until
                             // overridden); Edit materializes the
                             // override (#139).
-                            ui.weak("inherited");
+                            ui.weak(crate::i18n::strs().msg_inherited());
                         }
-                        if ui.button("Go").clicked() {
+                        if ui.button(crate::i18n::strs().msg_go()).clicked() {
                             let (a, s) = (row.addr.clone(), row.sub.clone());
                             self.follow_hyperlink(&a, &s);
                         }
-                        if ui.button("Edit").clicked() {
+                        if ui.button(crate::i18n::strs().msg_edit()).clicked() {
                             draft = Some(HyperlinkDraft {
                                 edit_row: Some(row.ix),
                                 from_master: row.inherited,
@@ -11365,15 +11361,15 @@ impl App {
                                 desc: row.desc.clone(),
                             });
                         }
-                        let remove = ui.add_enabled(!row.inherited, egui::Button::new("Remove"));
+                        let remove = ui.add_enabled(!row.inherited, egui::Button::new(crate::i18n::strs().msg_remove()));
                         if row.inherited {
                             remove.on_disabled_hover_text(
-                                "Inherited from the shape's master — edit it to override it on this shape",
+                                crate::i18n::strs().msg_inherited_from_the_shape_s_maste(),
                             );
                         } else if remove.clicked() {
                             self.apply(dc_core::commands::RemoveSectionRow::new(
                                 scope.clone(),
-                                "Hyperlink",
+                                crate::i18n::strs().msg_hyperlink(),
                                 0,
                                 dc_core::commands::RowSel::Ix(row.ix),
                             ));
@@ -11400,7 +11396,7 @@ impl App {
                             // Open/Save As worker-thread pattern); the
                             // pick lands in the Address field once the
                             // dialog resolves.
-                            if ui.button("Browse…").clicked() {
+                            if ui.button(crate::i18n::strs().msg_browse()).clicked() {
                                 self.begin_dialog(PendingKind::HyperlinkAddress);
                             }
                             ui.end_row();
@@ -11411,7 +11407,7 @@ impl App {
                             // label requirement (#56 pattern).
                             let combo = egui::ComboBox::from_id_salt("dc-hyperlink-sub-page")
                                 .selected_text(if d.sub.is_empty() {
-                                    "Pages…".into()
+                                    crate::i18n::strs().msg_hyperlink_pages()
                                 } else {
                                     d.sub.clone()
                                 })
@@ -11425,7 +11421,7 @@ impl App {
                                 egui::WidgetInfo::labeled(
                                     egui::Role::ComboBox,
                                     true,
-                                    "Sub-address page",
+                                    crate::i18n::strs().msg_sub_address_page(),
                                 )
                             });
                             ui.end_row();
@@ -11473,7 +11469,7 @@ impl App {
                             if !from_master {
                                 cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
                                     scope.clone(),
-                                    "Hyperlink",
+                                    crate::i18n::strs().msg_hyperlink(),
                                     0,
                                     dc_core::commands::RowSel::Ix(old),
                                 )));
@@ -11493,7 +11489,7 @@ impl App {
                             if from_master || !val.trim().is_empty() {
                                 cmds.push(Box::new(dc_core::SetRowCell::new(
                                     scope.clone(),
-                                    "Hyperlink",
+                                    crate::i18n::strs().msg_hyperlink(),
                                     0,
                                     dc_core::commands::RowSel::Ix(ix),
                                     name,
@@ -11506,15 +11502,15 @@ impl App {
                         if cmds.is_empty() {
                             return None;
                         }
-                        self_.apply(dc_core::Macro::new("edit hyperlink", cmds));
+                        self_.apply(dc_core::Macro::new(crate::i18n::strs().msg_edit_hyperlink(), cmds));
                         Some(ix)
                     };
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.button(crate::i18n::strs().msg_ok()).clicked() {
                             commit(self);
                             close_draft = true;
                         }
-                        if ui.button("Apply").clicked() {
+                        if ui.button(crate::i18n::strs().msg_apply()).clicked() {
                             if let Some(ix) = commit(self) {
                                 // The draft now edits the row it just
                                 // created (a second Apply updates it,
@@ -11523,7 +11519,7 @@ impl App {
                                 d.from_master = false;
                             }
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                             close_draft = true;
                         }
                     });
@@ -11544,7 +11540,7 @@ impl App {
                 // hidden behind editor state): New… left, Close right.
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    if draft.is_none() && ui.button("New…").clicked() {
+                    if draft.is_none() && ui.button(crate::i18n::strs().msg_hyperlink_new()).clicked() {
                         draft = Some(HyperlinkDraft {
                             edit_row: None,
                             from_master: false,
@@ -11554,7 +11550,7 @@ impl App {
                         });
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("Close").clicked() {
+                        if ui.button(crate::i18n::strs().msg_close()).clicked() {
                             draft = None;
                             close_btn = true;
                         }
@@ -11579,7 +11575,7 @@ impl App {
         }
         let mut close = false;
         let mut open = true;
-        egui::Window::new("Reorder Pages")
+        egui::Window::new(crate::i18n::strs().msg_reorder_pages())
             // #110 tab-order audit: the title-bar close X — the window
             // was the one dialog without a keyboard-reachable dismiss
             // besides tabbing to Close (Esc arrives through
@@ -11601,13 +11597,13 @@ impl App {
                         for (i, name) in names.iter().enumerate() {
                             ui.label(egui::RichText::new(name.clone()).size(12.0));
                             if ui
-                                .add_enabled(i > 0, egui::Button::new("Move Up").small())
+                                .add_enabled(i > 0, egui::Button::new(crate::i18n::strs().msg_move_up()).small())
                                 .clicked()
                             {
                                 self.tab_cmd_reorder(i, i - 1);
                             }
                             if ui
-                                .add_enabled(i + 1 < n, egui::Button::new("Move Down").small())
+                                .add_enabled(i + 1 < n, egui::Button::new(crate::i18n::strs().msg_move_down()).small())
                                 .clicked()
                             {
                                 self.tab_cmd_reorder(i, i + 1);
@@ -11616,7 +11612,7 @@ impl App {
                         }
                     });
                 ui.add_space(8.0);
-                if ui.button("Close").clicked() {
+                if ui.button(crate::i18n::strs().msg_close()).clicked() {
                     close = true;
                 }
             });
@@ -11835,12 +11831,12 @@ impl App {
                 "Character",
                 0,
                 dc_core::commands::RowSel::Ix(0),
-                "Size",
+                crate::i18n::strs().msg_size(),
                 vsdx::Cell::value(format!("{next:.6}")),
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new("font size", cmds));
+            self.apply(Macro::new(crate::i18n::strs().msg_font_size(), cmds));
         }
     }
 
@@ -11851,7 +11847,7 @@ impl App {
     fn disband_container(&mut self) {
         let Some(page_id) = self.page_id() else { return };
         let Some(cont) = self.sel_container_id() else {
-            self.status = "Select a container to disband".into();
+            self.status = crate::i18n::strs().msg_select_a_container_to_disband();
             return;
         };
         let members = self.container_member_ids(page_id, cont);
@@ -11898,7 +11894,7 @@ impl App {
             .map(|(_, sid)| *sid)
             .collect();
         if members.len() < 2 {
-            self.status = "Group needs 2+ shapes on the page".into();
+            self.status = crate::i18n::strs().msg_group_needs_2_shapes_on_the_page();
             return;
         }
         let new_id = self
@@ -11945,11 +11941,11 @@ impl App {
             .map(|(sid, _)| Box::new(dc_core::commands::UngroupShape::new(page_id, *sid)) as _)
             .collect();
         if cmds.is_empty() {
-            self.status = "Select a group to ungroup".into();
+            self.status = crate::i18n::strs().msg_select_a_group_to_ungroup();
             return;
         }
         let n = cmds.len();
-        self.apply(dc_core::Macro::new(format!("ungroup {n} group(s)"), cmds));
+        self.apply(dc_core::Macro::new(format!("ungroup {} group(s)", n), cmds));
         // The selection becomes the first EX-MEMBER of a group that
         // was actually ungrouped — `groups.first()` can be a plain
         // shape (None member), which left sel_set holding the removed
@@ -11989,7 +11985,7 @@ impl App {
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new("rotate shapes", cmds));
+            self.apply(Macro::new(crate::i18n::strs().msg_rotate_shapes(), cmds));
         }
     }
 
@@ -12000,7 +11996,7 @@ impl App {
         // fields use (first-edit materialization seeds the row with
         // the inherited cells).
         if matches!(target, ColorTarget::Text) {
-            self.fmt_set_row("Character", "Color", color);
+            self.fmt_set_row("Character", &crate::i18n::strs().msg_color(), color);
             return;
         }
         let cell_name = match target {
@@ -12068,9 +12064,9 @@ impl App {
         let popup = menu.show(|ui| {
             ui.set_min_width(214.0);
             let label = if member {
-                "Remove from Quick Shapes"
+                crate::i18n::strs().msg_remove_from_quick_shapes()
             } else {
-                "Add to Quick Shapes"
+                crate::i18n::strs().msg_add_to_quick_shapes()
             };
             if ui.button(label).clicked() {
                 act = Some(!member);
@@ -12079,10 +12075,10 @@ impl App {
         if let Some(add) = act {
             if add {
                 self.quick_shapes.add(&identity, master_id);
-                self.status = "added to Quick Shapes".into();
+                self.status = crate::i18n::strs().msg_added_to_quick_shapes();
             } else {
                 self.quick_shapes.remove(&identity, master_id);
-                self.status = "removed from Quick Shapes".into();
+                self.status = crate::i18n::strs().msg_removed_from_quick_shapes();
             }
             self.quick_menu = None;
             return;
@@ -12234,7 +12230,7 @@ impl App {
                     for (icon, label, enabled, a) in [
                         (
                             crate::ribbon::Icon::TextBox,
-                            "Edit Text…",
+                            crate::i18n::strs().msg_edit_text(),
                             true,
                             Act::EditText,
                         ),
@@ -12245,31 +12241,31 @@ impl App {
                         // still dispatch Act::FormatShape.
                         (
                             crate::ribbon::Icon::Bucket,
-                            "Format Shape Fill…",
+                            crate::i18n::strs().msg_format_shape_fill(),
                             true,
                             Act::FormatShape,
                         ),
                         (
                             crate::ribbon::Icon::Pen,
-                            "Format Shape Line…",
+                            crate::i18n::strs().msg_format_shape_line(),
                             true,
                             Act::FormatShape,
                         ),
                         (
                             crate::ribbon::Icon::FontA,
-                            "Format Shape Text…",
+                            crate::i18n::strs().msg_format_shape_text(),
                             true,
                             Act::FormatShape,
                         ),
                         (
                             crate::ribbon::Icon::BringFront,
-                            "Bring to Front",
+                            crate::i18n::strs().msg_bring_to_front(),
                             true,
                             Act::Front,
                         ),
                         (
                             crate::ribbon::Icon::Rotate,
-                            "Rotate Right 90°",
+                            crate::i18n::strs().msg_rotate_right_90(),
                             true,
                             // The text row's sign: page coordinates are
                             // y-up, so clockwise (right) is NEGATIVE
@@ -12277,7 +12273,7 @@ impl App {
                             // it backwards).
                             Act::Rot(-std::f64::consts::FRAC_PI_2),
                         ),
-                        (crate::ribbon::Icon::Group, "Group", can_group, Act::Group),
+                        (crate::ribbon::Icon::Group, crate::i18n::strs().msg_group(), can_group, Act::Group),
                     ] {
                         // A real (possibly disabled) button — egui-level
                         // disablement keeps a Menu-kind popup open on
@@ -12287,7 +12283,7 @@ impl App {
                             egui::Button::new("").min_size(Vec2::splat(22.0)),
                         );
                         resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label)
+                            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label.clone())
                         });
                         let resp = if enabled {
                             resp.on_hover_text(label)
@@ -12337,39 +12333,39 @@ impl App {
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::ShapeSheet),
-                "Show ShapeSheet",
+                &crate::i18n::strs().msg_show_shapesheet(),
                 "",
                 true,
             ) {
                 act = Some(Act::ShapeSheet);
             }
             ui.separator();
-            if ctx_item(ui, Some(crate::ribbon::Icon::Cut), "Cut", "Ctrl+X", true) {
+            if ctx_item(ui, Some(crate::ribbon::Icon::Cut), &crate::i18n::strs().msg_cut(), "Ctrl+X", true) {
                 act = Some(Act::Cut);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Copy), "Copy", "Ctrl+C", true) {
+            if ctx_item(ui, Some(crate::ribbon::Icon::Copy), &crate::i18n::strs().msg_copy(), "Ctrl+C", true) {
                 act = Some(Act::Copy);
             }
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::Paste),
-                "Paste",
+                &crate::i18n::strs().msg_paste(),
                 "Ctrl+V",
                 has_clip,
             ) {
                 act = Some(Act::Paste);
             }
-            if ctx_item(ui, None, "Duplicate", "Ctrl+D", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_duplicate(), "Ctrl+D", true) {
                 act = Some(Act::Duplicate);
             }
-            if ctx_item(ui, Some(crate::ribbon::Icon::Delete), "Delete", "Del", true) {
+            if ctx_item(ui, Some(crate::ribbon::Icon::Delete), &crate::i18n::strs().msg_delete(), "Del", true) {
                 act = Some(Act::Delete);
             }
             ui.separator();
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::BringFront),
-                "Bring to Front",
+                &crate::i18n::strs().msg_bring_to_front(),
                 "",
                 true,
             ) {
@@ -12378,7 +12374,7 @@ impl App {
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::SendBack),
-                "Send to Back",
+                &crate::i18n::strs().msg_send_to_back(),
                 "",
                 true,
             ) {
@@ -12388,7 +12384,7 @@ impl App {
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::Rotate),
-                "Rotate Right 90°",
+                &crate::i18n::strs().msg_rotate_right_90(),
                 "",
                 true,
             ) {
@@ -12397,16 +12393,16 @@ impl App {
             if ctx_item(
                 ui,
                 Some(crate::ribbon::Icon::Rotate),
-                "Rotate Left 90°",
+                &crate::i18n::strs().msg_rotate_left_90(),
                 "",
                 true,
             ) {
                 act = Some(Act::Rot(std::f64::consts::FRAC_PI_2));
             }
-            if ctx_item(ui, None, "Flip Vertical", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_flip_vertical(), "", true) {
                 act = Some(Act::FlipV);
             }
-            if ctx_item(ui, None, "Flip Horizontal", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_flip_horizontal(), "", true) {
                 act = Some(Act::FlipH);
             }
             ui.separator();
@@ -12442,13 +12438,13 @@ impl App {
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                 .show(|ui| {
                     ui.set_min_width(210.0);
-                    if ctx_item(ui, None, "Group", "Ctrl+G", can_group) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_group(), "Ctrl+G", can_group) {
                         act = Some(Act::Group);
                     }
-                    if ctx_item(ui, None, "Ungroup", "Ctrl+Shift+G", is_group) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_ungroup(), "Ctrl+Shift+G", is_group) {
                         act = Some(Act::Ungroup);
                     }
-                    if ctx_item(ui, None, &format!("Open {group_label}"), "", is_group) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_open_group_label(group_label), "", is_group) {
                         act = Some(Act::OpenGroup(shape_id));
                     }
                 });
@@ -12471,10 +12467,10 @@ impl App {
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                 .show(|ui| {
                     ui.set_min_width(210.0);
-                    if ctx_item(ui, None, "Add to New Container", "", true) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_add_to_new_container(), "", true) {
                         sub_action = true;
                     }
-                    if ctx_item(ui, None, "Add to Underlying Container", "", can_underlying)
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_add_to_underlying_container(), "", can_underlying)
                         && can_underlying
                     {
                         underlying_action = true;
@@ -12497,35 +12493,35 @@ impl App {
                     })
                 });
                 if is_conn {
-                    if ctx_item(ui, None, "Straight Connector", "", true) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_straight_connector(), "", true) {
                         act = Some(Act::RouteStraight);
                     }
-                    if ctx_item(ui, None, "Right-Angle Connector", "", true) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_right_angle_connector(), "", true) {
                         act = Some(Act::RouteRightAngle);
                     }
-                    if ctx_item(ui, None, "Curved Connector", "", true) {
+                    if ctx_item(ui, None, &crate::i18n::strs().msg_curved_connector(), "", true) {
                         act = Some(Act::RouteCurved);
                     }
                     ui.separator();
                 }
             }
-            if ctx_item(ui, None, "Copy as Picture…", "", self.sel.is_some()) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_copy_as_picture_menu(), "", self.sel.is_some()) {
                 act = Some(Act::CopyAsPicture);
             }
-            if ctx_item(ui, None, "Hyperlink…", "Ctrl+K", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_hyperlink_menu(), "Ctrl+K", true) {
                 act = Some(Act::Hyperlink);
             }
-            if ctx_item(ui, None, "Add Comment", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_comment_add(), "", true) {
                 act = Some(Act::AddComment);
             }
-            if ctx_item(ui, None, "Shape Data…", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_shape_data_menu(), "", true) {
                 act = Some(Act::ShapeData);
             }
-            if ctx_item(ui, None, "Format Shape…", "", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_format_shape_menu(), "", true) {
                 act = Some(Act::FormatShape);
             }
             ui.separator();
-            if ctx_item(ui, None, "Edit Text…", "F2", true) {
+            if ctx_item(ui, None, &crate::i18n::strs().msg_edit_text(), "F2", true) {
                 act = Some(Act::EditText);
             }
         });
@@ -12654,7 +12650,7 @@ impl App {
             Act::EditText => {
                 let draft = self.selected_text(shape_id).unwrap_or_default();
                 self.begin_text_edit(shape_id, draft);
-                self.status = format!("editing text of shape {shape_id}");
+                self.status = crate::i18n::strs().msg_editing_text_of_shape_shape_id(shape_id);
             }
             // #190/#192: a per-shape toggle for the CLICKED shape —
             // the one-way open left no reachable close; the spec made
@@ -13865,7 +13861,7 @@ impl App {
         let row = dc_core::commands::RowSel::Named(name.to_string());
         let cell = |v: &str| vsdx::model::Cell::value(v.to_string());
         self.apply(dc_core::Macro::new(
-            format!("add {name} prop row (test)"),
+            crate::i18n::strs().msg_add_name_prop_row_test(name),
             vec![
                 Box::new(dc_core::SetRowCell::new(
                     scope.clone(),
@@ -14068,7 +14064,7 @@ impl App {
             }
         } else {
             sh.sheet.children.push(SheetChild::Section(Section {
-                name: "Protection".into(),
+                name: crate::i18n::strs().msg_protection(),
                 rows: vec![Row {
                     cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
                     ..Row::default()
@@ -14312,7 +14308,7 @@ impl App {
             // The pane's own note carries the full message incl. any
             // density-cap notes; the status mirrors it.
             self.status = self.export_pane.note_clone().unwrap_or_else(|| match result {
-                Ok(_) => "Export finished.".into(),
+                Ok(_) => crate::i18n::strs().msg_export_finished(),
                 Err(e) => format!("Export failed: {e}"),
             });
         }
@@ -14324,6 +14320,7 @@ impl App {
         self.backgrounds_window(&ctx);
         self.select_by_type_window(&ctx);
         self.snap_glue_window(&ctx);
+        self.language_window(&ctx);
         self.hyperlink_window(&ctx);
         self.comment_window(&ctx);
         self.shape_data_window(&ctx);
@@ -14395,7 +14392,7 @@ impl App {
             .map(|ed| !ed.doc.masters.is_empty() || !self.stencils.is_empty())
             .unwrap_or(false);
         if pane_wanted {
-            egui::Panel::left("stencil")
+            egui::Panel::left(crate::i18n::strs().msg_stencil_fallback())
                 .frame(
                     egui::Frame::new()
                         .fill(t.stencil_bg)
@@ -14452,7 +14449,7 @@ impl App {
                             self.status =
                                 format!("master {} armed — click the canvas to place", id.1);
                         }
-                        if self.stencil.armed.is_some() && ui.button("x cancel placement").clicked()
+                        if self.stencil.armed.is_some() && ui.button(crate::i18n::strs().msg_x_cancel_placement()).clicked()
                         {
                             self.stencil.armed = None;
                         }
@@ -14544,8 +14541,8 @@ impl App {
                     .and_then(|ed| ed.doc.pages.get(self.page_idx))
                     .and_then(|p| vsdx::model::find_shape_by_id(&p.shapes, sid))
                     .and_then(|sh| sh.name_u.clone())
-                    .unwrap_or_else(|| format!("shape {sid}"));
-                let title = format!("ShapeSheet — {name}");
+                    .unwrap_or_else(|| crate::i18n::strs().msg_shape_sid(sid));
+                let title = crate::i18n::strs().msg_shapesheet_name(name);
                 let mut win = egui::Window::new(title)
                     .id(egui::Id::unique(("dc-shapesheet", sid)))
                     .open(&mut open)
@@ -14649,7 +14646,7 @@ impl App {
                 return;
             }
             let mut open = self.about_open;
-            egui::Window::new("About Tarahi")
+            egui::Window::new(crate::i18n::strs().msg_about_tarahi())
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
@@ -14666,22 +14663,63 @@ impl App {
                     ui.painter().text(
                         rect.center() + egui::Vec2::new(0.0, 48.0),
                         egui::Align2::CENTER_CENTER,
-                        "tarahi",
+                        crate::i18n::strs().msg_splash_wordmark(),
                         egui::FontId::proportional(26.0),
                         egui::Color32::from_rgb(0x1A, 0x24, 0x44),
                     );
                     // Inside the WINDOW — the outer ui paints on the
                     // shell behind it (#218 review).
                     ui.label(
-                        egui::RichText::new(format!(
-                            "Tarahi v{} — cleanroom Visio-compatible diagramming",
-                            env!("CARGO_PKG_VERSION")
+                        egui::RichText::new(crate::i18n::strs().msg_tarahi_v_cargo_pkg_version_clean(
+                            env!("CARGO_PKG_VERSION"),
                         ))
                         .size(12.0),
                     );
                 });
             self.about_open = open && self.about_open;
         }
+    }
+
+    /// #246: the Language dialog (View ▸ Window) — one radio row per
+    /// shipped language (native names), applying on selection. Strings
+    /// resolve through the catalog each frame, so the switch is live:
+    /// the very next frame re-renders in the picked language.
+    fn language_window(&mut self, ctx: &egui::Context) {
+        if !self.language_dlg_open {
+            return;
+        }
+        let mut open = true;
+        let mut picked: Option<crate::i18n::L10n> = None;
+        let mut close = false;
+        egui::Window::new(crate::i18n::strs().msg_display_language())
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(crate::i18n::strs().msg_choose_the_display_language_for());
+                ui.add_space(6.0);
+                let current = crate::i18n::current();
+                for lang in crate::i18n::L10n::iter() {
+                    if ui
+                        .radio(*lang == current, lang.language_name())
+                        .clicked()
+                    {
+                        picked = Some(*lang);
+                    }
+                }
+                ui.add_space(6.0);
+                ui.weak(crate::i18n::strs().msg_applies_to_the_ribbon_menus_and());
+                ui.add_space(8.0);
+                if ui.button(crate::i18n::strs().msg_close()).clicked() {
+                    close = true;
+                }
+            });
+        if let Some(lang) = picked {
+            crate::i18n::set_language(lang);
+            self.status = crate::i18n::strs().msg_applies_to_the_ribbon_menus_and();
+        }
+        self.language_dlg_open = open && !close;
     }
 
     /// A close request arrived — the window's ✕ / Alt-F4 (or the
@@ -14746,11 +14784,11 @@ impl App {
         // the Save / Don't-Save decision. The title rides inside the
         // dialog frame (a modal has no title bar).
         egui::Modal::new(egui::Id::unique("dc-confirm-close")).show(ctx, |ui| {
-            ui.strong("Save changes?");
+            ui.strong(crate::i18n::strs().msg_save_changes());
             ui.add_space(4.0);
-            ui.label(format!("Save changes to {name}?"));
+            ui.label(crate::i18n::strs().msg_save_changes_to_name(name));
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.button(crate::i18n::strs().msg_save()).clicked() {
                     self.confirm_close = None;
                     // New and close chains are mutually exclusive.
                     self.new_after_save = false;
@@ -14769,11 +14807,11 @@ impl App {
                         // carries the error
                     }
                 }
-                if ui.button("Don't Save").clicked() {
+                if ui.button(crate::i18n::strs().msg_don_t_save()).clicked() {
                     self.confirm_close = None;
                     self.finish_close(ctx, target);
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                     self.confirm_close = None;
                 }
             });
@@ -14858,8 +14896,8 @@ impl App {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".into());
-        self.status = format!("switched to {name}");
+            .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
+        self.status = crate::i18n::strs().msg_switched_to_name(name);
     }
 
     fn close_doc(&mut self) {
@@ -14892,10 +14930,10 @@ impl App {
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Untitled".into());
-            self.status = format!("closed; switched to {name}");
+                .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
+            self.status = crate::i18n::strs().msg_closed_switched_to_name(name);
         } else {
-            self.status = "document closed".into();
+            self.status = crate::i18n::strs().msg_document_closed();
         }
     }
 
@@ -14907,11 +14945,11 @@ impl App {
         // MODAL (#166), same as the close prompt: nothing behind the
         // dialog is interactive while the decision is pending.
         egui::Modal::new(egui::Id::unique("dc-confirm-new")).show(ctx, |ui| {
-            ui.strong("Save changes?");
+            ui.strong(crate::i18n::strs().msg_save_changes());
             ui.add_space(4.0);
-            ui.label("The current drawing has unsaved changes.");
+            ui.label(crate::i18n::strs().msg_the_current_drawing_has_unsaved());
             ui.horizontal(|ui| {
-                if ui.button("Save & New").clicked() {
+                if ui.button(crate::i18n::strs().msg_save_new()).clicked() {
                     self.confirm_new = false;
                     if self.path.as_os_str().is_empty() {
                         // pick a file first; the new document
@@ -14924,10 +14962,10 @@ impl App {
                         self.start_new();
                     }
                 }
-                if ui.button("Discard & New").clicked() {
+                if ui.button(crate::i18n::strs().msg_discard_new()).clicked() {
                     self.start_new();
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                     self.confirm_new = false;
                 }
             });
@@ -15006,9 +15044,9 @@ impl App {
                     // (2010's separation of actions from navigation, the
                     // structure Apple's and Material's rail guidance ask
                     // for).
-                    rail(ui, "Save", has_doc, None, Some(BackAction::Save));
-                    rail(ui, "Save As", has_doc, None, Some(BackAction::SaveAs));
-                    rail(ui, "Close", has_doc, None, Some(BackAction::CloseDoc));
+                    rail(ui, &crate::i18n::strs().msg_save(), has_doc, None, Some(BackAction::Save));
+                    rail(ui, &crate::i18n::strs().msg_save_as(), has_doc, None, Some(BackAction::SaveAs));
+                    rail(ui, &crate::i18n::strs().msg_close(), has_doc, None, Some(BackAction::CloseDoc));
                     // Band divider.
                     let (sep, _) = ui
                         .allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
@@ -15021,15 +15059,15 @@ impl App {
                     // Band 2 — destinations (six, inside M3's 3–7 window;
                     // 2016's Share/Export split replaces 2010's
                     // "Save & Send").
-                    rail(ui, "Info", true, Some(BackPage::Info), None);
-                    rail(ui, "Recent", true, Some(BackPage::Recent), None);
-                    rail(ui, "New", true, Some(BackPage::New), None);
-                    rail(ui, "Print", true, Some(BackPage::Print), None)
-                        .on_hover_text("Print the current drawing");
-                    rail(ui, "Share", true, Some(BackPage::Share), None)
-                        .on_hover_text("Share a copy of the drawing");
-                    rail(ui, "Export", true, Some(BackPage::Export), None)
-                        .on_hover_text("Save the drawing in another format");
+                    rail(ui, &crate::i18n::strs().msg_info(), true, Some(BackPage::Info), None);
+                    rail(ui, &crate::i18n::strs().msg_recent(), true, Some(BackPage::Recent), None);
+                    rail(ui, &crate::i18n::strs().msg_rail_new(), true, Some(BackPage::New), None);
+                    rail(ui, &crate::i18n::strs().msg_rail_print(), true, Some(BackPage::Print), None)
+                        .on_hover_text(crate::i18n::strs().msg_print_the_current_drawing());
+                    rail(ui, &crate::i18n::strs().msg_share(), true, Some(BackPage::Share), None)
+                        .on_hover_text(crate::i18n::strs().msg_share_a_copy_of_the_drawing());
+                    rail(ui, &crate::i18n::strs().msg_rail_export(), true, Some(BackPage::Export), None)
+                        .on_hover_text(crate::i18n::strs().msg_export_entry_desc());
                 });
                 // Band 3 — pinned footer, non-critical items only (Apple:
                 // "avoid putting critical information or actions at the
@@ -15038,13 +15076,13 @@ impl App {
                     ui.add_enabled(
                         false,
                         egui::Button::new(
-                            egui::RichText::new("Options")
+                            egui::RichText::new(crate::i18n::strs().msg_options())
                                 .size(14.0)
                                 .color(t.rail_disabled),
                         )
                         .frame(false),
                     )
-                    .on_disabled_hover_text("Options arrive with a later milestone");
+                    .on_disabled_hover_text(crate::i18n::strs().msg_options_arrive_with_a_later_mile());
                 });
             });
         // Page content (the 2010 white backstage surface).
@@ -15065,7 +15103,7 @@ impl App {
                                 .path
                                 .file_name()
                                 .map(|n| n.to_string_lossy().into_owned())
-                                .unwrap_or_else(|| "Untitled".into());
+                                .unwrap_or_else(|| crate::i18n::strs().msg_untitled());
                             let dir = self
                                 .path
                                 .parent()
@@ -15073,9 +15111,9 @@ impl App {
                                 .filter(|s| !s.is_empty())
                                 .unwrap_or_else(|| "Not saved yet".into());
                             let status = if self.dirty {
-                                "Unsaved changes"
+                                crate::i18n::strs().msg_unsaved_changes()
                             } else {
-                                "All changes saved"
+                                crate::i18n::strs().msg_all_changes_saved()
                             };
                             // Live thumbnail of the active page (#58):
                             // the same render → rasterize → texture pipeline
@@ -15107,13 +15145,13 @@ impl App {
                                     .num_columns(2)
                                     .spacing(Vec2::new(18.0, 6.0))
                                     .show(ui, |ui| {
-                                        ui.weak("Name");
+                                        ui.weak(crate::i18n::strs().msg_name());
                                         ui.label(&name);
                                         ui.end_row();
-                                        ui.weak("Location");
+                                        ui.weak(crate::i18n::strs().msg_location());
                                         ui.label(&dir);
                                         ui.end_row();
-                                        ui.weak("Status");
+                                        ui.weak(crate::i18n::strs().msg_status());
                                         ui.label(status);
                                         ui.end_row();
                                     });
@@ -15168,28 +15206,28 @@ impl App {
                             });
                             ui.add_space(14.0);
                             ui.horizontal(|ui| {
-                                ui.add_enabled(false, egui::Button::new("Protect Drawing…"))
+                                ui.add_enabled(false, egui::Button::new(crate::i18n::strs().msg_protect_drawing()))
                                     .on_disabled_hover_text(
-                                        "Document protection arrives with a later milestone",
+                                        crate::i18n::strs().msg_document_protection_arrives_with(),
                                     );
-                                ui.add_enabled(false, egui::Button::new("Inspect Drawing…"))
+                                ui.add_enabled(false, egui::Button::new(crate::i18n::strs().msg_inspect_drawing()))
                                     .on_disabled_hover_text(
-                                        "Document inspection arrives with a later milestone",
+                                        crate::i18n::strs().msg_document_inspection_arrives_with(),
                                     );
                             });
                         } else {
-                            ui.heading("No document open");
+                            ui.heading(crate::i18n::strs().msg_no_document_open());
                             ui.add_space(8.0);
-                            if ui.button("Open a file…").clicked() {
+                            if ui.button(crate::i18n::strs().msg_open_file_cta()).clicked() {
                                 open_browse = true;
                             }
                         }
                     }
                     BackPage::Recent => {
                         ui.horizontal(|ui| {
-                            ui.heading("Recent");
+                            ui.heading(crate::i18n::strs().msg_recent());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
-                                if ui.button("Browse…").clicked() {
+                                if ui.button(crate::i18n::strs().msg_browse()).clicked() {
                                     open_browse = true;
                                 }
                             });
@@ -15198,21 +15236,21 @@ impl App {
                         if self.recent.entries().is_empty() {
                             // elementary Welcome Screen: context plus
                             // named actions instead of an empty list.
-                            ui.weak("Drawings you open will appear here.");
+                            ui.weak(crate::i18n::strs().msg_drawings_you_open_will_appear_he());
                             ui.add_space(12.0);
                             if welcome_action(
                                 ui,
                                 Icon::New,
-                                "New blank drawing",
-                                "Start an empty drawing on a letter-size page.",
+                                &crate::i18n::strs().msg_new_blank_drawing(),
+                                &crate::i18n::strs().msg_start_an_empty_drawing_on_a_lett(),
                             ) {
                                 new_blank = true;
                             }
                             if welcome_action(
                                 ui,
                                 Icon::Open,
-                                "Open a file",
-                                "Browse for an existing Visio package.",
+                                &crate::i18n::strs().msg_open_file_title(),
+                                &crate::i18n::strs().msg_browse_for_an_existing_visio_pac(),
                             ) {
                                 open_browse = true;
                             }
@@ -15222,32 +15260,32 @@ impl App {
                     }
                     BackPage::New => {
                         ui.horizontal(|ui| {
-                            ui.heading("New");
+                            ui.heading(crate::i18n::strs().msg_rail_new());
                             // 2016's search-first New page; elementary/
                             // Apple: trailing toolbar position, instant
                             // type-to-filter.
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut search_text)
-                                        .hint_text("Search Templates")
+                                        .hint_text(crate::i18n::strs().msg_search_templates())
                                         .desired_width(200.0),
                                 );
                             });
                         });
                         ui.add_space(4.0);
-                        ui.weak("Suggested: flowchart · network · floor plan");
+                        ui.weak(crate::i18n::strs().msg_suggested_flowchart_network_floo());
                         ui.add_space(12.0);
                         let q = search_text.trim().to_lowercase();
                         let mut card_click = false;
                         ui.horizontal_wrapped(|ui| {
-                            if backstage_card(ui, Icon::New, "Blank drawing", q.is_empty()) {
+                            if backstage_card(ui, Icon::New, &crate::i18n::strs().msg_blank_drawing(), q.is_empty()) {
                                 card_click = true;
                             }
-                            for (name, icon) in NEW_TEMPLATE_ENTRIES {
+                            for (name, icon) in new_template_entries() {
                                 if !q.is_empty() && !name.to_lowercase().contains(&q) {
                                     continue;
                                 }
-                                backstage_card(ui, *icon, name, false);
+                                backstage_card(ui, icon, &name, false);
                             }
                         });
                         if card_click {
@@ -15255,7 +15293,7 @@ impl App {
                         }
                         if !q.is_empty()
                             && !"blank drawing".contains(&q)
-                            && NEW_TEMPLATE_ENTRIES
+                            && new_template_entries()
                                 .iter()
                                 .all(|(n, _)| !n.to_lowercase().contains(&q))
                         {
@@ -15265,22 +15303,22 @@ impl App {
                     }
                     BackPage::Print => backstage_stub(
                         ui,
-                        "Print",
-                        "Send the drawing to a printer or save it as a PDF.",
-                        "Print…",
-                        "Printing arrives with M6",
+                        &crate::i18n::strs().msg_rail_print(),
+                        &crate::i18n::strs().msg_send_the_drawing_to_a_printer_or(),
+                        &crate::i18n::strs().msg_print_stub(),
+                        &crate::i18n::strs().msg_printing_arrives_with_m6(),
                     ),
                     BackPage::Share => backstage_stub(
                         ui,
-                        "Share",
-                        "Share a copy of the drawing with other people.",
-                        "Share a Copy…",
-                        "Sharing arrives with M6",
+                        &crate::i18n::strs().msg_share(),
+                        &crate::i18n::strs().msg_share_a_copy_of_the_drawing_with(),
+                        &crate::i18n::strs().msg_share_a_copy(),
+                        &crate::i18n::strs().msg_sharing_arrives_with_m6(),
                     ),
                     BackPage::Export => {
-                        ui.heading("Export");
+                        ui.heading(crate::i18n::strs().msg_rail_export());
                         ui.add_space(6.0);
-                        ui.weak("Save the drawing in another format.");
+                        ui.weak(crate::i18n::strs().msg_export_page_sub());
                         ui.add_space(6.0);
                         let page_count = self.ed().map_or(0, |ed| ed.doc.pages.len());
                         match self.export_pane.show(ui, page_count) {
@@ -15344,13 +15382,17 @@ impl App {
 
 /// Placeholder template names on the backstage New page (generic
 /// diagram-type names, ours — template bodies arrive with the M5 flow).
-const NEW_TEMPLATE_ENTRIES: &[(&str, Icon)] = &[
-    ("Flowchart", Icon::Swimlane),
-    ("Cross-functional", Icon::Container),
-    ("Network Diagram", Icon::Link),
-    ("Org Chart", Icon::Group),
-    ("Floor Plan", Icon::Grid),
-];
+/// Template names translate at paint (#246): resolved per call, so
+/// the backstage New page re-renders on a language switch.
+fn new_template_entries() -> Vec<(String, Icon)> {
+    vec![
+        (crate::i18n::strs().msg_flowchart(), Icon::Swimlane),
+        (crate::i18n::strs().msg_cross_functional(), Icon::Container),
+        (crate::i18n::strs().msg_network_diagram(), Icon::Link),
+        (crate::i18n::strs().msg_org_chart(), Icon::Group),
+        (crate::i18n::strs().msg_floor_plan(), Icon::Grid),
+    ]
+}
 
 /// One New-page gallery card: icon over the caption, 2010 tile metrics.
 /// The caption is a real Label so the card stays in the accessibility
@@ -15372,9 +15414,9 @@ fn backstage_card(ui: &mut Ui, icon: Icon, name: &str, enabled: bool) -> bool {
             enabled,
         );
         let tip = if enabled {
-            "Start an empty drawing"
+            crate::i18n::strs().msg_start_an_empty_drawing()
         } else {
-            "Template gallery arrives with the M5 template flow"
+            crate::i18n::strs().msg_template_gallery_arrives_with_th()
         };
         let caption = ui
             .add(
@@ -15557,7 +15599,7 @@ fn qat_button(
         hit: crate::keytips::Hit::Action {
             action: a,
             enabled: true,
-            label: "",
+            label: String::new(),
         },
     });
     // The icon is painted, so the control needs its name attached;
@@ -15581,17 +15623,19 @@ fn qat_button(
     r
 }
 
-fn t_title(t: Tab) -> &'static str {
+/// Tab captions come from the catalog (#246): resolved per call, so
+/// the strip re-renders on a language switch.
+fn t_title(t: Tab) -> String {
     match t {
-        Tab::File => "File",
-        Tab::Home => "Home",
-        Tab::Insert => "Insert",
-        Tab::Design => "Design",
-        Tab::Data => "Data",
-        Tab::Review => "Review",
-        Tab::View => "View",
-        Tab::Developer => "Developer",
-        Tab::ContainerTools => "Container Tools",
+        Tab::File => crate::i18n::strs().msg_file(),
+        Tab::Home => crate::i18n::strs().msg_home(),
+        Tab::Insert => crate::i18n::strs().msg_insert(),
+        Tab::Design => crate::i18n::strs().msg_design(),
+        Tab::Data => crate::i18n::strs().msg_data(),
+        Tab::Review => crate::i18n::strs().msg_review(),
+        Tab::View => crate::i18n::strs().msg_view(),
+        Tab::Developer => crate::i18n::strs().msg_developer(),
+        Tab::ContainerTools => crate::i18n::strs().msg_container_tools(),
     }
 }
 
@@ -15653,15 +15697,15 @@ fn collect_connection_points(t: &mut crate::snap::SnapTarget, sheet: &vsdx::mode
 fn snap_hit_text(h: crate::snap::SnapHit) -> String {
     use crate::snap::SnapHit::*;
     match h {
-        Grid => "the grid".into(),
-        Ruler => "a ruler subdivision".into(),
-        Guide(id) => format!("guide {id}"),
-        AlignmentBox(id) => format!("shape {id}'s alignment box"),
-        ShapeExtension(id) => format!("shape {id}'s extension"),
-        ShapeIntersection => "a shape intersection".into(),
-        ConnectionPoint(id) => format!("shape {id}'s connection point"),
-        ShapeHandle(id) => format!("shape {id}'s handle"),
-        ShapeVertex(id) => format!("shape {id}'s vertex"),
+        Grid => crate::i18n::strs().msg_the_grid(),
+        Ruler => crate::i18n::strs().msg_a_ruler_subdivision(),
+        Guide(id) => crate::i18n::strs().msg_guide_id(id),
+        AlignmentBox(id) => crate::i18n::strs().msg_shape_id_s_alignment_box(id),
+        ShapeExtension(id) => crate::i18n::strs().msg_shape_id_s_extension(id),
+        ShapeIntersection => crate::i18n::strs().msg_a_shape_intersection(),
+        ConnectionPoint(id) => crate::i18n::strs().msg_shape_id_s_connection_point(id),
+        ShapeHandle(id) => crate::i18n::strs().msg_shape_id_s_handle(id),
+        ShapeVertex(id) => crate::i18n::strs().msg_shape_id_s_vertex(id),
     }
 }
 
@@ -16403,9 +16447,7 @@ fn classify_dbl_click(formula: Option<&str>) -> DblClick {
     {
         DblClick::OpenText
     } else {
-        DblClick::Deferred(format!(
-            "EventDblClick '{f}' — macro and navigation actions arrive with a later milestone"
-        ))
+        DblClick::Deferred(crate::i18n::strs().msg_eventdblclick_f_macro_and_naviga(f))
     }
 }
 

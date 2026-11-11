@@ -102,7 +102,7 @@ impl ExportPane {
     pub fn show(&mut self, ui: &mut Ui, page_count: usize) -> PaneAction {
         let mut action = PaneAction::None;
         ui.add_space(4.0);
-        ui.strong("Select a format");
+        ui.strong(crate::i18n::strs().msg_select_a_format());
         ui.add_space(4.0);
         ui.vertical(|ui| {
             for (f, label, hint) in [
@@ -137,18 +137,18 @@ impl ExportPane {
         });
         ui.add_space(8.0);
 
-        ui.strong("Pages");
+        ui.strong(crate::i18n::strs().msg_insert_pages());
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             // A single-page document has only "Current page" — show it
             // selected rather than an odd unselected radio.
             let current_only = page_count <= 1 || !self.all_pages;
-            if ui.radio(current_only, "Current page").clicked() {
+            if ui.radio(current_only, crate::i18n::strs().msg_current_page()).clicked() {
                 self.all_pages = false;
             }
             if page_count > 1
                 && ui
-                    .radio(self.all_pages, format!("All pages ({page_count})"))
+                    .radio(self.all_pages, crate::i18n::strs().msg_all_pages_page_count(page_count))
                     .clicked()
             {
                 self.all_pages = true;
@@ -156,12 +156,12 @@ impl ExportPane {
         });
         if self.format != Format::Pdf {
             ui.add_space(8.0);
-            ui.strong("Options");
+            ui.strong(crate::i18n::strs().msg_options());
             ui.add_space(4.0);
-            ui.checkbox(&mut self.transparent, "Transparent background");
+            ui.checkbox(&mut self.transparent, crate::i18n::strs().msg_transparent_background());
             if self.format == Format::Png {
                 ui.horizontal(|ui| {
-                    ui.label("Resolution (dpi):");
+                    ui.label(crate::i18n::strs().msg_resolution_dpi());
                     ui.add(
                         egui::TextEdit::singleline(&mut self.dpi)
                             .hint_text("96")
@@ -172,12 +172,12 @@ impl ExportPane {
         }
         ui.add_space(10.0);
 
-        ui.strong("Save as");
+        ui.strong(crate::i18n::strs().msg_export_save_as_label());
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let path_edit = ui.add(
                 egui::TextEdit::singleline(&mut self.path)
-                    .hint_text("Output file")
+                    .hint_text(crate::i18n::strs().msg_output_file())
                     .desired_width(360.0),
             );
             if path_edit.changed() {
@@ -187,7 +187,7 @@ impl ExportPane {
                     self.format = f;
                 }
             }
-            if ui.button("Browse…").clicked() {
+            if ui.button(crate::i18n::strs().msg_browse()).clicked() {
                 action = PaneAction::Browse(self.format);
             }
         });
@@ -197,14 +197,14 @@ impl ExportPane {
         let enabled = !self.path.trim().is_empty() && !busy;
         let export = ui.add_enabled(
             enabled,
-            egui::Button::new("Export…").min_size(Vec2::new(90.0, 26.0)),
+            egui::Button::new(crate::i18n::strs().msg_export_start()).min_size(Vec2::new(90.0, 26.0)),
         );
         if busy {
-            ui.weak("Exporting…");
+            ui.weak(crate::i18n::strs().msg_exporting());
         } else if let Some(note) = &self.note {
             ui.weak(note);
         } else if self.path.trim().is_empty() {
-            ui.weak("Pick an output file first");
+            ui.weak(crate::i18n::strs().msg_pick_an_output_file_first());
         }
         if export.clicked() && enabled {
             action = PaneAction::Export;
@@ -294,7 +294,7 @@ impl ExportPane {
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.in_flight = None;
-                self.note = Some("Export failed: worker lost".into());
+                self.note = Some(crate::i18n::strs().msg_export_failed_worker_lost());
                 Some(Err("worker lost".into()))
             }
         }

@@ -15,7 +15,12 @@ pub mod group_fixture;
 pub mod guides;
 pub mod hyperlink;
 pub mod icontex;
+pub mod i18n;
 pub mod keytips;
+/// Generated fluent-typed accessors (`build.rs` from the project-level
+/// `locales/` catalogs); re-exported through [`i18n`]. #246.
+#[allow(clippy::all)]
+mod l10n;
 mod layers;
 pub mod loading;
 pub mod os_theme;

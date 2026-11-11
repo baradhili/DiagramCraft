@@ -10,6 +10,7 @@ File names map 1:1 to the `Icon` enum asset stems in
 | file | MDI icon |
 |---|---|
 | save | content-save |
+| translate | translate |
 | undo | undo |
 | redo | redo |
 | open | folder-open-outline |

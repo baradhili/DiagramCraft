@@ -7400,7 +7400,7 @@ fn lasso_select_trail_picks_touched_shapes() {
     );
     assert_eq!(h.state().debug_sel(), Some((page, a)));
     assert!(
-        h.state().debug_status().contains("lasso selected 1"),
+        h.state().debug_status().contains("lasso selected one"),
         "status notes the lasso pick: {}",
         h.state().debug_status()
     );

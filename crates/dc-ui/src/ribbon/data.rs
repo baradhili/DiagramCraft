@@ -7,86 +7,86 @@ use super::{Action, Group, Icon, RibbonButton, TabCtx, big, grid, stack};
 
 pub(crate) fn groups(_ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new("External Data", external_data_cols()),
-        Group::new("Shape Data", shape_data_cols()),
-        Group::new("Data Graphics", data_graphics_cols()),
-        Group::new("Display Options", display_options_cols()),
+        Group::new(crate::i18n::strs().msg_external_data(), external_data_cols()),
+        Group::new(crate::i18n::strs().msg_shape_data(), shape_data_cols()),
+        Group::new(crate::i18n::strs().msg_data_graphics(), data_graphics_cols()),
+        Group::new(crate::i18n::strs().msg_display_options(), display_options_cols()),
     ]
 }
 
 fn external_data_cols() -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Open, "Quick Import", Action::Macros)
+            RibbonButton::new(Icon::Open, crate::i18n::strs().msg_quick_import(), Action::Macros)
                 .enabled(false)
-                .tip("Data linking (M6)"),
+                .tip(crate::i18n::strs().msg_data_linking_m6()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::Link, "", Action::Macros)
-                    .alt("Link Data to Shapes")
+                    .alt(crate::i18n::strs().msg_link_data_to_shapes())
                     .enabled(false)
-                    .tip("Data linking (M6)"),
+                    .tip(crate::i18n::strs().msg_data_linking_m6()),
                 RibbonButton::new(Icon::Refresh, "", Action::Macros)
-                    .alt("Refresh All")
+                    .alt(crate::i18n::strs().msg_refresh_all())
                     .enabled(false)
-                    .tip("Data linking (M6)"),
+                    .tip(crate::i18n::strs().msg_data_linking_m6()),
             ],
             vec![
                 RibbonButton::new(Icon::Shapes, "", Action::Macros)
-                    .alt("Custom Import")
+                    .alt(crate::i18n::strs().msg_custom_import())
                     .enabled(false)
-                    .tip("Data linking (M6)"),
+                    .tip(crate::i18n::strs().msg_data_linking_m6()),
                 RibbonButton::new(Icon::Magnet, "", Action::Macros)
-                    .alt("Automatically Link")
+                    .alt(crate::i18n::strs().msg_automatically_link())
                     .enabled(false)
-                    .tip("Data linking (M6)"),
+                    .tip(crate::i18n::strs().msg_data_linking_m6()),
             ],
         ]),
         stack(vec![RibbonButton::new(
             Icon::Units,
-            "External Data Window",
+            crate::i18n::strs().msg_external_data_window(),
             Action::Macros,
         )
         .enabled(false)
-        .tip("External data window (M6)")]),
+        .tip(crate::i18n::strs().msg_external_data_window_m6())]),
     ]
 }
 
 fn shape_data_cols() -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::ShapeSheet, "Shape Data Window", Action::Macros)
+            RibbonButton::new(Icon::ShapeSheet, crate::i18n::strs().msg_shape_data_window(), Action::Macros)
                 .enabled(false)
-                .tip("Shape data window (M6)"),
+                .tip(crate::i18n::strs().msg_shape_data_window_m6()),
         ),
         stack(vec![RibbonButton::new(
             Icon::Field,
-            "Define Shape Data",
+            crate::i18n::strs().msg_define_shape_data(),
             Action::Macros,
         )
         .enabled(false)
-        .tip("Define shape data (M6)")]),
+        .tip(crate::i18n::strs().msg_define_shape_data_m6())]),
     ]
 }
 
 fn data_graphics_cols() -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::DataGraphic, "Data Graphics", Action::Macros)
+            RibbonButton::new(Icon::DataGraphic, crate::i18n::strs().msg_data_graphics(), Action::Macros)
                 .enabled(false)
-                .tip("Data graphics (M6)"),
+                .tip(crate::i18n::strs().msg_data_graphics_m6()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::Effects, "", Action::Macros)
-                    .alt("Create New Data Graphic")
+                    .alt(crate::i18n::strs().msg_create_new_data_graphic())
                     .enabled(false)
-                    .tip("Data graphics (M6)"),
+                    .tip(crate::i18n::strs().msg_data_graphics_m6()),
                 RibbonButton::new(Icon::Pen, "", Action::Macros)
-                    .alt("Edit Data Graphic")
+                    .alt(crate::i18n::strs().msg_edit_data_graphic())
                     .enabled(false)
-                    .tip("Data graphics (M6)"),
+                    .tip(crate::i18n::strs().msg_data_graphics_m6()),
             ],
         ]),
     ]
@@ -95,9 +95,9 @@ fn data_graphics_cols() -> Vec<super::Col> {
 fn display_options_cols() -> Vec<super::Col> {
     vec![stack(vec![RibbonButton::new(
         Icon::Check,
-        "Display Data Graphics",
+        crate::i18n::strs().msg_display_data_graphics(),
         Action::Macros,
     )
     .enabled(false)
-    .tip("Show/hide data graphics on the page (M6)")])]
+    .tip(crate::i18n::strs().msg_show_hide_data_graphics_on_the_p())])]
 }

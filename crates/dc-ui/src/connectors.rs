@@ -971,8 +971,8 @@ mod tests {
         let r = (0.0, 0.0, 2.0, 1.0);
         assert!(near(attach_point(r, (5.0, 0.5)), (2.0, 0.5)), "right side");
         assert!(near(attach_point(r, (-5.0, 0.5)), (0.0, 0.5)), "left side");
-        assert!(near(attach_point(r, (1.0, 9.0)), (1.0, 1.0)), "top");
-        assert!(near(attach_point(r, (1.0, -9.0)), (1.0, 0.0)), "bottom");
+        assert!(near(attach_point(r, (1.0, 9.0)), (1.0, 1.0)), "{}", crate::i18n::strs().msg_align_top_kind());
+        assert!(near(attach_point(r, (1.0, -9.0)), (1.0, 0.0)), "{}", crate::i18n::strs().msg_align_bottom_kind());
         // The other end inside the shape → degenerate center.
         assert!(near(attach_point(r, (1.0, 0.5)), (1.0, 0.5)));
     }

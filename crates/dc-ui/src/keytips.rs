@@ -37,7 +37,8 @@ pub(crate) enum Mode {
 }
 
 /// What a badge activates when its letter arrives.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `Clone` only since #246: labels translate per language.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Hit {
     /// Fire this action through the app's dispatch (QAT digits and
     /// content-row controls); `enabled` mirrors the button — a
@@ -46,7 +47,7 @@ pub(crate) enum Hit {
         action: Action,
         enabled: bool,
         /// The control's label (Controls-level assignment only).
-        label: &'static str,
+        label: String,
     },
     /// Switch to this tab and show its control badges.
     Tab(Tab),
@@ -130,7 +131,7 @@ pub fn tab_keytip(t: Tab) -> Option<&'static str> {
 /// label (case-insensitive), else the first unused digit `1`..=`9`.
 /// Labels whose alphabet and digits are exhausted get `None` (no
 /// badge — with a tab's worth of controls this does not happen).
-pub fn assign_control_letters(labels: &[&'static str]) -> Vec<Option<char>> {
+pub fn assign_control_letters(labels: &[String]) -> Vec<Option<char>> {
     assign_control_letters_reserved(labels, &[])
 }
 
@@ -138,7 +139,7 @@ pub fn assign_control_letters(labels: &[&'static str]) -> Vec<Option<char>> {
 /// carry — the QAT digits stay visible at the Controls level, so a
 /// fallback digit must never repeat one (#218 review round).
 pub fn assign_control_letters_reserved(
-    labels: &[&'static str],
+    labels: &[String],
     reserved: &[char],
 ) -> Vec<Option<char>> {
     let mut taken: Vec<char> = reserved.to_vec();
@@ -176,11 +177,11 @@ pub(crate) fn assign_badge_letters(badges: &mut [Badge]) {
         .filter(|(_, b)| b.key.is_empty() && matches!(b.hit, Hit::Action { .. }))
         .map(|(i, _)| i)
         .collect();
-    let labels: Vec<&'static str> = pending
+    let labels: Vec<String> = pending
         .iter()
-        .map(|&i| match badges[i].hit {
+        .map(|&i| match badges[i].hit.clone() {
             Hit::Action { label, .. } => label,
-            _ => "",
+            _ => String::new(),
         })
         .collect();
     for (&i, letter) in pending
@@ -225,9 +226,9 @@ pub(crate) fn paint(ctx: &Context, kt: &Keytips) {
     // digits) and no strip letters.
     let show = |b: &Badge| match kt.mode {
         Some(Mode::Controls) => {
-            !matches!(b.hit, Hit::Tab(_) | Hit::File | Hit::TellMe)
+            !matches!(&b.hit, Hit::Tab(_) | Hit::File | Hit::TellMe)
         }
-        _ => !matches!(b.hit, Hit::Action { label, .. } if !label.is_empty()),
+        _ => !matches!(&b.hit, Hit::Action { label, .. } if !label.is_empty()),
     };
     for b in kt.badges.iter().filter(|b| show(b) && !b.key.is_empty()) {
         let text = if dark {
@@ -282,7 +283,7 @@ mod tests {
 
     #[test]
     fn letters_follow_label_order_and_skip_taken() {
-        let out = assign_control_letters(&["Paste", "Cut", "Copy", "Paste"]);
+        let out = assign_control_letters(&[crate::i18n::strs().msg_paste(), crate::i18n::strs().msg_cut(), crate::i18n::strs().msg_copy(), crate::i18n::strs().msg_paste()]);
         // P, C(ut), O — Copy's C is free (Cut took C? no: Cut takes C
         // first), so Copy falls to O; the second Paste falls to A.
         assert_eq!(
@@ -293,7 +294,7 @@ mod tests {
 
     #[test]
     fn non_alphanumerics_are_skipped() {
-        let out = assign_control_letters(&["Zoom In", "Zoom Out"]);
+        let out = assign_control_letters(&[crate::i18n::strs().msg_zoom_in(), crate::i18n::strs().msg_zoom_out()]);
         // Z, then O — the space never becomes a keytip.
         assert_eq!(out, vec![Some('Z'), Some('O')]);
     }
@@ -302,10 +303,13 @@ mod tests {
     fn digits_fallback_when_letters_run_out() {
         // 26 labels exhausting A..Z, then one more: the 27th falls to
         // the first unused digit.
-        let all = vec!["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf",
+        let all: Vec<String> = vec!["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf",
             "Hotel", "India", "Juliet", "Kilo", "Lima", "Mike", "November", "Oscar",
             "Papa", "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor",
-            "Whiskey", "Xray", "Yankee", "Zulu", "After"];
+            "Whiskey", "Xray", "Yankee", "Zulu", "After"]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let out = assign_control_letters(&all);
         assert!(out[0..26].iter().all(|c| c.is_some()));
         assert_eq!(out[26], Some('1'));
@@ -316,10 +320,11 @@ mod tests {
         // Every letter already taken: the digit fallback must skip the
         // reserved digits (a live QAT badge) and start after them.
         let reserved: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ34".chars().collect();
-        let out = assign_control_letters_reserved(
-            &["Alpha", "Bravo", "Charlie", "Delta", "Echo"],
-            &reserved,
-        );
+        let labels: Vec<String> = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = assign_control_letters_reserved(&labels, &reserved);
         assert_eq!(
             out,
             vec![Some('1'), Some('2'), Some('5'), Some('6'), Some('7')]

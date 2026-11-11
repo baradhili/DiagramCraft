@@ -224,14 +224,14 @@ impl Stencil {
         // menu — built-in catalog categories (#87), then Open Existing
         // Stencil… (#83) — then the search box, then the stencil list.
         ui.horizontal(|ui| {
-            ui.strong("Shapes");
+            ui.strong(crate::i18n::strs().msg_shapes());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.menu_button("More Shapes", |ui| {
+                ui.menu_button(crate::i18n::strs().msg_more_shapes(), |ui| {
                     // Unit variant for built-ins (US default): a session
                     // preference — the shipped U/M stencil pairs differ
                     // in master geometry only and carry no units marker.
                     if ui
-                        .checkbox(&mut self.metric_units, "Metric Stencils")
+                        .checkbox(&mut self.metric_units, crate::i18n::strs().msg_metric_stencils())
                         .changed()
                     {
                         ui.close();
@@ -273,14 +273,14 @@ impl Stencil {
                         });
                     }
                     ui.separator();
-                    if ui.button("Open Existing Stencil...").clicked() {
+                    if ui.button(crate::i18n::strs().msg_open_existing_stencil()).clicked() {
                         self.request = Some(Request::OpenStencilDialog);
                         ui.close();
                     }
                     // Visio parity (#102): the document stencil is an
                     // opt-in pane entry, not a pinned one.
                     if ui
-                        .checkbox(&mut self.doc_stencil_visible, "Document Stencil")
+                        .checkbox(&mut self.doc_stencil_visible, crate::i18n::strs().msg_document_stencil())
                         .changed()
                     {
                         ui.close();
@@ -290,7 +290,7 @@ impl Stencil {
         });
         let sr = ui.add(
             egui::TextEdit::singleline(&mut self.search)
-                .hint_text("Search Shapes")
+                .hint_text(crate::i18n::strs().msg_search_shapes())
                 .desired_width(ui.available_width()),
         );
         self.search_rect = Some(sr.rect);
@@ -349,7 +349,7 @@ impl Stencil {
                 }
                 stencil_list_entry(ui, t, "Search Results", true);
                 if cells.is_empty() {
-                    ui.weak("No matching shapes.");
+                    ui.weak(crate::i18n::strs().msg_no_matching_shapes());
                 } else {
                     self.entry_grid(
                         ui,
@@ -369,7 +369,7 @@ impl Stencil {
                 // contributions.
                 let quick = quick_cells(ed, set, quick_membership);
                 self.quick_keys = quick.iter().map(|c| c.key).collect();
-                let resp = stencil_list_entry(ui, t, "Quick Shapes", self.quick_expanded);
+                let resp = stencil_list_entry(ui, t, &crate::i18n::strs().msg_quick_shapes(), self.quick_expanded);
                 self.quick_rect = Some(resp.rect);
                 if resp.clicked() {
                     self.quick_expanded = !self.quick_expanded;
@@ -399,7 +399,7 @@ impl Stencil {
                     if !self.collapsed {
                         let cells = doc_cells(ed, &q);
                         if cells.is_empty() {
-                            ui.weak("No shapes.");
+                            ui.weak(crate::i18n::strs().msg_no_shapes());
                         } else {
                             self.entry_grid(
                                 ui,
@@ -433,7 +433,7 @@ impl Stencil {
                     // so a later stencil at the same pane position can
                     // never inherit stale art.
                     resp.context_menu(|ui| {
-                        if ui.button("Close Stencil...").clicked() {
+                        if ui.button(crate::i18n::strs().msg_close_stencil()).clicked() {
                             close_requested = Some(ix);
                             ui.close();
                         }
@@ -508,10 +508,9 @@ impl Stencil {
                     // paradigm — plain Sense::click cannot drag).
                     let (r, resp) = ui.allocate_exact_size(size, Sense::click_and_drag());
                     self.cell_rects.push((key, r));
-                    let resp = resp.on_hover_text(format!(
-                        "{} (master {})",
+                    let resp = resp.on_hover_text(crate::i18n::strs().msg_name_u_master_id(
                         cell.master.name_u.as_deref().unwrap_or("-"),
-                        cell.master.id
+                        cell.master.id,
                     ));
                     let p = ui.painter();
                     // Visio masters sit directly on the pane — no

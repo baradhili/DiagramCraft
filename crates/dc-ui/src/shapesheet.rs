@@ -1442,7 +1442,7 @@ mod tests {
             }));
         let mut master = vsdx::model::Master {
             id: 42,
-            name_u: Some("Container".into()),
+            name_u: Some("Container".to_string()),
             ..vsdx::model::Master::default()
         };
         master.shapes.push(master_shape);
@@ -1450,7 +1450,7 @@ mod tests {
         // The instance: everything inherits, nothing is local.
         let shape = Shape {
             id: 100,
-            name_u: Some("Container".into()),
+            name_u: Some("Container".to_string()),
             master: Some(42),
             master_shape: Some(6),
             ..Shape::default()

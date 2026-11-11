@@ -110,7 +110,7 @@ impl StencilSet {
         let title = path
             .file_stem()
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Stencil".into());
+            .unwrap_or_else(|| crate::i18n::strs().msg_stencil());
         let ix = self.push(doc, path.to_path_buf(), title, Origin::File);
         Ok((ix, false))
     }

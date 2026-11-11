@@ -142,6 +142,8 @@ pub enum Action {
     FontShrink,
     RotateLeft,
     RotateRight,
+    /// #246: open the Language dialog (View ▸ Window).
+    Language,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +271,8 @@ pub enum Icon {
     Eye,
     /// #252 Container Tools wave.
     Lock,
+    /// #246 i18n: the Language command.
+    Translate,
 }
 
 impl Icon {
@@ -277,6 +281,7 @@ impl Icon {
         let a = match self {
             Icon::Save => "save",
             Icon::Undo => "undo",
+            Icon::Translate => "translate",
             Icon::Redo => "redo",
             Icon::Open => "open",
             Icon::New => "new",
@@ -675,6 +680,18 @@ impl Icon {
                     c + Vec2::new(8.5, -1.5),
                     1.4,
                     lit(Color32::from_rgb(0xe0, 0x4a, 0x2f)),
+                );
+            }
+            Icon::Translate => {
+                // #246 fallback glyph (the MDI texture is primary):
+                // two overlapping letter tiles.
+                let a = Rect::from_center_size(c + Vec2::new(-2.5, -2.5), Vec2::splat(9.0));
+                let b = Rect::from_center_size(c + Vec2::new(3.0, 3.5), Vec2::splat(8.0));
+                p.rect_filled(a, 1.5, blue);
+                p.rect_filled(b, 1.5, lit(Color32::from_rgb(0xe0, 0x7b, 0x1f)));
+                p.line_segment(
+                    [a.center() + Vec2::new(-2.0, 1.5), a.center() + Vec2::new(0.0, -2.5)],
+                    Stroke::new(1.2, Color32::WHITE),
                 );
             }
             Icon::Pen => {
@@ -1421,11 +1438,12 @@ impl Icon {
 }
 
 /// A ribbon button: icon + caption, hero- or compact-style.
-#[derive(Clone, Copy)]
+/// `Clone` only since #246: the label/tip translate per language.
+#[derive(Clone)]
 pub struct RibbonButton {
     pub icon: Icon,
-    pub label: &'static str,
-    pub tip: &'static str,
+    pub label: String,
+    pub tip: String,
     pub enabled: bool,
     pub selected: bool,
     pub action: Action,
@@ -1438,15 +1456,16 @@ pub struct RibbonButton {
     /// Accessible name when the painted label is empty (#252): the
     /// compact icon-only tier keeps screen-reader and kittest label
     /// lookups working (e.g. the align buttons paint icons only).
-    pub alt: Option<&'static str>,
+    pub alt: Option<String>,
 }
 
 impl RibbonButton {
-    pub fn new(icon: Icon, label: &'static str, action: Action) -> Self {
+    pub fn new(icon: Icon, label: impl Into<String>, action: Action) -> Self {
+        let label = label.into();
         RibbonButton {
+            tip: label.clone(),
             icon,
             label,
-            tip: label,
             enabled: true,
             selected: false,
             action,
@@ -1456,8 +1475,8 @@ impl RibbonButton {
             alt: None,
         }
     }
-    pub fn tip(mut self, tip: &'static str) -> Self {
-        self.tip = tip;
+    pub fn tip(mut self, tip: impl Into<String>) -> Self {
+        self.tip = tip.into();
         self
     }
     pub fn enabled(mut self, on: bool) -> Self {
@@ -1477,16 +1496,16 @@ impl RibbonButton {
         self
     }
     /// Set the accessible name (#252 compact tier).
-    pub fn alt(mut self, a: &'static str) -> Self {
-        self.alt = Some(a);
+    pub fn alt(mut self, a: impl Into<String>) -> Self {
+        self.alt = Some(a.into());
         self
     }
 
     /// The name assistive tech / kittest sees (the #184 keytip
     /// letters also key off this — the compact icon-only tier keeps
     /// its name in `alt`).
-    pub(crate) fn a11y_label(&self) -> &'static str {
-        self.alt.unwrap_or(self.label)
+    pub(crate) fn a11y_label(&self) -> &str {
+        self.alt.as_deref().unwrap_or(&self.label)
     }
 
     pub fn width(mut self, w: f32) -> Self {
@@ -1494,7 +1513,7 @@ impl RibbonButton {
         self
     }
 
-    fn paint_frame(self, ui: &Ui, r: Rect, resp: &egui::Response) {
+    fn paint_frame(&self, ui: &Ui, r: Rect, resp: &egui::Response) {
         // Office 2016 states are flat neutral chips with a hairline
         // border (observed in Visio 2016 shots — no colored fills).
         if !self.enabled {
@@ -1514,7 +1533,7 @@ impl RibbonButton {
     }
 
     /// Button label color for the active visual mode (GitHub #52).
-    fn label_color(self, ui: &Ui) -> Color32 {
+    fn label_color(&self, ui: &Ui) -> Color32 {
         let t = theme::shell_tokens(ui.visuals());
         if self.enabled {
             t.label
@@ -1525,16 +1544,16 @@ impl RibbonButton {
 
     /// Visio "hero" button: large icon above the label. `on_rect`
     /// observes the laid-out rect (the #184 keytip badge collector).
-    pub fn show_big(self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
+    pub fn show_big(&self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
-        on_rect(&self, r);
+        on_rect(self, r);
         // The caption is a painted galley — attach its text for
         // screen readers and keyboard focus (GitHub #56).
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
-        let resp = resp.on_hover_text(self.tip);
+        let resp = resp.on_hover_text(&self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r =
             Rect::from_center_size(Pos2::new(r.center().x, r.top() + 21.0), Vec2::splat(32.0));
@@ -1546,7 +1565,7 @@ impl RibbonButton {
         }
         self.icon.paint(ui, icon_r, self.enabled);
         let gal = ui.painter().layout_no_wrap(
-            self.label.to_string(),
+            self.label.clone(),
             egui::FontId::proportional(11.5),
             self.label_color(ui),
         );
@@ -1562,13 +1581,13 @@ impl RibbonButton {
     /// narrow column, Visio small-button style). `on_rect` observes
     /// the laid-out rect (the #184 keytip badge collector).
     pub fn show_small(
-        self,
+        &self,
         ui: &mut Ui,
         on_rect: &mut dyn FnMut(&RibbonButton, Rect),
     ) -> ButtonClick {
         let h = 22.0;
         let gal = ui.painter().layout_no_wrap(
-            self.label.to_string(),
+            self.label.clone(),
             egui::FontId::proportional(11.5),
             self.label_color(ui),
         );
@@ -1576,13 +1595,13 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-        on_rect(&self, r);
+        on_rect(self, r);
         // Painted galley caption — name the control (GitHub #56); the
         // compact icon-only tier carries its name in `alt` (#252).
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
-        let resp = resp.on_hover_text(self.tip);
+        let resp = resp.on_hover_text(&self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r = Rect::from_min_size(r.left_top() + Vec2::new(1.0, 2.0), Vec2::splat(18.0));
         self.icon.paint(ui, icon_r, self.enabled);
@@ -1620,7 +1639,7 @@ impl RibbonButton {
                     ui.weak(entry);
                 }
                 ui.separator();
-                ui.weak("Text formatting arrives with a later milestone");
+                ui.weak(crate::i18n::strs().msg_text_formatting_arrives_with_a_l());
             });
         }
         click_kind(&resp, self.enabled)
@@ -1690,16 +1709,16 @@ pub fn grid(rows: Vec<Vec<RibbonButton>>) -> Col {
 /// beneath it (Visio 2016 layout). Only some groups carry the dialog
 /// launcher (Visio: Font, Paragraph — never Clipboard/Arrange).
 pub struct Group {
-    pub label: &'static str,
+    pub label: String,
     pub cols: Vec<Col>,
     /// Whether to draw the group dialog launcher (pop-out arrow).
     pub launcher: bool,
 }
 
 impl Group {
-    pub fn new(label: &'static str, cols: Vec<Col>) -> Self {
+    pub fn new(label: impl Into<String>, cols: Vec<Col>) -> Self {
         Group {
-            label,
+            label: label.into(),
             cols,
             launcher: false,
         }
@@ -1764,11 +1783,11 @@ pub fn content_row(
     ui: &mut Ui,
     groups: &[Group],
     on_action: &mut dyn FnMut(Action),
-    on_launcher: &mut dyn FnMut(&'static str),
+    on_launcher: &mut dyn FnMut(&str),
     on_rect: &mut dyn FnMut(&RibbonButton, Rect),
 ) {
     let t = theme::shell_tokens(ui.visuals());
-    let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
+    let mut spans: Vec<(String, f32, f32, bool)> = Vec::new();
     ui.vertical(|ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -1784,7 +1803,7 @@ pub fn content_row(
                     }
                 });
                 let x1 = ui.next_widget_position().x - ui.spacing().item_spacing.x;
-                spans.push((g.label, x0, x1, g.launcher));
+                spans.push((g.label.clone(), x0, x1, g.launcher));
                 if i + 1 < groups.len() {
                     // Visio: the separator spans the content row and
                     // stops above the group-label strip.
@@ -1802,7 +1821,7 @@ pub fn content_row(
             ui.allocate_exact_size(Vec2::new(ui.available_width(), LABEL_H), Sense::hover());
         for (label, x0, x1, launcher) in &spans {
             let gal = ui.painter().layout_no_wrap(
-                label.to_string(),
+                label.clone(),
                 egui::FontId::proportional(9.5),
                 t.ribbon_label,
             );
