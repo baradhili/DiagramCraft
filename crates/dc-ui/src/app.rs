@@ -3047,7 +3047,7 @@ impl App {
     /// so no text field ever types them.
     fn keytip_input(&mut self, ctx: &Context) {
         // Office shows no ribbon keytips on the File screen.
-        if self.backstage {
+        if self.backstage || self.language_dlg_open {
             self.keytips.disarm();
             return;
         }
@@ -11832,7 +11832,7 @@ impl App {
                 "Character",
                 0,
                 dc_core::commands::RowSel::Ix(0),
-                crate::i18n::strs().msg_size(),
+                "Size",
                 vsdx::Cell::value(format!("{next:.6}")),
             )));
         }
@@ -11997,7 +11997,7 @@ impl App {
         // fields use (first-edit materialization seeds the row with
         // the inherited cells).
         if matches!(target, ColorTarget::Text) {
-            self.fmt_set_row("Character", &crate::i18n::strs().msg_color(), color);
+            self.fmt_set_row("Character", "Color", color);
             return;
         }
         let cell_name = match target {

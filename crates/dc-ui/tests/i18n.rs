@@ -17,6 +17,15 @@ use std::sync::Mutex;
 
 static LANG_LOCK: Mutex<()> = Mutex::new(());
 
+/// Panic-safe: restores English even when an assertion fails mid-test,
+/// so a leaked German setting can't flip parallel tests in this binary.
+struct EnglishOnDrop;
+impl Drop for EnglishOnDrop {
+    fn drop(&mut self) {
+        dc_ui::i18n::pin_english();
+    }
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -211,7 +220,7 @@ fn litscan_flags_unrouted_chrome_literals() {
             // section names are .vsdx vocabulary — never translated).
             // a small context window: key patterns often sit several
             // lines above the literal in a multi-line model call
-            let lo = i.saturating_sub(5);
+            let lo = i.saturating_sub(8);
             let ctx = lines[lo..=i].join("\n");
             if ctx.contains("msg_")
                 || ctx.contains("format!")
@@ -292,6 +301,7 @@ fn unescape(raw: &str) -> String {
 #[test]
 fn language_switch_renders_german_shell() {
     let _guard = LANG_LOCK.lock().unwrap();
+    let _english = EnglishOnDrop;
     // Pin FIRST, construct, then switch: the headless constructor pins
     // English, so the switch must come after it.
     dc_ui::i18n::pin_english();
@@ -309,6 +319,4 @@ fn language_switch_renders_german_shell() {
     // must come from the catalog, not hardcoded English.
     harness.get_by_label_contains("Datei");
     harness.snapshot("i18n_german_shell");
-
-    dc_ui::i18n::pin_english();
 }

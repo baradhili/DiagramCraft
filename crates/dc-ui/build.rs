@@ -5,8 +5,9 @@
 //! fails — the same contract `flynt` checks on the catalogs.
 
 fn main() -> std::process::ExitCode {
-    println!("cargo:rerun-if-changed=../../locales/en/app.ftl");
-    println!("cargo:rerun-if-changed=../../locales/de/app.ftl");
+    // Watch the whole tree: adding a locale folder is itself a
+    // change that must regenerate the accessors.
+    println!("cargo:rerun-if-changed=../../locales");
     let opts = fluent_typed::BuildOptions::default()
         .with_locales_folder("../../locales")
         .with_default_language("en")
