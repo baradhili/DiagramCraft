@@ -1875,6 +1875,19 @@ fn draw_rulers(
     };
 
     // Horizontal ruler: ticks over the page extent only.
+    // #257 item 3: an RTL chrome flips the ruler's zero to the right —
+    // tick positions mirror across the ruler band so values grow
+    // leftward; the document coordinates themselves never move.
+    let rtl = crate::i18n::rtl();
+    let band_left = top.left();
+    let band_right = top.right();
+    let mirror = |sx: f32| {
+        if rtl {
+            band_left + (band_right - sx)
+        } else {
+            sx
+        }
+    };
     let x0_in = ((page_rect.left() - view.pan.x) / ppi).max(0.0) as f64;
     let x1_in = ((page_rect.right() - view.pan.x) / ppi).min(page.w_in as f32) as f64;
     let upx = view.unit.from_in(1.0);
@@ -1882,7 +1895,7 @@ fn draw_rulers(
     let k1 = (x1_in * upx / interval).floor() as i64;
     for k in k0..=k1 {
         let v = k as f64 * interval;
-        let sx = view.pan.x + (view.unit.to_in(v) as f32) * ppi;
+        let sx = mirror(view.pan.x + (view.unit.to_in(v) as f32) * ppi);
         let tier = tier_for(k);
         p.line_segment(
             [
@@ -1892,9 +1905,14 @@ fn draw_rulers(
             Stroke::new(0.8, t.ruler_tick),
         );
         if tier.labeled && v > 0.0 {
+            let (anchor, dx) = if rtl {
+                (egui::Align2::RIGHT_TOP, -2.0)
+            } else {
+                (egui::Align2::LEFT_TOP, 2.0)
+            };
             p.text(
-                Pos2::new(sx + 2.0, top.top() + 1.0),
-                egui::Align2::LEFT_TOP,
+                Pos2::new(sx + dx, top.top() + 1.0),
+                anchor,
                 format_num(v),
                 font.clone(),
                 t.ruler_text,

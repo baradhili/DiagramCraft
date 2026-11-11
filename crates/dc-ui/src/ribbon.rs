@@ -56,7 +56,7 @@ pub(crate) struct TabCtx {
 /// contextual Container Tools tab (File opens the backstage view
 /// instead of ribbon content).
 pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
-    match tab {
+    let mut groups = match tab {
         Tab::File => Vec::new(),
         Tab::Home => home::groups(ctx),
         Tab::Insert => insert::groups(ctx),
@@ -66,7 +66,30 @@ pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
         Tab::View => view::groups(ctx),
         Tab::Developer => developer::groups(ctx),
         Tab::ContainerTools => container_tools::groups(ctx),
+    };
+    // #257 item 3: an RTL chrome reads right-to-left — group order,
+    // column order within a group, and button order within a column
+    // (and each grid's rows) flip so the eye travels the ribbon the
+    // way the text reads.
+    if crate::i18n::rtl() {
+        groups.reverse();
+        for g in &mut groups {
+            g.cols.reverse();
+            for col in &mut g.cols {
+                match col {
+                    Col::Big(_) => {}
+                    Col::Stack(v) => v.reverse(),
+                    Col::Grid(rows) => {
+                        rows.reverse();
+                        for row in rows {
+                            row.reverse();
+                        }
+                    }
+                }
+            }
+        }
     }
+    groups
 }
 
 /// Everything the ribbon can ask the app to do.

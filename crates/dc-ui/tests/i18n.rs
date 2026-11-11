@@ -269,7 +269,7 @@ static RE_LIT: LazyLock<Regex> =
 /// never translate, so literals in these call shapes are not chrome.
 static RE_KEY: LazyLock<Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"\.cell\(|\.sections_named\(|eff_cell_str\(|eff_row_str\(|env\.insert|SetCell::new\(|set_row|set_cell|attrs\.push|type_:|Panel::left|SheetChild::Section|type_ == |RemoveSectionRow|attrs\s*[:=]|IndexChild|children: vec|SetRowCell::new\(|mod tests",
+        r"\.cell\(|\.sections_named\(|eff_cell_str\(|eff_row_str\(|env\.insert|SetCell::new\(|set_row|set_cell|attrs\.push|type_:|Panel::left|Panel::right|SheetChild::Section|type_ == |RemoveSectionRow|attrs\s*[:=]|IndexChild|children: vec|SetRowCell::new\(|mod tests",
     )
     .unwrap()
 });
@@ -347,7 +347,16 @@ fn language_switch_renders_persian_shell() {
     for _ in 0..6 {
         harness.run(); // let the canvas layer textures settle
     }
-    // The Persian catalog's word for the File tab.
-    harness.get_by_label_contains("پرونده");
+    // The Persian catalog's word for the File tab, and the mirrored
+    // chrome (#257 item 3): the File tab hugs the RIGHT edge.
+    let file_tab = harness
+        .get_all_by_label_contains("پرونده")
+        .next()
+        .expect("File tab node");
+    let cx = file_tab.rect().center().x;
+    assert!(
+        cx > 1280.0 * 0.75,
+        "the File tab must mirror to the right edge (center x = {cx})"
+    );
     harness.snapshot("i18n_persian_shell");
 }

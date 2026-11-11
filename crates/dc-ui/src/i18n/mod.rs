@@ -73,6 +73,17 @@ pub fn set_language_ephemeral(lang: L10n) {
     set_current(lang);
 }
 
+/// The RTL language set (#257 item 3): the shell chrome mirrors for
+/// these. Arabic/Hebrew catalogs join the set with their folders.
+const RTL_LANGS: &[L10n] = &[L10n::Fa];
+
+/// True while the current language reads right-to-left: the shell
+/// mirrors its chrome for it (ribbon order, panel sides, strip and
+/// status alignment, horizontal-ruler zero direction).
+pub fn rtl() -> bool {
+    RTL_LANGS.contains(&current())
+}
+
 /// The current language's generated accessors, loaded once and leaked
 /// per language (bounded by [`L10n::iter`]). Every chrome string in the
 /// shell resolves through this.

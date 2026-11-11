@@ -8000,7 +8000,14 @@ impl App {
                     .inner_margin(egui::Margin::same(0)),
             )
             .show(ui, |ui| {
-                ui.horizontal_centered(|ui| {
+                // #257 item 3: RTL mirrors the strip — File lands at
+                // the right edge and the tabs flow leftward.
+                let strip_dir = if crate::i18n::rtl() {
+                    egui::Layout::right_to_left(egui::Align::Center)
+                } else {
+                    egui::Layout::left_to_right(egui::Align::Center)
+                };
+                ui.with_layout(strip_dir, |ui| {
                     ui.set_min_height(STRIP_H);
                     // File: a green block spanning the full strip height
                     // — the green title band above makes it read as one
@@ -8137,8 +8144,15 @@ impl App {
                             }
                         }
                     }
-                    // Office's "Tell me what you want to do" search box.                    // Office's "Tell me what you want to do" search box.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // Office's "Tell me what you want to do" search box.                    // Office's "Tell me what you want to do" search
+                    // box. The inner layout flips with the strip so it
+                    // hugs the mirrored far end.
+                    let tellme_dir = if crate::i18n::rtl() {
+                        egui::Layout::left_to_right(egui::Align::Center)
+                    } else {
+                        egui::Layout::right_to_left(egui::Align::Center)
+                    };
+                    ui.with_layout(tellme_dir, |ui| {
                         ui.add_space(6.0);
                         let (pr, presp) =
                             ui.allocate_exact_size(Vec2::new(196.0, 20.0), Sense::click());
@@ -8306,7 +8320,14 @@ impl App {
 
     fn page_tabs(&mut self, ui: &mut Ui) {
         let t = theme::shell_tokens(ui.visuals());
-        ui.horizontal(|ui| {
+        // #257 item 3: RTL mirrors the strip — the navigation cluster
+        // hugs the right edge and the tabs flow leftward.
+        let dir = if crate::i18n::rtl() {
+            egui::Layout::right_to_left(egui::Align::Center)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center)
+        };
+        ui.with_layout(dir, |ui| {
             ui.add_space(4.0);
             let tabs: Vec<(String, i64)> = self
                 .ed
@@ -8444,7 +8465,19 @@ impl App {
 
     fn status_bar(&mut self, ui: &mut Ui) {
         let t = theme::shell_tokens(ui.visuals());
-        ui.horizontal_centered(|ui| {
+        // #257 item 3: RTL mirrors the bar — the page/shape readout
+        // hugs the right edge and the zoom cluster the left.
+        let dir = if crate::i18n::rtl() {
+            egui::Layout::right_to_left(egui::Align::Center)
+        } else {
+            egui::Layout::left_to_right(egui::Align::Center)
+        };
+        let rev = if crate::i18n::rtl() {
+            egui::Layout::left_to_right(egui::Align::Center)
+        } else {
+            egui::Layout::right_to_left(egui::Align::Center)
+        };
+        ui.with_layout(dir, |ui| {
             let mut left;
             if let Some(ed) = self.ed() {
                 let geom = self.page_geom();
@@ -8496,7 +8529,7 @@ impl App {
                 left = "no document".into();
             }
             ui.label(egui::RichText::new(left).color(t.status_text).size(11.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.with_layout(rev, |ui| {
                 // Visio status bar right end: − [zoom slider] + N%
                 if self.ed.is_some() {
                     let pct = (self.view.zoom * 100.0).round() as u32;
@@ -14391,7 +14424,15 @@ impl App {
             .map(|ed| !ed.doc.masters.is_empty() || !self.stencils.is_empty())
             .unwrap_or(false);
         if pane_wanted {
-            egui::Panel::left("stencil")
+            // #257 item 3: RTL mirrors the pane sides — Shapes on the
+            // right, Format on the left (the observed Office RTL
+            // behavior; the stable ids keep user sizing).
+            let stencil_panel = if crate::i18n::rtl() {
+                egui::Panel::right("stencil")
+            } else {
+                egui::Panel::left("stencil")
+            };
+            stencil_panel
                 .frame(
                     egui::Frame::new()
                         .fill(t.stencil_bg)
@@ -14456,7 +14497,11 @@ impl App {
                 });
         }
         if self.format_pane_open && self.sel.is_some() {
-            egui::Panel::right("format_pane")
+            if crate::i18n::rtl() {
+                egui::Panel::left("format_pane")
+            } else {
+                egui::Panel::right("format_pane")
+            }
                 .default_size(240.0)
                 .resizable(true)
                 .show(ui, |ui| self.format_pane(ui));
@@ -14696,6 +14741,13 @@ impl App {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                // #257 item 3: RTL right-aligns the dialog's content.
+                let dir = if crate::i18n::rtl() {
+                    egui::Layout::top_down(egui::Align::RIGHT)
+                } else {
+                    egui::Layout::top_down(egui::Align::LEFT)
+                };
+                ui.with_layout(dir, |ui| {
                 ui.label(crate::i18n::strs().msg_choose_the_display_language_for());
                 ui.add_space(6.0);
                 let current = crate::i18n::current();
@@ -14713,6 +14765,7 @@ impl App {
                 if ui.button(crate::i18n::strs().msg_close()).clicked() {
                     close = true;
                 }
+                });
             });
         if let Some(lang) = picked {
             crate::i18n::set_language(lang);
@@ -14992,7 +15045,11 @@ impl App {
         }
         let has_doc = self.ed.is_some();
         let t = theme::shell_tokens(ui.visuals());
-        egui::Panel::left("backstage_rail")
+        if crate::i18n::rtl() {
+            egui::Panel::right("backstage_rail")
+        } else {
+            egui::Panel::left("backstage_rail")
+        }
             .frame(
                 egui::Frame::new()
                     .fill(t.accent_band)
