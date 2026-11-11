@@ -17,6 +17,10 @@ use std::sync::Mutex;
 
 static LANG_LOCK: Mutex<()> = Mutex::new(());
 
+/// The shipped catalogs — every one must satisfy every structural
+/// check. A new language is a folder here plus its `language-name`.
+const LOCALES: &[&str] = &["en", "de", "fa"];
+
 /// Panic-safe: restores English even when an assertion fails mid-test,
 /// so a leaked German setting can't flip parallel tests in this binary.
 struct EnglishOnDrop;
@@ -110,31 +114,29 @@ static RE_MSG: LazyLock<Regex> =
 
 #[test]
 fn catalogs_have_identical_key_sets() {
-    let en = catalog_ids("en");
-    let de = catalog_ids("de");
-    let only_en: Vec<_> = en.difference(&de).collect();
-    let only_de: Vec<_> = de.difference(&en).collect();
-    assert!(
-        only_en.is_empty() && only_de.is_empty(),
-        "catalogs drifted apart — every ID must exist in BOTH files: en-only {only_en:?} de-only {only_de:?}"
-    );
+    let sets: Vec<_> = LOCALES.iter().map(|l| (*l, catalog_ids(l))).collect();
+    let (_, en) = sets.first().expect("reference locale present");
+    for (lang, ids) in &sets {
+        let only_here: Vec<_> = ids.difference(en).collect();
+        let only_en: Vec<_> = en.difference(ids).collect();
+        assert!(
+            only_here.is_empty() && only_en.is_empty(),
+            "catalogs drifted apart — every ID must exist in EVERY file: {lang}-only {only_here:?} en-only {only_en:?}"
+        );
+    }
 }
 
 #[test]
 fn every_routed_id_exists_in_every_catalog() {
-    let en = catalog_ids("en");
-    let de = catalog_ids("de");
     let routed = routed_ids();
-    let missing_en: Vec<_> = routed.difference(&en).collect();
-    let missing_de: Vec<_> = routed.difference(&de).collect();
-    assert!(
-        missing_en.is_empty(),
-        "routed but missing from en/app.ftl: {missing_en:?}"
-    );
-    assert!(
-        missing_de.is_empty(),
-        "routed but missing from de/app.ftl: {missing_de:?}"
-    );
+    for lang in LOCALES {
+        let ids = catalog_ids(lang);
+        let missing: Vec<_> = routed.difference(&ids).collect();
+        assert!(
+            missing.is_empty(),
+            "routed but missing from {lang}/app.ftl: {missing:?}"
+        );
+    }
 }
 
 #[test]
@@ -311,6 +313,9 @@ fn language_switch_renders_german_shell() {
     let mut harness = egui_kittest::Harness::builder()
         .with_size(egui::vec2(1280.0, 800.0))
         .build_ui(move |ui| {
+            // The shipped font stack + the light Visio style — the
+            // same surfaces the production ctor installs.
+            dc_ui::theme::install_for(ui.ctx(), egui::ThemePreference::Light);
             app.draw(ui);
         });
     harness.run();
@@ -319,4 +324,30 @@ fn language_switch_renders_german_shell() {
     // must come from the catalog, not hardcoded English.
     harness.get_by_label_contains("Datei");
     harness.snapshot("i18n_german_shell");
+}
+
+/// Same harness, Persian catalog: the Arabic-script glyphs render
+/// through the vendored Vazirmatn fallback (#257 item 2) while the
+/// chrome stays LTR — mirroring is the next #257 item.
+#[test]
+fn language_switch_renders_persian_shell() {
+    let _guard = LANG_LOCK.lock().unwrap();
+    let _english = EnglishOnDrop;
+    dc_ui::i18n::pin_english();
+    let mut app = App::with_blank();
+    dc_ui::i18n::set_language_ephemeral(dc_ui::i18n::L10n::Fa);
+
+    dc_ui::svgimg::pin_determinism_for_tests();
+    let mut harness = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1280.0, 800.0))
+        .build_ui(move |ui| {
+            dc_ui::theme::install_for(ui.ctx(), egui::ThemePreference::Light);
+            app.draw(ui);
+        });
+    for _ in 0..6 {
+        harness.run(); // let the canvas layer textures settle
+    }
+    // The Persian catalog's word for the File tab.
+    harness.get_by_label_contains("پرونده");
+    harness.snapshot("i18n_persian_shell");
 }

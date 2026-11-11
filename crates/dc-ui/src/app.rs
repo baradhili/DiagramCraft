@@ -5681,10 +5681,8 @@ impl App {
         ));
         self.set_selection(Some((page_id, id)));
         self.sel_set = vec![(page_id, id)];
-        self.status = format!(
-            "freeform shape created ({segs} segment{} — drag the vertex handles to edit)",
-            if segs == 1 { "" } else { "s" }
-        );
+        self.status =
+            crate::i18n::strs().msg_freeform_shape_created_segs_segm(segs);
     }
 
     /// #108 reroute: a deferred [`crate::cmd::RerouteConnectors`]

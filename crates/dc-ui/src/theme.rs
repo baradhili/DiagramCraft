@@ -331,12 +331,34 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         ))
         .into(),
     );
+    // #257 item 2: Vazirmatn (OFL) covers the Arabic script — the
+    // Persian UI falls through to it after the Latin faces, so Latin
+    // metrics never move.
+    fonts.font_data.insert(
+        "vazirmatn".into(),
+        egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/vazirmatn/Vazirmatn-Regular.ttf"
+        ))
+        .into(),
+    );
+    fonts.font_data.insert(
+        "vazirmatn-bold".into(),
+        egui::FontData::from_static(include_bytes!(
+            "../assets/fonts/vazirmatn/Vazirmatn-Bold.ttf"
+        ))
+        .into(),
+    );
     let prop = fonts
         .families
         .get_mut(&egui::FontFamily::Proportional)
         .expect("proportional family always exists");
     prop.insert(0, "opensans".into());
     prop.insert(1, "opensans-semibold".into());
+    prop.push("vazirmatn".into());
+    prop.push("vazirmatn-bold".into());
+    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        mono.push("vazirmatn".into());
+    }
     ctx.set_fonts(fonts);
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(KEY), true));
 }

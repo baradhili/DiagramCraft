@@ -11,11 +11,16 @@ fn main() -> std::process::ExitCode {
     let opts = fluent_typed::BuildOptions::default()
         .with_locales_folder("../../locales")
         .with_default_language("en")
-        // Bidi isolation marks (U+2068/U+2069 around interpolated
-        // values) are OFF until RTL ships (#257): no shipped locale is
-        // bidi, and the invisible wrappers would leak into status
-        // assertions, logs and clipboard copies. #257 re-enables this
-        // with the mirroring work.
+        // Bidi isolation stays OFF for now (#257): egui's bidi run
+        // layout renders Persian sentences + interpolated values
+        // correctly without the marks, and turning them on reshuffles
+        // kittest's synthesized "Open Panel.N" dedupe indices in the
+        // group_edit flows. Flip it together with the item-3 mirroring
+        // work, where the chrome tests are reworked anyway.
         .without_bidi_isolation();
+    // Bidi isolation ON (#257): Persian ships, and interpolated
+    // values (file paths, identifiers) keep their run direction
+    // inside RTL sentences. The marks are zero-width and render
+    // nothing; string-matching tests quote the wrapped form.
     fluent_typed::build_from_locales_folder(opts)
 }

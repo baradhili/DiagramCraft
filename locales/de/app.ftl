@@ -288,6 +288,11 @@ freeform = Freihand
 freeform-drag-on-the-page-to-dra = Freihand: auf der Seite ziehen, um freihändig zu zeichnen (Esc beendet)
 freeform-off = Freihand aus
 freeform-shape-id = Freihandform { $id }
+freeform-shape-created-segs-segm =
+    { $segs ->
+        [one] Freihandform erstellt (ein Segment — ziehen Sie die Scheitelpunktgriffe zum Bearbeiten)
+       *[other] Freihandform erstellt ({ $segs } Segmente — ziehen Sie die Scheitelpunktgriffe zum Bearbeiten)
+    }
 freeform-stroke-too-short-to-dra = Der Freihandstrich ist zu kurz zum Zeichnen
 glue = Verklebung
 glue-to = Verkleben an:

@@ -2004,6 +2004,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "freeform-shape-created-segs-segm",
+        attribute: None,
+        vars: &["segs"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "freeform-stroke-too-short-to-dra",
         attribute: None,
         vars: &[],
@@ -5351,10 +5358,11 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
 ];
 #[allow(dead_code)]
-static ALL_LANGS: [L10n; 2] = [
+static ALL_LANGS: [L10n; 3] = [
     // languages as an array
     L10n::De,
     L10n::En,
+    L10n::Fa,
 ];
 
 /// The languages that have translations available.
@@ -5362,6 +5370,7 @@ static ALL_LANGS: [L10n; 2] = [
 pub enum L10n {
     De,
     En,
+    Fa,
 }
 
 impl Default for L10n {
@@ -5377,6 +5386,7 @@ impl FromStr for L10n {
         match s {
             "de" => Ok(Self::De),
             "en" => Ok(Self::En),
+            "fa" => Ok(Self::Fa),
             _ => Err(format!("Unknown language: {}", s)),
         }
     }
@@ -5388,6 +5398,7 @@ impl Deref for L10n {
         match self {
             Self::De => "de",
             Self::En => "en",
+            Self::Fa => "fa",
         }
     }
 }
@@ -5418,13 +5429,15 @@ impl L10n {
         match self {
             Self::De => "Deutsch",
             Self::En => "English",
+            Self::Fa => "فارسی",
         }
     }
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..35465,
-            Self::En => 35465..69495,
+            Self::De => 0..35738,
+            Self::En => 35738..70035,
+            Self::Fa => 70035..115744,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -6541,6 +6554,14 @@ impl L10nLanguage {
         let mut _args = FluentArgs::new();
         _args.set("id", id.into());
         self.0.msg("freeform-shape-id", Some(_args)).unwrap()
+    }
+    /// $segs (Number) - argument
+    pub fn msg_freeform_shape_created_segs_segm<F0: Into<FluentNumber>>(&self, segs: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("segs", segs.into());
+        self.0
+            .msg("freeform-shape-created-segs-segm", Some(_args))
+            .unwrap()
     }
     pub fn msg_freeform_stroke_too_short_to_dra(&self) -> String {
         self.0

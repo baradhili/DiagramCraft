@@ -317,6 +317,12 @@ freeform-drag-on-the-page-to-dra = Freeform: drag on the page to draw freehand g
 freeform-off = freeform off
 # $id (Number) - argument
 freeform-shape-id = freeform shape { $id }
+# $segs (Number) - argument
+freeform-shape-created-segs-segm =
+    { $segs ->
+        [one] freeform shape created (one segment — drag the vertex handles to edit)
+       *[other] freeform shape created ({ $segs } segments — drag the vertex handles to edit)
+    }
 freeform-stroke-too-short-to-dra = freeform stroke too short to draw
 glue = Glue
 glue-to = Glue to:
