@@ -34,7 +34,12 @@ use crate::recent::config_base;
 const SCHEMA_VERSION: u64 = 1;
 
 /// Slot index into [`L10n::iter`] — the process-global current language.
-static CURRENT: AtomicU8 = AtomicU8::new(0);
+/// `u8::MAX` = unset, so `current()` falls through to `L10n::default()`
+/// (English): `L10n::iter()` starts at German, and a bare `0` would
+/// make every unpinned reader — unit tests, the pre-init window title —
+/// resolve German.
+static CURRENT: AtomicU8 = AtomicU8::new(u8::MAX);
+const LANG_SLOTS: usize = 2; // L10n::iter().len() — const-evaluated
 
 /// English pinned (headless constructors, tests): no persistence.
 pub fn pin_english() {
@@ -73,7 +78,8 @@ pub fn set_language_ephemeral(lang: L10n) {
 /// per language (bounded by [`L10n::iter`]). Every chrome string in the
 /// shell resolves through this.
 pub fn strs() -> &'static L10nLanguage {
-    static LOADED: Mutex<[Option<&'static L10nLanguage>; 2]> = Mutex::new([None, None]);
+    static LOADED: Mutex<[Option<&'static L10nLanguage>; LANG_SLOTS]> =
+        Mutex::new([const { None }; LANG_SLOTS]);
     let lang = current();
     let ix = L10n::iter().position(|l| *l == lang).unwrap_or(0);
     let mut slots = LOADED.lock().unwrap();

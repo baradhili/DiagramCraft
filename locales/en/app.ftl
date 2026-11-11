@@ -359,7 +359,6 @@ inspect-drawing = Inspect Drawing…
 inspect-the-selected-shape-s-cel = Inspect the selected shape's cells
 italic = Italic
 italic-planned = Italic — planned
-jpg = JPG
 jump-size = Jump size
 justify = Justify
 justify-planned = Justify — planned

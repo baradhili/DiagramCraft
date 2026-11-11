@@ -2537,7 +2537,7 @@ mod reroute_master_tests {
         let conn = page.shapes.remove(at);
         let mut group = vsdx::model::Shape {
             id: 20,
-            type_: Some(crate::i18n::strs().msg_group()),
+            type_: Some("Group".into()),
             ..vsdx::model::Shape::default()
         };
         for (n, v) in [

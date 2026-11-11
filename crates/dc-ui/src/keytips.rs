@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn letters_follow_label_order_and_skip_taken() {
-        let out = assign_control_letters(&[crate::i18n::strs().msg_paste(), crate::i18n::strs().msg_cut(), crate::i18n::strs().msg_copy(), crate::i18n::strs().msg_paste()]);
+        let out = assign_control_letters(&["Paste".to_string(), "Cut".to_string(), "Copy".to_string(), "Paste".to_string()]);
         // P, C(ut), O — Copy's C is free (Cut took C? no: Cut takes C
         // first), so Copy falls to O; the second Paste falls to A.
         assert_eq!(
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn non_alphanumerics_are_skipped() {
-        let out = assign_control_letters(&[crate::i18n::strs().msg_zoom_in(), crate::i18n::strs().msg_zoom_out()]);
+        let out = assign_control_letters(&["Zoom In".to_string(), "Zoom Out".to_string()]);
         // Z, then O — the space never becomes a keytip.
         assert_eq!(out, vec![Some('Z'), Some('O')]);
     }

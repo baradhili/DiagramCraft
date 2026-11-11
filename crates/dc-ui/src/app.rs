@@ -575,9 +575,6 @@ struct EndpointPreview {
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, path: Option<PathBuf>) -> App {
-        // #246 i18n: the persisted language (or the system locale on
-        // first run) selects the catalog before the first frame paints.
-        crate::i18n::init_from_disk();
         // OS light/dark (GitHub #52): detect the opening mode (gsettings
         // with the XDG portal as fallback; `detect` debug-prints the
         // source), install BOTH style slots and select it — then follow
@@ -586,6 +583,10 @@ impl App {
         let pref = crate::os_theme::detect();
         crate::theme::install_for(&cc.egui_ctx, pref);
         let mut app = App::with_doc_opt(None);
+        // #246 i18n: AFTER the shared ctor (which pins English for the
+        // headless path), the persisted language — or the system locale
+        // on first run — selects the catalog before the first frame.
+        crate::i18n::init_from_disk();
         // #224: the branded boot moment — production only (the headless
         // ctors stay splash-free for kittest determinism).
         app.splash = Some(std::time::Instant::now());
@@ -6495,7 +6496,7 @@ impl App {
             self.status = crate::i18n::strs().msg_only_png_and_jpeg_pictures_are_s();
             return;
         };
-        let compression = if ext == "png" { "PNG" } else { &crate::i18n::strs().msg_jpg() };
+        let compression = if ext == "png" { "PNG" } else { "JPG" };
         let Ok(img) = image::load_from_memory(bytes) else {
             self.status = crate::i18n::strs().msg_the_picture_could_not_be_decoded();
             return;
@@ -8848,7 +8849,7 @@ impl App {
                     });
                     if r.lost_focus() {
                         if let Ok(v) = buf.trim().parse::<f64>() {
-                            set_cell = Some((crate::i18n::strs().msg_rounding(), format!("{v:.6}")));
+                            set_cell = Some(("Rounding".into(), format!("{v:.6}")));
                         }
                         bufs.remove("rounding");
                     }
@@ -8869,7 +8870,7 @@ impl App {
                     if r.lost_focus() {
                         let v = buf.trim().to_string();
                         if !v.is_empty() {
-                            set_row = Some(("Character".into(), crate::i18n::strs().msg_font(), v));
+                            set_row = Some(("Character".into(), "Font".into(), v));
                         }
                         bufs.remove("font");
                     }
@@ -8890,7 +8891,7 @@ impl App {
                         if let Ok(pt) = buf.trim().parse::<f64>() {
                             set_row = Some((
                                 "Character".into(),
-                                crate::i18n::strs().msg_size(),
+                                "Size".into(),
                                 format!("{:.6}", pt / 72.0),
                             ));
                         }
@@ -8912,7 +8913,7 @@ impl App {
                     if rb.changed() {
                         set_row = Some((
                             "Character".into(),
-                            crate::i18n::strs().msg_style(),
+                            "Style".into(),
                             format!("{}", (bits & !1) | bold as i64),
                         ));
                     }
@@ -8923,7 +8924,7 @@ impl App {
                     if ri.changed() {
                         set_row = Some((
                             "Character".into(),
-                            crate::i18n::strs().msg_style(),
+                            "Style".into(),
                             format!("{}", (bits & !2) | ((italic as i64) * 2)),
                         ));
                     }
@@ -8941,7 +8942,7 @@ impl App {
                     }
                 });
                 let cur = self
-                    .eff_row_str(&crate::i18n::strs().msg_paragraph(), "HorzAlign")
+                    .eff_row_str("Paragraph", "HorzAlign")
                     .unwrap_or_else(|| "0".into());
                 if let Some(v) = Self::fmt_dropdown(
                     ui,
@@ -8949,7 +8950,7 @@ impl App {
                     &|k: &str| k.to_string(),
                     &[("0", crate::i18n::strs().msg_align_left()), ("1", crate::i18n::strs().msg_center()), ("2", crate::i18n::strs().msg_align_right())],
                 ) {
-                    set_row = Some((crate::i18n::strs().msg_paragraph(), "HorzAlign".into(), v));
+                    set_row = Some(("Paragraph".into(), "HorzAlign".into(), v));
                 }
             });
 
@@ -10156,7 +10157,7 @@ impl App {
         page.attrs.retain(|(k, _)| k != "Background");
         let name = page.name.clone();
         if !marked {
-            page.attrs.push((crate::i18n::strs().msg_background(), "1".to_string()));
+            page.attrs.push(("Background".to_string(), "1".to_string()));
         }
         self.dirty = true;
         self.version += 1;
@@ -11369,7 +11370,7 @@ impl App {
                         } else if remove.clicked() {
                             self.apply(dc_core::commands::RemoveSectionRow::new(
                                 scope.clone(),
-                                crate::i18n::strs().msg_hyperlink(),
+                                "Hyperlink",
                                 0,
                                 dc_core::commands::RowSel::Ix(row.ix),
                             ));
@@ -11469,7 +11470,7 @@ impl App {
                             if !from_master {
                                 cmds.push(Box::new(dc_core::commands::RemoveSectionRow::new(
                                     scope.clone(),
-                                    crate::i18n::strs().msg_hyperlink(),
+                                    "Hyperlink",
                                     0,
                                     dc_core::commands::RowSel::Ix(old),
                                 )));
@@ -11489,7 +11490,7 @@ impl App {
                             if from_master || !val.trim().is_empty() {
                                 cmds.push(Box::new(dc_core::SetRowCell::new(
                                     scope.clone(),
-                                    crate::i18n::strs().msg_hyperlink(),
+                                    "Hyperlink",
                                     0,
                                     dc_core::commands::RowSel::Ix(ix),
                                     name,
@@ -14064,7 +14065,7 @@ impl App {
             }
         } else {
             sh.sheet.children.push(SheetChild::Section(Section {
-                name: crate::i18n::strs().msg_protection(),
+                name: "Protection".into(),
                 rows: vec![Row {
                     cells: vec![(name.to_string(), vsdx::model::Cell::value(val))],
                     ..Row::default()
@@ -14392,7 +14393,7 @@ impl App {
             .map(|ed| !ed.doc.masters.is_empty() || !self.stencils.is_empty())
             .unwrap_or(false);
         if pane_wanted {
-            egui::Panel::left(crate::i18n::strs().msg_stencil_fallback())
+            egui::Panel::left("stencil")
                 .frame(
                     egui::Frame::new()
                         .fill(t.stencil_bg)

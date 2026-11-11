@@ -83,7 +83,7 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
 
     let mut mroot = Shape {
         id: 1,
-        type_: Some(crate::i18n::strs().msg_group()),
+        type_: Some("Group".into()),
         ..Shape::default()
     };
     // The layout cells real task masters use (Process.7 pattern): the
@@ -156,7 +156,7 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
         attrs: vec![
             ("ID".into(), "10".into()),
             ("NameU".into(), "TaskG".into()),
-            (crate::i18n::strs().msg_name(), "TaskG".into()),
+            ("Name".into(), "TaskG".into()),
         ],
         children: vec![IndexChild::Rel(vec![("r:id".into(), "rId9".into())])],
         shapes: vec![mroot],
@@ -169,14 +169,14 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
     let root_id = dc_core::commands::next_shape_id(&ed.doc, page_id);
     let mut inst = Shape {
         id: root_id,
-        type_: Some(crate::i18n::strs().msg_group()),
+        type_: Some("Group".into()),
         master: Some(10),
         ..Shape::default()
     };
     inst.attrs = vec![
         ("ID".into(), root_id.to_string()),
-        ("Type".into(), crate::i18n::strs().msg_group()),
-        (crate::i18n::strs().msg_master(), "10".into()),
+        ("Type".into(), "Group".into()),
+        ("Master".into(), "10".into()),
     ];
     for (n, v, f) in [
         ("PinX", "4", None),
@@ -209,7 +209,7 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
     isub.attrs = vec![
         ("ID".into(), (root_id + 1).to_string()),
         ("Type".into(), "Shape".into()),
-        (crate::i18n::strs().msg_master(), "10".into()),
+        ("Master".into(), "10".into()),
         ("MasterShape".into(), "2".into()),
     ];
     for (n, v) in [
@@ -233,7 +233,7 @@ pub fn taskg_editor() -> (Editor, i64, [i64; 3]) {
     iicon.attrs = vec![
         ("ID".into(), (root_id + 2).to_string()),
         ("Type".into(), "Shape".into()),
-        (crate::i18n::strs().msg_master(), "10".into()),
+        ("Master".into(), "10".into()),
         ("MasterShape".into(), "3".into()),
     ];
     for (n, v) in [

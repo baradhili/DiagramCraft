@@ -1677,7 +1677,7 @@ mod tests {
         };
         let mut group = vsdx::model::Shape {
             id: 1,
-            type_: Some(crate::i18n::strs().msg_group()),
+            type_: Some("Group".into()),
             ..vsdx::model::Shape::default()
         };
         group.sheet.set_cell("PinX", vsdx::model::Cell::value("2"));

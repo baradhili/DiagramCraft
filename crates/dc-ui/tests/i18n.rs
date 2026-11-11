@@ -188,17 +188,38 @@ fn litscan_flags_unrouted_chrome_literals() {
             continue;
         }
         let text = std::fs::read_to_string(&f).expect("src readable");
-        for (i, line) in text.lines().enumerate() {
+        let lines: Vec<&str> = text.lines().collect();
+        // #[cfg(test)] fixtures are deliberate literals (see the
+        // keytips letter-assignment tests) — not unrouted chrome.
+        let mut in_tests = 0usize; // brace depth inside `mod tests`
+        for (i, line) in lines.iter().enumerate() {
+            if in_tests > 0 {
+                in_tests += line.matches('{').count();
+                in_tests -= line.matches('}').count();
+                if in_tests > 0 {
+                    continue;
+                }
+            }
+            if line.trim_start().starts_with("#[cfg(test)]")
+                || line.trim_start().starts_with("mod tests")
+            {
+                in_tests = 1 + line.matches('{').count() - line.matches('}').count();
+                continue;
+            }
             // conservative guard set mirroring the sweep: routed lines,
             // format!/const/match contexts, model-key lookups (cell and
             // section names are .vsdx vocabulary — never translated).
-            if line.contains("msg_")
-                || line.contains("format!")
+            // a small context window: key patterns often sit several
+            // lines above the literal in a multi-line model call
+            let lo = i.saturating_sub(5);
+            let ctx = lines[lo..=i].join("\n");
+            if ctx.contains("msg_")
+                || ctx.contains("format!")
                 || line.contains("==")
                 || line.contains("=>")
                 || line.trim_start().starts_with("//")
-                || RE_CONST.is_match(line)
-                || RE_KEY.is_match(line)
+                || RE_CONST.is_match(&ctx)
+                || RE_KEY.is_match(&ctx)
             {
                 continue;
             }
@@ -237,7 +258,7 @@ static RE_LIT: LazyLock<Regex> =
 /// never translate, so literals in these call shapes are not chrome.
 static RE_KEY: LazyLock<Regex> = LazyLock::new(|| {
     regex::Regex::new(
-        r"\.cell\(|\.sections_named\(|eff_cell_str\(|eff_row_str\(|env\.insert|SetCell::new\(",
+        r"\.cell\(|\.sections_named\(|eff_cell_str\(|eff_row_str\(|env\.insert|SetCell::new\(|set_row|set_cell|attrs\.push|type_:|Panel::left|SheetChild::Section|type_ == |RemoveSectionRow|attrs\s*[:=]|IndexChild|children: vec|SetRowCell::new\(|mod tests",
     )
     .unwrap()
 });

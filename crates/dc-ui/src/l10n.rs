@@ -2291,13 +2291,6 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
-        message: "jpg",
-        attribute: None,
-        vars: &[],
-        bool_vars: &[],
-        elements: &[],
-    },
-    MessageContract {
         message: "jump-size",
         attribute: None,
         vars: &[],
@@ -5430,8 +5423,8 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..35473,
-            Self::En => 35473..69513,
+            Self::De => 0..35465,
+            Self::En => 35465..69495,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -6688,9 +6681,6 @@ impl L10nLanguage {
     }
     pub fn msg_italic_planned(&self) -> String {
         self.0.msg("italic-planned", None).unwrap()
-    }
-    pub fn msg_jpg(&self) -> String {
-        self.0.msg("jpg", None).unwrap()
     }
     pub fn msg_jump_size(&self) -> String {
         self.0.msg("jump-size", None).unwrap()
