@@ -213,6 +213,17 @@ pub struct ResolvedFace {
     is_carlito: bool,
 }
 
+impl ResolvedFace {
+    /// Whether THIS face (not the Carlito fallback chain — the raster
+    /// resolves the element's family to this one) carries a glyph for
+    /// `c`. The wrap's complex-script probe uses it to pick the face
+    /// usvg's per-cluster fallback will actually draw (PR #269
+    /// review).
+    pub fn covers(&self, c: char) -> bool {
+        self.advance_of(self.id, c).is_some()
+    }
+}
+
 /// Resolve the face a shape's text measures (and rasterizes) in: the
 /// family chain the renderer emits, first installed family wins,
 /// Carlito fallback. `bold`/`italic` prefer the family's matching

@@ -65,7 +65,9 @@ impl SheetTextMeasure {
         // resolves it (#257 text-direction) so a TEXTHEIGHT refresh
         // wraps an RTL paragraph at the size its glyphs paint with.
         let cs_chain = self.tb.cs_font.as_deref().or(self.tb.font.as_deref());
-        let cs_face = crate::svg::cs_measure_face(cs_chain, self.tb.bold, self.tb.italic);
+        let cs_face = crate::textmetrics::resolve(cs_chain, self.tb.bold, self.tb.italic);
+        let cs_fallback =
+            crate::textmetrics::resolve(Some("Vazirmatn"), self.tb.bold, self.tb.italic);
         let usable = (width - self.tb.insets.0 - self.tb.insets.1).max(0.02);
         crate::svg::wrap_block_text(
             &face,
@@ -74,6 +76,7 @@ impl SheetTextMeasure {
             usable,
             &cs_face,
             self.tb.cs_size.unwrap_or(self.tb.font_size),
+            &cs_fallback,
         )
     }
 }

@@ -2178,6 +2178,11 @@ pub(crate) fn resolve_text_block(
 pub(crate) struct WrapLine {
     pub text: String,
     pub rtl: bool,
+    /// This paragraph measured with the complex-script FALLBACK face
+    /// (the resolved CS face lacked its script; the raster draws it
+    /// via usvg's per-cluster fallback) — the emission widths the
+    /// line with the same face (PR #269 review).
+    pub cs_fallback: bool,
 }
 
 /// The Right-to-Left Text toggle's transform (#257 text-direction,
@@ -2268,19 +2273,23 @@ pub fn paragraph_base_rtl(para: &str) -> bool {
 /// complex-script cells (`cs_face`/`cs_size`, the Latin pair when
 /// absent), so the wrap decision and the raster agree by construction
 /// per paragraph, not just per block.
-/// Resolve the face that will PAINT a complex-script (RTL) paragraph
-/// (PR #269 review): the sheet's own CS/Latin chain when it names one;
-/// otherwise the vendored Vazirmatn — the face usvg's per-cluster
-/// fallback selects for Arabic script on the raster side — so wrap
-/// measurement and the rasterized glyphs agree. With the face not
-/// registered (bare dc tests, no `register_complex_script_faces` call)
-/// the chain falls through to the Carlito default, the old behavior.
-pub(crate) fn cs_measure_face(
-    cs_chain: Option<&str>,
-    bold: bool,
-    italic: bool,
-) -> crate::textmetrics::ResolvedFace {
-    crate::textmetrics::resolve(cs_chain.or(Some("Vazirmatn")), bold, italic)
+/// The paragraph's first STRONG bidi character (R/AL or L — the same
+/// scan [`paragraph_base_rtl`] follows, leading marks skipped): the
+/// wrap's complex-script probe tests the measuring face against it, so
+/// a Latin paragraph merely MARKED rtl keeps its Latin face while an
+/// Arabic paragraph whose named face lacks the script measures with
+/// the fallback (PR #269 review).
+pub(crate) fn first_strong_char(para: &str) -> Option<char> {
+    let mut chars = para.chars().skip_while(|c| {
+        matches!(c, '\u{202A}' | '\u{202B}' | '\u{200E}' | '\u{200F}' | '\u{202C}')
+    });
+    chars.find_map(|c| {
+        use unicode_bidi::BidiClass as BC;
+        match unicode_bidi::bidi_class(c) {
+            BC::R | BC::AL | BC::L => Some(c),
+            _ => None,
+        }
+    })
 }
 
 pub(crate) fn wrap_block_text(
@@ -2290,11 +2299,29 @@ pub(crate) fn wrap_block_text(
     usable_w: f64,
     cs_face: &crate::textmetrics::ResolvedFace,
     cs_size: f64,
+    cs_fallback: &crate::textmetrics::ResolvedFace,
 ) -> Vec<WrapLine> {
     let mut lines: Vec<WrapLine> = Vec::new();
     for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
         let rtl = paragraph_base_rtl(para);
-        let (pface, psize) = if rtl { (cs_face, cs_size) } else { (face, size) };
+        // The face that PAINTS this paragraph's dominant script: the
+        // resolved CS face, unless it lacks the paragraph's first
+        // strong character — the raster then draws that script through
+        // usvg's per-cluster fallback (the vendored Vazirmatn, the
+        // first Arabic face in the raster db), and the wrap must
+        // measure with the same advances or line breaks and
+        // start-aligned edges drift (PR #269 review). Latin text
+        // merely MARKED rtl keeps its Latin face — the probe follows
+        // the paragraph's own script.
+        let use_fallback = rtl
+            && first_strong_char(para).is_some_and(|c| {
+                !cs_face.covers(c) && cs_fallback.covers(c)
+            });
+        let (pface, psize) = if rtl {
+            (if use_fallback { cs_fallback } else { cs_face }, cs_size)
+        } else {
+            (face, size)
+        };
         let width_in = |s: &str| pface.width_in(s, psize);
         let mut cur = String::new();
         let mut started = false;
@@ -2314,11 +2341,13 @@ pub(crate) fn wrap_block_text(
                     lines.push(WrapLine {
                         text: " ".to_string(),
                         rtl,
+                        cs_fallback: use_fallback,
                     });
                 } else {
                     lines.push(WrapLine {
                         text: std::mem::take(&mut cur),
                         rtl,
+                        cs_fallback: use_fallback,
                     });
                 }
                 cur = word.to_string();
@@ -2346,10 +2375,15 @@ pub(crate) fn wrap_block_text(
                 lines.push(WrapLine {
                     text: std::mem::replace(&mut cur, rest),
                     rtl,
+                    cs_fallback: use_fallback,
                 });
             }
         }
-        lines.push(WrapLine { text: cur, rtl });
+        lines.push(WrapLine {
+            text: cur,
+            rtl,
+            cs_fallback: use_fallback,
+        });
     }
     lines
 }
@@ -2435,7 +2469,11 @@ fn emit_text(
     // Vazirmatn (dc::register_complex_script_faces) covers the glyphs when the
     // document names no CS face.
     let cs_chain = tb.cs_font.as_deref().or(tb.font.as_deref());
-    let cs_face = cs_measure_face(cs_chain, tb.bold, tb.italic);
+    let cs_face = crate::textmetrics::resolve(cs_chain, tb.bold, tb.italic);
+    // The per-cluster fallback face (the vendored Vazirmatn — see the
+    // wrap's probe note); unregistered, it resolves like the Latin
+    // default and the probe never fires.
+    let cs_fallback = crate::textmetrics::resolve(Some("Vazirmatn"), tb.bold, tb.italic);
     let cs_size = tb.cs_size.unwrap_or(size);
     // Greeking (#124 item 2): a block whose on-screen em height falls
     // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
@@ -2467,7 +2505,7 @@ fn emit_text(
         (Vec::new(), bars)
     } else {
         (
-            wrap_block_text(&face, text, size, usable_w, &cs_face, cs_size),
+            wrap_block_text(&face, text, size, usable_w, &cs_face, cs_size, &cs_fallback),
             Vec::new(),
         )
     };
@@ -2552,7 +2590,8 @@ fn emit_text(
             // from the line's own shaped width. The face/size ride
             // the tspan — a block may mix direction lines and the
             // element-level attrs stay Latin.
-            let lw = cs_face.width_in(&line.text, cs_size);
+            let lw = if line.cs_fallback { &cs_fallback } else { &cs_face }
+                .width_in(&line.text, cs_size);
             let content = format!("\u{2067}{}\u{2069}", line.text);
             let vx = match halign {
                 0 | 3 => right_x - lw, // start (reading order) = visual right edge
@@ -7209,6 +7248,51 @@ mod tests {
         assert!(!paragraph_base_rtl("\u{202A}\u{0633}\u{0644}\u{0627}"), "LRE overrides arabic");
         assert!(!paragraph_base_rtl("123 (x)"), "numbers+neutrals → LTR default");
         assert!(!paragraph_base_rtl("   "), "all-neutral → LTR default");
+    }
+
+    /// PR #269 review: the wrap's complex-script probe — the first
+    /// strong character decides which script the paragraph paints in,
+    /// and the fallback face only takes over when BOTH faces are
+    /// registered and only the fallback covers the script. In this
+    /// test binary the vendored face is deliberately unregistered
+    /// (deterministic pins), so the probe must NEVER fire here.
+    #[test]
+    fn cs_probe_follows_the_paragraphs_own_script() {
+        assert_eq!(first_strong_char("hello"), Some('h'));
+        assert_eq!(first_strong_char("\u{202B}123 ()"), None, "no strong char");
+        let alef = '\u{0627}';
+        assert_eq!(first_strong_char(&format!("\u{202A}{alef}")), Some(alef));
+        let latin = crate::textmetrics::resolve(None, false, false);
+        let fallback = crate::textmetrics::resolve(Some("Vazirmatn"), false, false);
+        // Unregistered fallback covers nothing beyond the Latin chain.
+        assert!(latin.covers('h'), "carlito covers latin");
+        assert!(!latin.covers(alef), "carlito lacks arabic");
+        assert!(!fallback.covers(alef), "unregistered vazirmatn covers nothing");
+        // So a wrapped Persian paragraph keeps the primary face here —
+        // and a Latin paragraph MARKED rtl keeps its Latin face even
+        // with the face registered (the probe tests the paragraph's
+        // own first strong character, not its base direction).
+        let lines = wrap_block_text(
+            &latin,
+            "\u{202B}\u{0633}\u{0644}\u{0627}\u{0645}",
+            0.13889,
+            2.0,
+            &latin,
+            0.13889,
+            &fallback,
+        );
+        assert!(!lines[0].cs_fallback, "no fallback without a covering face");
+        let lines = wrap_block_text(
+            &latin,
+            "\u{202B}abc",
+            0.13889,
+            2.0,
+            &latin,
+            0.13889,
+            &fallback,
+        );
+        assert!(!lines[0].cs_fallback, "latin-marked-rtl keeps the latin face");
+        assert!(lines[0].rtl, "but the base is rtl");
     }
 
     /// #257 text-direction (PR #269 review): the Right-to-Left Text
