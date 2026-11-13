@@ -8,4 +8,4 @@ Icon=diagramcraft
 Terminal=false
 Categories=Graphics;VectorGraphics;Office;
 MimeType=application/vnd.ms-visio.drawing.main+xml;application/vnd.ms-visio.template.main+xml;application/vnd.ms-visio.stencil.main+xml;
-StartupWMClass=diagramcraft
+StartupWMClass=Tarahi

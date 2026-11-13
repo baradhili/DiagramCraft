@@ -36,7 +36,7 @@ jobs:
             libxkbcommon-x11-0 libxkbcommon0 libx11-6 libx11-xcb1 libxcb1 libxcb-xkb1 \
             libxcursor1 libxrandr2 libxi6 libxrender1 libxfixes3 libxext6 \
             libxau6 libxdmcp6 libbsd0 libmd0 libwayland-client0 \
-            libwayland-cursor0 libwayland-egl1 libffi8
+            libwayland-cursor0 libwayland-egl1 libffi8 libdbus-1-3
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -85,17 +85,20 @@ jobs:
           wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -O /tmp/linuxdeploy
           chmod +x /tmp/linuxdeploy
           mkdir -p AppDir/usr/lib
-          # winit/rfd/arboard dlopen the X11/Wayland client libraries —
-          # linuxdeploy bundles only NEEDED-linked deps, so the
-          # dlopen set is copied in explicitly (#261: the catalog test
-          # system has none of them and the app must start offline on
-          # a bare desktop).
+          # winit/rfd/arboard dlopen the X11/Wayland client libraries,
+          # and rfd's portal file dialogs dlopen libdbus — linuxdeploy
+          # bundles only NEEDED-linked deps, so the dlopen set (with
+          # its transitive closure) is copied in explicitly (#261: the
+          # catalog test system has none of them and the app must work
+          # offline on a bare desktop).
           for lib in \
             libX11.so.6 libX11-xcb.so.1 libxcb.so.1 libXau.so.6 libXdmcp.so.6 \
             libxkbcommon.so.0 libxkbcommon-x11.so.0 \
             libXcursor.so.1 libXrandr.so.2 libXi.so.6 libXrender.so.1 \
             libXfixes.so.3 libXext.so.6 libxcb-xkb.so.1 libbsd.so.0 \
             libmd.so.0 \
+            libdbus-1.so.3 libsystemd.so.0 liblzma.so.5 libzstd.so.1 \
+            liblz4.so.1 libcap.so.2 libgcrypt.so.20 libgpg-error.so.0 \
             libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 \
             libffi.so.8; do
             src="$(ldconfig -p | awk -v lib="$lib" '$NF ~ ("/" lib "$") {print $NF; exit}')"
