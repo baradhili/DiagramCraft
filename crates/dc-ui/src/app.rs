@@ -11278,9 +11278,13 @@ impl App {
                                     }
                                 }
                             }
-                            if rtl_grid && self.prop_add.as_deref() != Some(name.as_str()) {
-                                // the mirrored row's second cell (the
-                                // add-row variant closed its own cells)
+                            if rtl_grid {
+                                // The mirrored row's second cell —
+                                // ALWAYS, including while the add row
+                                // is open: the property keeps its
+                                // label (the add row below carries its
+                                // own empty label cell; PR #269
+                                // review).
                                 emit_label(ui, &label, &tip);
                             }
                             ui.end_row();
