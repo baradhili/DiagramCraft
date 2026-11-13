@@ -63,12 +63,147 @@ fn catalog_ids(lang: &str) -> BTreeSet<String> {
 /// The dc-ui sources the gate reasons about (the generated accessor
 /// file and the i18n runtime itself are excluded — they are the
 /// mechanism, not the strings).
-/// Advance the inside-`mod tests` brace depth by one line (0 = not
-/// inside a test module). REAL braces only — see the litscan loop.
-fn test_depth_step(depth: usize, line: &str) -> usize {
-    depth
-        .saturating_add(line.matches('{').count())
-        .saturating_sub(line.matches('}').count())
+/// End-of-line brace DEPTH for every line of `text`, counting Rust
+/// brace TOKENS only — braces inside string/char literals and comments
+/// never count (PR #269 review: a fixture like `let s = "{";` opened a
+/// phantom module level and stranded the scanner inside the module). A
+/// small state machine: line and (nested) block comments, normal and
+/// byte strings with escapes, raw strings by hash count, and char
+/// literals with a lifetime lookahead so `'a` never opens one.
+fn brace_depths(text: &str) -> Vec<usize> {
+    #[derive(PartialEq)]
+    enum Mode {
+        Code,
+        LineComment,
+        BlockComment(usize), // nesting level
+        Str,                 // "…" / b"…" — backslash escapes
+        Char,                // '…' / b'…' — backslash escapes
+        RawStr(usize),       // r#"…"# / br#"…"# — hash count
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut mode = Mode::Code;
+    let mut depth = 0usize;
+    let mut depths = Vec::new();
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        let next = chars.get(i + 1).copied();
+        match mode {
+            Mode::Code => {
+                match c {
+                    '/' if next == Some('/') => {
+                        mode = Mode::LineComment;
+                        i += 1;
+                    }
+                    '/' if next == Some('*') => {
+                        mode = Mode::BlockComment(1);
+                        i += 1;
+                    }
+                    '"' => mode = Mode::Str,
+                    'r' | 'b' => {
+                        // r".."/r#".."#, b"..", br#".."# — a string
+                        // prefix only when not the tail of an
+                        // identifier.
+                        let prev_ident = i > 0 && is_ident(chars[i - 1]) && chars[i - 1] != c;
+                        if !prev_ident {
+                            let mut j = i;
+                            if c == 'b' && chars.get(j + 1) == Some(&'r') {
+                                j += 1;
+                            }
+                            if chars.get(j + 1) == Some(&'"') {
+                                mode = Mode::RawStr(0);
+                                i = j + 1;
+                            } else if chars.get(j + 1) == Some(&'#') {
+                                let mut hashes = 0usize;
+                                let mut k = j + 1;
+                                while chars.get(k) == Some(&'#') {
+                                    hashes += 1;
+                                    k += 1;
+                                }
+                                if chars.get(k) == Some(&'"') {
+                                    mode = Mode::RawStr(hashes);
+                                    i = k;
+                                }
+                            } else if c == 'b' && chars.get(i + 1) == Some(&'"') {
+                                mode = Mode::Str;
+                                i += 1;
+                            } else if c == 'b' && chars.get(i + 1) == Some(&'\'') {
+                                mode = Mode::Char;
+                                i += 1;
+                            }
+                        }
+                    }
+                    '\'' => {
+                        // Char literal ('x', '\n', '{') vs lifetime
+                        // ('a) — a lifetime never starts a literal.
+                        let is_char = matches!(next, Some('\\'))
+                            || next.is_some_and(|n2| {
+                                chars.get(i + 2) == Some(&'\'') && n2 != '\''
+                            });
+                        if is_char {
+                            mode = Mode::Char;
+                        }
+                    }
+                    '{' => depth += 1,
+                    '}' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            Mode::LineComment => {
+                if c == '\n' {
+                    mode = Mode::Code;
+                }
+            }
+            Mode::BlockComment(n) => {
+                if c == '/' && next == Some('*') {
+                    mode = Mode::BlockComment(n + 1);
+                    i += 1;
+                } else if c == '*' && next == Some('/') {
+                    mode = if n == 1 {
+                        Mode::Code
+                    } else {
+                        Mode::BlockComment(n - 1)
+                    };
+                    i += 1;
+                }
+            }
+            Mode::Str | Mode::Char => {
+                if c == '\\' {
+                    i += 1; // escaped char (incl. \n line continues)
+                } else if (c == '"' && mode == Mode::Str)
+                    || (c == '\'' && mode == Mode::Char)
+                {
+                    mode = Mode::Code;
+                }
+            }
+            Mode::RawStr(h) => {
+                if c == '"' {
+                    let mut k = i + 1;
+                    let mut ok = true;
+                    for _ in 0..h {
+                        if chars.get(k) != Some(&'#') {
+                            ok = false;
+                            break;
+                        }
+                        k += 1;
+                    }
+                    if ok {
+                        mode = Mode::Code;
+                        i = k - 1;
+                    }
+                }
+            }
+        }
+        if c == '\n' {
+            depths.push(depth);
+        }
+        i += 1;
+    }
+    if chars.last() != Some(&'\n') {
+        depths.push(depth); // a final line without trailing newline
+    }
+    depths
 }
 
 /// A line that opens a test module — the `#[cfg(test)]` attribute or
@@ -81,40 +216,54 @@ fn opens_test_module(line: &str) -> bool {
 #[test]
 fn litscan_test_module_depth_closes_behind_the_module() {
     // PR #269 review: production code AFTER a `mod tests` block must
-    // be scanned again — the old synthetic +1 stranded the scanner at
-    // depth 1 forever.
-    let lines = [
-        "let a = \"kept\";",
-        "#[cfg(test)]",
-        "mod tests {",
-        "    let fixture = \"inside\";",
-        "    fn helper() { \"nested\" }",
-        "}",
-        "let after = \"after the module\";",
-    ];
-    let mut depth = 0usize;
+    // be scanned again — and braces inside fixture STRINGS and
+    // comments must not count (the raw brace tally stranded the
+    // scanner on inputs like `let fixture = "{";`).
+    let text = concat!(
+        "let a = \"kept\";\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    let fixture = \"{\"; // }\n",
+        "    fn helper() { /* } */ let s = r#\"}{\"#; }\n",
+        "    let ch = '{';\n",
+        "}\n",
+        "let after = \"after the module\";\n",
+    );
+    let lines: Vec<&str> = text.lines().collect();
+    let depths = brace_depths(text);
+    assert_eq!(depths.len(), lines.len(), "one depth per line");
+    // The phantom braces never lift the depth: the module opens at
+    // line 2 and closes on line 6, back to the file's base 0.
+    assert_eq!(depths[0], 0);
+    assert_eq!(depths[2], 1, "mod tests opens");
+    assert_eq!(depths[5], 1, "string/comment braces do not close it");
+    assert_eq!(depths[6], 0, "the real brace closes it");
+
+    let mut in_tests = false;
+    let mut base = 0usize;
     let mut scanned = Vec::new();
-    for line in lines {
-        if depth > 0 {
-            depth = test_depth_step(depth, line);
-            if depth > 0 {
+    for (i, line) in lines.iter().enumerate() {
+        if in_tests {
+            if depths[i] > base {
                 continue;
             }
+            in_tests = false; // this line closed the module — scan it
         }
         if opens_test_module(line) {
-            depth = test_depth_step(0, line);
+            base = if i == 0 { 0 } else { depths[i - 1] };
+            in_tests = depths[i] > base;
             continue;
         }
-        scanned.push(line);
+        scanned.push(*line);
     }
-    assert!(scanned.contains(&lines[0]), "before is scanned");
+    assert!(scanned.contains(&"let a = \"kept\";"), "before is scanned");
     assert!(
-        !scanned.iter().any(|l| l.contains("inside")),
+        !scanned.iter().any(|l| l.contains("fixture") || l.contains("helper")),
         "the module body is skipped"
     );
     assert!(
         scanned.iter().any(|l| l.contains("after the module")),
-        "production after the module is scanned again: {scanned:?}"
+        "production after the module is scanned again"
     );
 }
 
@@ -290,21 +439,23 @@ fn litscan_flags_unrouted_chrome_literals() {
         let lines: Vec<&str> = text.lines().collect();
         // #[cfg(test)] fixtures are deliberate literals (see the
         // keytips letter-assignment tests) — not unrouted chrome. The
-        // depth counts REAL module braces only (PR #269 review: the
-        // synthetic +1 for the `#[cfg(test)]` attribute line left the
-        // scanner inside tests forever after the module closed, so
-        // production literals after any `mod tests` went unscanned).
-        let mut in_tests = 0usize; // brace depth inside `mod tests`
+        // module span comes from the token-aware `brace_depths` (PR
+        // #269 review: raw brace counting both stranded the scanner
+        // after the module closed and phantom-counted braces inside
+        // fixture strings).
+        let depths = brace_depths(&text);
+        let mut in_tests = false;
+        let mut base = 0usize; // depth outside the open test module
         for (i, line) in lines.iter().enumerate() {
-            if in_tests > 0 {
-                in_tests = test_depth_step(in_tests, line);
-                if in_tests > 0 {
+            if in_tests {
+                if depths[i] > base {
                     continue;
                 }
-                // Depth hit 0 on this closing line — scan it.
+                in_tests = false; // this line closed the module — scan it
             }
             if opens_test_module(line) {
-                in_tests = test_depth_step(0, line);
+                base = if i == 0 { 0 } else { depths[i - 1] };
+                in_tests = depths[i] > base;
                 continue;
             }
             // conservative guard set mirroring the sweep: routed lines,
