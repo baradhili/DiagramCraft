@@ -107,7 +107,14 @@ fn build(s: &'static crate::l10n::L10nLanguage, tab: Tab, ctx: &TabCtx) -> Vec<G
 /// the parallel list the keytip anchor zip walks (#257). The tree is
 /// rebuilt under [`L10n::En`]'s strings and flattened in the identical
 /// group→column→button order (the builders are pure functions of the
-/// snapshot, so the two runs are structurally identical).
+/// snapshot, so the two runs are structurally identical). Under RTL
+/// the [`groups`] dispatcher feeds [`content_row`] the fully mirrored
+/// tree (groups, columns, stacks and grid rows all reversed) — a
+/// reversal at EVERY nesting level is exactly the flat reversal, so
+/// the anchor list reverses with it and the positional zip keeps
+/// pairing each badge with its OWN control's English name (PR #269
+/// review: the un-reversed list keyed every Persian button off an
+/// unrelated command).
 pub(crate) fn anchor_labels(tab: Tab, ctx: &TabCtx) -> Vec<String> {
     let en = crate::i18n::strs_for(crate::l10n::L10n::En);
     let mut out = Vec::new();
@@ -123,6 +130,9 @@ pub(crate) fn anchor_labels(tab: Tab, ctx: &TabCtx) -> Vec<String> {
                 }
             }
         }
+    }
+    if crate::i18n::rtl() {
+        out.reverse();
     }
     out
 }
