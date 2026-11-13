@@ -806,6 +806,7 @@ pub fn show(
             .or_else(|| ui.input(|i| i.pointer.interact_pos()));
         if let Some(p) = p {
             ui.ctx().memory_mut(|m| m.data.insert_temp(mem_start, p));
+            let rtl = crate::i18n::rtl();
             // A Ctrl/Cmd press starts a pan gesture (see pan_drag
             // above): it must not arm a marquee or a move-drag, or the
             // release commits a selection clobbering pan. A press on a
@@ -831,15 +832,18 @@ pub fn show(
                 ui.ctx()
                     .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
             } else if view.show_rulers
-                && (p.x < canvas_r.left() + RULER
-                    || p.x > canvas_r.right() - RULER
+                && ((rtl && p.x > canvas_r.right() - RULER)
+                    || (!rtl && p.x < canvas_r.left() + RULER)
                     || p.y < canvas_r.top() + RULER)
             {
                 // A ruler drag pulls a guide out (#113): the corner
                 // square yields a guide point, the vertical band (LEFT
                 // edge LTR, RIGHT edge under the #257 RTL mirror) a
-                // vertical guide, the top band a horizontal one.
-                let rtl = crate::i18n::rtl();
+                // vertical guide, the top band a horizontal one. Only
+                // the ACTIVE band is a ruler (PR #269 review): the
+                // opposite edge is drawable canvas, and accepting both
+                // armed guide drags on presses that should select or
+                // move shapes in that strip.
                 let in_vband = if rtl {
                     p.x > canvas_r.right() - RULER
                 } else {
