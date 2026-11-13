@@ -238,9 +238,14 @@ pub fn show_overlay(
         };
         // Only the BARE and Shift arrows take the visual path —
         // Ctrl/Alt/Cmd arrows keep egui's own cursor handling
-        // (word-wise and row-end navigation, PR #269 review).
+        // (word-wise and row-end navigation), and a frame that also
+        // carries TEXT input defers entirely to egui so the typed
+        // character lands before any cursor move (event order must
+        // decide, not this block's position — PR #269 review).
         let plain = !(mods.ctrl || mods.alt || mods.command || mods.mac_cmd);
-        if plain && ui.input_mut(|i| i.consume_key(mods, key)) {
+        let has_text_events =
+            ui.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(_))));
+        if plain && !has_text_events && ui.input_mut(|i| i.consume_key(mods, key)) {
             let galley = ui.fonts_mut(|f| f.layout_job(build_job(session.draft.as_str())));
             if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
                 if let Some(range) = state.cursor.char_range() {
@@ -249,16 +254,20 @@ pub fn show_overlay(
                     } else if range.primary != range.secondary {
                         // An unmodified arrow first COLLAPSES the
                         // selection to the boundary in the pressed
-                        // direction — measured visually, so a bidi
-                        // selection collapses on the side the arrow
-                        // names; movement resumes on the next press.
+                        // direction. The comparison is visual and
+                        // ROW-FIRST: on a multiline (or bidi)
+                        // selection the endpoints' x order says
+                        // nothing about which end the arrow names —
+                        // only within one row does x decide (PR #269
+                        // review). Movement resumes on the next press.
                         let pp = galley.pos_from_cursor(range.primary);
                         let ps = galley.pos_from_cursor(range.secondary);
-                        let take_primary = if right {
-                            pp.min.x >= ps.min.x
-                        } else {
-                            pp.min.x <= ps.min.x
-                        };
+                        // (row, x) lexicographic: primary is the
+                        // visually-later endpoint when this is true.
+                        let primary_later =
+                            (pp.min.y, pp.min.x).ge(&(ps.min.y, ps.min.x))
+                                && (pp.min.y, pp.min.x) != (ps.min.y, ps.min.x);
+                        let take_primary = if right { primary_later } else { !primary_later };
                         (
                             if take_primary {
                                 range.primary
@@ -292,12 +301,11 @@ pub fn show_overlay(
     // band of the wrapped height); egui's first row puts its baseline
     // `ascent` below the editor's text-area top. Solving for that top
     // makes the caret sit ON the rendered line — entering the editor
-    // moves nothing.
-    // The overlay editor lays every row out at ONE size, so its
-                // baseline uses the Latin ascent; the renderer's
-                // per-line complex-script slots are its own.
-                let baseline_off_in =
-                    dc::svg::text_first_baseline(&tb, n_lines * tb.line_height, tb.font_size);
+    // moves nothing. The overlay editor lays every row out at ONE
+    // size, so its baseline uses the Latin ascent; the renderer's
+    // per-line complex-script slots are its own.
+    let baseline_off_in =
+        dc::svg::text_first_baseline(&tb, n_lines * tb.line_height, tb.font_size);
     let baseline_page_y_up = (by + bh) - baseline_off_in;
     let baseline_screen = canvas::page_to_screen(bx, baseline_page_y_up, view, geom).y;
     let editor_top = baseline_screen - (ascent_em * font_pts as f64) as f32;
@@ -494,10 +502,14 @@ fn adjacent_visual_caret(
         };
         let band = galley.rows[rix].rect();
         let mut stops: Vec<(f32, CCursor)> = Vec::new();
+        // Every char boundary of the span, BOTH affinities: at a soft
+        // wrap the shared boundary maps to the END of this row with
+        // prefer_next_row=false and the START of the next with true —
+        // the y-band check keeps each facing its own row, so this
+        // row's end stop survives (PR #269 review: excluding the
+        // boundary outright left the caret unable to sit at a wrapped
+        // row's end, and Left skipped a character).
         for i in start..=end {
-            if i == end && rix + 1 != galley.rows.len() {
-                break; // the shared boundary opens the NEXT row
-            }
             for pn in [false, true] {
                 let c = CCursor {
                     index: egui::text::CharIndex(i),
@@ -618,6 +630,16 @@ mod tests {
         ctx.fonts_mut(|f| f.layout_job(job))
     }
 
+    fn wrapped_galley_of(ctx: &egui::Context, text: &str, wrap: f32) -> std::sync::Arc<egui::Galley> {
+        let job = egui::text::LayoutJob::simple(
+            text.into(),
+            egui::FontId::monospace(14.0),
+            egui::Color32::WHITE,
+            wrap,
+        );
+        ctx.fonts_mut(|f| f.layout_job(job))
+    }
+
     /// #257 text-direction / PR #269 review: the visual stepping moves
     /// one glyph per press through plain Latin text, crosses explicit
     /// line breaks to the far end of the next row, and round-trips an
@@ -667,6 +689,20 @@ mod tests {
             start,
             "left returns to the start"
         );
+
+        // Soft wrap (PR #269 review): the shared boundary at a wrap
+        // keeps its END affinity on the earlier row — Left from
+        // "ab|cd" (wrapped after "ab") steps to "a|bcd", not past
+        // both characters.
+        let g = wrapped_galley_of(&ctx, "abcd", 20.0);
+        assert!(
+            g.rows.len() == 2,
+            "the narrow width wraps after ab: {} rows",
+            g.rows.len()
+        );
+        let at_wrap = CCursor::new(2);
+        let stepped = adjacent_visual_caret(&g, at_wrap, false);
+        assert_eq!(stepped.index.0, 1, "left crosses one stop at the wrap");
 
         let mut out = ctx.end_pass();
         // Headless: the pass's texture delta is intentionally dropped
