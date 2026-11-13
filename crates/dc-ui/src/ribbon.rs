@@ -1632,11 +1632,21 @@ impl RibbonButton {
             );
         }
         self.icon.paint(ui, icon_r, self.enabled);
-        let gal = ui.painter().layout_no_wrap(
-            self.label.clone(),
-            egui::FontId::proportional(11.5),
-            self.label_color(ui),
-        );
+        // Localized captions can outgrow the fixed 58 px big-button
+        // cell (German "Schnellformatvorlagen"): shrink-to-fit instead
+        // of painting across the neighbors. Captions that fit at the
+        // Visio 11.5 pt keep exactly the old galley (byte-identical
+        // goldens); only oversized ones step down, floored at 8 pt.
+        let mut font = egui::FontId::proportional(11.5);
+        let mut gal =
+            ui.painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), self.label_color(ui));
+        while gal.size().x > 54.0 && font.size > 8.0 {
+            font.size = (font.size - 0.5).max(8.0);
+            gal = ui
+                .painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), self.label_color(ui));
+        }
         ui.painter().galley(
             Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 15.0),
             gal,
