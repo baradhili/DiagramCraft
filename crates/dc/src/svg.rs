@@ -2259,6 +2259,21 @@ pub fn paragraph_base_rtl(para: &str) -> bool {
 /// complex-script cells (`cs_face`/`cs_size`, the Latin pair when
 /// absent), so the wrap decision and the raster agree by construction
 /// per paragraph, not just per block.
+/// Resolve the face that will PAINT a complex-script (RTL) paragraph
+/// (PR #269 review): the sheet's own CS/Latin chain when it names one;
+/// otherwise the vendored Vazirmatn — the face usvg's per-cluster
+/// fallback selects for Arabic script on the raster side — so wrap
+/// measurement and the rasterized glyphs agree. With the face not
+/// registered (bare dc tests, no `register_complex_script_faces` call)
+/// the chain falls through to the Carlito default, the old behavior.
+pub(crate) fn cs_measure_face(
+    cs_chain: Option<&str>,
+    bold: bool,
+    italic: bool,
+) -> crate::textmetrics::ResolvedFace {
+    crate::textmetrics::resolve(cs_chain.or(Some("Vazirmatn")), bold, italic)
+}
+
 pub(crate) fn wrap_block_text(
     face: &crate::textmetrics::ResolvedFace,
     text: &str,
@@ -2411,7 +2426,7 @@ fn emit_text(
     // Vazirmatn (dc::register_complex_script_faces) covers the glyphs when the
     // document names no CS face.
     let cs_chain = tb.cs_font.as_deref().or(tb.font.as_deref());
-    let cs_face = crate::textmetrics::resolve(cs_chain, tb.bold, tb.italic);
+    let cs_face = cs_measure_face(cs_chain, tb.bold, tb.italic);
     let cs_size = tb.cs_size.unwrap_or(size);
     // Greeking (#124 item 2): a block whose on-screen em height falls
     // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
