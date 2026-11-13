@@ -617,12 +617,22 @@ pub enum SectionView {
     /// A row grid: gray row-label column, header row of cell names.
     Rows {
         title: String,
+        /// The MODEL section's render rank ([`section_rank`] of the
+        /// name the section was built from) — the section keeps its
+        /// order under any display language, since `title` is the
+        /// translated heading (PR #269 review).
+        rank: i32,
         headers: Vec<String>,
         /// (row label, label is a red row name, cells)
         rows: Vec<(String, bool, Vec<MergedCell>)>,
     },
     /// Layer Membership's single bare value line (no header row).
-    Bare { title: String, text: String },
+    Bare {
+        title: String,
+        /// [`section_rank`] of the model section — see [`Rows::rank`].
+        rank: i32,
+        text: String,
+    },
 }
 
 /// One row of a merged section, resolved against deeper levels. A
@@ -888,7 +898,8 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
         let lm = resolved("LayerMember");
         if lm.text != crate::i18n::strs().msg_no_formula() {
             views.push(SectionView::Bare {
-                title: "Layer Membership".into(),
+                title: crate::i18n::strs().msg_ss_section_layer_membership(),
+                rank: section_rank("LayerMembership"),
                 text: lm.text,
             });
         }
@@ -967,22 +978,15 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
 
     views.sort_by_key(|v| match v {
         SectionView::Transform { .. } => 0,
+        // The pairs sections' titles are stable model vocabulary
+        // (never translated), so their rank keys off the title.
         SectionView::Pairs { title, .. } => pairs_rank(title),
-        SectionView::Rows { title, .. } | SectionView::Bare { title, .. } => match title.as_str() {
-            "User-defined Cells" => section_rank("User"),
-            "Connection Points" => section_rank("Connection"),
-            "1-D Endpoints" => section_rank("XForm1D"),
-            "Text Transform" => section_rank("TextXForm"),
-            "Layer Membership" => section_rank("LayerMembership"),
-            "Line Gradient Stops" => section_rank("LineGradient"),
-            "Fill Gradient Stops" => section_rank("FillGradient"),
-            "Shape Data" => section_rank("Prop"),
-            "Smart Tags" => section_rank("SmartTags"),
-            "Text Fields" => section_rank("Fields"),
-            "Control Points" => section_rank("Control"),
-            t if t.starts_with("Geometry ") => section_rank("Geometry"),
-            other => section_rank(other),
-        },
+        // Real sections keep the rank captured from their MODEL name
+        // at construction — the translated heading must never drive
+        // the order (PR #269 review: under fa/de every translated
+        // heading fell to the unknown bucket and the pairs sections
+        // jumped ahead of them).
+        SectionView::Rows { rank, .. } | SectionView::Bare { rank, .. } => *rank,
     });
 
     views
@@ -1037,6 +1041,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
         }
         return Some(SectionView::Rows {
             title: section_display_name(name, ix),
+            rank: section_rank(name),
             headers,
             rows,
         });
@@ -1054,6 +1059,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
             let ncols = headers.len();
             return Some(SectionView::Rows {
                 title: section_display_name(name, ix),
+                rank: section_rank(name),
                 headers,
                 rows: vec![(
                     "0".into(),
@@ -1082,6 +1088,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
             .unwrap_or_default();
         return Some(SectionView::Bare {
             title: crate::i18n::strs().msg_ss_section_layer_membership(),
+            rank: section_rank(name),
             text,
         });
     }
@@ -1131,6 +1138,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
     }
     Some(SectionView::Rows {
         title: section_display_name(name, ix),
+        rank: section_rank(name),
         headers,
         rows,
     })
@@ -1310,6 +1318,7 @@ pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f3
                         title,
                         headers,
                         rows,
+                        ..
                     } => {
                         section_bar(ui, title);
                         const LABEL_W: f32 = 110.0;
@@ -1364,7 +1373,7 @@ pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f3
                                 }
                             });
                     }
-                    SectionView::Bare { title, text } => {
+                    SectionView::Bare { title, text, .. } => {
                         section_bar(ui, title);
                         ui.add_space(2.0);
                         let t = RichText::new(text);
