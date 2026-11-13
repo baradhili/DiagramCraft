@@ -63,6 +63,61 @@ fn catalog_ids(lang: &str) -> BTreeSet<String> {
 /// The dc-ui sources the gate reasons about (the generated accessor
 /// file and the i18n runtime itself are excluded — they are the
 /// mechanism, not the strings).
+/// Advance the inside-`mod tests` brace depth by one line (0 = not
+/// inside a test module). REAL braces only — see the litscan loop.
+fn test_depth_step(depth: usize, line: &str) -> usize {
+    depth
+        .saturating_add(line.matches('{').count())
+        .saturating_sub(line.matches('}').count())
+}
+
+/// A line that opens a test module — the `#[cfg(test)]` attribute or
+/// the `mod tests` item itself.
+fn opens_test_module(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("#[cfg(test)]") || t.starts_with("mod tests")
+}
+
+#[test]
+fn litscan_test_module_depth_closes_behind_the_module() {
+    // PR #269 review: production code AFTER a `mod tests` block must
+    // be scanned again — the old synthetic +1 stranded the scanner at
+    // depth 1 forever.
+    let lines = [
+        "let a = \"kept\";",
+        "#[cfg(test)]",
+        "mod tests {",
+        "    let fixture = \"inside\";",
+        "    fn helper() { \"nested\" }",
+        "}",
+        "let after = \"after the module\";",
+    ];
+    let mut depth = 0usize;
+    let mut scanned = Vec::new();
+    for line in lines {
+        if depth > 0 {
+            depth = test_depth_step(depth, line);
+            if depth > 0 {
+                continue;
+            }
+        }
+        if opens_test_module(line) {
+            depth = test_depth_step(0, line);
+            continue;
+        }
+        scanned.push(line);
+    }
+    assert!(scanned.contains(&lines[0]), "before is scanned");
+    assert!(
+        !scanned.iter().any(|l| l.contains("inside")),
+        "the module body is skipped"
+    );
+    assert!(
+        scanned.iter().any(|l| l.contains("after the module")),
+        "production after the module is scanned again: {scanned:?}"
+    );
+}
+
 fn src_files() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut out = Vec::new();
@@ -234,20 +289,22 @@ fn litscan_flags_unrouted_chrome_literals() {
         let text = std::fs::read_to_string(&f).expect("src readable");
         let lines: Vec<&str> = text.lines().collect();
         // #[cfg(test)] fixtures are deliberate literals (see the
-        // keytips letter-assignment tests) — not unrouted chrome.
+        // keytips letter-assignment tests) — not unrouted chrome. The
+        // depth counts REAL module braces only (PR #269 review: the
+        // synthetic +1 for the `#[cfg(test)]` attribute line left the
+        // scanner inside tests forever after the module closed, so
+        // production literals after any `mod tests` went unscanned).
         let mut in_tests = 0usize; // brace depth inside `mod tests`
         for (i, line) in lines.iter().enumerate() {
             if in_tests > 0 {
-                in_tests += line.matches('{').count();
-                in_tests -= line.matches('}').count();
+                in_tests = test_depth_step(in_tests, line);
                 if in_tests > 0 {
                     continue;
                 }
+                // Depth hit 0 on this closing line — scan it.
             }
-            if line.trim_start().starts_with("#[cfg(test)]")
-                || line.trim_start().starts_with("mod tests")
-            {
-                in_tests = 1 + line.matches('{').count() - line.matches('}').count();
+            if opens_test_module(line) {
+                in_tests = test_depth_step(0, line);
                 continue;
             }
             // conservative guard set mirroring the sweep: routed lines,
