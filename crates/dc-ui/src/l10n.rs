@@ -6305,7 +6305,7 @@ impl L10n {
         match self {
             Self::De => 0..44555,
             Self::En => 44555..87782,
-            Self::Fa => 87782..144485,
+            Self::Fa => 87782..144471,
         }
     }
     /// Load a L10nLanguage from the embedded data.

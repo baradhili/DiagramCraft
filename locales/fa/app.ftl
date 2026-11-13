@@ -429,7 +429,7 @@ lasso-select-drag-a-freehand-tra = گزینش با لاسو: دور شکل‌ه�
 lasso-select-off = گزینش لاسو خاموش است
 lasso-selected-n-shape-s =
     { $n ->
-        [one] لاسو: یک شکل انتخاب شد
+        [1] لاسو: یک شکل انتخاب شد
        *[other] لاسو: { $n } شکل انتخاب شد
     }
 last-page = صفحهٔ آخر
@@ -716,7 +716,7 @@ select-two-or-more-shapes-to-ali = برای تراز، دو شکل یا بیشت
 # $label - نام مقدار
 # $n - تعداد شکل‌های منطبق
 select-value-n-shapes = { $label } ({ $n ->
-    [one] یک شکل
+    [1] یک شکل
    *[other] { $n } شکل
 })
 selected-all-shapes = همهٔ شکل‌ها انتخاب شدند
@@ -724,7 +724,7 @@ selected-all-shapes = همهٔ شکل‌ها انتخاب شدند
 # $crit - برچسب ملاک
 selected-n-by-criterion =
     { $n ->
-        [one] یک شکل بر پایهٔ { $crit } انتخاب شد
+        [1] یک شکل بر پایهٔ { $crit } انتخاب شد
        *[other] { $n } شکل بر پایهٔ { $crit } انتخاب شد
     }
 selected-shape-shape-id = شکل { $shape_id } انتخاب شد
@@ -913,7 +913,7 @@ undo-add-connector = افزودن کانکتور { $id }
 # $c - نام کانتینر
 undo-add-n-to-container =
     { $n ->
-        [one] افزودن یک شکل به کانتینر { $c }
+        [1] افزودن یک شکل به کانتینر { $c }
        *[other] افزودن { $n } شکل به کانتینر { $c }
     }
 # $what - واژهٔ لبهٔ هم‌ترازشده
@@ -926,7 +926,7 @@ undo-ctrl-z = واگرد (Ctrl+Z)
 # $n - تعداد شکل‌ها
 undo-delete-n-shapes =
     { $n ->
-        [one] حذف یک شکل
+        [1] حذف یک شکل
        *[other] حذف { $n } شکل
     }
 # $id - شناسهٔ شکل
@@ -934,7 +934,7 @@ undo-delete-shape = حذف شکل { $id }
 # $n - تعداد اعضای آزادشده
 undo-disband-container =
     { $n ->
-        [one] منحل کردن کانتینر (یک عضو آزاد شد)
+        [1] منحل کردن کانتینر (یک عضو آزاد شد)
        *[other] منحل کردن کانتینر ({ $n } عضو آزاد شد)
     }
 # $sid - شناسهٔ شکل کانکتور
@@ -963,7 +963,7 @@ undo-set-section-cell = تنظیم { $section }.{ $cell }
 # $n - تعداد گروه‌ها
 undo-ungroup-n =
     { $n ->
-        [one] حل یک گروه
+        [1] حل یک گروه
        *[other] حل { $n } گروه
     }
 ungroup = واگروه‌سازی
