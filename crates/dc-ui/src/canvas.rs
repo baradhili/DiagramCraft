@@ -32,6 +32,11 @@ pub struct View {
     pub fit_mode: bool,
     /// Content size the last fit was computed against.
     pub last_content: Vec2,
+    /// Content ORIGIN the last fit was computed against — the LTR/RTL
+    /// chrome moves the ruler band between the canvas's edges without
+    /// changing the content SIZE, and a fit-mode view must re-center
+    /// or the page hides behind the new ruler (PR #269 review).
+    pub last_origin: Vec2,
 }
 
 impl Default for View {
@@ -45,6 +50,7 @@ impl Default for View {
             fit_pending: true,
             fit_mode: false,
             last_content: Vec2::ZERO,
+            last_origin: Vec2::ZERO,
         }
     }
 }
@@ -73,12 +79,17 @@ impl View {
             + Vec2::new((content.x - pw) / 2.0, (content.y - ph) / 2.0).max(Vec2::new(12.0, 12.0));
         self.fit_mode = true;
         self.last_content = content;
+        self.last_origin = origin;
     }
 
-    /// Whether a newly laid-out content size should trigger a re-fit:
-    /// only in fit mode, and only beyond sub-pixel layout jitter.
-    pub fn wants_refit(&self, content: Vec2) -> bool {
-        self.fit_mode && (self.last_content - content).length() > 0.5
+    /// Whether a newly laid-out content area should trigger a re-fit:
+    /// only in fit mode, and only beyond sub-pixel layout jitter — a
+    /// change in either the content SIZE or its ORIGIN (the RTL ruler
+    /// band moves between canvas edges at the same size) re-centers.
+    pub fn wants_refit(&self, origin: Vec2, content: Vec2) -> bool {
+        self.fit_mode
+            && ((self.last_content - content).length() > 0.5
+                || (self.last_origin - origin).length() > 0.5)
     }
 
     /// Zoom into a page rect and center it in the content area
@@ -716,7 +727,7 @@ pub fn show(
     // Fit on first layout, and — while in fit mode — again whenever the
     // content area itself changes size (window resize, side panes
     // toggling), so the page stays centered and fully visible.
-    if view.fit_pending || view.wants_refit(content) {
+    if view.fit_pending || view.wants_refit(content_origin.to_vec2(), content) {
         view.apply_fit(content, content_origin.to_vec2(), page);
         view.fit_pending = false;
         out.zoom_changed = true;
@@ -2275,33 +2286,40 @@ mod tests {
         let z0 = view.zoom;
         // A resize re-fits (taller content → larger fit zoom).
         assert!(
-            view.wants_refit(Vec2::new(800.0, 900.0)),
+            view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)),
             "resize triggers refit"
         );
         view.apply_fit(Vec2::new(800.0, 900.0), Vec2::ZERO, &page);
         assert!(view.zoom > z0, "zoom grew: {z0} → {}", view.zoom);
         // Same size — and sub-pixel jitter — must not re-fit every frame.
-        assert!(!view.wants_refit(Vec2::new(800.0, 900.0)));
+        assert!(!view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)));
         assert!(
-            !view.wants_refit(Vec2::new(800.2, 900.3)),
+            !view.wants_refit(Vec2::ZERO, Vec2::new(800.2, 900.3)),
             "jitter is ignored"
         );
+        // An ORIGIN move alone (the RTL chrome moving the ruler band
+        // across equally-sized content) re-fits too.
+        assert!(
+            view.wants_refit(Vec2::new(22.0, 22.0), Vec2::new(800.0, 900.0)),
+            "origin move triggers refit"
+        );
+        view.apply_fit(Vec2::new(800.0, 900.0), Vec2::new(22.0, 22.0), &page);
         // Manual zoom/pan clears fit mode: resizes stop re-fitting.
         view.fit_mode = false;
         assert!(
-            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            !view.wants_refit(Vec2::ZERO, Vec2::new(300.0, 200.0)),
             "manual view survives a resize"
         );
         // Fit Page re-arms: the pending fit re-enters fit mode.
         view.fit_pending = true;
         assert!(
-            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            !view.wants_refit(Vec2::new(22.0, 22.0), Vec2::new(300.0, 200.0)),
             "pending alone doesn't refit"
         );
         view.apply_fit(Vec2::new(300.0, 200.0), Vec2::ZERO, &page);
         assert!(view.fit_mode, "apply_fit re-enters fit mode");
         assert!(
-            view.wants_refit(Vec2::new(800.0, 900.0)),
+            view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)),
             "and follows again"
         );
     }
