@@ -132,6 +132,12 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // Before ANY subcommand can measure or rasterize text: the
+    // complex-script fallback face must sit in the lazily-built font
+    // databases (#257 text-direction; PR #269 review — a CLI export of
+    // RTL text used to raster without it because only dc-ui
+    // registered it).
+    dc::register_complex_script_faces();
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Info { file } => info(&file),

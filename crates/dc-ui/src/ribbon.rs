@@ -56,17 +56,85 @@ pub(crate) struct TabCtx {
 /// contextual Container Tools tab (File opens the backstage view
 /// instead of ribbon content).
 pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
+    let mut groups = build(crate::i18n::strs(), tab, ctx);
+    // #257 item 3: an RTL chrome reads right-to-left — group order,
+    // column order within a group, and button order within a column
+    // (and each grid's rows) flip so the eye travels the ribbon the
+    // way the text reads.
+    if crate::i18n::rtl() {
+        groups.reverse();
+        for g in &mut groups {
+            g.cols.reverse();
+            for col in &mut g.cols {
+                match col {
+                    Col::Big(_) => {}
+                    Col::Stack(v) => v.reverse(),
+                    Col::Grid(rows) => {
+                        rows.reverse();
+                        for row in rows {
+                            row.reverse();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    groups
+}
+
+
+/// The tab layouts under one language's strings (#257): the `groups`
+/// dispatcher reads the current language through it; `anchor_labels`
+/// rebuilds the same tree under ENGLISH so a non-Latin chrome keys its
+/// keytip letters off the English command names (the RTL Office
+/// scheme) instead of collapsing to the digit fallback.
+fn build(s: &'static crate::l10n::L10nLanguage, tab: Tab, ctx: &TabCtx) -> Vec<Group> {
     match tab {
         Tab::File => Vec::new(),
-        Tab::Home => home::groups(ctx),
-        Tab::Insert => insert::groups(ctx),
-        Tab::Design => design::groups(ctx),
-        Tab::Data => data::groups(ctx),
-        Tab::Review => review::groups(ctx),
-        Tab::View => view::groups(ctx),
-        Tab::Developer => developer::groups(ctx),
-        Tab::ContainerTools => container_tools::groups(ctx),
+        Tab::Home => home::groups(s, ctx),
+        Tab::Insert => insert::groups(s, ctx),
+        Tab::Design => design::groups(s, ctx),
+        Tab::Data => data::groups(s, ctx),
+        Tab::Review => review::groups(s, ctx),
+        Tab::View => view::groups(s, ctx),
+        Tab::Developer => developer::groups(s, ctx),
+        Tab::ContainerTools => container_tools::groups(s, ctx),
     }
+}
+
+/// The English a11y labels of a tab's content-row buttons, in the SAME
+/// traversal order [`content_row`] lays the localized buttons out —
+/// the parallel list the keytip anchor zip walks (#257). The tree is
+/// rebuilt under [`L10n::En`]'s strings and flattened in the identical
+/// group→column→button order (the builders are pure functions of the
+/// snapshot, so the two runs are structurally identical). Under RTL
+/// the [`groups`] dispatcher feeds [`content_row`] the fully mirrored
+/// tree (groups, columns, stacks and grid rows all reversed) — a
+/// reversal at EVERY nesting level is exactly the flat reversal, so
+/// the anchor list reverses with it and the positional zip keeps
+/// pairing each badge with its OWN control's English name (PR #269
+/// review: the un-reversed list keyed every Persian button off an
+/// unrelated command).
+pub(crate) fn anchor_labels(tab: Tab, ctx: &TabCtx) -> Vec<String> {
+    let en = crate::i18n::strs_for(crate::l10n::L10n::En);
+    let mut out = Vec::new();
+    for g in build(en, tab, ctx) {
+        for col in g.cols {
+            match col {
+                Col::Big(b) => out.push(b.a11y_label().to_string()),
+                Col::Stack(v) => out.extend(v.iter().map(|b| b.a11y_label().to_string())),
+                Col::Grid(rows) => {
+                    for row in rows {
+                        out.extend(row.iter().map(|b| b.a11y_label().to_string()));
+                    }
+                }
+            }
+        }
+    }
+    if crate::i18n::rtl() {
+        out.reverse();
+    }
+    out
 }
 
 /// Everything the ribbon can ask the app to do.
@@ -142,6 +210,8 @@ pub enum Action {
     FontShrink,
     RotateLeft,
     RotateRight,
+    /// #246: open the Language dialog (View ▸ Window).
+    Language,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -269,6 +339,8 @@ pub enum Icon {
     Eye,
     /// #252 Container Tools wave.
     Lock,
+    /// #246 i18n: the Language command.
+    Translate,
 }
 
 impl Icon {
@@ -277,6 +349,7 @@ impl Icon {
         let a = match self {
             Icon::Save => "save",
             Icon::Undo => "undo",
+            Icon::Translate => "translate",
             Icon::Redo => "redo",
             Icon::Open => "open",
             Icon::New => "new",
@@ -675,6 +748,18 @@ impl Icon {
                     c + Vec2::new(8.5, -1.5),
                     1.4,
                     lit(Color32::from_rgb(0xe0, 0x4a, 0x2f)),
+                );
+            }
+            Icon::Translate => {
+                // #246 fallback glyph (the MDI texture is primary):
+                // two overlapping letter tiles.
+                let a = Rect::from_center_size(c + Vec2::new(-2.5, -2.5), Vec2::splat(9.0));
+                let b = Rect::from_center_size(c + Vec2::new(3.0, 3.5), Vec2::splat(8.0));
+                p.rect_filled(a, 1.5, blue);
+                p.rect_filled(b, 1.5, lit(Color32::from_rgb(0xe0, 0x7b, 0x1f)));
+                p.line_segment(
+                    [a.center() + Vec2::new(-2.0, 1.5), a.center() + Vec2::new(0.0, -2.5)],
+                    Stroke::new(1.2, Color32::WHITE),
                 );
             }
             Icon::Pen => {
@@ -1421,11 +1506,12 @@ impl Icon {
 }
 
 /// A ribbon button: icon + caption, hero- or compact-style.
-#[derive(Clone, Copy)]
+/// `Clone` only since #246: the label/tip translate per language.
+#[derive(Clone)]
 pub struct RibbonButton {
     pub icon: Icon,
-    pub label: &'static str,
-    pub tip: &'static str,
+    pub label: String,
+    pub tip: String,
     pub enabled: bool,
     pub selected: bool,
     pub action: Action,
@@ -1438,15 +1524,16 @@ pub struct RibbonButton {
     /// Accessible name when the painted label is empty (#252): the
     /// compact icon-only tier keeps screen-reader and kittest label
     /// lookups working (e.g. the align buttons paint icons only).
-    pub alt: Option<&'static str>,
+    pub alt: Option<String>,
 }
 
 impl RibbonButton {
-    pub fn new(icon: Icon, label: &'static str, action: Action) -> Self {
+    pub fn new(icon: Icon, label: impl Into<String>, action: Action) -> Self {
+        let label = label.into();
         RibbonButton {
+            tip: label.clone(),
             icon,
             label,
-            tip: label,
             enabled: true,
             selected: false,
             action,
@@ -1456,8 +1543,8 @@ impl RibbonButton {
             alt: None,
         }
     }
-    pub fn tip(mut self, tip: &'static str) -> Self {
-        self.tip = tip;
+    pub fn tip(mut self, tip: impl Into<String>) -> Self {
+        self.tip = tip.into();
         self
     }
     pub fn enabled(mut self, on: bool) -> Self {
@@ -1477,16 +1564,16 @@ impl RibbonButton {
         self
     }
     /// Set the accessible name (#252 compact tier).
-    pub fn alt(mut self, a: &'static str) -> Self {
-        self.alt = Some(a);
+    pub fn alt(mut self, a: impl Into<String>) -> Self {
+        self.alt = Some(a.into());
         self
     }
 
     /// The name assistive tech / kittest sees (the #184 keytip
     /// letters also key off this — the compact icon-only tier keeps
     /// its name in `alt`).
-    pub(crate) fn a11y_label(&self) -> &'static str {
-        self.alt.unwrap_or(self.label)
+    pub(crate) fn a11y_label(&self) -> &str {
+        self.alt.as_deref().unwrap_or(&self.label)
     }
 
     pub fn width(mut self, w: f32) -> Self {
@@ -1494,7 +1581,7 @@ impl RibbonButton {
         self
     }
 
-    fn paint_frame(self, ui: &Ui, r: Rect, resp: &egui::Response) {
+    fn paint_frame(&self, ui: &Ui, r: Rect, resp: &egui::Response) {
         // Office 2016 states are flat neutral chips with a hairline
         // border (observed in Visio 2016 shots — no colored fills).
         if !self.enabled {
@@ -1514,7 +1601,7 @@ impl RibbonButton {
     }
 
     /// Button label color for the active visual mode (GitHub #52).
-    fn label_color(self, ui: &Ui) -> Color32 {
+    fn label_color(&self, ui: &Ui) -> Color32 {
         let t = theme::shell_tokens(ui.visuals());
         if self.enabled {
             t.label
@@ -1525,16 +1612,16 @@ impl RibbonButton {
 
     /// Visio "hero" button: large icon above the label. `on_rect`
     /// observes the laid-out rect (the #184 keytip badge collector).
-    pub fn show_big(self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
+    pub fn show_big(&self, ui: &mut Ui, on_rect: &mut dyn FnMut(&RibbonButton, Rect)) -> ButtonClick {
         let size = Vec2::new(58.0, 72.0);
         let (r, resp) = ui.allocate_exact_size(size, Sense::click());
-        on_rect(&self, r);
+        on_rect(self, r);
         // The caption is a painted galley — attach its text for
         // screen readers and keyboard focus (GitHub #56).
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
-        let resp = resp.on_hover_text(self.tip);
+        let resp = resp.on_hover_text(&self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r =
             Rect::from_center_size(Pos2::new(r.center().x, r.top() + 21.0), Vec2::splat(32.0));
@@ -1545,11 +1632,21 @@ impl RibbonButton {
             );
         }
         self.icon.paint(ui, icon_r, self.enabled);
-        let gal = ui.painter().layout_no_wrap(
-            self.label.to_string(),
-            egui::FontId::proportional(11.5),
-            self.label_color(ui),
-        );
+        // Localized captions can outgrow the fixed 58 px big-button
+        // cell (German "Schnellformatvorlagen"): shrink-to-fit instead
+        // of painting across the neighbors. Captions that fit at the
+        // Visio 11.5 pt keep exactly the old galley (byte-identical
+        // goldens); only oversized ones step down, floored at 8 pt.
+        let mut font = egui::FontId::proportional(11.5);
+        let mut gal =
+            ui.painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), self.label_color(ui));
+        while gal.size().x > 54.0 && font.size > 8.0 {
+            font.size = (font.size - 0.5).max(8.0);
+            gal = ui
+                .painter()
+                .layout_no_wrap(self.label.clone(), font.clone(), self.label_color(ui));
+        }
         ui.painter().galley(
             Pos2::new(r.center().x - gal.size().x / 2.0, r.bottom() - 15.0),
             gal,
@@ -1562,13 +1659,13 @@ impl RibbonButton {
     /// narrow column, Visio small-button style). `on_rect` observes
     /// the laid-out rect (the #184 keytip badge collector).
     pub fn show_small(
-        self,
+        &self,
         ui: &mut Ui,
         on_rect: &mut dyn FnMut(&RibbonButton, Rect),
     ) -> ButtonClick {
         let h = 22.0;
         let gal = ui.painter().layout_no_wrap(
-            self.label.to_string(),
+            self.label.clone(),
             egui::FontId::proportional(11.5),
             self.label_color(ui),
         );
@@ -1576,13 +1673,13 @@ impl RibbonButton {
             .width
             .unwrap_or_else(|| 16.0 + 4.0 + gal.size().x + 8.0);
         let (r, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-        on_rect(&self, r);
+        on_rect(self, r);
         // Painted galley caption — name the control (GitHub #56); the
         // compact icon-only tier carries its name in `alt` (#252).
         resp.widget_info(|| {
             egui::WidgetInfo::labeled(egui::Role::Button, self.enabled, self.a11y_label())
         });
-        let resp = resp.on_hover_text(self.tip);
+        let resp = resp.on_hover_text(&self.tip);
         self.paint_frame(ui, r, &resp);
         let icon_r = Rect::from_min_size(r.left_top() + Vec2::new(1.0, 2.0), Vec2::splat(18.0));
         self.icon.paint(ui, icon_r, self.enabled);
@@ -1620,7 +1717,7 @@ impl RibbonButton {
                     ui.weak(entry);
                 }
                 ui.separator();
-                ui.weak("Text formatting arrives with a later milestone");
+                ui.weak(crate::i18n::strs().msg_text_formatting_arrives_with_a_l());
             });
         }
         click_kind(&resp, self.enabled)
@@ -1690,16 +1787,16 @@ pub fn grid(rows: Vec<Vec<RibbonButton>>) -> Col {
 /// beneath it (Visio 2016 layout). Only some groups carry the dialog
 /// launcher (Visio: Font, Paragraph — never Clipboard/Arrange).
 pub struct Group {
-    pub label: &'static str,
+    pub label: String,
     pub cols: Vec<Col>,
     /// Whether to draw the group dialog launcher (pop-out arrow).
     pub launcher: bool,
 }
 
 impl Group {
-    pub fn new(label: &'static str, cols: Vec<Col>) -> Self {
+    pub fn new(label: impl Into<String>, cols: Vec<Col>) -> Self {
         Group {
-            label,
+            label: label.into(),
             cols,
             launcher: false,
         }
@@ -1764,11 +1861,11 @@ pub fn content_row(
     ui: &mut Ui,
     groups: &[Group],
     on_action: &mut dyn FnMut(Action),
-    on_launcher: &mut dyn FnMut(&'static str),
+    on_launcher: &mut dyn FnMut(&str),
     on_rect: &mut dyn FnMut(&RibbonButton, Rect),
 ) {
     let t = theme::shell_tokens(ui.visuals());
-    let mut spans: Vec<(&'static str, f32, f32, bool)> = Vec::new();
+    let mut spans: Vec<(String, f32, f32, bool)> = Vec::new();
     ui.vertical(|ui| {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
@@ -1784,7 +1881,7 @@ pub fn content_row(
                     }
                 });
                 let x1 = ui.next_widget_position().x - ui.spacing().item_spacing.x;
-                spans.push((g.label, x0, x1, g.launcher));
+                spans.push((g.label.clone(), x0, x1, g.launcher));
                 if i + 1 < groups.len() {
                     // Visio: the separator spans the content row and
                     // stops above the group-label strip.
@@ -1802,7 +1899,7 @@ pub fn content_row(
             ui.allocate_exact_size(Vec2::new(ui.available_width(), LABEL_H), Sense::hover());
         for (label, x0, x1, launcher) in &spans {
             let gal = ui.painter().layout_no_wrap(
-                label.to_string(),
+                label.clone(),
                 egui::FontId::proportional(9.5),
                 t.ribbon_label,
             );

@@ -32,6 +32,11 @@ pub struct View {
     pub fit_mode: bool,
     /// Content size the last fit was computed against.
     pub last_content: Vec2,
+    /// Content ORIGIN the last fit was computed against — the LTR/RTL
+    /// chrome moves the ruler band between the canvas's edges without
+    /// changing the content SIZE, and a fit-mode view must re-center
+    /// or the page hides behind the new ruler (PR #269 review).
+    pub last_origin: Vec2,
 }
 
 impl Default for View {
@@ -45,6 +50,7 @@ impl Default for View {
             fit_pending: true,
             fit_mode: false,
             last_content: Vec2::ZERO,
+            last_origin: Vec2::ZERO,
         }
     }
 }
@@ -73,12 +79,17 @@ impl View {
             + Vec2::new((content.x - pw) / 2.0, (content.y - ph) / 2.0).max(Vec2::new(12.0, 12.0));
         self.fit_mode = true;
         self.last_content = content;
+        self.last_origin = origin;
     }
 
-    /// Whether a newly laid-out content size should trigger a re-fit:
-    /// only in fit mode, and only beyond sub-pixel layout jitter.
-    pub fn wants_refit(&self, content: Vec2) -> bool {
-        self.fit_mode && (self.last_content - content).length() > 0.5
+    /// Whether a newly laid-out content area should trigger a re-fit:
+    /// only in fit mode, and only beyond sub-pixel layout jitter — a
+    /// change in either the content SIZE or its ORIGIN (the RTL ruler
+    /// band moves between canvas edges at the same size) re-centers.
+    pub fn wants_refit(&self, origin: Vec2, content: Vec2) -> bool {
+        self.fit_mode
+            && ((self.last_content - content).length() > 0.5
+                || (self.last_origin - origin).length() > 0.5)
     }
 
     /// Zoom into a page rect and center it in the content area
@@ -163,15 +174,35 @@ pub const RULER: f32 = 22.0;
 /// page margin `show`/`apply_fit`/`zoom_to_rect` all keep. Shared so
 /// the fit math and the text-edit zoom (#22) target the same pixels.
 pub fn content_area(canvas_rect: Rect, show_rulers: bool) -> (Pos2, Vec2) {
+    // #257 item 3: an RTL chrome carries the vertical ruler band on
+    // the canvas's RIGHT edge (the mirrored-corner reading of the
+    // Office RTL ruler pair). The origin stays AT the canvas's left
+    // edge — only the LTR case shifts past a left-edge ruler — and
+    // the RTL width below subtracts the right band, so the content
+    // rect never starts outside the canvas (PR #269 review: a
+    // -RULER origin pushed the fit region 22 px past the left edge
+    // while the width cancellation made it 22 px too wide).
+    let rtl = crate::i18n::rtl();
+    let v_offset = if rtl { 0.0 } else { RULER };
     let content_origin = if show_rulers {
-        canvas_rect.left_top() + Vec2::new(RULER, RULER)
+        canvas_rect.left_top() + Vec2::new(v_offset, RULER)
+    } else if rtl {
+        // keep the drawable width honest without a band
+        canvas_rect.left_top()
     } else {
         canvas_rect.left_top()
     };
-    let content = Vec2::new(
-        (canvas_rect.right() - content_origin.x - 12.0).max(50.0),
-        (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
-    );
+    let content = if show_rulers && rtl {
+        Vec2::new(
+            (canvas_rect.right() - RULER - content_origin.x - 12.0).max(50.0),
+            (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
+        )
+    } else {
+        Vec2::new(
+            (canvas_rect.right() - content_origin.x - 12.0).max(50.0),
+            (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
+        )
+    };
     (content_origin, content)
 }
 
@@ -696,7 +727,7 @@ pub fn show(
     // Fit on first layout, and — while in fit mode — again whenever the
     // content area itself changes size (window resize, side panes
     // toggling), so the page stays centered and fully visible.
-    if view.fit_pending || view.wants_refit(content) {
+    if view.fit_pending || view.wants_refit(content_origin.to_vec2(), content) {
         view.apply_fit(content, content_origin.to_vec2(), page);
         view.fit_pending = false;
         out.zoom_changed = true;
@@ -786,6 +817,7 @@ pub fn show(
             .or_else(|| ui.input(|i| i.pointer.interact_pos()));
         if let Some(p) = p {
             ui.ctx().memory_mut(|m| m.data.insert_temp(mem_start, p));
+            let rtl = crate::i18n::rtl();
             // A Ctrl/Cmd press starts a pan gesture (see pan_drag
             // above): it must not arm a marquee or a move-drag, or the
             // release commits a selection clobbering pan. A press on a
@@ -811,14 +843,26 @@ pub fn show(
                 ui.ctx()
                     .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
             } else if view.show_rulers
-                && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
+                && ((rtl && p.x > canvas_r.right() - RULER)
+                    || (!rtl && p.x < canvas_r.left() + RULER)
+                    || p.y < canvas_r.top() + RULER)
             {
                 // A ruler drag pulls a guide out (#113): the corner
-                // square yields a guide point, the left band below it
-                // a vertical guide, the top band a horizontal one.
-                let src = if p.x < canvas_r.left() + RULER && p.y < canvas_r.top() + RULER {
+                // square yields a guide point, the vertical band (LEFT
+                // edge LTR, RIGHT edge under the #257 RTL mirror) a
+                // vertical guide, the top band a horizontal one. Only
+                // the ACTIVE band is a ruler (PR #269 review): the
+                // opposite edge is drawable canvas, and accepting both
+                // armed guide drags on presses that should select or
+                // move shapes in that strip.
+                let in_vband = if rtl {
+                    p.x > canvas_r.right() - RULER
+                } else {
+                    p.x < canvas_r.left() + RULER
+                };
+                let src = if in_vband && p.y < canvas_r.top() + RULER {
                     GuideSource::Point
-                } else if p.x < canvas_r.left() + RULER {
+                } else if in_vband {
                     GuideSource::Vertical
                 } else {
                     GuideSource::Horizontal
@@ -1822,18 +1866,35 @@ fn draw_rulers(
     page_rect: Rect,
     t: &ShellTokens,
 ) {
-    // Corner square + bands.
-    p.rect_filled(
-        Rect::from_min_size(canvas_r.left_top(), Vec2::splat(RULER)),
-        0.0,
-        t.ruler_bg,
+    // Corner square + bands. #257 item 3: an RTL chrome mirrors the
+    // ruler pair — the corner lands top-right and the vertical band
+    // hugs the canvas's right edge (the mirrored reading of the
+    // Office RTL rulers); the DOCUMENT coordinates never move, the
+    // vertical values keep their y-up origin at the page bottom.
+    let rtl = crate::i18n::rtl();
+    let corner = Rect::from_min_size(
+        if rtl {
+            canvas_r.right_top() - Vec2::new(RULER, 0.0)
+        } else {
+            canvas_r.left_top()
+        },
+        Vec2::splat(RULER),
     );
+    p.rect_filled(corner, 0.0, t.ruler_bg);
     let top = Rect::from_min_size(
-        canvas_r.left_top() + Vec2::new(RULER, 0.0),
+        if rtl {
+            canvas_r.left_top()
+        } else {
+            canvas_r.left_top() + Vec2::new(RULER, 0.0)
+        },
         Vec2::new(canvas_r.width() - RULER, RULER),
     );
     let left = Rect::from_min_size(
-        canvas_r.left_top() + Vec2::new(0.0, RULER),
+        if rtl {
+            canvas_r.right_top() - Vec2::new(RULER, 0.0) + Vec2::new(0.0, RULER)
+        } else {
+            canvas_r.left_top() + Vec2::new(0.0, RULER)
+        },
         Vec2::new(RULER, canvas_r.height() - RULER),
     );
     p.rect_filled(top, 0.0, t.ruler_bg);
@@ -1875,6 +1936,20 @@ fn draw_rulers(
     };
 
     // Horizontal ruler: ticks over the page extent only.
+    // #257 item 3: an RTL chrome flips the ruler's zero to the page's
+    // right edge — tick positions mirror across the PAGE's center line
+    // (not the band: a page off the window's center would mirror its
+    // ticks off the paper), so values grow leftward while the document
+    // coordinates never move.
+    let rtl = crate::i18n::rtl();
+    let page_cx = page_rect.center().x;
+    let mirror = |sx: f32| {
+        if rtl {
+            2.0 * page_cx - sx
+        } else {
+            sx
+        }
+    };
     let x0_in = ((page_rect.left() - view.pan.x) / ppi).max(0.0) as f64;
     let x1_in = ((page_rect.right() - view.pan.x) / ppi).min(page.w_in as f32) as f64;
     let upx = view.unit.from_in(1.0);
@@ -1882,7 +1957,7 @@ fn draw_rulers(
     let k1 = (x1_in * upx / interval).floor() as i64;
     for k in k0..=k1 {
         let v = k as f64 * interval;
-        let sx = view.pan.x + (view.unit.to_in(v) as f32) * ppi;
+        let sx = mirror(view.pan.x + (view.unit.to_in(v) as f32) * ppi);
         let tier = tier_for(k);
         p.line_segment(
             [
@@ -1892,9 +1967,14 @@ fn draw_rulers(
             Stroke::new(0.8, t.ruler_tick),
         );
         if tier.labeled && v > 0.0 {
+            let (anchor, dx) = if rtl {
+                (egui::Align2::RIGHT_TOP, -2.0)
+            } else {
+                (egui::Align2::LEFT_TOP, 2.0)
+            };
             p.text(
-                Pos2::new(sx + 2.0, top.top() + 1.0),
-                egui::Align2::LEFT_TOP,
+                Pos2::new(sx + dx, top.top() + 1.0),
+                anchor,
                 format_num(v),
                 font.clone(),
                 t.ruler_text,
@@ -1902,7 +1982,9 @@ fn draw_rulers(
         }
     }
 
-    // Vertical ruler: values count upward from the page bottom (Visio).
+    // Vertical ruler: values count upward from the page bottom (Visio)
+    // — the document convention, unchanged by the #257 chrome mirror;
+    // only the band side, tick direction and label anchor flip.
     let y0_in = ((page_rect.top() - view.pan.y) / ppi).max(0.0) as f64;
     let y1_in = ((page_rect.bottom() - view.pan.y) / ppi).min(page.h_in as f32) as f64;
     let k0 = (y0_in * upx / interval).ceil() as i64;
@@ -1913,17 +1995,30 @@ fn draw_rulers(
         let val_up = page.h_in - view.unit.to_in(v); // label in y-up units
         let disp = view.unit.from_in(val_up);
         let tier = tier_for(k);
+        let (tick_x, label_x, anchor) = if rtl {
+            // ticks grow inward from the band's left edge (the mirrored
+            // reading edge), labels anchor to it
+            (
+                left.left(),
+                left.left() + 2.0,
+                egui::Align2::LEFT_TOP,
+            )
+        } else {
+            (
+                left.right(),
+                left.left() + 1.0,
+                egui::Align2::LEFT_TOP,
+            )
+        };
+        let tick_inner = if rtl { tick_x + tier.len } else { tick_x - tier.len };
         p.line_segment(
-            [
-                Pos2::new(left.right() - tier.len, sy_top),
-                Pos2::new(left.right(), sy_top),
-            ],
+            [Pos2::new(tick_inner, sy_top), Pos2::new(tick_x, sy_top)],
             Stroke::new(0.8, t.ruler_tick),
         );
         if tier.labeled && disp > 0.0 {
             p.text(
-                Pos2::new(left.left() + 1.0, sy_top + 2.0),
-                egui::Align2::LEFT_TOP,
+                Pos2::new(label_x, sy_top + 2.0),
+                anchor,
                 format_num(disp),
                 font.clone(),
                 t.ruler_text,
@@ -2191,33 +2286,40 @@ mod tests {
         let z0 = view.zoom;
         // A resize re-fits (taller content → larger fit zoom).
         assert!(
-            view.wants_refit(Vec2::new(800.0, 900.0)),
+            view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)),
             "resize triggers refit"
         );
         view.apply_fit(Vec2::new(800.0, 900.0), Vec2::ZERO, &page);
         assert!(view.zoom > z0, "zoom grew: {z0} → {}", view.zoom);
         // Same size — and sub-pixel jitter — must not re-fit every frame.
-        assert!(!view.wants_refit(Vec2::new(800.0, 900.0)));
+        assert!(!view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)));
         assert!(
-            !view.wants_refit(Vec2::new(800.2, 900.3)),
+            !view.wants_refit(Vec2::ZERO, Vec2::new(800.2, 900.3)),
             "jitter is ignored"
         );
+        // An ORIGIN move alone (the RTL chrome moving the ruler band
+        // across equally-sized content) re-fits too.
+        assert!(
+            view.wants_refit(Vec2::new(22.0, 22.0), Vec2::new(800.0, 900.0)),
+            "origin move triggers refit"
+        );
+        view.apply_fit(Vec2::new(800.0, 900.0), Vec2::new(22.0, 22.0), &page);
         // Manual zoom/pan clears fit mode: resizes stop re-fitting.
         view.fit_mode = false;
         assert!(
-            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            !view.wants_refit(Vec2::ZERO, Vec2::new(300.0, 200.0)),
             "manual view survives a resize"
         );
         // Fit Page re-arms: the pending fit re-enters fit mode.
         view.fit_pending = true;
         assert!(
-            !view.wants_refit(Vec2::new(300.0, 200.0)),
+            !view.wants_refit(Vec2::new(22.0, 22.0), Vec2::new(300.0, 200.0)),
             "pending alone doesn't refit"
         );
         view.apply_fit(Vec2::new(300.0, 200.0), Vec2::ZERO, &page);
         assert!(view.fit_mode, "apply_fit re-enters fit mode");
         assert!(
-            view.wants_refit(Vec2::new(800.0, 900.0)),
+            view.wants_refit(Vec2::ZERO, Vec2::new(800.0, 900.0)),
             "and follows again"
         );
     }

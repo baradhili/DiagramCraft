@@ -18,8 +18,15 @@ pub struct BuiltinStencil {
     /// dedupe pseudo-path.
     pub slug: &'static str,
     /// More Shapes menu category (menu order follows first appearance).
+    /// Persisted key (`stencils.json` category order) — never translated
+    /// (#246: lookup/sort keys stay English; display translation parks on
+    /// #257), and never REGROUPED without a stencils.json migration: a
+    /// renamed key orphans every existing category list that names it
+    /// (PR #269 review reverted a Flowchart→General regrouping).
     pub category: &'static str,
     /// Pane entry / menu title.
+    /// Stencil display name — parked on #257 with localized master
+    /// names (#246 keeps stencil chrome English this wave).
     pub title: &'static str,
     /// Default variant (US units; a metric-only entry's metric bytes).
     pub bytes: &'static [u8],

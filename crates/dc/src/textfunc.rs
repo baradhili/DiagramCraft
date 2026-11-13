@@ -55,13 +55,29 @@ impl SheetTextMeasure {
         }
     }
 
-    /// The wrapped line count at `width` block inches (insets
-    /// subtracted, same as the renderer).
-    fn lines_at(&self, text: &str, width: f64) -> Vec<String> {
+    /// The wrapped lines at `width` block inches (insets subtracted,
+    /// same as the renderer), keeping each line's direction so the
+    /// height sums the same per-line slots the renderer paints.
+    fn lines_at(&self, text: &str, width: f64) -> Vec<crate::svg::WrapLine> {
         let face =
             crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
+        // The complex-script pair, resolved exactly as the renderer
+        // resolves it (#257 text-direction) so a TEXTHEIGHT refresh
+        // wraps an RTL paragraph at the size its glyphs paint with.
+        let cs_chain = self.tb.cs_font.as_deref().or(self.tb.font.as_deref());
+        let cs_face = crate::textmetrics::resolve(cs_chain, self.tb.bold, self.tb.italic);
+        let cs_fallback =
+            crate::textmetrics::resolve(Some("Vazirmatn"), self.tb.bold, self.tb.italic);
         let usable = (width - self.tb.insets.0 - self.tb.insets.1).max(0.02);
-        crate::svg::wrap_block_text(&face, text, self.tb.font_size, usable)
+        crate::svg::wrap_block_text(
+            &face,
+            text,
+            self.tb.font_size,
+            usable,
+            &cs_face,
+            self.tb.cs_size.unwrap_or(self.tb.font_size),
+            &cs_fallback,
+        )
     }
 }
 
@@ -90,23 +106,29 @@ impl TextMeasure for SheetTextMeasure {
     }
 
     fn text_height(&self, text: &str, width: f64) -> Option<f64> {
-        // TEXTHEIGHT = wrapped lines × line height + the block's top
-        // and bottom insets (corpus gold: DBUML_M's all-zero-margin
-        // 'PK\r\n' caches exactly 1.2 em — no insets added; TIMELN's
-        // default-T/B-margins shape caches 1 line + 2×0.0555). The
-        // wrap runs against the width minus the LEFT/RIGHT insets —
-        // the same usable width `emit_text` wraps at, so the
-        // refreshed cache and the rendered lines cannot disagree.
+        // TEXTHEIGHT = the SUM of the wrapped lines' slots + the
+        // block's top and bottom insets (corpus gold: DBUML_M's
+        // all-zero-margin 'PK\r\n' caches exactly 1.2 em — no insets
+        // added; TIMELN's default-T/B-margins shape caches 1 line +
+        // 2×0.0555). The wrap runs against the width minus the
+        // LEFT/RIGHT insets — the same usable width `emit_text` wraps
+        // at, and the same per-line slots it paints (an RTL line
+        // under a larger ComplexScriptSize takes a taller slot — PR
+        // #269 review), so the refreshed cache and the rendered lines
+        // cannot disagree.
         let text = text.trim_end();
         let ins_tb = self.tb.insets.2 + self.tb.insets.3;
-        let lines = if text.is_empty() {
+        let lines_h = if text.is_empty() {
             // An empty block still composes one line (the corpus's
             // bare "\r\n" texts measure one line height, #148).
-            1.0
+            self.tb.line_height
         } else {
-            self.lines_at(text, width).len() as f64
+            self.lines_at(text, width)
+                .iter()
+                .map(|l| crate::svg::line_slot_height(&self.tb, l.rtl))
+                .sum::<f64>()
         };
-        Some(lines * self.tb.line_height + ins_tb)
+        Some(lines_h + ins_tb)
     }
 }
 

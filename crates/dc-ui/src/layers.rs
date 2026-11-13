@@ -684,7 +684,8 @@ impl ShapeLayers {
                 }
                 Err(e) => {
                     entry.failed = Some((v, format!("{e:#}")));
-                    (0, 0, Some(format!("layer {id}: {e:#}")), patch.is_some())
+                    (0, 0, Some(crate::i18n::strs().msg_layer_composite_failed(id, format!("{e:#}"))),
+                    patch.is_some())
                 }
             }
         };
@@ -1169,7 +1170,10 @@ impl ShapeLayers {
                                             }
                                             Err(e) => {
                                                 entry.failed = Some((version, format!("{e:#}")));
-                                                status = Some(format!("layer {}: {e:#}", shape.id));
+                                                status = Some(crate::i18n::strs().msg_layer_composite_failed(
+                    shape.id,
+                    format!("{e:#}"),
+                ));
                                             }
                                         }
                                     }
@@ -1192,7 +1196,10 @@ impl ShapeLayers {
                             }
                             Err(e) => {
                                 entry.failed = Some((version, format!("{e:#}")));
-                                status = Some(format!("layer {}: {e:#}", shape.id));
+                                status = Some(crate::i18n::strs().msg_layer_composite_failed(
+                    shape.id,
+                    format!("{e:#}"),
+                ));
                             }
                         }
                     } else {
@@ -1235,7 +1242,10 @@ impl ShapeLayers {
                                 }
                                 Err(e) => {
                                     entry.failed = Some((version, format!("{e:#}")));
-                                    status = Some(format!("layer {}: {e:#}", shape.id));
+                                    status = Some(crate::i18n::strs().msg_layer_composite_failed(
+                    shape.id,
+                    format!("{e:#}"),
+                ));
                                     continue;
                                 }
                             }
@@ -1294,7 +1304,10 @@ impl ShapeLayers {
                                     }
                                     Err(e) => {
                                         entry.failed = Some((version, format!("{e:#}")));
-                                        status = Some(format!("layer {}: {e:#}", shape.id));
+                                        status = Some(crate::i18n::strs().msg_layer_composite_failed(
+                    shape.id,
+                    format!("{e:#}"),
+                ));
                                     }
                                 }
                             }

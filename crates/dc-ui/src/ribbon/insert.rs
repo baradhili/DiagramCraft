@@ -7,139 +7,139 @@
 
 use super::{Action, Group, Icon, RibbonButton, TabCtx, big, grid, stack};
 
-pub(crate) fn groups(ctx: &TabCtx) -> Vec<Group> {
+pub(crate) fn groups(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<Group> {
     let has_doc = ctx.has_doc;
     let has_sel = ctx.has_sel;
     vec![
-        Group::new("Pages", pages_cols(has_doc)),
-        Group::new("Illustrations", illustrations_cols()),
-        Group::new("Diagram Parts", diagram_parts_cols(ctx)),
+        Group::new(s.msg_insert_pages(), pages_cols(s, has_doc)),
+        Group::new(s.msg_illustrations(), illustrations_cols(s, )),
+        Group::new(s.msg_diagram_parts(), diagram_parts_cols(s, ctx)),
         Group::new(
-            "Links",
+            s.msg_links(),
             vec![big(
-                RibbonButton::new(Icon::Link, "Hyperlink", Action::Hyperlink)
+                RibbonButton::new(Icon::Link, s.msg_hyperlink(), Action::Hyperlink)
                     .enabled(has_sel)
-                    .tip("Edit the selected shape's hyperlinks (Ctrl+K)"),
+                    .tip(s.msg_edit_the_selected_shape_s_hyperl()),
             )],
         ),
-        Group::new("Text", text_cols()),
+        Group::new(s.msg_text(), text_cols(s, )),
     ]
 }
 
-fn pages_cols(has_doc: bool) -> Vec<super::Col> {
+fn pages_cols(s: &'static crate::l10n::L10nLanguage, has_doc: bool) -> Vec<super::Col> {
     vec![
-        big(RibbonButton::new(Icon::NewPage, "New Page", Action::NewPage).enabled(has_doc)),
+        big(RibbonButton::new(Icon::NewPage, s.msg_new_page(), Action::NewPage).enabled(has_doc)),
         // Visio's New Page split: plain page / background page (the
         // background variant is planned; assignment lives in
         // Design ▸ Backgrounds today).
         stack(vec![RibbonButton::new(
             Icon::Picture,
-            "New Background Page",
+            s.msg_new_background_page(),
             Action::Macros,
         )
         .enabled(false)
-        .tip("Create a background page — planned (Design ▸ Backgrounds assigns today)")]),
+        .tip(s.msg_create_a_background_page_planned())]),
     ]
 }
 
-fn illustrations_cols() -> Vec<super::Col> {
+fn illustrations_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Picture, "Pictures", Action::InsertPicture)
-                .tip("Insert a PNG or JPEG picture from a file"),
+            RibbonButton::new(Icon::Picture, s.msg_pictures(), Action::InsertPicture)
+                .tip(s.msg_insert_a_png_or_jpeg_picture_fro()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::OnlinePic, "", Action::Macros)
-                    .alt("Online Pictures")
+                    .alt(s.msg_online_pictures())
                     .enabled(false)
-                    .tip("Online pictures — planned"),
+                    .tip(s.msg_online_pictures_planned()),
                 RibbonButton::new(Icon::DataGraphic, "", Action::Macros)
-                    .alt("Chart")
+                    .alt(s.msg_chart())
                     .enabled(false)
-                    .tip("Charts — planned (later milestone)"),
+                    .tip(s.msg_charts_planned_later_milestone()),
             ],
             vec![
                 RibbonButton::new(Icon::Shapes, "", Action::Macros)
-                    .alt("CAD Drawing")
+                    .alt(s.msg_cad_drawing())
                     .enabled(false)
-                    .tip("CAD drawing import — planned (later milestone)"),
+                    .tip(s.msg_cad_drawing_import_planned_later()),
             ],
         ]),
     ]
 }
 
-fn diagram_parts_cols(ctx: &TabCtx) -> Vec<super::Col> {
+fn diagram_parts_cols(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Container, "Container", Action::Macros)
+            RibbonButton::new(Icon::Container, s.msg_container(), Action::Macros)
                 .enabled(false)
-                .tip("Containers — planned"),
+                .tip(s.msg_containers_planned()),
         ),
         big(
-            RibbonButton::new(Icon::Callout, "Callout", Action::Macros)
+            RibbonButton::new(Icon::Callout, s.msg_callout(), Action::Macros)
                 .enabled(false)
-                .tip("Callouts — planned"),
+                .tip(s.msg_callouts_planned()),
         ),
         grid(vec![
             vec![
                 // #156: the SDCONT gallery (moved from Design).
                 RibbonButton::new(Icon::Container, "", Action::ContainerGallery)
-                    .alt("Containers…")
+                    .alt(s.msg_containers())
                     .selected(ctx.contgal_open)
-                    .tip("Wrap the selection in a container style"),
+                    .tip(s.msg_containers_wrap_tip()),
                 RibbonButton::new(Icon::Connector, "", Action::ConnectorTool)
-                    .alt("Connector")
+                    .alt(s.msg_connector())
                     .selected(ctx.tool == crate::app::Tool::Connector)
-                    .tip("Connector tool — draw a connector between shapes or points"),
+                    .tip(s.msg_connector_tool_tip()),
             ],
             vec![
                 RibbonButton::new(Icon::Shapes, "", Action::Macros)
-                    .alt("Legend")
+                    .alt(s.msg_legend())
                     .enabled(false)
-                    .tip("Legends (M6; Visio paints Legend on Insert, not Data)"),
+                    .tip(s.msg_legends_m6_visio_paints_legend_o()),
                 RibbonButton::new(Icon::Title, "", Action::Macros)
-                    .alt("Title")
+                    .alt(s.msg_title())
                     .enabled(false)
-                    .tip("Title — planned"),
+                    .tip(s.msg_title_planned()),
             ],
             vec![
                 RibbonButton::new(Icon::Picture, "", Action::Macros)
-                    .alt("Border & Title")
+                    .alt(s.msg_border_title())
                     .enabled(false)
-                    .tip("Borders & titles — planned"),
+                    .tip(s.msg_borders_titles_planned()),
             ],
         ]),
     ]
 }
 
-fn text_cols() -> Vec<super::Col> {
+fn text_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::TextBox, "Text Box", Action::Macros)
+            RibbonButton::new(Icon::TextBox, s.msg_text_box(), Action::Macros)
                 .enabled(false)
-                .tip("Text shapes — planned"),
+                .tip(s.msg_text_shapes_planned()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::Field, "", Action::Macros)
-                    .alt("Text Field")
+                    .alt(s.msg_text_field())
                     .enabled(false)
-                    .tip("Fields — planned"),
+                    .tip(s.msg_fields_planned()),
                 RibbonButton::new(Icon::DateTime, "", Action::Macros)
-                    .alt("Date & Time")
+                    .alt(s.msg_date_time())
                     .enabled(false)
-                    .tip("Date & time field — planned"),
+                    .tip(s.msg_date_time_field_planned()),
             ],
             vec![
                 RibbonButton::new(Icon::NewPage, "", Action::Macros)
-                    .alt("Page Number")
+                    .alt(s.msg_page_number())
                     .enabled(false)
-                    .tip("Page-number field — planned"),
+                    .tip(s.msg_page_number_field_planned()),
                 RibbonButton::new(Icon::FontA, "", Action::Macros)
-                    .alt("Symbol")
+                    .alt(s.msg_symbol())
                     .enabled(false)
-                    .tip("Symbol — planned"),
+                    .tip(s.msg_symbol_planned()),
             ],
         ]),
     ]

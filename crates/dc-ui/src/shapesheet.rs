@@ -384,23 +384,26 @@ fn section_rank(name: &str) -> i32 {
 
 /// Visio's display names for ShapeSheet sections.
 fn section_display_name(n: &str, ix: i64) -> String {
+    // Display layer only (#257 ride-along): the section NAMES stay
+    // model vocabulary; these are the headings the inspector paints.
+    let strs = crate::i18n::strs();
     match n {
-        "User" => "User-defined Cells".into(),
-        "Connection" => "Connection Points".into(),
-        "XForm1D" => "1-D Endpoints".into(),
-        "TextXForm" => "Text Transform".into(),
-        "LayerMembership" => "Layer Membership".into(),
-        "FillGradient" => "Fill Gradient Stops".into(),
-        "LineGradient" => "Line Gradient Stops".into(),
-        "Prop" => "Shape Data".into(),
-        "SmartTags" => "Smart Tags".into(),
-        "Fields" => "Text Fields".into(),
-        "Control" => "Control Points".into(),
-        "Geometry" => format!("Geometry {}", ix + 1),
-        "RulerGrid" => "Ruler & Grid".into(),
-        "PageLayout" => "Page Layout".into(),
-        "PrintPageSetup" => "Print Setup".into(),
-        "PagesXForm" => "Page Properties".into(),
+        "User" => strs.msg_ss_section_user_defined_cells(),
+        "Connection" => strs.msg_ss_section_connection_points(),
+        "XForm1D" => strs.msg_ss_section_1d_endpoints(),
+        "TextXForm" => strs.msg_ss_section_text_transform(),
+        "LayerMembership" => strs.msg_ss_section_layer_membership(),
+        "FillGradient" => strs.msg_ss_section_fill_gradient_stops(),
+        "LineGradient" => strs.msg_ss_section_line_gradient_stops(),
+        "Prop" => strs.msg_ss_section_shape_data(),
+        "SmartTags" => strs.msg_ss_section_smart_tags(),
+        "Fields" => strs.msg_ss_section_text_fields(),
+        "Control" => strs.msg_ss_section_control_points(),
+        "Geometry" => strs.msg_ss_section_geometry_n(ix + 1),
+        "RulerGrid" => strs.msg_ss_section_ruler_grid(),
+        "PageLayout" => strs.msg_ss_section_page_layout(),
+        "PrintPageSetup" => strs.msg_ss_section_print_setup(),
+        "PagesXForm" => strs.msg_ss_section_page_properties(),
         other => other.into(),
     }
 }
@@ -556,7 +559,7 @@ fn cell_text(c: &Cell, cell: &str) -> String {
     }
     match c.v.as_deref() {
         Some(v) if !v.is_empty() => fmt_value(v, c.u.as_deref(), cell),
-        _ => "No Formula".into(),
+        _ => crate::i18n::strs().msg_no_formula(),
     }
 }
 
@@ -614,12 +617,22 @@ pub enum SectionView {
     /// A row grid: gray row-label column, header row of cell names.
     Rows {
         title: String,
+        /// The MODEL section's render rank ([`section_rank`] of the
+        /// name the section was built from) — the section keeps its
+        /// order under any display language, since `title` is the
+        /// translated heading (PR #269 review).
+        rank: i32,
         headers: Vec<String>,
         /// (row label, label is a red row name, cells)
         rows: Vec<(String, bool, Vec<MergedCell>)>,
     },
     /// Layer Membership's single bare value line (no header row).
-    Bare { title: String, text: String },
+    Bare {
+        title: String,
+        /// [`section_rank`] of the model section — see [`Rows::rank`].
+        rank: i32,
+        text: String,
+    },
 }
 
 /// One row of a merged section, resolved against deeper levels. A
@@ -831,7 +844,7 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
                 MergedCell::fallback(
                     display_default(name)
                         .map(str::to_string)
-                        .unwrap_or_else(|| "No Formula".into()),
+                        .unwrap_or_else(|| crate::i18n::strs().msg_no_formula()),
                 )
             })
     };
@@ -883,9 +896,10 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
     //    it as a cell rather than a real LayerMembership section).
     if !names.iter().any(|(n, _)| n == "LayerMembership") {
         let lm = resolved("LayerMember");
-        if lm.text != "No Formula" {
+        if lm.text != crate::i18n::strs().msg_no_formula() {
             views.push(SectionView::Bare {
-                title: "Layer Membership".into(),
+                title: crate::i18n::strs().msg_ss_section_layer_membership(),
+                rank: section_rank("LayerMembership"),
                 text: lm.text,
             });
         }
@@ -964,22 +978,15 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
 
     views.sort_by_key(|v| match v {
         SectionView::Transform { .. } => 0,
+        // The pairs sections' titles are stable model vocabulary
+        // (never translated), so their rank keys off the title.
         SectionView::Pairs { title, .. } => pairs_rank(title),
-        SectionView::Rows { title, .. } | SectionView::Bare { title, .. } => match title.as_str() {
-            "User-defined Cells" => section_rank("User"),
-            "Connection Points" => section_rank("Connection"),
-            "1-D Endpoints" => section_rank("XForm1D"),
-            "Text Transform" => section_rank("TextXForm"),
-            "Layer Membership" => section_rank("LayerMembership"),
-            "Line Gradient Stops" => section_rank("LineGradient"),
-            "Fill Gradient Stops" => section_rank("FillGradient"),
-            "Shape Data" => section_rank("Prop"),
-            "Smart Tags" => section_rank("SmartTags"),
-            "Text Fields" => section_rank("Fields"),
-            "Control Points" => section_rank("Control"),
-            t if t.starts_with("Geometry ") => section_rank("Geometry"),
-            other => section_rank(other),
-        },
+        // Real sections keep the rank captured from their MODEL name
+        // at construction — the translated heading must never drive
+        // the order (PR #269 review: under fa/de every translated
+        // heading fell to the unknown bucket and the pairs sections
+        // jumped ahead of them).
+        SectionView::Rows { rank, .. } | SectionView::Bare { rank, .. } => *rank,
     });
 
     views
@@ -1034,6 +1041,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
         }
         return Some(SectionView::Rows {
             title: section_display_name(name, ix),
+            rank: section_rank(name),
             headers,
             rows,
         });
@@ -1051,11 +1059,12 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
             let ncols = headers.len();
             return Some(SectionView::Rows {
                 title: section_display_name(name, ix),
+                rank: section_rank(name),
                 headers,
                 rows: vec![(
                     "0".into(),
                     false,
-                    vec![MergedCell::fallback("No Formula".into()); ncols],
+                    vec![MergedCell::fallback(crate::i18n::strs().msg_no_formula()); ncols],
                 )],
             });
         }
@@ -1078,7 +1087,8 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
             })
             .unwrap_or_default();
         return Some(SectionView::Bare {
-            title: "Layer Membership".into(),
+            title: crate::i18n::strs().msg_ss_section_layer_membership(),
+            rank: section_rank(name),
             text,
         });
     }
@@ -1123,11 +1133,12 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
         rows.push((
             "0".into(),
             false,
-            vec![MergedCell::fallback("No Formula".into()); headers.len().max(1)],
+            vec![MergedCell::fallback(crate::i18n::strs().msg_no_formula()); headers.len().max(1)],
         ));
     }
     Some(SectionView::Rows {
         title: section_display_name(name, ix),
+        rank: section_rank(name),
         headers,
         rows,
     })
@@ -1224,7 +1235,7 @@ fn value_label(ui: &mut Ui, w: f32, cell: &MergedCell) {
 pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f32) {
     let views = build_views(doc, page_id, shape_id);
     if views.is_empty() {
-        ui.label("shape not found");
+        ui.label(crate::i18n::strs().msg_ss_shape_not_found());
         return;
     }
     // The viewport is capped: the resolved sheet of a master-backed
@@ -1307,6 +1318,7 @@ pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f3
                         title,
                         headers,
                         rows,
+                        ..
                     } => {
                         section_bar(ui, title);
                         const LABEL_W: f32 = 110.0;
@@ -1361,7 +1373,7 @@ pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f3
                                 }
                             });
                     }
-                    SectionView::Bare { title, text } => {
+                    SectionView::Bare { title, text, .. } => {
                         section_bar(ui, title);
                         ui.add_space(2.0);
                         let t = RichText::new(text);
@@ -1442,7 +1454,7 @@ mod tests {
             }));
         let mut master = vsdx::model::Master {
             id: 42,
-            name_u: Some("Container".into()),
+            name_u: Some("Container".to_string()),
             ..vsdx::model::Master::default()
         };
         master.shapes.push(master_shape);
@@ -1450,7 +1462,7 @@ mod tests {
         // The instance: everything inherits, nothing is local.
         let shape = Shape {
             id: 100,
-            name_u: Some("Container".into()),
+            name_u: Some("Container".to_string()),
             master: Some(42),
             master_shape: Some(6),
             ..Shape::default()
@@ -1786,10 +1798,17 @@ mod tests {
             ..Section::default()
         }));
         let views = build_views(&doc, 1, 100);
+        // The localized title carries fluent's zero-width bidi
+        // isolation around the interpolated number (item 3e) — strip
+        // the invisible marks for the comparison.
+        let strip_isolates =
+            |s: &str| s.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect::<String>();
         let g2 = views
             .iter()
             .find_map(|v| match v {
-                SectionView::Rows { title, rows, .. } if title == "Geometry 2" => {
+                SectionView::Rows { title, rows, .. }
+                    if strip_isolates(title) == "Geometry 2" =>
+                {
                     Some(rows.clone())
                 }
                 _ => None,

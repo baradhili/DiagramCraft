@@ -581,7 +581,7 @@ fn window_title_tracks_document_and_dirty_state() {
     h.run();
     h.run();
     assert_eq!(
-        h.state().debug_window_title_for_test(),
+        common::strip_bidi(&h.state().debug_window_title_for_test()),
         "Drawing1 - Tarahi",
         "an unsaved blank drawing titles the OS window"
     );
@@ -591,7 +591,7 @@ fn window_title_tracks_document_and_dirty_state() {
     tab_menu_pick(&mut h, "Page-1", "Insert Page");
     h.run();
     assert_eq!(
-        h.state().debug_window_title_for_test(),
+        common::strip_bidi(&h.state().debug_window_title_for_test()),
         "Drawing1 - Tarahi *",
         "the dirty marker reaches the OS window title"
     );

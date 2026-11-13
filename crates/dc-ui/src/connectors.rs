@@ -535,6 +535,17 @@ pub fn route_rows(begin: (f64, f64), points: &[(f64, f64)]) -> [(f64, f64); 3] {
     [local(e1), local(e2), local(last)]
 }
 
+
+/// The localized endpoint word (#257 value-side vocabulary): the
+/// endpoint macros' labels carry the reading-order word, not the cell
+/// name (which stays model vocabulary).
+pub fn endpoint_word(end: End) -> String {
+    match end {
+        End::Begin => crate::i18n::strs().msg_endpoint_begin(),
+        End::End => crate::i18n::strs().msg_endpoint_end(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -971,8 +982,8 @@ mod tests {
         let r = (0.0, 0.0, 2.0, 1.0);
         assert!(near(attach_point(r, (5.0, 0.5)), (2.0, 0.5)), "right side");
         assert!(near(attach_point(r, (-5.0, 0.5)), (0.0, 0.5)), "left side");
-        assert!(near(attach_point(r, (1.0, 9.0)), (1.0, 1.0)), "top");
-        assert!(near(attach_point(r, (1.0, -9.0)), (1.0, 0.0)), "bottom");
+        assert!(near(attach_point(r, (1.0, 9.0)), (1.0, 1.0)), "{}", crate::i18n::strs().msg_align_top_kind());
+        assert!(near(attach_point(r, (1.0, -9.0)), (1.0, 0.0)), "{}", crate::i18n::strs().msg_align_bottom_kind());
         // The other end inside the shape → degenerate center.
         assert!(near(attach_point(r, (1.0, 0.5)), (1.0, 0.5)));
     }

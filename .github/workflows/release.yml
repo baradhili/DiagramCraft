@@ -15,13 +15,28 @@ permissions:
 
 jobs:
   linux:
-    # glibc floor: the shipped AppImage/deb/rpm must run on Ubuntu
-    # 24.04 / Mint 22.x (glibc 2.39). The ubuntu-26.04 image's glibc
-    # 2.43 made every binary it linked refuse to start there (#98) —
-    # do not "upgrade" this runner; the glibc-floor step below fails
-    # the build if this ever drifts above the floor.
+    # glibc floor (#261, supersedes the #98 24.04 floor): the AppImage
+    # is catalog-tested on the OLDEST still-supported Ubuntu LTS, so
+    # the whole linux job builds inside an ubuntu:22.04 container
+    # (glibc 2.35) — the AppImage/deb/rpm then run on 22.04 and
+    # everything newer. The 22.04 base also avoids the newer-image
+    # trap that motivated #98 (the ubuntu-26.04 image's glibc 2.43
+    # made every linked binary refuse to start on older distros); do
+    # not move this back to a bare runner — the glibc-floor step below
+    # fails the build if the base ever drifts above the floor.
     runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:22.04
     steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential binutils \
+            libxkbcommon-x11-0 libxkbcommon0 libx11-6 libx11-xcb1 libxcb1 libxcb-xkb1 \
+            libxcursor1 libxrandr2 libxi6 libxrender1 libxfixes3 libxext6 \
+            libxau6 libxdmcp6 libbsd0 libmd0 libwayland-client0 \
+            libwayland-cursor0 libwayland-egl1 libffi8 libdbus-1-3
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -32,10 +47,11 @@ jobs:
       - name: Enforce glibc floor
         env:
           # Newest glibc symbol version the shipped binary may require.
-          # 2.39 = Ubuntu 24.04 / Mint 22.x. Raise only with an explicit
+          # 2.35 = Ubuntu 22.04 (the oldest still-supported LTS — the
+          # AppImage catalog test system). Raise only with an explicit
           # compat decision; to support OLDER distros, build with an
           # older-baseline linker (e.g. cargo-zigbuild) instead.
-          GLIBC_FLOOR: "2.39"
+          GLIBC_FLOOR: "2.35"
         run: |
           BIN=target/release/diagramcraft
           MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
@@ -64,12 +80,44 @@ jobs:
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: |
-          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20240109-1/linuxdeploy-x86_64.AppImage -O /tmp/linuxdeploy
+          # Current linuxdeploy: its embedded AppImage runtime is what
+          # the catalog test flagged as outdated with the 2024-01 pin.
+          # curl, not wget — the bare 22.04 container installs curl
+          # above but ships neither downloader by default (PR #269
+          # review).
+          curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o /tmp/linuxdeploy
           chmod +x /tmp/linuxdeploy
-          OUTPUT="diagramcraft_${{ steps.ver.outputs.version }}_x86_64.AppImage" /tmp/linuxdeploy \
+          mkdir -p AppDir/usr/lib
+          # winit/rfd/arboard dlopen the X11/Wayland client libraries,
+          # and rfd's portal file dialogs dlopen libdbus — linuxdeploy
+          # bundles only NEEDED-linked deps, so the dlopen set (with
+          # its transitive closure) is copied in explicitly (#261: the
+          # catalog test system has none of them and the app must work
+          # offline on a bare desktop).
+          for lib in \
+            libX11.so.6 libX11-xcb.so.1 libxcb.so.1 libXau.so.6 libXdmcp.so.6 \
+            libxkbcommon.so.0 libxkbcommon-x11.so.0 \
+            libXcursor.so.1 libXrandr.so.2 libXi.so.6 libXrender.so.1 \
+            libXfixes.so.3 libXext.so.6 libxcb-xkb.so.1 libbsd.so.0 \
+            libmd.so.0 \
+            libdbus-1.so.3 libsystemd.so.0 liblzma.so.5 libzstd.so.1 \
+            liblz4.so.1 libcap.so.2 libgcrypt.so.20 libgpg-error.so.0 \
+            libwayland-client.so.0 libwayland-cursor.so.0 libwayland-egl.so.1 \
+            libffi.so.8; do
+            src="$(ldconfig -p | awk -v lib="$lib" '$NF ~ ("/" lib "$") {print $NF; exit}')"
+            if [ -z "$src" ]; then
+              echo "::warning::runtime library $lib not found in the build container"
+            else
+              cp -aL "$src" AppDir/usr/lib/
+            fi
+          done
+          # The AppImage FILE name must match the desktop entry's
+          # application name (Name=Tarahi) — the catalog test rejects
+          # diagramcraft_*.AppImage for it (#261).
+          OUTPUT="Tarahi_${{ steps.ver.outputs.version }}_x86_64.AppImage" /tmp/linuxdeploy \
             --appdir AppDir \
             -e target/release/diagramcraft \
-            -d packaging/diagramcraft.desktop \
+            -d packaging/tarahi.desktop \
             -i packaging/diagramcraft.png \
             --output appimage
       - name: Collect artifacts
@@ -77,7 +125,7 @@ jobs:
           mkdir -p dist
           cp target/debian/*.deb dist/
           cp diagramcraft_*_amd64.rpm dist/
-          cp diagramcraft_*.AppImage dist/
+          cp Tarahi_*_x86_64.AppImage dist/
           ls -la dist/
       - uses: actions/upload-artifact@v7
         with:

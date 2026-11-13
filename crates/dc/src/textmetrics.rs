@@ -129,6 +129,12 @@ fn build_db(embedded_only: bool) -> MetricsDb {
     for bytes in EMBEDDED_FONTS {
         db.load_font_data(bytes.to_vec());
     }
+    // Runtime-registered faces (the dc-ui complex-script drop — see
+    // `register_face_bytes`); kept so BOTH databases see them no
+    // matter which builds first.
+    for bytes in pending_faces().lock().unwrap().iter() {
+        db.load_font_data(bytes.clone());
+    }
     if !embedded_only {
         db.load_system_fonts();
     }
@@ -163,6 +169,26 @@ fn build_db(embedded_only: bool) -> MetricsDb {
 /// there is deliberately no way to unset it.
 static PIN_EMBEDDED: AtomicBool = AtomicBool::new(false);
 
+/// Faces registered at runtime after this module's vendored set
+/// (#257 text-direction coordination: ONE font drop for the complex
+/// script face — dc's vendored Vazirmatn — registered into BOTH the
+/// metrics and the raster databases, never copied). The list is
+/// consulted when each database builds; callers must register before
+/// the first measurement — `dc::register_complex_script_faces` (the
+/// dc CLI's main and dc-ui's `theme::install_fonts` both call it).
+fn pending_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
+    static PENDING: OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register a face (its file bytes) into the metrics database. Must
+/// precede the first `resolve`/`width_in` call — the databases build
+/// once, lazily, and consult the pending list at build time.
+#[doc(hidden)]
+pub fn register_face_bytes(bytes: Vec<u8>) {
+    pending_faces().lock().unwrap().push(bytes);
+}
+
 /// Test hook for hermetic measurement (see the module docs).
 #[doc(hidden)]
 pub fn pin_embedded_for_tests() {
@@ -185,6 +211,40 @@ pub struct ResolvedFace {
     id: fontdb::ID,
     carlito: fontdb::ID,
     is_carlito: bool,
+}
+
+impl ResolvedFace {
+    /// Whether THIS face (not the Carlito fallback chain — the raster
+    /// resolves the element's family to this one) carries a glyph for
+    /// `c`. The wrap's complex-script probe uses it to pick the face
+    /// usvg's per-cluster fallback will actually draw (PR #269
+    /// review).
+    pub fn covers(&self, c: char) -> bool {
+        self.advance_of(self.id, c).is_some()
+    }
+}
+
+/// Split `text` into contiguous runs by which face covers each
+/// character: `(uses_other, text)` pairs where a character the first
+/// face lacks — and the second covers — joins an `other` run (PR
+/// #269 review). Shaping then happens per run with the face that
+/// paints it, exactly like the raster's per-cluster fallback; only
+/// cross-script run boundaries forgo cross-run kerning, which does
+/// not exist across scripts anyway.
+pub(crate) fn split_runs(
+    text: &str,
+    self_covers: impl Fn(char) -> bool,
+    other_covers: impl Fn(char) -> bool,
+) -> Vec<(bool, String)> {
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for c in text.chars() {
+        let uses_other = !self_covers(c) && other_covers(c);
+        match runs.last_mut() {
+            Some((last_other, buf)) if *last_other == uses_other => buf.push(c),
+            _ => runs.push((uses_other, c.to_string())),
+        }
+    }
+    runs
 }
 
 /// Resolve the face a shape's text measures (and rasterizes) in: the
@@ -329,6 +389,29 @@ impl ResolvedFace {
         width
     }
 
+    /// Shaped width where `other` covers the runs this face lacks
+    /// (see [`split_runs`]) — a mixed paragraph's script tail measures
+    /// with the face the raster actually paints it with, instead of
+    /// missing-glyph estimates. Single-run text takes the same
+    /// single-face shaped path as [`Self::width_in`]: unmixed text
+    /// keeps byte-identical widths.
+    pub fn width_in_runs(&self, other: &ResolvedFace, text: &str, size_in: f64) -> f64 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        let total: f64 = split_runs(text, |c| self.covers(c), |c| other.covers(c))
+            .into_iter()
+            .map(|(uses_other, run)| {
+                if uses_other {
+                    other.shaped_width_em(&run)
+                } else {
+                    self.shaped_width_em(&run)
+                }
+            })
+            .sum();
+        total * size_in
+    }
+
     /// The face's ascender in em units (hhea) — the GUI overlay places
     /// its editor from the renderer's baseline math, so it needs the
     /// same face's ascent (#22 review).
@@ -414,15 +497,20 @@ fn shaped_face(
 }
 
 /// The usvg-0.49 shaping pipeline, measurement-side (#146): BIDI
-/// visual runs (base LTR), each run shaped by harfrust with DEFAULT
-/// features — pair kerning on, ligatures/contextual forms applied,
-/// script and language guessed — advances summed in em units. That is
-/// verbatim what usvg does per text chunk (its `shape_text`), so a
-/// width measured here is the width the rasterizer will draw.
+/// visual runs, each shaped by harfrust with DEFAULT features — pair
+/// kerning on, ligatures/contextual forms applied, script and
+/// language guessed — advances summed in em units. The base level is
+/// `None` (#257 text-direction): each PARAGRAPH takes the first-strong
+/// base (explicit U+202A/U+202B overrides honored), the reconstruction
+/// the analysis note pins for Visio-authored text. usvg's own pipeline
+/// still hardcodes base LTR — the SVG exporter compensates with
+/// isolates (see `svg::emit_text`) — but the advance SUM is
+/// base-invariant either way, so a width measured here is the width
+/// the rasterizer draws.
 fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> f64 {
     use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
     let shaper = face.shaper_data.shaper(face.font).build();
-    let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+    let bidi = unicode_bidi::BidiInfo::new(text, None);
     let Some(paragraph) = bidi.paragraphs.first() else {
         return 0.0;
     };
@@ -525,6 +613,41 @@ pub fn face_data(font: Option<&str>, bold: bool, italic: bool) -> Option<FaceDat
 
 #[cfg(test)]
 mod tests {
+
+    /// PR #269 review: runs split by which face covers each char —
+    /// only chars the FIRST face lacks AND the second covers switch
+    /// runs; chars both lack stay on the first face (their advance
+    /// falls through the missing-glyph chain either way).
+    #[test]
+    fn split_runs_follows_per_char_coverage() {
+        let lower = |c: char| c.is_ascii_lowercase();
+        let upper = |c: char| c.is_ascii_uppercase();
+        let runs = split_runs("ab CD EF gh", lower, upper);
+        let flat: Vec<(bool, String)> = runs
+            .into_iter()
+            .map(|(o, t): (bool, String)| (o, t.chars().filter(|c| !c.is_whitespace()).collect::<String>()))
+            .filter(|(_, t)| !t.is_empty())
+            .collect();
+        assert_eq!(
+            flat,
+            vec![
+                (false, "ab".into()),
+                (true, "CD".into()),
+                (true, "EF".into()),
+                (false, "gh".into()),
+            ],
+            "contiguous covered spans join; the split follows coverage, not script"
+        );
+        // Chars NEITHER face covers stay on the primary run.
+        let runs = split_runs("a中b", lower, upper);
+        assert_eq!(
+            runs,
+            vec![(false, "a中b".to_string())],
+            "uncovered chars never switch runs"
+        );
+    }
+
+
     use super::*;
 
     /// Measurement uses the embedded Carlito everywhere (hermetic on

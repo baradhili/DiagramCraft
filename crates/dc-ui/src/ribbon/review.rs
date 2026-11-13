@@ -6,117 +6,117 @@
 
 use super::{Action, Group, Icon, RibbonButton, TabCtx, big, grid, stack};
 
-pub(crate) fn groups(_ctx: &TabCtx) -> Vec<Group> {
+pub(crate) fn groups(s: &'static crate::l10n::L10nLanguage, _ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new("Proofing", proofing_cols()),
-        Group::new("Language", language_cols()),
-        Group::new("Comments", comments_cols()),
-        Group::new("Markup", markup_cols()),
-        Group::new("Reports", reports_cols()),
+        Group::new(s.msg_proofing(), proofing_cols(s, )),
+        Group::new(s.msg_language(), language_cols(s, )),
+        Group::new(s.msg_comments(), comments_cols(s, )),
+        Group::new(s.msg_markup(), markup_cols(s, )),
+        Group::new(s.msg_reports(), reports_cols(s, )),
     ]
 }
 
-fn proofing_cols() -> Vec<super::Col> {
+fn proofing_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Spell, "Spelling", Action::Macros)
+            RibbonButton::new(Icon::Spell, s.msg_spelling(), Action::Macros)
                 .enabled(false)
-                .tip("Spell check — planned"),
+                .tip(s.msg_spell_check_planned()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::FontA, "", Action::Macros)
-                    .alt("Thesaurus")
+                    .alt(s.msg_thesaurus())
                     .enabled(false)
-                    .tip("Thesaurus — planned"),
+                    .tip(s.msg_thesaurus_planned()),
                 RibbonButton::new(Icon::Find, "", Action::Macros)
-                    .alt("Word Count")
+                    .alt(s.msg_word_count())
                     .enabled(false)
-                    .tip("Word count — planned"),
+                    .tip(s.msg_word_count_planned()),
             ],
             vec![
                 RibbonButton::new(Icon::Check, "", Action::Macros)
-                    .alt("AutoCorrect Options")
+                    .alt(s.msg_autocorrect_options())
                     .enabled(false)
-                    .tip("AutoCorrect options — planned"),
+                    .tip(s.msg_autocorrect_options_planned()),
             ],
         ]),
     ]
 }
 
-fn language_cols() -> Vec<super::Col> {
+fn language_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![stack(vec![
-        RibbonButton::new(Icon::FontA, "Language", Action::Macros)
+        RibbonButton::new(Icon::FontA, s.msg_language(), Action::Macros)
             .enabled(false)
-            .tip("Language settings — planned"),
-        RibbonButton::new(Icon::Shapes, "Translate", Action::Macros)
+            .tip(s.msg_language_settings_planned()),
+        RibbonButton::new(Icon::Shapes, s.msg_translate(), Action::Macros)
             .enabled(false)
-            .tip("Translate — planned"),
-        RibbonButton::new(Icon::Units, "Set Proofing Language", Action::Macros)
+            .tip(s.msg_translate_planned()),
+        RibbonButton::new(Icon::Units, s.msg_set_proofing_language(), Action::Macros)
             .enabled(false)
-            .tip("Set proofing language — planned"),
+            .tip(s.msg_set_proofing_language_planned()),
     ])]
 }
 
-fn comments_cols() -> Vec<super::Col> {
+fn comments_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Comment, "New Comment", Action::Macros)
+            RibbonButton::new(Icon::Comment, s.msg_comment_new(), Action::Macros)
                 .enabled(false)
-                .tip("Comments — planned"),
+                .tip(s.msg_comments_planned()),
         ),
         grid(vec![
             vec![
                 RibbonButton::new(Icon::Comment, "", Action::Macros)
-                    .alt("Previous Comment")
+                    .alt(s.msg_previous_comment())
                     .enabled(false)
-                    .tip("Previous comment — planned"),
+                    .tip(s.msg_previous_comment_planned()),
                 RibbonButton::new(Icon::Comment, "", Action::Macros)
-                    .alt("Next Comment")
+                    .alt(s.msg_next_comment())
                     .enabled(false)
-                    .tip("Next comment — planned"),
+                    .tip(s.msg_next_comment_planned()),
             ],
             vec![
                 RibbonButton::new(Icon::Delete, "", Action::Macros)
-                    .alt("Delete Comment")
+                    .alt(s.msg_delete_comment())
                     .enabled(false)
-                    .tip("Delete comment — planned"),
+                    .tip(s.msg_delete_comment_planned()),
                 RibbonButton::new(Icon::Eye, "", Action::Macros)
-                    .alt("Show/Hide Comments")
+                    .alt(s.msg_show_hide_comments())
                     .enabled(false)
-                    .tip("Show/hide comments — planned (View's toggle is wired today)"),
+                    .tip(s.msg_show_hide_comments_planned_view()),
             ],
         ]),
     ]
 }
 
-fn markup_cols() -> Vec<super::Col> {
+fn markup_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![stack(vec![
-        RibbonButton::new(Icon::Check, "Track Markup", Action::Macros)
+        RibbonButton::new(Icon::Check, s.msg_track_markup(), Action::Macros)
             .enabled(false)
-            .tip("Markup tracking — planned (no markup model yet)"),
-        RibbonButton::new(Icon::Shapes, "Show Markup", Action::Macros)
+            .tip(s.msg_markup_tracking_planned_no_marku()),
+        RibbonButton::new(Icon::Shapes, s.msg_show_markup(), Action::Macros)
             .enabled(false)
-            .tip("Show markup — planned"),
-        RibbonButton::new(Icon::Fit, "Reviewing Pane", Action::Macros)
+            .tip(s.msg_show_markup_planned()),
+        RibbonButton::new(Icon::Fit, s.msg_reviewing_pane(), Action::Macros)
             .enabled(false)
-            .tip("Reviewing pane — planned"),
+            .tip(s.msg_reviewing_pane_planned()),
     ])]
 }
 
-fn reports_cols() -> Vec<super::Col> {
+fn reports_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::DataGraphic, "Shape Report", Action::Macros)
+            RibbonButton::new(Icon::DataGraphic, s.msg_shape_report(), Action::Macros)
                 .enabled(false)
-                .tip("Shape reports — planned"),
+                .tip(s.msg_shape_reports_planned()),
         ),
         stack(vec![RibbonButton::new(
             Icon::Field,
-            "Manage Reports",
+            s.msg_manage_reports(),
             Action::Macros,
         )
         .enabled(false)
-        .tip("Report definitions — planned")]),
+        .tip(s.msg_report_definitions_planned())]),
     ]
 }

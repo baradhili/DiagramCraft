@@ -21,7 +21,7 @@ write .vsdx/.vstx/.vssx packages losslessly, with a Visio-style ribbon
 GUI, stencils and ShapeSheet inspector."""
 assets = [
     ["target/release/diagramcraft", "usr/bin/", "755"],
-    ["../../packaging/diagramcraft.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/tarahi.desktop", "usr/share/applications/", "644"],
     ["../../packaging/diagramcraft.png", "usr/share/icons/hicolor/512x512/apps/diagramcraft.png", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/diagramcraft/LICENSE-MIT", "644"],
     ["../../LICENSE-APACHE", "usr/share/doc/diagramcraft/LICENSE-APACHE", "644"],
@@ -31,7 +31,7 @@ assets = [
 [package.metadata.generate-rpm]
 assets = [
     { source = "../../target/release/diagramcraft", dest = "/usr/bin/diagramcraft", mode = "755" },
-    { source = "../../packaging/diagramcraft.desktop", dest = "/usr/share/applications/diagramcraft.desktop", mode = "644" },
+    { source = "../../packaging/tarahi.desktop", dest = "/usr/share/applications/tarahi.desktop", mode = "644" },
     { source = "../../packaging/diagramcraft.png", dest = "/usr/share/icons/hicolor/512x512/apps/diagramcraft.png", mode = "644" },
     { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/diagramcraft/LICENSE-MIT", mode = "644" },
     { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/diagramcraft/LICENSE-APACHE", mode = "644" },
@@ -55,8 +55,15 @@ arboard = "3.7"
 vsdx = { version = "0.1.0", path = "../vsdx" }
 # Digest-verified built-in extraction to My Shapes (#104).
 sha2 = "0.11"
+# #246 i18n: typed Fluent accessors generated from the project-level
+# `locales/` catalogs (see build.rs; the generated src/l10n.rs is committed).
+fluent-typed = "0.10"
+
+[build-dependencies]
+fluent-typed = { version = "0.10", features = ["build"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["snapshot", "wgpu"] }
+regex = "1" 
 tempfile = "3"
 zip = { version = "9", default-features = false, features = ["deflate"] }

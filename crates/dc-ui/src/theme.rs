@@ -331,13 +331,39 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         ))
         .into(),
     );
+    // #257 item 2: Vazirmatn (OFL) covers the Arabic script — the
+    // Persian UI falls through to it after the Latin faces, so Latin
+    // metrics never move. The bytes are dc's ONE vendored drop
+    // (provenance in dc/assets/fonts/vazirmatn/README.md).
+    fonts.font_data.insert(
+        "vazirmatn".into(),
+        egui::FontData::from_static(dc::VAZIRMATN_REGULAR).into(),
+    );
+    fonts.font_data.insert(
+        "vazirmatn-bold".into(),
+        egui::FontData::from_static(dc::VAZIRMATN_BOLD).into(),
+    );
     let prop = fonts
         .families
         .get_mut(&egui::FontFamily::Proportional)
         .expect("proportional family always exists");
     prop.insert(0, "opensans".into());
     prop.insert(1, "opensans-semibold".into());
+    prop.push("vazirmatn".into());
+    prop.push("vazirmatn-bold".into());
+    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+        mono.push("vazirmatn".into());
+    }
     ctx.set_fonts(fonts);
+    // #257 text-direction coordination: the SAME Vazirmatn drop feeds
+    // the canvas stack — wrap metrics (dc::textmetrics) and the raster
+    // fontdb (dc::raster) consult their registered faces at lazy init.
+    // The initializer is idempotent per PROCESS (PR #269 review): the
+    // egui side above is per-context, but the pending lists are
+    // process-wide and repeated headless constructors used to stack a
+    // fresh copy of both faces every time. The dc CLI calls the same
+    // initializer from main, so exports raster with the face too.
+    dc::register_complex_script_faces();
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(KEY), true));
 }
 

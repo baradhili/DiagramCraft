@@ -1,0 +1,11 @@
+# flynt — Fluent catalog linter (issue #246). Run from the workspace
+# root: `flynt`.
+#
+# Usage detection: flynt scans Rust for `loc("key")` / `loc_with_args`
+# call shapes, which this codebase does not use — messages resolve
+# through the generated fluent-typed accessors
+# (`crates/dc-ui/src/l10n.rs`, built from these catalogs). The
+# completeness / orphan / literal-scan checks that flynt's unused rule
+# would otherwise cover live in `crates/dc-ui/tests/i18n.rs`, so the
+# unused rule is allowed here instead of warned.
+unused = "allow"

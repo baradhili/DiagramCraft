@@ -370,7 +370,7 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
                 p.text(
                     c + Vec2::new(0.0, half + 40.0 + rise),
                     egui::Align2::CENTER_TOP,
-                    "tarahi",
+                    crate::i18n::strs().msg_splash_wordmark(),
                     egui::FontId::proportional(size),
                     INK.gamma_multiply(wm_t),
                 );
@@ -381,7 +381,7 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
                     p.text(
                         c + Vec2::new(0.0, half + 40.0 + size + 14.0),
                         egui::Align2::CENTER_TOP,
-                        "DIAGRAM · DESIGN",
+                        crate::i18n::strs().msg_diagram_design(),
                         egui::FontId::proportional(12.0),
                         MUTED.gamma_multiply(cap_t),
                     );
@@ -393,7 +393,7 @@ pub fn draw_splash(ui: &mut egui::Ui, screen: Rect, started: Instant) -> bool {
             p.text(
                 Pos2::new(card.center().x, card.bottom() - pad),
                 egui::Align2::CENTER_BOTTOM,
-                "Tarahi",
+                crate::i18n::strs().msg_about_name(),
                 egui::FontId::proportional(13.0),
                 MUTED.gamma_multiply(0.8),
             );

@@ -101,25 +101,52 @@ impl ExportPane {
     /// label; the App performs the returned action.
     pub fn show(&mut self, ui: &mut Ui, page_count: usize) -> PaneAction {
         let mut action = PaneAction::None;
+        // #257 item 3: the backstage pane mirrors with the chrome —
+        // the body right-aligns under RTL. The LTR form keeps the
+        // pane's own default layout (plain top_down), byte-identical
+        // to the pre-#257 measure.
+        if crate::i18n::rtl() {
+            ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
+                self.show_body(ui, page_count, &mut action)
+            });
+        } else {
+            self.show_body(ui, page_count, &mut action);
+        }
+        action
+    }
+
+    /// The pane's body — [`Self::show`]'s layout half, direct on the
+    /// pane ui (LTR) or wrapped in the RTL right-aligning layout.
+    fn show_body(
+        &mut self,
+        ui: &mut Ui,
+        page_count: usize,
+        action: &mut PaneAction,
+    ) {
         ui.add_space(4.0);
-        ui.strong("Select a format");
+        ui.strong(crate::i18n::strs().msg_select_a_format());
         ui.add_space(4.0);
         ui.vertical(|ui| {
             for (f, label, hint) in [
                 (
                     Format::Svg,
                     "SVG",
-                    "Vector graphics — the renderer's own format",
+                    crate::i18n::strs().msg_export_svg_hint(),
                 ),
-                (Format::Png, "PNG", "Raster image at the chosen density"),
+                (
+                    Format::Png,
+                    "PNG",
+                    crate::i18n::strs().msg_export_png_hint(),
+                ),
                 (
                     Format::Pdf,
                     "PDF",
-                    "Document with selectable text (all pages in one file)",
+                    crate::i18n::strs().msg_export_pdf_hint(),
                 ),
             ] {
                 let selected = self.format == f;
-                if ui.radio(selected, label).on_hover_text(hint).clicked() && !selected {
+                let label_ref: &str = label;
+                if ui.radio(selected, label_ref).on_hover_text(&hint).clicked() && !selected {
                     self.format = f;
                     // The suggested path follows the format (#218
                     // review): exporting PNG bytes into a .svg name
@@ -132,36 +159,56 @@ impl ExportPane {
                         self.path = p.to_string_lossy().into_owned();
                     }
                 }
-                ui.weak(hint);
+                ui.weak(&hint);
             }
         });
         ui.add_space(8.0);
 
-        ui.strong("Pages");
+        ui.strong(crate::i18n::strs().msg_insert_pages());
         ui.add_space(4.0);
+        // #257: no manual reversal — `show` wraps this body in
+        // `top_down(Align::RIGHT)` under RTL, and egui's
+        // `ui::horizontal` inherits the right-to-left preference from
+        // that placer (Layout::prefer_right_to_left), so the row
+        // mirrors by itself. The explicit `.rev()` double-flipped it
+        // back to LTR (PR #269 review).
+        let mut pages = vec![(false, crate::i18n::strs().msg_current_page())];
+        if page_count > 1 {
+            pages.push((true, crate::i18n::strs().msg_all_pages_page_count(page_count)));
+        }
         ui.horizontal(|ui| {
             // A single-page document has only "Current page" — show it
             // selected rather than an odd unselected radio.
             let current_only = page_count <= 1 || !self.all_pages;
-            if ui.radio(current_only, "Current page").clicked() {
+            let all_only = page_count > 1 && self.all_pages;
+            let mut current_clicked = false;
+            let mut all_clicked = false;
+            for (is_all, label) in &pages {
+                if *is_all {
+                    all_clicked = ui.radio(all_only, label.as_str()).clicked();
+                } else {
+                    current_clicked = ui.radio(current_only, label.as_str()).clicked();
+                }
+            }
+            if current_clicked {
                 self.all_pages = false;
             }
-            if page_count > 1
-                && ui
-                    .radio(self.all_pages, format!("All pages ({page_count})"))
-                    .clicked()
-            {
+            if all_clicked {
                 self.all_pages = true;
             }
         });
         if self.format != Format::Pdf {
             ui.add_space(8.0);
-            ui.strong("Options");
+            ui.strong(crate::i18n::strs().msg_options());
             ui.add_space(4.0);
-            ui.checkbox(&mut self.transparent, "Transparent background");
+            ui.checkbox(&mut self.transparent, crate::i18n::strs().msg_transparent_background());
             if self.format == Format::Png {
+                // #257: `ui::horizontal` under the RTL right-aligning
+                // parent mirrors the pair itself (see the pages row) —
+                // no manual order swap (PR #269 review).
+                let dpi_label = crate::i18n::strs().msg_resolution_dpi();
                 ui.horizontal(|ui| {
-                    ui.label("Resolution (dpi):");
+                    ui.label(dpi_label);
                     ui.add(
                         egui::TextEdit::singleline(&mut self.dpi)
                             .hint_text("96")
@@ -172,44 +219,57 @@ impl ExportPane {
         }
         ui.add_space(10.0);
 
-        ui.strong("Save as");
+        ui.strong(crate::i18n::strs().msg_export_save_as_label());
         ui.add_space(4.0);
+        // #257: mirrored emission under RTL (horizontal, not
+        // with_layout — see the pages row).
+        let mut browse_clicked = false;
         ui.horizontal(|ui| {
-            let path_edit = ui.add(
-                egui::TextEdit::singleline(&mut self.path)
-                    .hint_text("Output file")
-                    .desired_width(360.0),
-            );
-            if path_edit.changed() {
-                // A typed extension re-targets the format so the
-                // dialog filter and the writer agree.
-                if let Some(f) = path_buf_ext(&self.path) {
-                    self.format = f;
+            let mut path_edit = |ui: &mut Ui| {
+                let e = ui.add(
+                    egui::TextEdit::singleline(&mut self.path)
+                        .hint_text(crate::i18n::strs().msg_output_file())
+                        .desired_width(360.0),
+                );
+                if e.changed() {
+                    // A typed extension re-targets the format so the
+                    // dialog filter and the writer agree.
+                    if let Some(f) = path_buf_ext(&self.path) {
+                        self.format = f;
+                    }
                 }
-            }
-            if ui.button("Browse…").clicked() {
-                action = PaneAction::Browse(self.format);
+            };
+            if crate::i18n::rtl() {
+                if ui.button(crate::i18n::strs().msg_browse()).clicked() {
+                    browse_clicked = true;
+                }
+                path_edit(ui);
+            } else {
+                path_edit(ui);
+                browse_clicked = ui.button(crate::i18n::strs().msg_browse()).clicked();
             }
         });
+        if browse_clicked {
+            *action = PaneAction::Browse(self.format);
+        }
         ui.add_space(10.0);
 
         let busy = self.in_flight.is_some();
         let enabled = !self.path.trim().is_empty() && !busy;
         let export = ui.add_enabled(
             enabled,
-            egui::Button::new("Export…").min_size(Vec2::new(90.0, 26.0)),
+            egui::Button::new(crate::i18n::strs().msg_export_start()).min_size(Vec2::new(90.0, 26.0)),
         );
         if busy {
-            ui.weak("Exporting…");
+            ui.weak(crate::i18n::strs().msg_exporting());
         } else if let Some(note) = &self.note {
             ui.weak(note);
         } else if self.path.trim().is_empty() {
-            ui.weak("Pick an output file first");
+            ui.weak(crate::i18n::strs().msg_pick_an_output_file_first());
         }
         if export.clicked() && enabled {
-            action = PaneAction::Export;
+            *action = PaneAction::Export;
         }
-        action
     }
 
     /// Spawn the export worker (App-side: clones the document as the
@@ -277,8 +337,7 @@ impl ExportPane {
                 self.in_flight = None;
                 self.note = Some(match &r {
                     Ok((n, notes)) => {
-                        let mut msg =
-                            format!("Exported {n} file{}.", if *n == 1 { "" } else { "s" });
+                        let mut msg = crate::i18n::strs().msg_exported_files(*n);
                         // #218 review: a density the memory ceiling
                         // reduced is REPORTED, never silently applied.
                         for note in notes {
@@ -287,15 +346,15 @@ impl ExportPane {
                         }
                         msg
                     }
-                    Err(e) => format!("Export failed: {e}"),
+                    Err(e) => crate::i18n::strs().msg_export_failed_e(e),
                 });
                 Some(r)
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => None,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.in_flight = None;
-                self.note = Some("Export failed: worker lost".into());
-                Some(Err("worker lost".into()))
+                self.note = Some(crate::i18n::strs().msg_export_failed_worker_lost());
+                Some(Err(crate::i18n::strs().msg_worker_lost()))
             }
         }
     }

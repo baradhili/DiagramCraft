@@ -13,6 +13,27 @@ use std::sync::Arc;
 use resvg::tiny_skia::Pixmap;
 use resvg::usvg;
 
+/// Faces registered at runtime after this module's vendored set
+/// (#257 text-direction coordination: ONE font drop for the complex
+/// script face — dc's vendored Vazirmatn — registered into BOTH the
+/// metrics and the raster databases, never copied). Callers must
+/// register before the first raster; the databases build once,
+/// lazily, and consult the list at build time —
+/// `dc::register_complex_script_faces` is the idempotent entry
+/// point.
+fn pending_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register a face (its file bytes) into the raster font database.
+/// Must precede the first `font_db()` use.
+#[doc(hidden)]
+pub fn register_face_bytes(bytes: Vec<u8>) {
+    pending_faces().lock().unwrap().push(bytes);
+}
+
 /// The font database, built once: the vendored metric faces —
 /// Carlito (style-complete) and Liberation Sans/Serif/Mono (the
 /// Arial/Times/Courier substitution chains' named faces, #145) —
@@ -25,6 +46,13 @@ pub fn font_db() -> Arc<usvg::fontdb::Database> {
     static DB: std::sync::OnceLock<Arc<usvg::fontdb::Database>> = std::sync::OnceLock::new();
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
+        // Runtime-registered faces (#257 text-direction coordination:
+        // dc's vendored complex-script drop registers into BOTH
+        // databases; must precede the first raster — see
+        // `register_complex_script_faces`).
+        for bytes in pending_faces().lock().unwrap().iter() {
+            db.load_font_data(bytes.clone());
+        }
         const VENDORED: [&[u8]; 16] = [
             include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
             include_bytes!("../assets/fonts/Carlito-Bold.ttf"),

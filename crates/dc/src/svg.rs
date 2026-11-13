@@ -1915,6 +1915,16 @@ pub struct TextBlock {
     pub halign: i32,
     /// `VertAlign`: 1 top, 2 middle (default), 3 bottom.
     pub valign: i32,
+    /// Character `ComplexScriptFont` family (#257 text-direction):
+    /// the face complex-script (RTL-base) paragraphs paint with; the
+    /// spec's zero/absent semantics resolve to `None` and the Latin
+    /// `Font` chain stays. Paragraph granularity — the per-run `<cp>`
+    /// model stays out until a fixture shows one (see
+    /// Analysis/rtl-text-direction.md).
+    pub cs_font: Option<String>,
+    /// Effective `ComplexScriptSize` in inches (the spec's `0 → Size`,
+    /// `<0 → |v|·Size/100` semantics already applied; `None` = Size).
+    pub cs_size: Option<f64>,
 }
 
 /// Resolve one shape's [`TextBlock`] through the instance → master
@@ -1993,20 +2003,46 @@ pub fn text_block_page_rect(
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
+/// The complex-script size an RTL line's glyphs actually paint with
+/// (#257 text-direction, PR #269 review): the resolved
+/// ComplexScriptSize (negative-percent semantics already applied)
+/// when it EXCEEDS the Latin size — a smaller CS size keeps the
+/// block's Latin slot (Visio's LineSpacing is a block cell; only
+/// larger glyphs need a taller slot or adjacent lines overlap).
+pub(crate) fn effective_cs_size(tb: &TextBlock) -> f64 {
+    tb.cs_size.unwrap_or(tb.font_size).max(tb.font_size)
+}
+
+/// One wrapped line's vertical slot: the block's line height, scaled
+/// by the line's effective size when its glyphs paint larger than the
+/// Latin size (RTL lines under a bigger ComplexScriptSize — PR #269
+/// review: default spacing is 1.2 em, so 2 em glyphs in 1.2 em slots
+/// overlapped).
+pub(crate) fn line_slot_height(tb: &TextBlock, rtl: bool) -> f64 {
+    if rtl {
+        tb.line_height * (effective_cs_size(tb) / tb.font_size)
+    } else {
+        tb.line_height
+    }
+}
+
 /// The first baseline's offset below the text-block's TOP edge, in
 /// the block's local inches (y-down) — the single placement authority
 /// shared by `emit_text` and the GUI's in-place editor overlay, so
 /// the editing caret sits on the very line the renderer draws (the
 /// #22 review's "no translation between edit and render"). Subsequent
-/// lines sit one [`TextBlock::line_height`] lower. `total_h` is the
-/// wrapped text's height (lines × line height).
-pub fn text_first_baseline(tb: &TextBlock, total_h: f64) -> f64 {
+/// lines sit their [`line_slot_height`] lower. `total_h` is the
+/// wrapped text's height (the SUM of the line slots), and
+/// `first_line_size` is the first line's effective glyph size — a
+/// first line of larger complex-script glyphs ascends from a higher
+/// baseline than the Latin ascent.
+pub fn text_first_baseline(tb: &TextBlock, total_h: f64, first_line_size: f64) -> f64 {
     let (_ins_l, _ins_r, ins_t, ins_b) = tb.insets;
     let th = tb.size.1;
     match tb.valign {
-        1 => ins_t + tb.font_size * 0.8,                // top
-        3 => th - ins_b - total_h + tb.font_size * 0.8, // bottom
-        _ => (th - total_h) / 2.0 + tb.font_size * 0.8, // middle
+        1 => ins_t + first_line_size * 0.8,                // top
+        3 => th - ins_b - total_h + first_line_size * 0.8, // bottom
+        _ => (th - total_h) / 2.0 + first_line_size * 0.8, // middle
     }
 }
 
@@ -2077,6 +2113,25 @@ pub(crate) fn resolve_text_block(
         .unwrap_or(font_size * 1.2)
         .max(font_size);
 
+    // Complex-script character cells (#257 text-direction, paragraph
+    // granularity — see Analysis/rtl-text-direction.md). Size
+    // semantics per [MS-VSDX] §2.4.4.62: >0 = the value, 0 = the
+    // sibling Size, <0 = |v|·Size/100.
+    let cs_font = char_cell(doc, s, chain, "ComplexScriptFont")
+        .and_then(|c| c.v.clone())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v.parse::<f64>().is_err());
+    let cs_size_raw = char_cell(doc, s, chain, "ComplexScriptSize").and_then(|c| c.numeric());
+    let cs_size = cs_size_raw.map(|v| {
+        if v > 0.0 {
+            v
+        } else if v < 0.0 {
+            v.abs() * font_size / 100.0
+        } else {
+            font_size
+        }
+    });
+
     TextBlock {
         pin: (tx, ty),
         size: (tw, th),
@@ -2094,6 +2149,8 @@ pub(crate) fn resolve_text_block(
         italic: style_bits & 2 != 0,
         halign,
         valign,
+        cs_font,
+        cs_size,
     }
 }
 
@@ -2113,15 +2170,136 @@ pub(crate) fn resolve_text_block(
 /// empty word consumed" (a pending leading space): a bare
 /// `cur.is_empty()` test cannot tell them apart, which is how the
 /// leading run used to vanish.
+/// One wrapped line plus its paragraph's base direction (#257
+/// text-direction): alignment and emission order follow the base, so
+/// the wrap must carry it per line (a block can mix LTR and RTL
+/// paragraphs).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WrapLine {
+    pub text: String,
+    pub rtl: bool,
+}
+
+/// The Right-to-Left Text toggle's transform (#257 text-direction,
+/// PR #269 review): `to_rtl` prepends an explicit U+202B (RLE) to
+/// every paragraph; the reverse strips the leading direction marks
+/// and then pins paragraphs whose first-strong scan still reads RTL
+/// with an explicit U+202A (LRE) — "off" must really read LTR even
+/// on naturally-RTL text, or the toggle is a visual no-op for it.
+/// CRLF input normalizes to LF like the renderer's own wrap.
+pub fn toggle_rtl_marks(text: &str, to_rtl: bool) -> String {
+    let paras = text.replace("\r\n", "\n").replace('\r', "\n");
+    // A text with NO content at all still takes the mark — it
+    // PRE-SETS the direction for the first paragraph typed into an
+    // empty shape (PR #269 review); only the trailing empty of a
+    // NON-empty text stays bare.
+    let pre_empty = paras.is_empty();
+    let mut out: Vec<String> = Vec::new();
+    for l in paras.split('\n') {
+        // Both directions REPLACE the leading mark — stacking an RLE
+        // onto an existing LRE pin would leave two overrides.
+        let stripped = l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}']);
+        if stripped.is_empty() && !pre_empty {
+            // An EMPTY paragraph takes no mark: a mark on the trailing
+            // terminator's empty paragraph is content to the wrapper
+            // (a direction mark is not whitespace, so the renderer's
+            // `trim_end` keeps it) and "hello\r\n" would gain a second
+            // TEXTHEIGHT line — the corpus's trailing-break-adds-no-
+            // line gold (#148) must survive a direction toggle (PR
+            // #269 review).
+            out.push(String::new());
+        } else if to_rtl {
+            out.push(format!("\u{202B}{stripped}"));
+        } else {
+            out.push(if paragraph_base_rtl(stripped) {
+                format!("\u{202A}{stripped}")
+            } else {
+                stripped.to_string()
+            });
+        }
+    }
+    out.join("\n")
+}
+
+/// A paragraph's base direction (Analysis/rtl-text-direction.md):
+/// explicit U+202A/U+202B overrides first, then the first strong
+/// bidi character (R/AL → RTL, L → LTR, neutrals and numbers
+/// skipped); no strong character → LTR. Public for dc-ui's
+/// Right-to-Left Text toggle, which needs the renderer's exact rule
+/// when it pins a stripped paragraph LTR (PR #269 review).
+pub fn paragraph_base_rtl(para: &str) -> bool {
+    let mut chars = para.chars().peekable();
+    // Leading explicit embedding marks decide outright.
+    while let Some(&c) = chars.peek() {
+        match c {
+            '\u{202B}' => return true, // RLE
+            '\u{202A}' => return false, // LRE
+            '\u{200E}' | '\u{200F}' | '\u{202C}' => {
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    for c in chars {
+        use unicode_bidi::BidiClass as BC;
+        match unicode_bidi::bidi_class(c) {
+            BC::R | BC::AL => return true,
+            BC::L => return false,
+            _ => {} // neutrals, EN/AN, marks: keep scanning
+        }
+    }
+    false
+}
+
+/// The greedy wrap both the renderer (`emit_text`) and the
+/// `TEXTHEIGHT` measurement (#147) run — one wrap, so block-size
+/// caches and the rendered lines can never disagree.
+///
+/// Visio stores line breaks as CRLF: breaking on each of \r and \n
+/// separately would insert an empty paragraph between every pair of
+/// lines, so normalize CRLF (and lone CR) to one break first.
+/// Character-exact lines (#144): each paragraph is reconstructed
+/// verbatim — `split(' ')` words joined back with their separator
+/// spaces — so a paragraph-leading space run (empty first words)
+/// survives into the first line, interior runs stay, and a
+/// whitespace-only paragraph emits its spaces instead of an empty
+/// line. `started` distinguishes "no words consumed yet" from "an
+/// empty word consumed" (a pending leading space): a bare
+/// `cur.is_empty()` test cannot tell them apart, which is how the
+/// leading run used to vanish.
+///
+/// #257: `width_in` measures ONE paragraph with the face/size that
+/// paragraph paints with — an RTL-base paragraph resolves the
+/// complex-script cells (`cs_face`/`cs_size`, the Latin pair when
+/// absent), so the wrap decision and the raster agree by construction
+/// per paragraph, not just per block.
 pub(crate) fn wrap_block_text(
     face: &crate::textmetrics::ResolvedFace,
     text: &str,
     size: f64,
     usable_w: f64,
-) -> Vec<String> {
-    let width_in = |s: &str| face.width_in(s, size);
-    let mut lines: Vec<String> = Vec::new();
+    cs_face: &crate::textmetrics::ResolvedFace,
+    cs_size: f64,
+    cs_fallback: &crate::textmetrics::ResolvedFace,
+) -> Vec<WrapLine> {
+    let mut lines: Vec<WrapLine> = Vec::new();
     for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        let rtl = paragraph_base_rtl(para);
+        // An RTL paragraph measures RUN BY RUN with the faces the
+        // raster paints it with (PR #269 review): the resolved CS
+        // face, and the vendored Vazirmatn for runs it lacks — usvg's
+        // per-cluster fallback draws those clusters with the fallback
+        // face, so the wrap's advances must agree or line breaks and
+        // start-aligned edges drift. A pure-script paragraph (Latin
+        // text merely MARKED rtl, or straight Arabic) measures as one
+        // run through the same single-face path as before.
+        let width_in = |s: &str| {
+            if rtl {
+                cs_face.width_in_runs(cs_fallback, s, cs_size)
+            } else {
+                face.width_in(s, size)
+            }
+        };
         let mut cur = String::new();
         let mut started = false;
         for word in para.split(' ') {
@@ -2137,9 +2315,15 @@ pub(crate) fn wrap_block_text(
                     // to share a line with the word): the space is
                     // content (#144 review) — it becomes a line of its
                     // own, never an empty line, never dropped.
-                    lines.push(" ".to_string());
+                    lines.push(WrapLine {
+                        text: " ".to_string(),
+                        rtl,
+                    });
                 } else {
-                    lines.push(std::mem::take(&mut cur));
+                    lines.push(WrapLine {
+                        text: std::mem::take(&mut cur),
+                        rtl,
+                    });
                 }
                 cur = word.to_string();
             } else {
@@ -2163,10 +2347,16 @@ pub(crate) fn wrap_block_text(
                     }
                 }
                 let rest = cur.split_off(split_at);
-                lines.push(std::mem::replace(&mut cur, rest));
+                lines.push(WrapLine {
+                    text: std::mem::replace(&mut cur, rest),
+                    rtl,
+                });
             }
         }
-        lines.push(cur);
+        lines.push(WrapLine {
+            text: cur,
+            rtl,
+        });
     }
     lines
 }
@@ -2245,6 +2435,19 @@ fn emit_text(
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
     let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
+    // The complex-script pair (#257 text-direction): an RTL-base
+    // paragraph measures and paints with ComplexScriptFont/Size —
+    // falling back to the Latin chain/size per the spec's zero
+    // semantics — so wrap and raster agree per paragraph. The vendored
+    // Vazirmatn (dc::register_complex_script_faces) covers the glyphs when the
+    // document names no CS face.
+    let cs_chain = tb.cs_font.as_deref().or(tb.font.as_deref());
+    let cs_face = crate::textmetrics::resolve(cs_chain, tb.bold, tb.italic);
+    // The per-cluster fallback face (the vendored Vazirmatn — see the
+    // wrap's probe note); unregistered, it resolves like the Latin
+    // default and the probe never fires.
+    let cs_fallback = crate::textmetrics::resolve(Some("Vazirmatn"), tb.bold, tb.italic);
+    let cs_size = tb.cs_size.unwrap_or(size);
     // Greeking (#124 item 2): a block whose on-screen em height falls
     // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
     // at paragraph granularity (one width_in per paragraph, no greedy
@@ -2274,14 +2477,30 @@ fn emit_text(
         }
         (Vec::new(), bars)
     } else {
-        (wrap_block_text(&face, text, size, usable_w), Vec::new())
+        (
+            wrap_block_text(&face, text, size, usable_w, &cs_face, cs_size, &cs_fallback),
+            Vec::new(),
+        )
     };
     let n_lines = if greeked {
         bar_widths.len()
     } else {
         lines.len()
     } as f64;
-    let total_h = n_lines * line_h;
+    // Per-line slots (PR #269 review): an RTL line under a bigger
+    // ComplexScriptSize needs a proportionally taller slot — the flat
+    // n × line_h overlapped larger glyphs onto their neighbors, and
+    // TEXTHEIGHT (textfunc) measured the same too-small block.
+    let slots: Vec<f64> = if greeked {
+        vec![line_h; n_lines as usize]
+    } else {
+        lines.iter().map(|l| line_slot_height(&tb, l.rtl)).collect()
+    };
+    let total_h: f64 = slots.iter().sum();
+    // The first line's ascent rides its own effective size.
+    let first_size = lines
+        .first()
+        .map_or(size, |l| if l.rtl { effective_cs_size(&tb) } else { size });
 
     // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
     // sits TxtLocPinX/TxtLocPinY from the block's lower-left corner, so that
@@ -2290,23 +2509,37 @@ fn emit_text(
     // is -(ty - lpy + th).
     let (lpx, lpy) = tb.loc_pin;
     let top_edge = -(ty - lpy + th);
-    let first_baseline = top_edge + text_first_baseline(&tb, total_h);
+    let first_baseline = top_edge + text_first_baseline(&tb, total_h, first_size);
     let _ = (valign, ins_t, ins_b);
     // Line x per alignment: left edge of the text area, center, or right.
+    // #257 text-direction: an RTL-base line reads 0/2 as start/end
+    // relative to its READING order (Visio's RTL editions), so the
+    // visual left edge moves with the line's base. The anchor stays
+    // "start" (usvg lays glyphs from the visual left under its
+    // hardcoded LTR base); the x is the line's computed visual left.
     let left_x = tx - lpx + ins_l;
+    let right_x = left_x + (tw - ins_l - ins_r);
     let (anchor, x) = match halign {
         0 | 3 => ("start", left_x),
-        2 => ("end", left_x + (tw - ins_l - ins_r)),
+        2 => ("end", right_x),
         _ => ("middle", left_x + (tw - ins_l - ins_r) / 2.0),
     };
 
     let mut body = String::new();
+    // Baselines ride each line's OWN ascent: the running coordinate is
+    // the next line's slot TOP (the first baseline already sits
+    // `first_size × 0.8` below the block's band top), and line i's
+    // baseline is its slot top plus ITS effective ascent — a larger
+    // complex-script line following a Latin one rises by the larger
+    // ascent instead of overlapping it (PR #269 review; uniform for
+    // greek bars, whose Latin ascent/slots make this byte-identical
+    // to the old advance-by-slot form).
+    let mut top = first_baseline - first_size * 0.8;
     if greeked {
         // Greek bars (#124 item 2): one neutral-gray rect per line,
         // anchored like the tspan it replaces (left/center/right).
         // Height sits in the x-height band of the line's em box.
-        for (i, w) in bar_widths.iter().enumerate() {
-            let y = first_baseline + i as f64 * line_h;
+        for (w, slot) in bar_widths.iter().zip(&slots) {
             let (bx, bw) = match anchor {
                 "start" => (x, *w),
                 "end" => (x - *w, *w),
@@ -2315,18 +2548,70 @@ fn emit_text(
             let _ = write!(
                 body,
                 r##"<rect x="{bx:.4}" y="{y:.4}" width="{bw:.4}" height="{h:.4}" fill="#7f7f7f"/>"##,
-                y = y - size * 0.72,
+                y = top + size * 0.8 - size * 0.72,
                 h = size * 0.62,
             );
+            top += slot;
         }
     }
-    for (i, line) in lines.iter().enumerate() {
-        let y = first_baseline + i as f64 * line_h;
+    let mut any_rtl = false;
+    for (line, slot) in lines.iter().zip(&slots) {
+        let (content, line_x, line_attrs) = if line.rtl {
+            any_rtl = true;
+            // The RTL line paints with the complex-script pair; its
+            // visual LEFT edge per the start/end mapping, computed
+            // from the line's own shaped width. The face/size ride
+            // the tspan — a block may mix direction lines and the
+            // element-level attrs stay Latin.
+            let lw = cs_face
+                .width_in_runs(&cs_fallback, &line.text, cs_size);
+            let content = format!("\u{2067}{}\u{2069}", line.text);
+            let vx = match halign {
+                0 | 3 => right_x - lw, // start (reading order) = visual right edge
+                2 => left_x,           // end (reading order) = visual left edge
+                _ => x,                // center: the shared center
+            };
+            // PR #269 review: a right-aligned (halign 2) block anchors
+            // the ELEMENT "end", but this line sits at the block's
+            // visual LEFT edge — the inherited "end" would swing its
+            // glyphs further left, outside the block. It anchors
+            // itself "start" there. `font_family_attr` returns the
+            // COMPLETE attribute (leading space included) — wrapping
+            // it in another font-family="" nested the quotes and
+            // emitted malformed XML.
+            let attrs = format!(
+                "{}{}",
+                if halign == 2 {
+                    r#" text-anchor="start""#
+                } else {
+                    ""
+                },
+                if (cs_size - size).abs() > 1e-9 {
+                    format!(r#" font-size="{cs_size:.4}"{}"#, font_family_attr(cs_chain))
+                } else {
+                    font_family_attr(cs_chain)
+                }
+            );
+            (content, vx, attrs)
+        } else {
+            (line.text.clone(), x, String::new())
+        };
+        // This line's baseline: its slot top plus ITS OWN effective
+        // ascent (0.8 × effective size — the same factor
+        // `text_first_baseline` gives the first line).
+        let line_size = if line.rtl {
+            effective_cs_size(&tb)
+        } else {
+            size
+        };
+        let y = top + line_size * 0.8;
         let _ = write!(
             body,
-            r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-            escape_text(line)
+            r#"<tspan x="{line_x:.4}" y="{y:.4}"{}>{}</tspan>"#,
+            line_attrs,
+            escape_text(&content)
         );
+        top += slot;
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
     // glyphs un-mirrored inside the caller's flipped frame, and the
@@ -2367,11 +2652,22 @@ fn emit_text(
         }
         return;
     }
+    // #257 text-direction: the RTL lines' isolates order the runs
+    // under ANY base; `direction="ltr"` pins the element base for
+    // viewers that honor the attribute (usvg ignores it) so the
+    // visual-left start anchor reads the same everywhere. LTR-only
+    // blocks keep the pre-#257 byte form.
+    let dir_attr = if any_rtl {
+        r#" direction="ltr""#
+    } else {
+        ""
+    };
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            r#"<text{d} text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            d = dir_attr,
             a = anchor,
             f = font_attrs,
             b = body
@@ -2380,7 +2676,8 @@ fn emit_text(
     } else {
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            r#"<text{d} text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            d = dir_attr,
             a = anchor,
             f = font_attrs,
             b = body
@@ -6913,6 +7210,350 @@ mod tests {
         );
     }
 
+    /// #257 text-direction: the paragraph base derivation — explicit
+    /// U+202A/U+202B overrides decide before the first strong
+    /// character; neutrals and numbers never decide.
+    #[test]
+    fn paragraph_base_follows_marks_then_first_strong() {
+        assert!(!paragraph_base_rtl("hello world"), "latin → LTR");
+        assert!(paragraph_base_rtl("\u{0633}\u{0644}\u{0627}"), "arabic → RTL");
+        assert!(paragraph_base_rtl("\u{202B}hello"), "RLE override → RTL");
+        assert!(!paragraph_base_rtl("\u{202A}\u{0633}\u{0644}\u{0627}"), "LRE overrides arabic");
+        assert!(!paragraph_base_rtl("123 (x)"), "numbers+neutrals → LTR default");
+        assert!(!paragraph_base_rtl("   "), "all-neutral → LTR default");
+    }
+
+    /// PR #269 review: RTL paragraphs measure with the RUN-PAIRED
+    /// faces (see textmetrics::split_runs) — in this test binary the
+    /// vendored fallback is deliberately unregistered (deterministic
+    /// pins), so every paragraph measures as ONE run through the same
+    /// single-face path as before: the wrap's output for pure-Latin
+    /// and pure-Persian paragraphs is unchanged.
+    #[test]
+    fn rtl_wrap_stays_single_face_without_a_registered_fallback() {
+        let latin = crate::textmetrics::resolve(None, false, false);
+        let fallback = crate::textmetrics::resolve(Some("Vazirmatn"), false, false);
+        let alef = '\u{0627}';
+        assert!(!fallback.covers(alef), "unregistered vazirmatn covers nothing");
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        for para in [format!("\u{202B}{fa}"), format!("\u{202B}abc {fa}")] {
+            let lines = wrap_block_text(
+                &latin,
+                &para,
+                0.13889,
+                2.0,
+                &latin,
+                0.13889,
+                &fallback,
+            );
+            assert_eq!(lines.len(), 1);
+            assert!(lines[0].rtl, "the base is rtl");
+            // No covering fallback → one run → width equals the plain
+            // single-face measurement the wrap always used.
+            let w = lines[0].text.clone();
+            let expect = latin.width_in(&w, 0.13889);
+            let got = latin.width_in_runs(&fallback, &w, 0.13889);
+            assert!(
+                (expect - got).abs() < 1e-9,
+                "single-run text keeps byte-identical widths: {expect} vs {got}"
+            );
+        }
+    }
+
+    /// #257 text-direction (PR #269 review): the Right-to-Left Text
+    /// toggle round-trips — on marks every paragraph, off strips the
+    /// marks AND pins still-RTL paragraphs with an explicit LRE so
+    /// "off" is really LTR (the trim-then-ask direction test in the
+    /// old dc-ui toggle could never see its own mark).
+    #[test]
+    fn rtl_toggle_round_trips_and_pins_natural_rtl_ltr() {
+        // Latin: on marks every paragraph (CRLF normalizes), off
+        // restores the original bytes.
+        let on = toggle_rtl_marks("ab\r\ncd", true);
+        assert_eq!(on, "\u{202B}ab\n\u{202B}cd");
+        assert_eq!(toggle_rtl_marks(&on, false), "ab\ncd");
+        // Naturally-RTL text: off strips the RLE and pins an LRE —
+        // without the pin the first-strong scan would keep it RTL and
+        // the toggle would be a visual no-op.
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        let marked = format!("\u{202B}{fa}");
+        assert_eq!(toggle_rtl_marks(&marked, false), format!("\u{202A}{fa}"));
+        // Toggling back on replaces the pin with the RLE.
+        assert_eq!(
+            toggle_rtl_marks(&format!("\u{202A}{fa}"), true),
+            format!("\u{202B}{fa}")
+        );
+        // An empty paragraph never gains a pin when switching off.
+        assert_eq!(toggle_rtl_marks("\u{202B}", false), "");
+        // An EMPTY shape pre-sets its direction: the bare mark is the
+        // whole text and the first typed paragraph inherits the base.
+        assert_eq!(toggle_rtl_marks("", true), "\u{202B}");
+        assert_eq!(toggle_rtl_marks("", false), "");
+        // The trailing terminator's empty paragraph takes NO mark —
+        // a marked empty tail is content to the wrapper and would add
+        // a TEXTHEIGHT line to "hello\r\n" (#148 gold, PR #269 review).
+        assert_eq!(toggle_rtl_marks("hello\r\n", true), "\u{202B}hello\n");
+        assert_eq!(
+            toggle_rtl_marks("\u{202B}hello\n", false),
+            "hello\n",
+            "off restores the plain trailing break"
+        );
+    }
+
+    /// #257 text-direction: a paragraph whose base is RTL wraps with
+    /// the complex-script pair and emits the isolate-wrapped line at
+    /// its visual right edge (start alignment), with direction=ltr
+    /// pinned on the element.
+    #[test]
+    fn rtl_paragraph_wraps_and_emits_isolated_at_visual_right() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Paragraph".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("HorzAlign".into(), Cell::value("0"))], // start = reading order
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        s.sheet.text = Some("\u{0633}\u{0644}\u{0627}\u{0645} \u{0639}\u{0644}\u{06CC}\u{06A9}\u{0645}".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        // The isolate pair wraps the line content.
+        assert!(out.contains('\u{2067}'), "the RTL line carries an RLI: {out}");
+        assert!(out.contains('\u{2069}'), "the RTL line carries a PDI: {out}");
+        // direction=ltr pins the element base for attribute-honoring viewers.
+        assert!(out.contains(r#"direction="ltr""#), "element base pinned: {out}");
+        // Start alignment under an RTL base puts the line's visual
+        // left edge at (right edge - shaped width), NOT at left_x —
+        // the tspan x must sit right of the block's left inset edge.
+        let x: f64 = out
+            .split(r#"<tspan x=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("a tspan x");
+        // Block pin (1.5,0.5) centered: left edge = tx - lpx + ins_l
+        // = 1.5 - 1.5 + 0.1 = 0.1; the RTL line's visual left must be
+        // strictly inside the block (right_x - lw > 0.1).
+        assert!(x > 0.1, "RTL start line sits at its visual right: x={x}");
+        // A second shape with the SAME text but end alignment (2)
+        // anchors the line at the block's LEFT edge instead.
+        if let Some(SheetChild::Section(sec)) = s.sheet.children.last_mut() {
+            sec.rows[0].cells[0] = ("HorzAlign".into(), Cell::value("2"));
+        }
+        let chain = [&s];
+        let mut out2 = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.0, 1.0, 1.0, false, None, &mut out2);
+        let x2: f64 = out2
+            .split(r#"<tspan x=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("a tspan x");
+        assert!(
+            (x2 - 0.1).abs() < 1e-6,
+            "RTL end line anchors at the visual left inset edge: x2={x2}"
+        );
+        // PR #269 review: the end-aligned line carries its OWN start
+        // anchor (the inherited element "end" would push the glyphs
+        // left of the block), and the tspan's font-family is the
+        // complete attribute — the old double wrapper nested the
+        // quotes. Both are pinned by parsing the emission through the
+        // same usvg the rasterizer runs.
+        assert!(
+            out2.contains(r#" text-anchor="start""#),
+            "the end-aligned RTL line anchors itself start: {out2}"
+        );
+        let full = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">{out2}</svg>"#
+        );
+        // usvg's roxmltree stage rejects malformed attributes — the
+        // nested-quote font-family this fixes failed here.
+        resvg::usvg::Tree::from_str(&full, &resvg::usvg::Options::default())
+            .unwrap_or_else(|e| panic!("RTL emission parses as well-formed SVG: {e}\n{full}"));
+    }
+
+    /// #257 text-direction (PR #269 review): RTL lines under a larger
+    /// ComplexScriptSize take proportionally taller slots — with
+    /// default 1.2 em spacing and 2 em glyphs, the flat line height
+    /// overlapped adjacent lines.
+    #[test]
+    fn larger_complex_script_lines_take_taller_slots() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.set_cell("TxtHeight", Cell::value("1.2"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("ComplexScriptSize".into(), Cell::value("-200"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        // Two RTL paragraphs (the explicit mark decides the base).
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        s.sheet.text = Some(format!("{fa}\r\n{fa}"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.2, 1.5, 0.6, false, None, &mut out);
+        let ys: Vec<f64> = out
+            .split(r#" y=""#)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next().and_then(|v| v.parse().ok()))
+            .collect();
+        assert_eq!(ys.len(), 2, "two rtl lines: {out}");
+        let (tb, _) = {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.2);
+            (tb, chain)
+        };
+        let slot = line_slot_height(&tb, true);
+        let naive = tb.line_height;
+        assert!(
+            slot > naive * 1.5,
+            "the double-size cs glyphs take a taller slot: {slot} vs {naive}"
+        );
+        assert!(
+            (ys[1] - ys[0] - slot).abs() < 2e-3,
+            "the second line advances by the taller slot: {} vs {slot}",
+            ys[1] - ys[0]
+        );
+        // TEXTHEIGHT agrees with the painted slots (the refreshed
+        // cache feeds TxtHeight the same sum).
+        let m = crate::textfunc::SheetTextMeasure::new(&doc, &s, &[&s], format!("{fa}\r\n{fa}"));
+        let h = {
+            use vsdx::formula::TextMeasure as _;
+            m.text_height(&format!("{fa}\r\n{fa}"), 3.0).unwrap()
+        };
+        let ins_tb = tb.insets.2 + tb.insets.3;
+        assert!(
+            (h - (2.0 * slot + ins_tb)).abs() < 1e-3,
+            "TEXTHEIGHT sums the slots (+ insets): {h} vs {}",
+            2.0 * slot + ins_tb
+        );
+    }
+
+    /// PR #269 review: a SMALLER Latin line followed by a larger
+    /// complex-script line — the larger line's baseline must rise by
+    /// its own ascent, not advance by the Latin slot (which overlapped
+    /// the Latin glyphs).
+    #[test]
+    fn mixed_latin_then_larger_cs_lines_keep_their_ascents() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.set_cell("TxtHeight", Cell::value("1.4"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("ComplexScriptSize".into(), Cell::value("-200"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        s.sheet.text = Some(format!("one\r\n\u{202B}{fa}"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.4, 1.5, 0.7, false, None, &mut out);
+        let ys: Vec<f64> = out
+            .split(r#" y=""#)
+            .skip(1)
+            .filter_map(|r| r.split('"').next().and_then(|v| v.parse().ok()))
+            .collect();
+        assert_eq!(ys.len(), 2, "one latin + one rtl line: {out}");
+        let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.4);
+        let size = tb.font_size;
+        let delta = ys[1] - ys[0];
+        // Latin slot (1.2 em) + (cs ascent − latin ascent) = 2.0 em —
+        // the old flat advance was the Latin slot's 1.2 em.
+        assert!(
+            (delta - 2.0 * size).abs() < 2e-3,
+            "the larger line rises by its own ascent: {delta} vs {}",
+            2.0 * size
+        );
+    }
+
+    /// #257 text-direction: LTR-only blocks keep the pre-#257 byte
+    /// form (no direction attribute, no isolates) — golden stability.
+    #[test]
+    fn ltr_blocks_emit_without_direction_marks() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
+        s.sheet.text = Some("plain latin".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        assert!(!out.contains("direction="), "no direction attr: {out}");
+        assert!(!out.contains('\u{2067}'), "no isolates: {out}");
+    }
+
+    /// #257 text-direction: ComplexScriptFont/Size resolve through the
+    /// first Character row with the spec's zero/absent semantics —
+    /// a CS face rides the RTL tspan's font-family, and its size swaps
+    /// the glyph size when it differs.
+    #[test]
+    fn complex_script_cells_feed_the_rtl_line() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.0);
+            assert_eq!(tb.cs_font, None, "absent cell → None");
+            assert_eq!(tb.cs_size, None, "absent size → None (Size fallback)");
+        }
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![
+                    ("ComplexScriptFont".into(), Cell::value("Vazirmatn")),
+                    ("ComplexScriptSize".into(), Cell::value("0.2")),
+                ],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let (font, size) = {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.0);
+            (tb.cs_font, tb.cs_size)
+        };
+        assert_eq!(font.as_deref(), Some("Vazirmatn"));
+        assert_eq!(size, Some(0.2));
+        // The negative-size semantics: <0 = |v|·Size/100.
+        let size0 = {
+            let chain = [&s];
+            resolve_text_block(&doc, &s, &chain, 3.0, 1.0).font_size
+        };
+        if let Some(SheetChild::Section(sec)) = s.sheet.children.last_mut() {
+            sec.rows[0].cells[1] = ("ComplexScriptSize".into(), Cell::value("-150"));
+        }
+        let size = {
+            let chain = [&s];
+            resolve_text_block(&doc, &s, &chain, 3.0, 1.0).cs_size
+        };
+        assert_eq!(
+            size,
+            Some(1.5 * size0),
+            "negative → |v|·Size/100"
+        );
+    }
+
     /// #144 review: when a block is too narrow for `"a "` and `" b"`,
     /// the wrap breaks inside the `"a  b"` space run — the surviving
     /// space is a line of its own, not an empty line and not a dropped
@@ -7027,15 +7668,37 @@ mod tests {
         let total = 2.0 * 0.16667;
         let ascent = 0.13889 * 0.8;
         tb.valign = 1; // top
-        assert!((text_first_baseline(&tb, total) - (0.0555 + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size) - (0.0555 + ascent)).abs() < 1e-9
+        );
         tb.valign = 2; // middle (default)
-        assert!((text_first_baseline(&tb, total) - ((1.0 - total) / 2.0 + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size) - ((1.0 - total) / 2.0 + ascent)).abs()
+                < 1e-9
+        );
         tb.valign = 3; // bottom
-        assert!((text_first_baseline(&tb, total) - (1.0 - 0.0555 - total + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size)
+                - (1.0 - 0.0555 - total + ascent))
+                .abs()
+                < 1e-9
+        );
         // More wrapped lines raise the first line in the middle band.
-        let two = text_first_baseline(&tb, total);
-        let four = text_first_baseline(&tb, total * 2.0);
+        let two = text_first_baseline(&tb, total, tb.font_size);
+        let four = text_first_baseline(&tb, total * 2.0, tb.font_size);
         assert!(four < two, "taller text starts its first line higher");
+        // PR #269 review: a first line of larger complex-script glyphs
+        // ascends from a higher baseline, and its slot (not the flat
+        // line height) is what the next line advances by.
+        tb.line_height = 0.16667;
+        tb.cs_size = Some(tb.font_size * 2.0);
+        let eff = effective_cs_size(&tb);
+        assert_eq!(eff, tb.font_size * 2.0);
+        assert_eq!(line_slot_height(&tb, true), tb.line_height * 2.0);
+        assert_eq!(line_slot_height(&tb, false), tb.line_height, "ltr keeps the latin slot");
+        // A SMALLER complex-script size never shrinks the slot.
+        tb.cs_size = Some(tb.font_size * 0.5);
+        assert_eq!(line_slot_height(&tb, true), tb.line_height);
     }
 
     /// GitHub #22's no-ghost guarantee: `render_page_no_text` drops
