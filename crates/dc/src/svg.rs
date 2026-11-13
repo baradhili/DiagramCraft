@@ -2515,9 +2515,15 @@ fn emit_text(
     };
 
     let mut body = String::new();
-    // Both loops advance baseline-to-baseline by each line's OWN slot
-    // (uniform for greek bars, per-direction for glyph lines).
-    let mut y = first_baseline;
+    // Baselines ride each line's OWN ascent: the running coordinate is
+    // the next line's slot TOP (the first baseline already sits
+    // `first_size × 0.8` below the block's band top), and line i's
+    // baseline is its slot top plus ITS effective ascent — a larger
+    // complex-script line following a Latin one rises by the larger
+    // ascent instead of overlapping it (PR #269 review; uniform for
+    // greek bars, whose Latin ascent/slots make this byte-identical
+    // to the old advance-by-slot form).
+    let mut top = first_baseline - first_size * 0.8;
     if greeked {
         // Greek bars (#124 item 2): one neutral-gray rect per line,
         // anchored like the tspan it replaces (left/center/right).
@@ -2531,10 +2537,10 @@ fn emit_text(
             let _ = write!(
                 body,
                 r##"<rect x="{bx:.4}" y="{y:.4}" width="{bw:.4}" height="{h:.4}" fill="#7f7f7f"/>"##,
-                y = y - size * 0.72,
+                y = top + size * 0.8 - size * 0.72,
                 h = size * 0.62,
             );
-            y += slot;
+            top += slot;
         }
     }
     let mut any_rtl = false;
@@ -2578,13 +2584,22 @@ fn emit_text(
         } else {
             (line.text.clone(), x, String::new())
         };
+        // This line's baseline: its slot top plus ITS OWN effective
+        // ascent (0.8 × effective size — the same factor
+        // `text_first_baseline` gives the first line).
+        let line_size = if line.rtl {
+            effective_cs_size(&tb)
+        } else {
+            size
+        };
+        let y = top + line_size * 0.8;
         let _ = write!(
             body,
             r#"<tspan x="{line_x:.4}" y="{y:.4}"{}>{}</tspan>"#,
             line_attrs,
             escape_text(&content)
         );
-        y += slot;
+        top += slot;
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
     // glyphs un-mirrored inside the caller's flipped frame, and the
@@ -7370,6 +7385,49 @@ mod tests {
             (h - (2.0 * slot + ins_tb)).abs() < 1e-3,
             "TEXTHEIGHT sums the slots (+ insets): {h} vs {}",
             2.0 * slot + ins_tb
+        );
+    }
+
+    /// PR #269 review: a SMALLER Latin line followed by a larger
+    /// complex-script line — the larger line's baseline must rise by
+    /// its own ascent, not advance by the Latin slot (which overlapped
+    /// the Latin glyphs).
+    #[test]
+    fn mixed_latin_then_larger_cs_lines_keep_their_ascents() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.set_cell("TxtHeight", Cell::value("1.4"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("ComplexScriptSize".into(), Cell::value("-200"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        s.sheet.text = Some(format!("one\r\n\u{202B}{fa}"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.4, 1.5, 0.7, false, None, &mut out);
+        let ys: Vec<f64> = out
+            .split(r#" y=""#)
+            .skip(1)
+            .filter_map(|r| r.split('"').next().and_then(|v| v.parse().ok()))
+            .collect();
+        assert_eq!(ys.len(), 2, "one latin + one rtl line: {out}");
+        let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.4);
+        let size = tb.font_size;
+        let delta = ys[1] - ys[0];
+        // Latin slot (1.2 em) + (cs ascent − latin ascent) = 2.0 em —
+        // the old flat advance was the Latin slot's 1.2 em.
+        assert!(
+            (delta - 2.0 * size).abs() < 2e-3,
+            "the larger line rises by its own ascent: {delta} vs {}",
+            2.0 * size
         );
     }
 
