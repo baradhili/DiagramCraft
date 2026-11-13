@@ -155,11 +155,20 @@ fn parse(text: &str) -> Option<L10n> {
 /// known locale is advertised. Unix-only: other platforms default to
 /// English until a native locale API is worth a dependency.
 fn detect_system_locale() -> L10n {
+    detect_from_envs(|key| std::env::var(key).ok())
+}
+
+/// POSIX precedence (`LC_ALL` > `LC_MESSAGES` > `LANG`): the FIRST
+/// set, non-empty variable decides the locale outright (an empty
+/// value counts as unset). An unsupported value there (e.g.
+/// `LC_ALL=C`) means English — the lower-priority variables are never
+/// consulted (PR #269 review: `LC_ALL=C` alongside
+/// `LANG=fa_IR.UTF-8` must stay English, not fall through to the
+/// Persian `LANG`).
+fn detect_from_envs(lookup: impl Fn(&str) -> Option<String>) -> L10n {
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Ok(value) = std::env::var(key) {
-            if let Some(lang) = parse_locale(&value) {
-                return lang;
-            }
+        if let Some(value) = lookup(key).filter(|v| !v.is_empty()) {
+            return parse_locale(&value).unwrap_or(L10n::En);
         }
     }
     L10n::En
@@ -175,6 +184,36 @@ fn parse_locale(value: &str) -> Option<L10n> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn locale_precedence_stops_at_the_first_set_variable() {
+        // Nothing set → English.
+        assert_eq!(detect_from_envs(|_| None), L10n::En);
+        // LANG alone decides.
+        assert_eq!(
+            detect_from_envs(|k| (k == "LANG").then(|| "fa_IR.UTF-8".to_string())),
+            L10n::Fa
+        );
+        // LC_ALL=C OVERRIDES a supported LANG — English, never the
+        // fall-through scan (PR #269 regression).
+        assert_eq!(
+            detect_from_envs(|k| match k {
+                "LC_ALL" => Some("C".to_string()),
+                "LANG" => Some("fa_IR.UTF-8".to_string()),
+                _ => None,
+            }),
+            L10n::En
+        );
+        // An empty value counts as unset (POSIX) — LANG decides.
+        assert_eq!(
+            detect_from_envs(|k| match k {
+                "LC_ALL" => Some(String::new()),
+                "LANG" => Some("de_DE.UTF-8".to_string()),
+                _ => None,
+            }),
+            L10n::De
+        );
+    }
 
     #[test]
     fn roundtrips_through_disk() {
