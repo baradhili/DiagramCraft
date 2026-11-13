@@ -117,7 +117,7 @@ jobs:
           OUTPUT="Tarahi_${{ steps.ver.outputs.version }}_x86_64.AppImage" /tmp/linuxdeploy \
             --appdir AppDir \
             -e target/release/diagramcraft \
-            -d packaging/diagramcraft.desktop \
+            -d packaging/tarahi.desktop \
             -i packaging/diagramcraft.png \
             --output appimage
       - name: Collect artifacts
