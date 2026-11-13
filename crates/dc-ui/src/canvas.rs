@@ -165,9 +165,14 @@ pub const RULER: f32 = 22.0;
 pub fn content_area(canvas_rect: Rect, show_rulers: bool) -> (Pos2, Vec2) {
     // #257 item 3: an RTL chrome carries the vertical ruler band on
     // the canvas's RIGHT edge (the mirrored-corner reading of the
-    // Office RTL ruler pair), so the content origin sits inside it.
+    // Office RTL ruler pair). The origin stays AT the canvas's left
+    // edge — only the LTR case shifts past a left-edge ruler — and
+    // the RTL width below subtracts the right band, so the content
+    // rect never starts outside the canvas (PR #269 review: a
+    // -RULER origin pushed the fit region 22 px past the left edge
+    // while the width cancellation made it 22 px too wide).
     let rtl = crate::i18n::rtl();
-    let v_offset = if rtl { -RULER } else { RULER };
+    let v_offset = if rtl { 0.0 } else { RULER };
     let content_origin = if show_rulers {
         canvas_rect.left_top() + Vec2::new(v_offset, RULER)
     } else if rtl {
