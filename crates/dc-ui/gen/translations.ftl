@@ -451,6 +451,7 @@ open-diamond = Offene Raute
 open-double-chevron-large = Offene Doppelwinkel (groß)
 open-existing-stencil = Vorhandene Schablone öffnen ...
 open-failed-e = Öffnen fehlgeschlagen: { $e }
+open-failed-no-pages = Öffnen fehlgeschlagen: { $path } hat keine Seiten
 open-failed-the-load-worker-died = Öffnen fehlgeschlagen: der Ladeprozess wurde beendet
 open-file-cta = Eine Datei öffnen …
 open-file-title = Datei öffnen
@@ -1275,6 +1276,8 @@ open-double-chevron-large = Open Double Chevron (Large)
 open-existing-stencil = Open Existing Stencil...
 # $e (String) - argument
 open-failed-e = open failed: { $e }
+# $path (String) - argument
+open-failed-no-pages = open failed: { $path } has no pages
 open-failed-the-load-worker-died = open failed: the load worker died
 open-file-cta = Open a file…
 open-file-title = Open a file
@@ -2086,6 +2089,7 @@ open-diamond = لوزی باز
 open-double-chevron-large = شورون دوتایی باز (بزرگ)
 open-existing-stencil = بازکردن شابلون موجود…
 open-failed-e = بازکردن شکست خورد: { $e }
+open-failed-no-pages = بازکردن شکست خورد: { $path } هیچ صفحه‌ای ندارد
 open-failed-the-load-worker-died = بازکردن شکست خورد: کارگر بارگذاری از دست رفت
 open-file-cta = بازکردن یک پرونده…
 open-file-title = بازکردن یک پرونده

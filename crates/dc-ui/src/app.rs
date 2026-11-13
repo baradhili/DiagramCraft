@@ -846,6 +846,14 @@ impl App {
         self.finish_load(path.to_path_buf(), result);
     }
 
+    /// #263 tests: the production CLI dispatch exactly as `App::new`
+    /// runs it — a `.vssx` argument lands in the Shapes pane, anything
+    /// else arms the async document flight.
+    #[doc(hidden)]
+    pub fn debug_load_for_test(&mut self, path: std::path::PathBuf) {
+        self.load(path);
+    }
+
     /// #192 4a tests: the open documents' file names (active first,
     /// then the inactive sessions).
     #[doc(hidden)]
@@ -1030,6 +1038,21 @@ impl App {
     fn finish_load(&mut self, path: PathBuf, result: Result<vsdx::Document, String>) {
         match result {
             Ok(ed) => {
+                // #263: a package that parses but carries NO pages (the
+                // reporter's minimal hand-authored file — one master, an
+                // empty Pages index) used to land in the editor and panic
+                // the first frame at `pages[0]`; on Windows that was an
+                // instant silent exit, no window, no error. The UI refuses
+                // to delete the last page, so opens are the only way a
+                // pages-empty document can exist — reject it here (every
+                // document-open entry lands through this fn) with a status
+                // note, and the app stays up.
+                if ed.pages.is_empty() {
+                    self.status = crate::i18n::strs().msg_open_failed_no_pages(
+                        path.display().to_string(),
+                    );
+                    return;
+                }
                 self.status = format!("opened {}", path.display());
                 self.recent.record(&path);
                 // #192 spec: opening ADDS a document — the active one

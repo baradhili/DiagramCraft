@@ -448,6 +448,7 @@ open-diamond = Offene Raute
 open-double-chevron-large = Offene Doppelwinkel (groß)
 open-existing-stencil = Vorhandene Schablone öffnen ...
 open-failed-e = Öffnen fehlgeschlagen: { $e }
+open-failed-no-pages = Öffnen fehlgeschlagen: { $path } hat keine Seiten
 open-failed-the-load-worker-died = Öffnen fehlgeschlagen: der Ladeprozess wurde beendet
 open-file-cta = Eine Datei öffnen …
 open-file-title = Datei öffnen

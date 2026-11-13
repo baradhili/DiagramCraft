@@ -448,6 +448,7 @@ open-diamond = لوزی باز
 open-double-chevron-large = شورون دوتایی باز (بزرگ)
 open-existing-stencil = بازکردن شابلون موجود…
 open-failed-e = بازکردن شکست خورد: { $e }
+open-failed-no-pages = بازکردن شکست خورد: { $path } هیچ صفحه‌ای ندارد
 open-failed-the-load-worker-died = بازکردن شکست خورد: کارگر بارگذاری از دست رفت
 open-file-cta = بازکردن یک پرونده…
 open-file-title = بازکردن یک پرونده

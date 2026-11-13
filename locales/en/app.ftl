@@ -490,6 +490,8 @@ open-double-chevron-large = Open Double Chevron (Large)
 open-existing-stencil = Open Existing Stencil...
 # $e (String) - argument
 open-failed-e = open failed: { $e }
+# $path (String) - argument
+open-failed-no-pages = open failed: { $path } has no pages
 open-failed-the-load-worker-died = open failed: the load worker died
 open-file-cta = Open a file…
 open-file-title = Open a file

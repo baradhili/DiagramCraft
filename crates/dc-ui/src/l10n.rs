@@ -3068,6 +3068,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "open-failed-no-pages",
+        attribute: None,
+        vars: &["path"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "open-failed-the-load-worker-died",
         attribute: None,
         vars: &[],
@@ -5442,9 +5449,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..35770,
-            Self::En => 35770..70099,
-            Self::Fa => 70099..115788,
+            Self::De => 0..35844,
+            Self::En => 35844..70260,
+            Self::Fa => 70260..116050,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -7118,6 +7125,12 @@ impl L10nLanguage {
         let mut _args = FluentArgs::new();
         _args.set("e", e.as_ref());
         self.0.msg("open-failed-e", Some(_args)).unwrap()
+    }
+    /// $path (String) - argument
+    pub fn msg_open_failed_no_pages<F0: AsRef<str>>(&self, path: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("path", path.as_ref());
+        self.0.msg("open-failed-no-pages", Some(_args)).unwrap()
     }
     pub fn msg_open_failed_the_load_worker_died(&self) -> String {
         self.0
