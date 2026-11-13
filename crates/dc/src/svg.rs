@@ -2283,12 +2283,9 @@ pub(crate) fn first_strong_char(para: &str) -> Option<char> {
     let mut chars = para.chars().skip_while(|c| {
         matches!(c, '\u{202A}' | '\u{202B}' | '\u{200E}' | '\u{200F}' | '\u{202C}')
     });
-    chars.find_map(|c| {
+    chars.find(|&c| {
         use unicode_bidi::BidiClass as BC;
-        match unicode_bidi::bidi_class(c) {
-            BC::R | BC::AL | BC::L => Some(c),
-            _ => None,
-        }
+        matches!(unicode_bidi::bidi_class(c), BC::R | BC::AL | BC::L)
     })
 }
 
