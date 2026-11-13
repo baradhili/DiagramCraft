@@ -2194,12 +2194,17 @@ pub(crate) struct WrapLine {
 /// CRLF input normalizes to LF like the renderer's own wrap.
 pub fn toggle_rtl_marks(text: &str, to_rtl: bool) -> String {
     let paras = text.replace("\r\n", "\n").replace('\r', "\n");
+    // A text with NO content at all still takes the mark — it
+    // PRE-SETS the direction for the first paragraph typed into an
+    // empty shape (PR #269 review); only the trailing empty of a
+    // NON-empty text stays bare.
+    let pre_empty = paras.is_empty();
     let mut out: Vec<String> = Vec::new();
     for l in paras.split('\n') {
         // Both directions REPLACE the leading mark — stacking an RLE
         // onto an existing LRE pin would leave two overrides.
         let stripped = l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}']);
-        if stripped.is_empty() {
+        if stripped.is_empty() && !pre_empty {
             // An EMPTY paragraph takes no mark: a mark on the trailing
             // terminator's empty paragraph is content to the wrapper
             // (a direction mark is not whitespace, so the renderer's
@@ -7317,6 +7322,10 @@ mod tests {
         );
         // An empty paragraph never gains a pin when switching off.
         assert_eq!(toggle_rtl_marks("\u{202B}", false), "");
+        // An EMPTY shape pre-sets its direction: the bare mark is the
+        // whole text and the first typed paragraph inherits the base.
+        assert_eq!(toggle_rtl_marks("", true), "\u{202B}");
+        assert_eq!(toggle_rtl_marks("", false), "");
         // The trailing terminator's empty paragraph takes NO mark —
         // a marked empty tail is content to the wrapper and would add
         // a TEXTHEIGHT line to "hello\r\n" (#148 gold, PR #269 review).

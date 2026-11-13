@@ -11122,6 +11122,13 @@ impl App {
                                     // The add row (label column empty —
                                     // mirrored with the grid under RTL).
                                     if self.prop_add.as_deref() == Some(name.as_str()) {
+                                        if rtl_grid {
+                                            // The PROPERTY row's second cell —
+                                            // emitted before the row closes, or
+                                            // the label would land in the add
+                                            // row below it (PR #269 review).
+                                            emit_label(ui, &label, &tip);
+                                        }
                                         ui.end_row();
                                         if rtl_grid {
                                             // the editor lands visual-left
@@ -11278,13 +11285,10 @@ impl App {
                                     }
                                 }
                             }
-                            if rtl_grid {
-                                // The mirrored row's second cell —
-                                // ALWAYS, including while the add row
-                                // is open: the property keeps its
-                                // label (the add row below carries its
-                                // own empty label cell; PR #269
-                                // review).
+                            if rtl_grid && self.prop_add.as_deref() != Some(name.as_str()) {
+                                // The mirrored row's second cell (the
+                                // add-row variant emitted its own above,
+                                // before its row closed).
                                 emit_label(ui, &label, &tip);
                             }
                             ui.end_row();
@@ -13101,9 +13105,10 @@ impl App {
             // (Analysis/rtl-text-direction.md); the renderer's
             // explicit-override rule reads them.
             Act::ToggleRtlText => {
-                let Some(text) = self.selected_text(shape_id) else {
-                    return;
-                };
+                // A shape with NO text yet can still pre-set its
+                // direction — the empty text takes the bare mark (PR
+                // #269 review).
+                let text = self.selected_text(shape_id).unwrap_or_default();
                 // The direction test reads the mark BEFORE any
                 // stripping — trim-then-ask could never see the
                 // U+202B and the toggle only ever added marks; off
@@ -15107,7 +15112,11 @@ impl App {
                 let drained = self.layers.render_drained()
                     && started.elapsed().as_secs_f32() >= crate::loading::LOADING_MIN_SECS;
                 if drained {
-                    self.status = format!("opened {}", path.display());
+                    // The same routed message the sync landing uses
+                    // (PR #269 review: this bare literal was the one
+                    // unrouted status on the open path).
+                    self.status =
+                        crate::i18n::strs().msg_opened_path(path.display().to_string());
                     self.rendering = None;
                 } else {
                     scrim = Some((crate::i18n::strs().msg_rendering_scrim(), *started));
