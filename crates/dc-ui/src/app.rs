@@ -4492,6 +4492,7 @@ impl App {
             guides,
             grid_step_in: canvas::grid_step_in(&self.view),
             ruler_step_in: canvas::ruler_interval_in(&self.view),
+            ruler_mirror_x_in: crate::i18n::rtl().then(|| self.page_geom().w_in),
             threshold_in: SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
         }
     }
@@ -9743,10 +9744,13 @@ impl App {
                     })
                 })
         });
-        let (snap_grid, snap_ruler, snap_thr) = (
+        let (snap_grid, snap_ruler, snap_thr, snap_mirror) = (
             canvas::grid_step_in(&self.view),
             canvas::ruler_interval_in(&self.view),
             SNAP_STRENGTH_PX as f64 / self.view.px_per_in() as f64,
+            // The RTL ruler's zero at the page's right edge (see
+            // SnapCtx::ruler_mirror_x_in).
+            crate::i18n::rtl().then(|| self.page_geom().w_in),
         );
         let (t_sel, g_sel, t_all, g_all) = {
             let pid = self.page_id().unwrap_or(-1);
@@ -9772,6 +9776,7 @@ impl App {
                 guides,
                 grid_step_in: snap_grid,
                 ruler_step_in: snap_ruler,
+                ruler_mirror_x_in: snap_mirror,
                 threshold_in: snap_thr,
             };
             let mut settings = snap_settings;
@@ -9791,6 +9796,7 @@ impl App {
                 guides: g_sel_r,
                 grid_step_in: snap_grid,
                 ruler_step_in: snap_ruler,
+                ruler_mirror_x_in: snap_mirror,
                 threshold_in: snap_thr,
             };
             crate::snap::corner_snap(p, &ctx, &snap_settings)

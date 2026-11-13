@@ -148,6 +148,14 @@ pub struct SnapCtx<'a> {
     pub grid_step_in: f64,
     /// The finest ruler subdivision interval currently drawn.
     pub ruler_step_in: f64,
+    /// The HORIZONTAL ruler's zero position: `None` = the page's left
+    /// edge (ticks grow rightward, LTR chrome); `Some(page_w_in)`
+    /// under the RTL chrome — the drawn ruler carries its zero at the
+    /// page's RIGHT edge and ticks grow leftward, and snapping shares
+    /// that origin or a corner sitting ON a drawn tick snaps off it
+    /// (PR #269 review). Vertical ticks never mirror (values count up
+    /// from the page bottom in every chrome).
+    pub ruler_mirror_x_in: Option<f64>,
     /// Snap distance: a candidate farther than this (inches) never
     /// wins. The app converts the screen threshold (Visio snap
     /// strength, in px) through the current zoom.
@@ -254,7 +262,7 @@ pub fn snap_translation(rect: (f64, f64, f64, f64), ctx: &SnapCtx, s: &SnapSetti
         }
         for src in sources_x {
             consider_axis(
-                round_to(src, step),
+                round_to_axis(src, step, (hit == SnapHit::Ruler).then_some(ctx.ruler_mirror_x_in).flatten()),
                 hit,
                 &sources_x,
                 ctx.threshold_in,
@@ -407,7 +415,13 @@ pub fn point_snap(
             if !enabled || !step.is_finite() || step <= 1e-6 {
                 continue;
             }
-            consider_line(round_to(p.0, step), true, hit, None, &mut best);
+            consider_line(
+                round_to_axis(p.0, step, (hit == SnapHit::Ruler).then_some(ctx.ruler_mirror_x_in).flatten()),
+                true,
+                hit,
+                None,
+                &mut best,
+            );
             consider_line(round_to(p.1, step), false, hit, None, &mut best);
         }
         for (q, hit) in point_targets(ctx, s.snap_shape_intersections, s.snap_connection_points) {
@@ -657,6 +671,18 @@ fn round_to(v: f64, step: f64) -> f64 {
     (v / step).round() * step
 }
 
+/// `round_to` on an axis whose ruler ticks grow from a mirrored
+/// origin (`Some(mirror)`, the RTL chrome): the tick nearest `v` sits
+/// at `mirror − round_to(mirror − v, step)` — the same line family
+/// the drawn ticks form, just measured from the other edge (PR #269
+/// review).
+fn round_to_axis(v: f64, step: f64, mirror: Option<f64>) -> f64 {
+    match mirror {
+        Some(m) => m - round_to(m - v, step),
+        None => round_to(v, step),
+    }
+}
+
 /// The source value nearest to `v` (the feature a target coordinate
 /// actually snapped to).
 fn nearest(values: [f64; 3], v: f64) -> f64 {
@@ -684,6 +710,7 @@ mod tests {
             guides,
             grid_step_in: 5.0 / 25.4,  // 5 mm
             ruler_step_in: 1.0 / 25.4, // 1 mm subdivision
+            ruler_mirror_x_in: None,
             threshold_in: THRESH,
         }
     }
@@ -1114,6 +1141,45 @@ mod tests {
     fn no_targets_no_hints() {
         assert!(dynamic_hints(box_at(0.0, 0.0, 1.0, 1.0), &ctx(&[], &[])).is_empty());
     }
+
+    /// PR #269 review: under the RTL chrome the horizontal ruler's
+    /// ticks grow from the page's RIGHT edge — a corner sitting on a
+    /// DRAWN tick (215.9 mm page, 5 mm ticks: the k=1 tick at
+    /// 210.9 mm) must snap onto that tick, not onto the from-zero
+    /// multiple at 210 mm.
+    #[test]
+    fn mirrored_ruler_ticks_snap_from_the_right_edge() {
+        let mm = 1.0 / 25.4;
+        let page_w = 215.9 * mm;
+        let mut c = ctx(&[], &[]);
+        c.ruler_step_in = 5.0 * mm;
+        c.ruler_mirror_x_in = Some(page_w);
+        let s = SnapSettings {
+            snap_active: true,
+            snap_grid: false,
+            snap_ruler_subdivisions: true,
+            ..Default::default()
+        };
+        // A 0-width box's left edge ON the drawn 210.9 mm tick.
+        let on_tick = box_at(210.9 * mm, 0.0, 0.0, 1.0);
+        let res = snap_translation(on_tick, &c, &s);
+        let snapped = on_tick.0 + res.dx;
+        assert!(
+            (snapped - 210.9 * mm).abs() < 1e-9,
+            "stays on the drawn tick: {}",
+            snapped / mm
+        );
+        // And with no mirror the same coordinate snaps to the
+        // from-zero 210 mm multiple — the two rulers differ.
+        c.ruler_mirror_x_in = None;
+        let res = snap_translation(on_tick, &c, &s);
+        let snapped = on_tick.0 + res.dx;
+        assert!(
+            (snapped - 210.0 * mm).abs() < 1e-9,
+            "ltr rounds from zero: {}",
+            snapped / mm
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1143,6 +1209,7 @@ mod guide_tests {
             guides: &guides,
             grid_step_in: 5.0 / 25.4,
             ruler_step_in: 1.0 / 25.4,
+            ruler_mirror_x_in: None,
             threshold_in: THRESH,
         };
         // Left edge 0.04 in off the guide's x.
@@ -1177,6 +1244,7 @@ mod guide_tests {
             guides: &guides,
             grid_step_in: 5.0 / 25.4,
             ruler_step_in: 1.0 / 25.4,
+            ruler_mirror_x_in: None,
             threshold_in: THRESH,
         };
         let r = snap_translation((2.96, 3.94, 1.0, 1.0), &ctx, &s);
@@ -1204,6 +1272,7 @@ mod guide_tests {
             guides: &guides,
             grid_step_in: 5.0 / 25.4,
             ruler_step_in: 1.0 / 25.4,
+            ruler_mirror_x_in: None,
             threshold_in: THRESH,
         };
         // Near the line: x snaps, y stays free.
