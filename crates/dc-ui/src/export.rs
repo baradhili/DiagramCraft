@@ -166,22 +166,16 @@ impl ExportPane {
 
         ui.strong(crate::i18n::strs().msg_insert_pages());
         ui.add_space(4.0);
-        // #257: under RTL the entries are emitted reversed —
-        // ui::horizontal keeps the wrap-aware measure (a with_layout
-        // flip here poisons the vertical cursor and voids the pane).
-        let pages: Vec<(bool, String)> = if crate::i18n::rtl() {
-            let mut v = vec![(false, crate::i18n::strs().msg_current_page())];
-            if page_count > 1 {
-                v.push((true, crate::i18n::strs().msg_all_pages_page_count(page_count)));
-            }
-            v.into_iter().rev().collect()
-        } else {
-            let mut v = vec![(false, crate::i18n::strs().msg_current_page())];
-            if page_count > 1 {
-                v.push((true, crate::i18n::strs().msg_all_pages_page_count(page_count)));
-            }
-            v
-        };
+        // #257: no manual reversal — `show` wraps this body in
+        // `top_down(Align::RIGHT)` under RTL, and egui's
+        // `ui::horizontal` inherits the right-to-left preference from
+        // that placer (Layout::prefer_right_to_left), so the row
+        // mirrors by itself. The explicit `.rev()` double-flipped it
+        // back to LTR (PR #269 review).
+        let mut pages = vec![(false, crate::i18n::strs().msg_current_page())];
+        if page_count > 1 {
+            pages.push((true, crate::i18n::strs().msg_all_pages_page_count(page_count)));
+        }
         ui.horizontal(|ui| {
             // A single-page document has only "Current page" — show it
             // selected rather than an odd unselected radio.
@@ -209,25 +203,17 @@ impl ExportPane {
             ui.add_space(4.0);
             ui.checkbox(&mut self.transparent, crate::i18n::strs().msg_transparent_background());
             if self.format == Format::Png {
-                // #257: the label/field pair mirrors by emitting in the
-                // reading order (horizontal keeps the wrap measure).
+                // #257: `ui::horizontal` under the RTL right-aligning
+                // parent mirrors the pair itself (see the pages row) —
+                // no manual order swap (PR #269 review).
                 let dpi_label = crate::i18n::strs().msg_resolution_dpi();
                 ui.horizontal(|ui| {
-                    if crate::i18n::rtl() {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.dpi)
-                                .hint_text("96")
-                                .desired_width(60.0),
-                        );
-                        ui.label(dpi_label);
-                    } else {
-                        ui.label(dpi_label);
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.dpi)
-                                .hint_text("96")
-                                .desired_width(60.0),
-                        );
-                    }
+                    ui.label(dpi_label);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.dpi)
+                            .hint_text("96")
+                            .desired_width(60.0),
+                    );
                 });
             }
         }
