@@ -236,13 +236,45 @@ pub fn show_overlay(
         } else {
             egui::Key::ArrowRight
         };
-        if ui.input_mut(|i| i.consume_key(mods, key)) {
+        // Only the BARE and Shift arrows take the visual path —
+        // Ctrl/Alt/Cmd arrows keep egui's own cursor handling
+        // (word-wise and row-end navigation, PR #269 review).
+        let plain = !(mods.ctrl || mods.alt || mods.command || mods.mac_cmd);
+        if plain && ui.input_mut(|i| i.consume_key(mods, key)) {
             let galley = ui.fonts_mut(|f| f.layout_job(build_job(session.draft.as_str())));
             if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
                 if let Some(range) = state.cursor.char_range() {
-                    let anchor = galley.pos_from_cursor(range.primary);
-                    let dx = if right { 1.5 } else { -1.5 };
-                    let stepped = galley.cursor_from_pos(anchor.center().to_vec2() + Vec2::new(dx, 0.0));
+                    let (primary, had_selection) = if extend {
+                        (range.primary, false)
+                    } else if range.primary != range.secondary {
+                        // An unmodified arrow first COLLAPSES the
+                        // selection to the boundary in the pressed
+                        // direction — measured visually, so a bidi
+                        // selection collapses on the side the arrow
+                        // names; movement resumes on the next press.
+                        let pp = galley.pos_from_cursor(range.primary);
+                        let ps = galley.pos_from_cursor(range.secondary);
+                        let take_primary = if right {
+                            pp.min.x >= ps.min.x
+                        } else {
+                            pp.min.x <= ps.min.x
+                        };
+                        (
+                            if take_primary {
+                                range.primary
+                            } else {
+                                range.secondary
+                            },
+                            true,
+                        )
+                    } else {
+                        (range.primary, false)
+                    };
+                    let stepped = if had_selection {
+                        primary
+                    } else {
+                        adjacent_visual_caret(&galley, primary, right)
+                    };
                     state.cursor.set_char_range(Some(egui::text::CCursorRange {
                         primary: stepped,
                         secondary: if extend { range.secondary } else { stepped },
@@ -415,4 +447,226 @@ fn parse_hex_color(s: &str) -> Color32 {
         }
     }
     Color32::BLACK
+}
+
+/// Step the caret to the adjacent VISUAL caret stop (#257
+/// text-direction, PR #269 review). egui's built-in arrows move in
+/// LOGICAL order — backwards inside an RTL run — and the previous
+/// 1.5 px hit-test nudge returned the SAME stop for any glyph wider
+/// than 3 px, leaving plain arrows dead. This walks the galley's
+/// laid-out stops directly: within the caret's row it steps to the
+/// neighboring x position (crossing bidi run boundaries one stop at a
+/// time), and at a row's edge it crosses to the far end of the
+/// adjacent row — wrapped rows AND explicit line breaks both move the
+/// way the built-in arrows move LTR text.
+fn adjacent_visual_caret(
+    galley: &egui::Galley,
+    cur: egui::text::CCursor,
+    right: bool,
+) -> egui::text::CCursor {
+    use egui::text::CCursor;
+
+    // Char span of each row (CCursor counts CHARS): a row consumes
+    // one char per glyph plus the '\n' when it ends one (epaint omits
+    // the newline glyph).
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(galley.rows.len());
+    {
+        let mut c = 0usize;
+        for r in &galley.rows {
+            let start = c;
+            c += r.row.glyphs.len() + usize::from(r.ends_with_newline);
+            spans.push((start, c));
+        }
+    }
+
+    // Every caret stop of one row, as (x, cursor): both prefer_next_row
+    // variants of each char boundary in the row's span (a boundary a
+    // soft wrap shares with the next row reports the row it faces, so
+    // the y-band check below sorts it into the right list). The
+    // trailing end-of-text boundary belongs to the last row only.
+    let stops_in = |rix: usize| -> Vec<(f32, CCursor)> {
+        let Some(&(start, end)) = spans.get(rix) else {
+            return Vec::new();
+        };
+        let band = galley.rows[rix].rect();
+        let mut stops: Vec<(f32, CCursor)> = Vec::new();
+        for i in start..=end {
+            if i == end && rix + 1 != galley.rows.len() {
+                break; // the shared boundary opens the NEXT row
+            }
+            for pn in [false, true] {
+                let c = CCursor {
+                    index: egui::text::CharIndex(i),
+                    prefer_next_row: pn,
+                };
+                let p = galley.pos_from_cursor(c);
+                if p.min.y >= band.min.y && p.max.y <= band.max.y {
+                    stops.push((p.min.x, c));
+                }
+            }
+        }
+        // Visual order; same-gap duplicates (the (i, prefer_next_row) /
+        // (i+1, !prefer_next_row) pair a shared x produces, and the two
+        // variants of one boundary when a glyph is zero-width) collapse
+        // to their first representative so LTR stepping never burns a
+        // keypress standing still. Distinct boundaries that merely
+        // share an x (a bidi run junction) stay separate stops.
+        stops.sort_by(|a, b| {
+            a.0.total_cmp(&b.0)
+                .then(a.1.index.0.cmp(&b.1.index.0))
+                .then(a.1.prefer_next_row.cmp(&b.1.prefer_next_row))
+        });
+        let mut dedup: Vec<(f32, CCursor)> = Vec::with_capacity(stops.len());
+        for s in stops {
+            if let Some(last) = dedup.last() {
+                let same_gap = (last.1.index.0 == s.1.index.0)
+                    || (last.1.index.0 + 1 == s.1.index.0
+                        && last.1.prefer_next_row
+                        && !s.1.prefer_next_row);
+                if last.0 == s.0 && same_gap {
+                    continue;
+                }
+            }
+            dedup.push(s);
+        }
+        dedup
+    };
+
+    // The caret's row (vertical band of its own slot).
+    let cur_pos = galley.pos_from_cursor(cur);
+    let row_ix = galley
+        .rows
+        .iter()
+        .position(|r| {
+            let rect = r.rect();
+            cur_pos.min.y < rect.max.y && cur_pos.max.y > rect.min.y
+        })
+        .unwrap_or(0);
+    let stops = stops_in(row_ix);
+
+    // Where the current caret sits in the visual order — exact, else
+    // the stop at its x (a collapsed duplicate), else the nearest.
+    let at = stops
+        .iter()
+        .position(|s| s.1 == cur)
+        .or_else(|| {
+            stops.iter().position(|s| {
+                (s.0 - cur_pos.min.x).abs() < 0.5
+                    && s.1.index.0 <= cur.index.0
+                    && cur.index.0 <= s.1.index.0 + 1
+            })
+        })
+        .or_else(|| {
+            stops
+                .iter()
+                .enumerate()
+                .min_by(|a, b| {
+                    (a.1 .0 - cur_pos.min.x)
+                        .abs()
+                        .total_cmp(&(b.1 .0 - cur_pos.min.x).abs())
+                })
+                .map(|(i, _)| i)
+        });
+
+    let Some(at) = at else { return cur };
+    // Step within the row; None = past its edge (left of the first
+    // stop, right of the last, or before the row's start at all).
+    let next = if right {
+        Some(at + 1)
+    } else {
+        at.checked_sub(1)
+    };
+    if let Some(stop) = next.and_then(|n| stops.get(n)) {
+        return stop.1;
+    }
+    // Past the row's edge: cross to the far end of the adjacent row —
+    // or stand still at the text's outer ends.
+    let hop: Option<usize> = if right {
+        Some(row_ix + 1)
+    } else {
+        row_ix.checked_sub(1)
+    };
+    match hop.filter(|&h| h < galley.rows.len()).map(stops_in) {
+        Some(hop_stops) if !hop_stops.is_empty() => {
+            let pick = if right {
+                hop_stops.first()
+            } else {
+                hop_stops.last()
+            };
+            pick.map(|s| s.1).unwrap_or(cur)
+        }
+        _ => cur,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adjacent_visual_caret;
+    use egui::text::CCursor;
+
+    fn galley_of(ctx: &egui::Context, text: &str) -> std::sync::Arc<egui::Galley> {
+        let job = egui::text::LayoutJob::simple(
+            text.into(),
+            egui::FontId::monospace(14.0),
+            egui::Color32::WHITE,
+            f32::INFINITY,
+        );
+        ctx.fonts_mut(|f| f.layout_job(job))
+    }
+
+    /// #257 text-direction / PR #269 review: the visual stepping moves
+    /// one glyph per press through plain Latin text, crosses explicit
+    /// line breaks to the far end of the next row, and round-trips an
+    /// RTL run (logical backwards is visual forwards).
+    #[test]
+    fn visual_caret_steps_glyphs_rows_and_rtl_runs() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+
+        // Latin with an explicit break: 0 → 1 → … → past 'b' crosses
+        // to 'c' (the next row's left end), never lands mid-newline.
+        let g = galley_of(&ctx, "ab\ncd");
+        let mut c = CCursor::new(0);
+        c = adjacent_visual_caret(&g, c, true);
+        assert_eq!(c.index.0, 1, "a|b after one right");
+        c = adjacent_visual_caret(&g, c, true);
+        assert_eq!(c.index.0, 2, "ab| at the break");
+        c = adjacent_visual_caret(&g, c, true);
+        assert_eq!(c.index.0, 3, "across the break to |cd");
+        // …and back: left from 'c' returns to the break, then 'b'.
+        c = adjacent_visual_caret(&g, c, false);
+        assert_eq!(c.index.0, 2, "back across the break");
+        c = adjacent_visual_caret(&g, c, false);
+        assert_eq!(c.index.0, 1, "a|b again");
+        // The outer ends stand still instead of wrapping or panicking.
+        assert_eq!(
+            adjacent_visual_caret(&g, CCursor::new(0), false).index.0,
+            0,
+            "left of the text stays put"
+        );
+        assert_eq!(
+            adjacent_visual_caret(&g, CCursor::new(5), true).index.0,
+            5,
+            "right of the text stays put"
+        );
+
+        // A Persian word: logical order runs right-to-left visually, so
+        // stepping right from the text START must MOVE (the old 1.5 px
+        // nudge returned the same stop), and stepping back returns.
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        let g = galley_of(&ctx, fa);
+        let start = CCursor::new(0);
+        let c = adjacent_visual_caret(&g, start, true);
+        assert_ne!(c, start, "right moves inside an rtl run");
+        assert_eq!(
+            adjacent_visual_caret(&g, c, false),
+            start,
+            "left returns to the start"
+        );
+
+        let mut out = ctx.end_pass();
+        // Headless: the pass's texture delta is intentionally dropped
+        // (nothing rasterizes it) — clear it so its Drop doesn't panic.
+        out.textures_delta.clear();
+    }
 }
