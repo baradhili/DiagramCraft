@@ -15,10 +15,12 @@ use resvg::usvg;
 
 /// Faces registered at runtime after this module's vendored set
 /// (#257 text-direction coordination: ONE font drop for the complex
-/// script face — dc-ui's vendored Vazirmatn — registered into BOTH
-/// the metrics and the raster databases, never copied). Callers must
+/// script face — dc's vendored Vazirmatn — registered into BOTH the
+/// metrics and the raster databases, never copied). Callers must
 /// register before the first raster; the databases build once,
-/// lazily, and consult the list at build time.
+/// lazily, and consult the list at build time —
+/// `dc::register_complex_script_faces` is the idempotent entry
+/// point.
 fn pending_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
     static PENDING: std::sync::OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> =
         std::sync::OnceLock::new();
@@ -45,9 +47,9 @@ pub fn font_db() -> Arc<usvg::fontdb::Database> {
     DB.get_or_init(|| {
         let mut db = usvg::fontdb::Database::new();
         // Runtime-registered faces (#257 text-direction coordination:
-        // dc-ui's vendored complex-script drop registers into BOTH
+        // dc's vendored complex-script drop registers into BOTH
         // databases; must precede the first raster — see
-        // `register_face_bytes`).
+        // `register_complex_script_faces`).
         for bytes in pending_faces().lock().unwrap().iter() {
             db.load_font_data(bytes.clone());
         }

@@ -171,11 +171,11 @@ static PIN_EMBEDDED: AtomicBool = AtomicBool::new(false);
 
 /// Faces registered at runtime after this module's vendored set
 /// (#257 text-direction coordination: ONE font drop for the complex
-/// script face — dc-ui's vendored Vazirmatn — registered into BOTH
-/// the metrics and the raster databases, never copied). The list is
+/// script face — dc's vendored Vazirmatn — registered into BOTH the
+/// metrics and the raster databases, never copied). The list is
 /// consulted when each database builds; callers must register before
-/// the first measurement (dc-ui's `theme::install_fonts` runs in
-/// every constructor ahead of any canvas render).
+/// the first measurement — `dc::register_complex_script_faces` (the
+/// dc CLI's main and dc-ui's `theme::install_fonts` both call it).
 fn pending_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
     static PENDING: OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> = OnceLock::new();
     PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))

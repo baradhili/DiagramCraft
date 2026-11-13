@@ -2382,7 +2382,7 @@ fn emit_text(
     // paragraph measures and paints with ComplexScriptFont/Size —
     // falling back to the Latin chain/size per the spec's zero
     // semantics — so wrap and raster agree per paragraph. The vendored
-    // Vazirmatn (registered by dc-ui) covers the glyphs when the
+    // Vazirmatn (dc::register_complex_script_faces) covers the glyphs when the
     // document names no CS face.
     let cs_chain = tb.cs_font.as_deref().or(tb.font.as_deref());
     let cs_face = crate::textmetrics::resolve(cs_chain, tb.bold, tb.italic);
