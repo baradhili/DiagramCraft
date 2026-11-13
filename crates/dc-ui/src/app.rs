@@ -13078,37 +13078,23 @@ impl App {
                 let Some(text) = self.selected_text(shape_id) else {
                     return;
                 };
-                let any_rtl = text.replace("\r\n", "\n").lines().any(|l| {
-                    l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}'])
-                        .starts_with('\u{202B}')
-                });
-                let toggled: Vec<String> = if any_rtl {
-                    // back to LTR: strip leading direction marks
-                    text.replace("\r\n", "\n")
-                        .split('\n')
-                        .map(|l| {
-                            l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}'])
-                                .to_string()
-                        })
-                        .collect()
-                } else {
-                    // to RTL: mark every paragraph
-                    text.replace("\r\n", "\n")
-                        .split('\n')
-                        .map(|l| format!("\u{202B}{l}"))
-                        .collect()
-                };
+                // The direction test reads the mark BEFORE any
+                // stripping — trim-then-ask could never see the
+                // U+202B and the toggle only ever added marks; off
+                // now pins still-RTL paragraphs with an explicit
+                // U+202A (PR #269 review — see svg::toggle_rtl_marks).
+                let any_rtl = text
+                    .replace("\r\n", "\n")
+                    .lines()
+                    .any(|l| l.starts_with('\u{202B}'));
+                let toggled = dc::svg::toggle_rtl_marks(&text, !any_rtl);
                 let scope = Scope::Shape {
                     page: page_id,
                     shape: shape_id,
                 };
                 let doc = self.ed().map(|ed| &ed.doc);
                 if let Some(doc) = doc {
-                    self.apply(dc::textfunc::text_edit_macro(
-                        doc,
-                        &scope,
-                        &toggled.join("\n"),
-                    ));
+                    self.apply(dc::textfunc::text_edit_macro(doc, &scope, &toggled));
                 }
                 self.status = if any_rtl {
                     crate::i18n::strs().msg_rtl_text_off()

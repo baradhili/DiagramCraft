@@ -2154,11 +2154,40 @@ pub(crate) struct WrapLine {
     pub rtl: bool,
 }
 
+/// The Right-to-Left Text toggle's transform (#257 text-direction,
+/// PR #269 review): `to_rtl` prepends an explicit U+202B (RLE) to
+/// every paragraph; the reverse strips the leading direction marks
+/// and then pins paragraphs whose first-strong scan still reads RTL
+/// with an explicit U+202A (LRE) — "off" must really read LTR even
+/// on naturally-RTL text, or the toggle is a visual no-op for it.
+/// CRLF input normalizes to LF like the renderer's own wrap.
+pub fn toggle_rtl_marks(text: &str, to_rtl: bool) -> String {
+    let paras = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out: Vec<String> = Vec::new();
+    for l in paras.split('\n') {
+        // Both directions REPLACE the leading mark — stacking an RLE
+        // onto an existing LRE pin would leave two overrides.
+        let stripped = l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}']);
+        if to_rtl {
+            out.push(format!("\u{202B}{stripped}"));
+        } else {
+            out.push(if paragraph_base_rtl(stripped) {
+                format!("\u{202A}{stripped}")
+            } else {
+                stripped.to_string()
+            });
+        }
+    }
+    out.join("\n")
+}
+
 /// A paragraph's base direction (Analysis/rtl-text-direction.md):
 /// explicit U+202A/U+202B overrides first, then the first strong
 /// bidi character (R/AL → RTL, L → LTR, neutrals and numbers
-/// skipped); no strong character → LTR.
-pub(crate) fn paragraph_base_rtl(para: &str) -> bool {
+/// skipped); no strong character → LTR. Public for dc-ui's
+/// Right-to-Left Text toggle, which needs the renderer's exact rule
+/// when it pins a stripped paragraph LTR (PR #269 review).
+pub fn paragraph_base_rtl(para: &str) -> bool {
     let mut chars = para.chars().peekable();
     // Leading explicit embedding marks decide outright.
     while let Some(&c) = chars.peek() {
@@ -7088,6 +7117,33 @@ mod tests {
         assert!(!paragraph_base_rtl("\u{202A}\u{0633}\u{0644}\u{0627}"), "LRE overrides arabic");
         assert!(!paragraph_base_rtl("123 (x)"), "numbers+neutrals → LTR default");
         assert!(!paragraph_base_rtl("   "), "all-neutral → LTR default");
+    }
+
+    /// #257 text-direction (PR #269 review): the Right-to-Left Text
+    /// toggle round-trips — on marks every paragraph, off strips the
+    /// marks AND pins still-RTL paragraphs with an explicit LRE so
+    /// "off" is really LTR (the trim-then-ask direction test in the
+    /// old dc-ui toggle could never see its own mark).
+    #[test]
+    fn rtl_toggle_round_trips_and_pins_natural_rtl_ltr() {
+        // Latin: on marks every paragraph (CRLF normalizes), off
+        // restores the original bytes.
+        let on = toggle_rtl_marks("ab\r\ncd", true);
+        assert_eq!(on, "\u{202B}ab\n\u{202B}cd");
+        assert_eq!(toggle_rtl_marks(&on, false), "ab\ncd");
+        // Naturally-RTL text: off strips the RLE and pins an LRE —
+        // without the pin the first-strong scan would keep it RTL and
+        // the toggle would be a visual no-op.
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        let marked = format!("\u{202B}{fa}");
+        assert_eq!(toggle_rtl_marks(&marked, false), format!("\u{202A}{fa}"));
+        // Toggling back on replaces the pin with the RLE.
+        assert_eq!(
+            toggle_rtl_marks(&format!("\u{202A}{fa}"), true),
+            format!("\u{202B}{fa}")
+        );
+        // An empty paragraph never gains a pin when switching off.
+        assert_eq!(toggle_rtl_marks("\u{202B}", false), "");
     }
 
     /// #257 text-direction: a paragraph whose base is RTL wraps with
