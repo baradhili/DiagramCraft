@@ -2478,11 +2478,9 @@ fn emit_text(
             any_rtl = true;
             // The RTL line paints with the complex-script pair; its
             // visual LEFT edge per the start/end mapping, computed
-            // from the line's own shaped width (the anchor stays
-            // start — usvg's LTR frame lays glyphs from x leftward-
-            // to-right and the isolate orders the runs). The face/
-            // size ride the tspan — a block may mix direction lines
-            // and the element-level attrs stay Latin.
+            // from the line's own shaped width. The face/size ride
+            // the tspan — a block may mix direction lines and the
+            // element-level attrs stay Latin.
             let lw = cs_face.width_in(&line.text, cs_size);
             let content = format!("\u{2067}{}\u{2069}", line.text);
             let vx = match halign {
@@ -2490,14 +2488,27 @@ fn emit_text(
                 2 => left_x,           // end (reading order) = visual left edge
                 _ => x,                // center: the shared center
             };
-            let attrs = if (cs_size - size).abs() > 1e-9 {
-                format!(
-                    r#" font-size="{cs_size:.4}" font-family="{}""#,
+            // PR #269 review: a right-aligned (halign 2) block anchors
+            // the ELEMENT "end", but this line sits at the block's
+            // visual LEFT edge — the inherited "end" would swing its
+            // glyphs further left, outside the block. It anchors
+            // itself "start" there. `font_family_attr` returns the
+            // COMPLETE attribute (leading space included) — wrapping
+            // it in another font-family="" nested the quotes and
+            // emitted malformed XML.
+            let attrs = format!(
+                "{}{}",
+                if halign == 2 {
+                    r#" text-anchor="start""#
+                } else {
+                    ""
+                },
+                if (cs_size - size).abs() > 1e-9 {
+                    format!(r#" font-size="{cs_size:.4}"{}"#, font_family_attr(cs_chain))
+                } else {
                     font_family_attr(cs_chain)
-                )
-            } else {
-                format!(r#" font-family="{}""#, font_family_attr(cs_chain))
-            };
+                }
+            );
             (content, vx, attrs)
         } else {
             (line.text.clone(), x, String::new())
@@ -7205,6 +7216,23 @@ mod tests {
             (x2 - 0.1).abs() < 1e-6,
             "RTL end line anchors at the visual left inset edge: x2={x2}"
         );
+        // PR #269 review: the end-aligned line carries its OWN start
+        // anchor (the inherited element "end" would push the glyphs
+        // left of the block), and the tspan's font-family is the
+        // complete attribute — the old double wrapper nested the
+        // quotes. Both are pinned by parsing the emission through the
+        // same usvg the rasterizer runs.
+        assert!(
+            out2.contains(r#" text-anchor="start""#),
+            "the end-aligned RTL line anchors itself start: {out2}"
+        );
+        let full = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">{out2}</svg>"#
+        );
+        // usvg's roxmltree stage rejects malformed attributes — the
+        // nested-quote font-family this fixes failed here.
+        resvg::usvg::Tree::from_str(&full, &resvg::usvg::Options::default())
+            .unwrap_or_else(|e| panic!("RTL emission parses as well-formed SVG: {e}\n{full}"));
     }
 
     /// #257 text-direction: LTR-only blocks keep the pre-#257 byte
