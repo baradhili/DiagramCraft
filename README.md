@@ -23,6 +23,8 @@ The workload — multi-file refactors across a real binary format reverse-engine
 
 If you're building a long-horizon coding project, [try GLM-5.x](https://z.ai) or [inquire about Z.ai open source sponsorships](https://z.ai/contact).
 
+[![Greptile: The War on Bugs](https://www.greptile.com/badge.svg)](https://www.greptile.com/?utm_source=oss_badge&utm_medium=readme&utm_campaign=greptile_for_open_source)
+
 ## Current screenshots
 
 ![Screenshot.png](Screenshot.png)
