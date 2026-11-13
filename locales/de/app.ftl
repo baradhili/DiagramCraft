@@ -561,6 +561,7 @@ save-stencil = Schablone speichern
 save-the-stencil-planned = Die Schablone speichern — geplant
 scale = Skalieren
 screen-96-dpi = Bildschirm (96 dpi)
+search-results = Suchergebnisse
 search-shapes = Formen suchen
 search-templates = Vorlagen suchen
 select = Auswählen

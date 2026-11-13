@@ -3859,6 +3859,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "search-results",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "search-shapes",
         attribute: None,
         vars: &[],
@@ -5435,9 +5442,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..35738,
-            Self::En => 35738..70035,
-            Self::Fa => 70035..115744,
+            Self::De => 0..35770,
+            Self::En => 35770..70099,
+            Self::Fa => 70099..115788,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -7516,6 +7523,9 @@ impl L10nLanguage {
     }
     pub fn msg_screen_96_dpi(&self) -> String {
         self.0.msg("screen-96-dpi", None).unwrap()
+    }
+    pub fn msg_search_results(&self) -> String {
+        self.0.msg("search-results", None).unwrap()
     }
     pub fn msg_search_shapes(&self) -> String {
         self.0.msg("search-shapes", None).unwrap()

@@ -1875,15 +1875,16 @@ fn draw_rulers(
     };
 
     // Horizontal ruler: ticks over the page extent only.
-    // #257 item 3: an RTL chrome flips the ruler's zero to the right —
-    // tick positions mirror across the ruler band so values grow
-    // leftward; the document coordinates themselves never move.
+    // #257 item 3: an RTL chrome flips the ruler's zero to the page's
+    // right edge — tick positions mirror across the PAGE's center line
+    // (not the band: a page off the window's center would mirror its
+    // ticks off the paper), so values grow leftward while the document
+    // coordinates never move.
     let rtl = crate::i18n::rtl();
-    let band_left = top.left();
-    let band_right = top.right();
+    let page_cx = page_rect.center().x;
     let mirror = |sx: f32| {
         if rtl {
-            band_left + (band_right - sx)
+            2.0 * page_cx - sx
         } else {
             sx
         }

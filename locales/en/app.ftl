@@ -617,6 +617,7 @@ save-stencil = Save Stencil
 save-the-stencil-planned = Save the stencil — planned
 scale = Scale
 screen-96-dpi = Screen (96 dpi)
+search-results = Search Results
 search-shapes = Search Shapes
 search-templates = Search Templates
 select = Select

@@ -347,7 +347,7 @@ impl Stencil {
                 for ix in 0..set.len() {
                     cells.extend(stencil_cells(set, ix, &q));
                 }
-                stencil_list_entry(ui, t, "Search Results", true);
+                stencil_list_entry(ui, t, &crate::i18n::strs().msg_search_results(), true);
                 if cells.is_empty() {
                     ui.weak(crate::i18n::strs().msg_no_matching_shapes());
                 } else {
