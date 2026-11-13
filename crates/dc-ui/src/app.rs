@@ -757,7 +757,7 @@ impl App {
             // parse synchronously (the interactive open paths use the
             // async load(); tests assert right after the ctor).
             let result = vsdx::parse::parse(&p).map_err(|e| format!("{e:#}"));
-            app.finish_load(p, result);
+            let _ = app.finish_load(p, result);
         }
         app
     }
@@ -843,7 +843,7 @@ impl App {
     #[doc(hidden)]
     pub fn debug_load_sync_for_test(&mut self, path: &std::path::Path) {
         let result = vsdx::parse::parse(path).map_err(|e| format!("{e:#}"));
-        self.finish_load(path.to_path_buf(), result);
+        let _ = self.finish_load(path.to_path_buf(), result);
     }
 
     /// #263 tests: the production CLI dispatch exactly as `App::new`
@@ -1035,7 +1035,13 @@ impl App {
 
     /// The shared open-completion path: the #224 worker's landing and
     /// the synchronous callers (tests, Recent lists) all end here.
-    fn finish_load(&mut self, path: PathBuf, result: Result<vsdx::Document, String>) {
+    /// Lands one worker result; the return says whether an EDITOR
+    /// landed — a failed parse or the #263 no-pages rejection both
+    /// refuse (with a status note) and their callers must not enter
+    /// the render-completion scrim (PR #269 review: an async no-pages
+    /// open kept the loading scrim up forever — nothing renders, so
+    /// the drain never closes it).
+    fn finish_load(&mut self, path: PathBuf, result: Result<vsdx::Document, String>) -> bool {
         match result {
             Ok(ed) => {
                 // #263: a package that parses but carries NO pages (the
@@ -1051,7 +1057,7 @@ impl App {
                     self.status = crate::i18n::strs().msg_open_failed_no_pages(
                         path.display().to_string(),
                     );
-                    return;
+                    return false;
                 }
                 self.status = crate::i18n::strs().msg_opened_path(path.display().to_string());
                 self.recent.record(&path);
@@ -1080,8 +1086,12 @@ impl App {
                 self.reorder_open = false;
                 self.comment_target = None;
                 self.comment_edit = None;
+                true
             }
-            Err(e) => self.status = crate::i18n::strs().msg_open_failed_e(e),
+            Err(e) => {
+                self.status = crate::i18n::strs().msg_open_failed_e(e);
+                false
+            }
         }
     }
 
@@ -1117,8 +1127,7 @@ impl App {
         {
             let result = load.result.take().expect("result gated the landing");
             let path = load.path.clone();
-            let loaded = result.is_ok();
-            self.finish_load(path.clone(), result);
+            let loaded = self.finish_load(path.clone(), result);
             // The first render is the heavy half (every shape rasters +
             // lands): keep the scrim up until the layer store drains
             // (#242 — "run until render is complete"). A FAILED open
