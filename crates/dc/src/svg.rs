@@ -2194,7 +2194,16 @@ pub fn toggle_rtl_marks(text: &str, to_rtl: bool) -> String {
         // Both directions REPLACE the leading mark — stacking an RLE
         // onto an existing LRE pin would leave two overrides.
         let stripped = l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}']);
-        if to_rtl {
+        if stripped.is_empty() {
+            // An EMPTY paragraph takes no mark: a mark on the trailing
+            // terminator's empty paragraph is content to the wrapper
+            // (a direction mark is not whitespace, so the renderer's
+            // `trim_end` keeps it) and "hello\r\n" would gain a second
+            // TEXTHEIGHT line — the corpus's trailing-break-adds-no-
+            // line gold (#148) must survive a direction toggle (PR
+            // #269 review).
+            out.push(String::new());
+        } else if to_rtl {
             out.push(format!("\u{202B}{stripped}"));
         } else {
             out.push(if paragraph_base_rtl(stripped) {
@@ -7212,6 +7221,15 @@ mod tests {
         );
         // An empty paragraph never gains a pin when switching off.
         assert_eq!(toggle_rtl_marks("\u{202B}", false), "");
+        // The trailing terminator's empty paragraph takes NO mark —
+        // a marked empty tail is content to the wrapper and would add
+        // a TEXTHEIGHT line to "hello\r\n" (#148 gold, PR #269 review).
+        assert_eq!(toggle_rtl_marks("hello\r\n", true), "\u{202B}hello\n");
+        assert_eq!(
+            toggle_rtl_marks("\u{202B}hello\n", false),
+            "hello\n",
+            "off restores the plain trailing break"
+        );
     }
 
     /// #257 text-direction: a paragraph whose base is RTL wraps with
