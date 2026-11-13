@@ -7266,9 +7266,17 @@ mod tests {
         assert_eq!(first_strong_char(&format!("\u{202A}{alef}")), Some(alef));
         let latin = crate::textmetrics::resolve(None, false, false);
         let fallback = crate::textmetrics::resolve(Some("Vazirmatn"), false, false);
-        // Unregistered fallback covers nothing beyond the Latin chain.
-        assert!(latin.covers('h'), "carlito covers latin");
-        assert!(!latin.covers(alef), "carlito lacks arabic");
+        // `covers` sees the resolved face itself. Whether the LATIN
+        // chain covers Arabic is HOST-dependent — the Windows CI
+        // runner carries a real Calibri (Arabic-capable), Linux falls
+        // to the vendored Carlito (not) — the probe is built for
+        // both, and the wrap assertions below hold on either host,
+        // so the face-level check stays informational.
+        assert!(latin.covers('h'), "the latin chain covers latin");
+        let _ = latin.covers(alef);
+        // The fallback names Vazirmatn, which resolves only when
+        // registered — here it falls to the vendored Latin default
+        // and cannot cover Arabic on any runner host.
         assert!(!fallback.covers(alef), "unregistered vazirmatn covers nothing");
         // So a wrapped Persian paragraph keeps the primary face here —
         // and a Latin paragraph MARKED rtl keeps its Latin face even
