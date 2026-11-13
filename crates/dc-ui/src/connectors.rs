@@ -535,6 +535,17 @@ pub fn route_rows(begin: (f64, f64), points: &[(f64, f64)]) -> [(f64, f64); 3] {
     [local(e1), local(e2), local(last)]
 }
 
+
+/// The localized endpoint word (#257 value-side vocabulary): the
+/// endpoint macros' labels carry the reading-order word, not the cell
+/// name (which stays model vocabulary).
+pub fn endpoint_word(end: End) -> String {
+    match end {
+        End::Begin => crate::i18n::strs().msg_endpoint_begin(),
+        End::End => crate::i18n::strs().msg_endpoint_end(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

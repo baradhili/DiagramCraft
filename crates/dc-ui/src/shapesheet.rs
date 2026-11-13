@@ -384,23 +384,26 @@ fn section_rank(name: &str) -> i32 {
 
 /// Visio's display names for ShapeSheet sections.
 fn section_display_name(n: &str, ix: i64) -> String {
+    // Display layer only (#257 ride-along): the section NAMES stay
+    // model vocabulary; these are the headings the inspector paints.
+    let strs = crate::i18n::strs();
     match n {
-        "User" => "User-defined Cells".into(),
-        "Connection" => "Connection Points".into(),
-        "XForm1D" => "1-D Endpoints".into(),
-        "TextXForm" => "Text Transform".into(),
-        "LayerMembership" => "Layer Membership".into(),
-        "FillGradient" => "Fill Gradient Stops".into(),
-        "LineGradient" => "Line Gradient Stops".into(),
-        "Prop" => "Shape Data".into(),
-        "SmartTags" => "Smart Tags".into(),
-        "Fields" => "Text Fields".into(),
-        "Control" => "Control Points".into(),
-        "Geometry" => format!("Geometry {}", ix + 1),
-        "RulerGrid" => "Ruler & Grid".into(),
-        "PageLayout" => "Page Layout".into(),
-        "PrintPageSetup" => "Print Setup".into(),
-        "PagesXForm" => "Page Properties".into(),
+        "User" => strs.msg_ss_section_user_defined_cells(),
+        "Connection" => strs.msg_ss_section_connection_points(),
+        "XForm1D" => strs.msg_ss_section_1d_endpoints(),
+        "TextXForm" => strs.msg_ss_section_text_transform(),
+        "LayerMembership" => strs.msg_ss_section_layer_membership(),
+        "FillGradient" => strs.msg_ss_section_fill_gradient_stops(),
+        "LineGradient" => strs.msg_ss_section_line_gradient_stops(),
+        "Prop" => strs.msg_ss_section_shape_data(),
+        "SmartTags" => strs.msg_ss_section_smart_tags(),
+        "Fields" => strs.msg_ss_section_text_fields(),
+        "Control" => strs.msg_ss_section_control_points(),
+        "Geometry" => strs.msg_ss_section_geometry_n(ix + 1),
+        "RulerGrid" => strs.msg_ss_section_ruler_grid(),
+        "PageLayout" => strs.msg_ss_section_page_layout(),
+        "PrintPageSetup" => strs.msg_ss_section_print_setup(),
+        "PagesXForm" => strs.msg_ss_section_page_properties(),
         other => other.into(),
     }
 }
@@ -556,7 +559,7 @@ fn cell_text(c: &Cell, cell: &str) -> String {
     }
     match c.v.as_deref() {
         Some(v) if !v.is_empty() => fmt_value(v, c.u.as_deref(), cell),
-        _ => "No Formula".into(),
+        _ => crate::i18n::strs().msg_no_formula(),
     }
 }
 
@@ -831,7 +834,7 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
                 MergedCell::fallback(
                     display_default(name)
                         .map(str::to_string)
-                        .unwrap_or_else(|| "No Formula".into()),
+                        .unwrap_or_else(|| crate::i18n::strs().msg_no_formula()),
                 )
             })
     };
@@ -883,7 +886,7 @@ pub fn build_views(doc: &Document, page_id: i64, shape_id: i64) -> Vec<SectionVi
     //    it as a cell rather than a real LayerMembership section).
     if !names.iter().any(|(n, _)| n == "LayerMembership") {
         let lm = resolved("LayerMember");
-        if lm.text != "No Formula" {
+        if lm.text != crate::i18n::strs().msg_no_formula() {
             views.push(SectionView::Bare {
                 title: "Layer Membership".into(),
                 text: lm.text,
@@ -1055,7 +1058,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
                 rows: vec![(
                     "0".into(),
                     false,
-                    vec![MergedCell::fallback("No Formula".into()); ncols],
+                    vec![MergedCell::fallback(crate::i18n::strs().msg_no_formula()); ncols],
                 )],
             });
         }
@@ -1078,7 +1081,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
             })
             .unwrap_or_default();
         return Some(SectionView::Bare {
-            title: "Layer Membership".into(),
+            title: crate::i18n::strs().msg_ss_section_layer_membership(),
             text,
         });
     }
@@ -1123,7 +1126,7 @@ fn section_view(sheets: &[(&Sheet, bool)], name: &str, ix: i64) -> Option<Sectio
         rows.push((
             "0".into(),
             false,
-            vec![MergedCell::fallback("No Formula".into()); headers.len().max(1)],
+            vec![MergedCell::fallback(crate::i18n::strs().msg_no_formula()); headers.len().max(1)],
         ));
     }
     Some(SectionView::Rows {
@@ -1224,7 +1227,7 @@ fn value_label(ui: &mut Ui, w: f32, cell: &MergedCell) {
 pub fn panel(ui: &mut Ui, doc: &Document, page_id: i64, shape_id: i64, max_w: f32) {
     let views = build_views(doc, page_id, shape_id);
     if views.is_empty() {
-        ui.label("shape not found");
+        ui.label(crate::i18n::strs().msg_ss_shape_not_found());
         return;
     }
     // The viewport is capped: the resolved sheet of a master-backed
@@ -1786,10 +1789,17 @@ mod tests {
             ..Section::default()
         }));
         let views = build_views(&doc, 1, 100);
+        // The localized title carries fluent's zero-width bidi
+        // isolation around the interpolated number (item 3e) — strip
+        // the invisible marks for the comparison.
+        let strip_isolates =
+            |s: &str| s.chars().filter(|c| !matches!(c, '\u{2066}'..='\u{2069}')).collect::<String>();
         let g2 = views
             .iter()
             .find_map(|v| match v {
-                SectionView::Rows { title, rows, .. } if title == "Geometry 2" => {
+                SectionView::Rows { title, rows, .. }
+                    if strip_isolates(title) == "Geometry 2" =>
+                {
                     Some(rows.clone())
                 }
                 _ => None,

@@ -28,84 +28,84 @@ pub(crate) const CONTAINER_STYLES: [&str; 14] = [
     "Translucent",
 ];
 
-pub(crate) fn groups(ctx: &TabCtx) -> Vec<Group> {
+pub(crate) fn groups(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new(crate::i18n::strs().msg_size(), size_cols()),
-        Group::new(crate::i18n::strs().msg_container_styles(), styles_grid()),
-        Group::new(crate::i18n::strs().msg_heading_style(), heading_cols()),
-        Group::new(crate::i18n::strs().msg_membership(), membership_cols(ctx)),
+        Group::new(s.msg_size(), size_cols(s, )),
+        Group::new(s.msg_container_styles(), styles_grid(s, )),
+        Group::new(s.msg_heading_style(), heading_cols(s, )),
+        Group::new(s.msg_membership(), membership_cols(s, ctx)),
     ]
 }
 
-fn size_cols() -> Vec<super::Col> {
+fn size_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Grid, crate::i18n::strs().msg_margins(), Action::Macros)
+            RibbonButton::new(Icon::Grid, s.msg_margins(), Action::Macros)
                 .enabled(false)
                 .split()
-                .tip(crate::i18n::strs().msg_container_margins_planned()),
+                .tip(s.msg_container_margins_planned()),
         ),
         stack(vec![
-            RibbonButton::new(Icon::Fit, crate::i18n::strs().msg_fit_to_contents(), Action::Macros)
+            RibbonButton::new(Icon::Fit, s.msg_fit_to_contents(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_size_the_container_to_its_member()),
-            RibbonButton::new(Icon::Fit, crate::i18n::strs().msg_automatic_resize(), Action::Macros)
+                .tip(s.msg_size_the_container_to_its_member()),
+            RibbonButton::new(Icon::Fit, s.msg_automatic_resize(), Action::Macros)
                 .enabled(false)
                 .split()
-                .tip(crate::i18n::strs().msg_grow_with_the_members_planned()),
+                .tip(s.msg_grow_with_the_members_planned()),
         ]),
     ]
 }
 
-fn styles_grid() -> Vec<super::Col> {
+fn styles_grid(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![grid(vec![
         CONTAINER_STYLES[..7]
             .iter()
             .map(|n| {
                 RibbonButton::new(Icon::Container, *n, Action::ContainerStyle(n))
-                    .tip(crate::i18n::strs().msg_wrap_the_selection_in_this_conta())
+                    .tip(s.msg_wrap_the_selection_in_this_conta())
             })
             .collect::<Vec<_>>(),
         CONTAINER_STYLES[7..]
             .iter()
             .map(|n| {
                 RibbonButton::new(Icon::Container, *n, Action::ContainerStyle(n))
-                    .tip(crate::i18n::strs().msg_wrap_the_selection_in_this_conta())
+                    .tip(s.msg_wrap_the_selection_in_this_conta())
             })
             .collect::<Vec<_>>(),
     ])]
 }
 
-fn heading_cols() -> Vec<super::Col> {
+fn heading_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![big(
-        RibbonButton::new(Icon::FontA, crate::i18n::strs().msg_heading_style(), Action::Macros)
+        RibbonButton::new(Icon::FontA, s.msg_heading_style(), Action::Macros)
             .enabled(false)
             .split()
-            .tip(crate::i18n::strs().msg_heading_style_gallery_planned()),
+            .tip(s.msg_heading_style_gallery_planned()),
     )]
 }
 
-fn membership_cols(ctx: &TabCtx) -> Vec<super::Col> {
+fn membership_cols(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<super::Col> {
     vec![
         grid(vec![
             vec![
-                RibbonButton::new(Icon::Container, crate::i18n::strs().msg_highlight_members(), Action::ContainerHighlight)
+                RibbonButton::new(Icon::Container, s.msg_highlight_members(), Action::ContainerHighlight)
                     .selected(ctx.container_highlight)
-                    .tip(crate::i18n::strs().msg_tint_the_container_s_members_whi()),
+                    .tip(s.msg_tint_the_container_s_members_whi()),
                 RibbonButton::new(Icon::Lock, "", Action::Macros)
-                    .alt(crate::i18n::strs().msg_lock_container())
+                    .alt(s.msg_lock_container())
                     .enabled(false)
-                    .tip(crate::i18n::strs().msg_lock_the_container_against_membe()),
+                    .tip(s.msg_lock_the_container_against_membe()),
             ],
             vec![
                 RibbonButton::new(Icon::Shapes, "", Action::Macros)
-                    .alt(crate::i18n::strs().msg_select_contents())
+                    .alt(s.msg_select_contents())
                     .enabled(false)
-                    .tip(crate::i18n::strs().msg_select_the_container_s_members_p()),
+                    .tip(s.msg_select_the_container_s_members_p()),
                 RibbonButton::new(Icon::Delete, "", Action::ContainerDisband)
-                    .alt(crate::i18n::strs().msg_disband_container())
+                    .alt(s.msg_disband_container())
                     .enabled(ctx.sel_container)
-                    .tip(crate::i18n::strs().msg_release_the_members_and_delete_t()),
+                    .tip(s.msg_release_the_members_and_delete_t()),
             ],
         ]),
     ]

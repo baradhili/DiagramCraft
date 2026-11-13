@@ -1915,6 +1915,16 @@ pub struct TextBlock {
     pub halign: i32,
     /// `VertAlign`: 1 top, 2 middle (default), 3 bottom.
     pub valign: i32,
+    /// Character `ComplexScriptFont` family (#257 text-direction):
+    /// the face complex-script (RTL-base) paragraphs paint with; the
+    /// spec's zero/absent semantics resolve to `None` and the Latin
+    /// `Font` chain stays. Paragraph granularity — the per-run `<cp>`
+    /// model stays out until a fixture shows one (see
+    /// Analysis/rtl-text-direction.md).
+    pub cs_font: Option<String>,
+    /// Effective `ComplexScriptSize` in inches (the spec's `0 → Size`,
+    /// `<0 → |v|·Size/100` semantics already applied; `None` = Size).
+    pub cs_size: Option<f64>,
 }
 
 /// Resolve one shape's [`TextBlock`] through the instance → master
@@ -2077,6 +2087,25 @@ pub(crate) fn resolve_text_block(
         .unwrap_or(font_size * 1.2)
         .max(font_size);
 
+    // Complex-script character cells (#257 text-direction, paragraph
+    // granularity — see Analysis/rtl-text-direction.md). Size
+    // semantics per [MS-VSDX] §2.4.4.62: >0 = the value, 0 = the
+    // sibling Size, <0 = |v|·Size/100.
+    let cs_font = char_cell(doc, s, chain, "ComplexScriptFont")
+        .and_then(|c| c.v.clone())
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty() && v.parse::<f64>().is_err());
+    let cs_size_raw = char_cell(doc, s, chain, "ComplexScriptSize").and_then(|c| c.numeric());
+    let cs_size = cs_size_raw.map(|v| {
+        if v > 0.0 {
+            v
+        } else if v < 0.0 {
+            v.abs() * font_size / 100.0
+        } else {
+            font_size
+        }
+    });
+
     TextBlock {
         pin: (tx, ty),
         size: (tw, th),
@@ -2094,6 +2123,8 @@ pub(crate) fn resolve_text_block(
         italic: style_bits & 2 != 0,
         halign,
         valign,
+        cs_font,
+        cs_size,
     }
 }
 
@@ -2113,15 +2144,79 @@ pub(crate) fn resolve_text_block(
 /// empty word consumed" (a pending leading space): a bare
 /// `cur.is_empty()` test cannot tell them apart, which is how the
 /// leading run used to vanish.
+/// One wrapped line plus its paragraph's base direction (#257
+/// text-direction): alignment and emission order follow the base, so
+/// the wrap must carry it per line (a block can mix LTR and RTL
+/// paragraphs).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WrapLine {
+    pub text: String,
+    pub rtl: bool,
+}
+
+/// A paragraph's base direction (Analysis/rtl-text-direction.md):
+/// explicit U+202A/U+202B overrides first, then the first strong
+/// bidi character (R/AL → RTL, L → LTR, neutrals and numbers
+/// skipped); no strong character → LTR.
+pub(crate) fn paragraph_base_rtl(para: &str) -> bool {
+    let mut chars = para.chars().peekable();
+    // Leading explicit embedding marks decide outright.
+    while let Some(&c) = chars.peek() {
+        match c {
+            '\u{202B}' => return true, // RLE
+            '\u{202A}' => return false, // LRE
+            '\u{200E}' | '\u{200F}' | '\u{202C}' => {
+                chars.next();
+            }
+            _ => break,
+        }
+    }
+    for c in chars {
+        use unicode_bidi::BidiClass as BC;
+        match unicode_bidi::bidi_class(c) {
+            BC::R | BC::AL => return true,
+            BC::L => return false,
+            _ => {} // neutrals, EN/AN, marks: keep scanning
+        }
+    }
+    false
+}
+
+/// The greedy wrap both the renderer (`emit_text`) and the
+/// `TEXTHEIGHT` measurement (#147) run — one wrap, so block-size
+/// caches and the rendered lines can never disagree.
+///
+/// Visio stores line breaks as CRLF: breaking on each of \r and \n
+/// separately would insert an empty paragraph between every pair of
+/// lines, so normalize CRLF (and lone CR) to one break first.
+/// Character-exact lines (#144): each paragraph is reconstructed
+/// verbatim — `split(' ')` words joined back with their separator
+/// spaces — so a paragraph-leading space run (empty first words)
+/// survives into the first line, interior runs stay, and a
+/// whitespace-only paragraph emits its spaces instead of an empty
+/// line. `started` distinguishes "no words consumed yet" from "an
+/// empty word consumed" (a pending leading space): a bare
+/// `cur.is_empty()` test cannot tell them apart, which is how the
+/// leading run used to vanish.
+///
+/// #257: `width_in` measures ONE paragraph with the face/size that
+/// paragraph paints with — an RTL-base paragraph resolves the
+/// complex-script cells (`cs_face`/`cs_size`, the Latin pair when
+/// absent), so the wrap decision and the raster agree by construction
+/// per paragraph, not just per block.
 pub(crate) fn wrap_block_text(
     face: &crate::textmetrics::ResolvedFace,
     text: &str,
     size: f64,
     usable_w: f64,
-) -> Vec<String> {
-    let width_in = |s: &str| face.width_in(s, size);
-    let mut lines: Vec<String> = Vec::new();
+    cs_face: &crate::textmetrics::ResolvedFace,
+    cs_size: f64,
+) -> Vec<WrapLine> {
+    let mut lines: Vec<WrapLine> = Vec::new();
     for para in text.replace("\r\n", "\n").replace('\r', "\n").split('\n') {
+        let rtl = paragraph_base_rtl(para);
+        let (pface, psize) = if rtl { (cs_face, cs_size) } else { (face, size) };
+        let width_in = |s: &str| pface.width_in(s, psize);
         let mut cur = String::new();
         let mut started = false;
         for word in para.split(' ') {
@@ -2137,9 +2232,15 @@ pub(crate) fn wrap_block_text(
                     // to share a line with the word): the space is
                     // content (#144 review) — it becomes a line of its
                     // own, never an empty line, never dropped.
-                    lines.push(" ".to_string());
+                    lines.push(WrapLine {
+                        text: " ".to_string(),
+                        rtl,
+                    });
                 } else {
-                    lines.push(std::mem::take(&mut cur));
+                    lines.push(WrapLine {
+                        text: std::mem::take(&mut cur),
+                        rtl,
+                    });
                 }
                 cur = word.to_string();
             } else {
@@ -2163,10 +2264,13 @@ pub(crate) fn wrap_block_text(
                     }
                 }
                 let rest = cur.split_off(split_at);
-                lines.push(std::mem::replace(&mut cur, rest));
+                lines.push(WrapLine {
+                    text: std::mem::replace(&mut cur, rest),
+                    rtl,
+                });
             }
         }
-        lines.push(cur);
+        lines.push(WrapLine { text: cur, rtl });
     }
     lines
 }
@@ -2245,6 +2349,15 @@ fn emit_text(
     // fitted to the block.
     let usable_w = (tw - ins_l - ins_r).max(0.02);
     let face = crate::textmetrics::resolve(tb.font.as_deref(), tb.bold, tb.italic);
+    // The complex-script pair (#257 text-direction): an RTL-base
+    // paragraph measures and paints with ComplexScriptFont/Size —
+    // falling back to the Latin chain/size per the spec's zero
+    // semantics — so wrap and raster agree per paragraph. The vendored
+    // Vazirmatn (registered by dc-ui) covers the glyphs when the
+    // document names no CS face.
+    let cs_chain = tb.cs_font.as_deref().or(tb.font.as_deref());
+    let cs_face = crate::textmetrics::resolve(cs_chain, tb.bold, tb.italic);
+    let cs_size = tb.cs_size.unwrap_or(size);
     // Greeking (#124 item 2): a block whose on-screen em height falls
     // under TEXT_GREEK_PX renders as gray bars — per line, shaped only
     // at paragraph granularity (one width_in per paragraph, no greedy
@@ -2274,7 +2387,10 @@ fn emit_text(
         }
         (Vec::new(), bars)
     } else {
-        (wrap_block_text(&face, text, size, usable_w), Vec::new())
+        (
+            wrap_block_text(&face, text, size, usable_w, &cs_face, cs_size),
+            Vec::new(),
+        )
     };
     let n_lines = if greeked {
         bar_widths.len()
@@ -2293,10 +2409,16 @@ fn emit_text(
     let first_baseline = top_edge + text_first_baseline(&tb, total_h);
     let _ = (valign, ins_t, ins_b);
     // Line x per alignment: left edge of the text area, center, or right.
+    // #257 text-direction: an RTL-base line reads 0/2 as start/end
+    // relative to its READING order (Visio's RTL editions), so the
+    // visual left edge moves with the line's base. The anchor stays
+    // "start" (usvg lays glyphs from the visual left under its
+    // hardcoded LTR base); the x is the line's computed visual left.
     let left_x = tx - lpx + ins_l;
+    let right_x = left_x + (tw - ins_l - ins_r);
     let (anchor, x) = match halign {
         0 | 3 => ("start", left_x),
-        2 => ("end", left_x + (tw - ins_l - ins_r)),
+        2 => ("end", right_x),
         _ => ("middle", left_x + (tw - ins_l - ins_r) / 2.0),
     };
 
@@ -2320,12 +2442,42 @@ fn emit_text(
             );
         }
     }
+    let mut any_rtl = false;
     for (i, line) in lines.iter().enumerate() {
         let y = first_baseline + i as f64 * line_h;
+        let (content, line_x, line_attrs) = if line.rtl {
+            any_rtl = true;
+            // The RTL line paints with the complex-script pair; its
+            // visual LEFT edge per the start/end mapping, computed
+            // from the line's own shaped width (the anchor stays
+            // start — usvg's LTR frame lays glyphs from x leftward-
+            // to-right and the isolate orders the runs). The face/
+            // size ride the tspan — a block may mix direction lines
+            // and the element-level attrs stay Latin.
+            let lw = cs_face.width_in(&line.text, cs_size);
+            let content = format!("\u{2067}{}\u{2069}", line.text);
+            let vx = match halign {
+                0 | 3 => right_x - lw, // start (reading order) = visual right edge
+                2 => left_x,           // end (reading order) = visual left edge
+                _ => x,                // center: the shared center
+            };
+            let attrs = if (cs_size - size).abs() > 1e-9 {
+                format!(
+                    r#" font-size="{cs_size:.4}" font-family="{}""#,
+                    font_family_attr(cs_chain)
+                )
+            } else {
+                format!(r#" font-family="{}""#, font_family_attr(cs_chain))
+            };
+            (content, vx, attrs)
+        } else {
+            (line.text.clone(), x, String::new())
+        };
         let _ = write!(
             body,
-            r#"<tspan x="{x:.4}" y="{y:.4}">{}</tspan>"#,
-            escape_text(line)
+            r#"<tspan x="{line_x:.4}" y="{y:.4}"{}>{}</tspan>"#,
+            line_attrs,
+            escape_text(&content)
         );
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
@@ -2367,11 +2519,22 @@ fn emit_text(
         }
         return;
     }
+    // #257 text-direction: the RTL lines' isolates order the runs
+    // under ANY base; `direction="ltr"` pins the element base for
+    // viewers that honor the attribute (usvg ignores it) so the
+    // visual-left start anchor reads the same everywhere. LTR-only
+    // blocks keep the pre-#257 byte form.
+    let dir_attr = if any_rtl {
+        r#" direction="ltr""#
+    } else {
+        ""
+    };
     if flipped || net_txt_deg.abs() > 1e-6 {
         let _ = writeln!(out, r#"<g transform="{}">"#, escape_attr(&transform));
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            r#"<text{d} text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            d = dir_attr,
             a = anchor,
             f = font_attrs,
             b = body
@@ -2380,7 +2543,8 @@ fn emit_text(
     } else {
         let _ = writeln!(
             out,
-            r#"<text text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            r#"<text{d} text-anchor="{a}" xml:space="preserve" {f}>{b}</text>"#,
+            d = dir_attr,
             a = anchor,
             f = font_attrs,
             b = body
@@ -6910,6 +7074,150 @@ mod tests {
         assert!(
             out.contains(r#"<text text-anchor="middle" xml:space="preserve""#),
             "the text element carries xml:space=preserve: {out}"
+        );
+    }
+
+    /// #257 text-direction: the paragraph base derivation — explicit
+    /// U+202A/U+202B overrides decide before the first strong
+    /// character; neutrals and numbers never decide.
+    #[test]
+    fn paragraph_base_follows_marks_then_first_strong() {
+        assert!(!paragraph_base_rtl("hello world"), "latin → LTR");
+        assert!(paragraph_base_rtl("\u{0633}\u{0644}\u{0627}"), "arabic → RTL");
+        assert!(paragraph_base_rtl("\u{202B}hello"), "RLE override → RTL");
+        assert!(!paragraph_base_rtl("\u{202A}\u{0633}\u{0644}\u{0627}"), "LRE overrides arabic");
+        assert!(!paragraph_base_rtl("123 (x)"), "numbers+neutrals → LTR default");
+        assert!(!paragraph_base_rtl("   "), "all-neutral → LTR default");
+    }
+
+    /// #257 text-direction: a paragraph whose base is RTL wraps with
+    /// the complex-script pair and emits the isolate-wrapped line at
+    /// its visual right edge (start alignment), with direction=ltr
+    /// pinned on the element.
+    #[test]
+    fn rtl_paragraph_wraps_and_emits_isolated_at_visual_right() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Paragraph".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("HorzAlign".into(), Cell::value("0"))], // start = reading order
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        s.sheet.text = Some("\u{0633}\u{0644}\u{0627}\u{0645} \u{0639}\u{0644}\u{06CC}\u{06A9}\u{0645}".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        // The isolate pair wraps the line content.
+        assert!(out.contains('\u{2067}'), "the RTL line carries an RLI: {out}");
+        assert!(out.contains('\u{2069}'), "the RTL line carries a PDI: {out}");
+        // direction=ltr pins the element base for attribute-honoring viewers.
+        assert!(out.contains(r#"direction="ltr""#), "element base pinned: {out}");
+        // Start alignment under an RTL base puts the line's visual
+        // left edge at (right edge - shaped width), NOT at left_x —
+        // the tspan x must sit right of the block's left inset edge.
+        let x: f64 = out
+            .split(r#"<tspan x=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("a tspan x");
+        // Block pin (1.5,0.5) centered: left edge = tx - lpx + ins_l
+        // = 1.5 - 1.5 + 0.1 = 0.1; the RTL line's visual left must be
+        // strictly inside the block (right_x - lw > 0.1).
+        assert!(x > 0.1, "RTL start line sits at its visual right: x={x}");
+        // A second shape with the SAME text but end alignment (2)
+        // anchors the line at the block's LEFT edge instead.
+        if let Some(SheetChild::Section(sec)) = s.sheet.children.last_mut() {
+            sec.rows[0].cells[0] = ("HorzAlign".into(), Cell::value("2"));
+        }
+        let chain = [&s];
+        let mut out2 = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.0, 1.0, 1.0, false, None, &mut out2);
+        let x2: f64 = out2
+            .split(r#"<tspan x=""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .and_then(|v| v.parse().ok())
+            .expect("a tspan x");
+        assert!(
+            (x2 - 0.1).abs() < 1e-6,
+            "RTL end line anchors at the visual left inset edge: x2={x2}"
+        );
+    }
+
+    /// #257 text-direction: LTR-only blocks keep the pre-#257 byte
+    /// form (no direction attribute, no isolates) — golden stability.
+    #[test]
+    fn ltr_blocks_emit_without_direction_marks() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("2.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("2.0"));
+        s.sheet.text = Some("plain latin".into());
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 2.0, 1.0, 1.0, 1.0, false, None, &mut out);
+        assert!(!out.contains("direction="), "no direction attr: {out}");
+        assert!(!out.contains('\u{2067}'), "no isolates: {out}");
+    }
+
+    /// #257 text-direction: ComplexScriptFont/Size resolve through the
+    /// first Character row with the spec's zero/absent semantics —
+    /// a CS face rides the RTL tspan's font-family, and its size swaps
+    /// the glyph size when it differs.
+    #[test]
+    fn complex_script_cells_feed_the_rtl_line() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.0);
+            assert_eq!(tb.cs_font, None, "absent cell → None");
+            assert_eq!(tb.cs_size, None, "absent size → None (Size fallback)");
+        }
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![
+                    ("ComplexScriptFont".into(), Cell::value("Vazirmatn")),
+                    ("ComplexScriptSize".into(), Cell::value("0.2")),
+                ],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        let (font, size) = {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.0);
+            (tb.cs_font, tb.cs_size)
+        };
+        assert_eq!(font.as_deref(), Some("Vazirmatn"));
+        assert_eq!(size, Some(0.2));
+        // The negative-size semantics: <0 = |v|·Size/100.
+        let size0 = {
+            let chain = [&s];
+            resolve_text_block(&doc, &s, &chain, 3.0, 1.0).font_size
+        };
+        if let Some(SheetChild::Section(sec)) = s.sheet.children.last_mut() {
+            sec.rows[0].cells[1] = ("ComplexScriptSize".into(), Cell::value("-150"));
+        }
+        let size = {
+            let chain = [&s];
+            resolve_text_block(&doc, &s, &chain, 3.0, 1.0).cs_size
+        };
+        assert_eq!(
+            size,
+            Some(1.5 * size0),
+            "negative → |v|·Size/100"
         );
     }
 

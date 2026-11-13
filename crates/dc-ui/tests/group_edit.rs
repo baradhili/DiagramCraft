@@ -385,7 +385,7 @@ fn member_resize_handles_work_in_group_edit_mode() {
     let g = shape_center(&h, 9);
     click_at(&mut h, g, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Panel.9");
+    open_group_via_flyout(&mut h, "Panel.9");
     let m = shape_center(&h, 10);
     click_at(&mut h, m, egui::PointerButton::Primary);
     assert_eq!(h.state().debug_sel().map(|s| s.1), Some(10));
@@ -524,7 +524,7 @@ fn open_group_edit_flow() {
     let g = shape_center(&h, 9);
     click_at(&mut h, g, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Panel.9");
+    open_group_via_flyout(&mut h, "Panel.9");
     assert_eq!(h.state().debug_group_edit(), vec![9], "group-edit entered");
     // The breadcrumb bar with its Close control is up.
     assert!(
@@ -532,7 +532,7 @@ fn open_group_edit_flow() {
         "breadcrumb Close control"
     );
     assert!(
-        h.get_all_by_label_contains("Page › Panel.9")
+        h.get_all_by_label_contains("Panel.9")
             .next()
             .is_some(),
         "breadcrumb path"
@@ -575,7 +575,7 @@ fn member_edit_esc_and_one_undo() {
     let g = shape_center(&h, 9);
     click_at(&mut h, g, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Panel.9");
+    open_group_via_flyout(&mut h, "Panel.9");
 
     // Drag member 10 a little (its Pin cells are group-local; the drag
     // converts through the group XForm).
@@ -652,7 +652,7 @@ fn nested_groups_open_recursively() {
     let g = shape_center(&h, 9);
     click_at(&mut h, g, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Panel.9");
+    open_group_via_flyout(&mut h, "Panel.9");
     assert_eq!(h.state().debug_group_edit(), vec![9]);
 
     // The nested group is a member here; open it in turn. A point on
@@ -665,7 +665,7 @@ fn nested_groups_open_recursively() {
     let band = egui::pos2(r20.center().x, r20.top() + 3.0);
     click_at(&mut h, band, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Inner.20");
+    open_group_via_flyout(&mut h, "Inner.20");
     assert_eq!(h.state().debug_group_edit(), vec![9, 20], "breadcrumb grew");
     // Esc pops one level at a time.
     h.event(egui::Event::Key {
@@ -735,7 +735,7 @@ fn group_edit_mode_golden() {
     let g = shape_center(&h, 9);
     click_at(&mut h, g, egui::PointerButton::Secondary);
     h.run();
-    open_group_via_flyout(&mut h, "Open Panel.9");
+    open_group_via_flyout(&mut h, "Panel.9");
     // Select a member so the frame shows in the golden.
     let m = shape_center(&h, 10);
     click_at(&mut h, m, egui::PointerButton::Primary);

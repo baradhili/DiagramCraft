@@ -52,6 +52,17 @@ impl AlignKind {
             AlignKind::Bottom => "bottom",
         }
     }
+    /// The localized undo-label word (#257 value-side vocabulary).
+    pub fn label_i18n(self) -> String {
+        match self {
+            AlignKind::Left => crate::i18n::strs().msg_align_word_left(),
+            AlignKind::HCenter => crate::i18n::strs().msg_align_word_centers(),
+            AlignKind::Right => crate::i18n::strs().msg_align_word_right(),
+            AlignKind::Top => crate::i18n::strs().msg_align_word_top(),
+            AlignKind::VCenter => crate::i18n::strs().msg_align_word_middles(),
+            AlignKind::Bottom => crate::i18n::strs().msg_align_word_bottom(),
+        }
+    }
 }
 
 /// What the shapes align to (URS-1149's option): the first-selected

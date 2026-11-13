@@ -163,15 +163,30 @@ pub const RULER: f32 = 22.0;
 /// page margin `show`/`apply_fit`/`zoom_to_rect` all keep. Shared so
 /// the fit math and the text-edit zoom (#22) target the same pixels.
 pub fn content_area(canvas_rect: Rect, show_rulers: bool) -> (Pos2, Vec2) {
+    // #257 item 3: an RTL chrome carries the vertical ruler band on
+    // the canvas's RIGHT edge (the mirrored-corner reading of the
+    // Office RTL ruler pair), so the content origin sits inside it.
+    let rtl = crate::i18n::rtl();
+    let v_offset = if rtl { -RULER } else { RULER };
     let content_origin = if show_rulers {
-        canvas_rect.left_top() + Vec2::new(RULER, RULER)
+        canvas_rect.left_top() + Vec2::new(v_offset, RULER)
+    } else if rtl {
+        // keep the drawable width honest without a band
+        canvas_rect.left_top()
     } else {
         canvas_rect.left_top()
     };
-    let content = Vec2::new(
-        (canvas_rect.right() - content_origin.x - 12.0).max(50.0),
-        (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
-    );
+    let content = if show_rulers && rtl {
+        Vec2::new(
+            (canvas_rect.right() - RULER - content_origin.x - 12.0).max(50.0),
+            (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
+        )
+    } else {
+        Vec2::new(
+            (canvas_rect.right() - content_origin.x - 12.0).max(50.0),
+            (canvas_rect.bottom() - content_origin.y - 12.0).max(50.0),
+        )
+    };
     (content_origin, content)
 }
 
@@ -811,14 +826,23 @@ pub fn show(
                 ui.ctx()
                     .memory_mut(|m| m.data.insert_temp(mem_freeform, vec![p]));
             } else if view.show_rulers
-                && (p.x < canvas_r.left() + RULER || p.y < canvas_r.top() + RULER)
+                && (p.x < canvas_r.left() + RULER
+                    || p.x > canvas_r.right() - RULER
+                    || p.y < canvas_r.top() + RULER)
             {
                 // A ruler drag pulls a guide out (#113): the corner
-                // square yields a guide point, the left band below it
-                // a vertical guide, the top band a horizontal one.
-                let src = if p.x < canvas_r.left() + RULER && p.y < canvas_r.top() + RULER {
+                // square yields a guide point, the vertical band (LEFT
+                // edge LTR, RIGHT edge under the #257 RTL mirror) a
+                // vertical guide, the top band a horizontal one.
+                let rtl = crate::i18n::rtl();
+                let in_vband = if rtl {
+                    p.x > canvas_r.right() - RULER
+                } else {
+                    p.x < canvas_r.left() + RULER
+                };
+                let src = if in_vband && p.y < canvas_r.top() + RULER {
                     GuideSource::Point
-                } else if p.x < canvas_r.left() + RULER {
+                } else if in_vband {
                     GuideSource::Vertical
                 } else {
                     GuideSource::Horizontal
@@ -1822,18 +1846,35 @@ fn draw_rulers(
     page_rect: Rect,
     t: &ShellTokens,
 ) {
-    // Corner square + bands.
-    p.rect_filled(
-        Rect::from_min_size(canvas_r.left_top(), Vec2::splat(RULER)),
-        0.0,
-        t.ruler_bg,
+    // Corner square + bands. #257 item 3: an RTL chrome mirrors the
+    // ruler pair — the corner lands top-right and the vertical band
+    // hugs the canvas's right edge (the mirrored reading of the
+    // Office RTL rulers); the DOCUMENT coordinates never move, the
+    // vertical values keep their y-up origin at the page bottom.
+    let rtl = crate::i18n::rtl();
+    let corner = Rect::from_min_size(
+        if rtl {
+            canvas_r.right_top() - Vec2::new(RULER, 0.0)
+        } else {
+            canvas_r.left_top()
+        },
+        Vec2::splat(RULER),
     );
+    p.rect_filled(corner, 0.0, t.ruler_bg);
     let top = Rect::from_min_size(
-        canvas_r.left_top() + Vec2::new(RULER, 0.0),
+        if rtl {
+            canvas_r.left_top()
+        } else {
+            canvas_r.left_top() + Vec2::new(RULER, 0.0)
+        },
         Vec2::new(canvas_r.width() - RULER, RULER),
     );
     let left = Rect::from_min_size(
-        canvas_r.left_top() + Vec2::new(0.0, RULER),
+        if rtl {
+            canvas_r.right_top() - Vec2::new(RULER, 0.0) + Vec2::new(0.0, RULER)
+        } else {
+            canvas_r.left_top() + Vec2::new(0.0, RULER)
+        },
         Vec2::new(RULER, canvas_r.height() - RULER),
     );
     p.rect_filled(top, 0.0, t.ruler_bg);
@@ -1921,7 +1962,9 @@ fn draw_rulers(
         }
     }
 
-    // Vertical ruler: values count upward from the page bottom (Visio).
+    // Vertical ruler: values count upward from the page bottom (Visio)
+    // — the document convention, unchanged by the #257 chrome mirror;
+    // only the band side, tick direction and label anchor flip.
     let y0_in = ((page_rect.top() - view.pan.y) / ppi).max(0.0) as f64;
     let y1_in = ((page_rect.bottom() - view.pan.y) / ppi).min(page.h_in as f32) as f64;
     let k0 = (y0_in * upx / interval).ceil() as i64;
@@ -1932,17 +1975,30 @@ fn draw_rulers(
         let val_up = page.h_in - view.unit.to_in(v); // label in y-up units
         let disp = view.unit.from_in(val_up);
         let tier = tier_for(k);
+        let (tick_x, label_x, anchor) = if rtl {
+            // ticks grow inward from the band's left edge (the mirrored
+            // reading edge), labels anchor to it
+            (
+                left.left(),
+                left.left() + 2.0,
+                egui::Align2::LEFT_TOP,
+            )
+        } else {
+            (
+                left.right(),
+                left.left() + 1.0,
+                egui::Align2::LEFT_TOP,
+            )
+        };
+        let tick_inner = if rtl { tick_x + tier.len } else { tick_x - tier.len };
         p.line_segment(
-            [
-                Pos2::new(left.right() - tier.len, sy_top),
-                Pos2::new(left.right(), sy_top),
-            ],
+            [Pos2::new(tick_inner, sy_top), Pos2::new(tick_x, sy_top)],
             Stroke::new(0.8, t.ruler_tick),
         );
         if tier.labeled && disp > 0.0 {
             p.text(
-                Pos2::new(left.left() + 1.0, sy_top + 2.0),
-                egui::Align2::LEFT_TOP,
+                Pos2::new(label_x, sy_top + 2.0),
+                anchor,
                 format_num(disp),
                 font.clone(),
                 t.ruler_text,

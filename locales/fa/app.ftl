@@ -7,6 +7,11 @@ a-ruler-subdivision = تقسیم‌بندی خط‌کش
 a-shape-intersection = محل تقاطع شکل‌ها
 about-name = طارحی
 about-tarahi = درباره طارحی
+# $what - نام کنش
+# $why - دلیل تعویق
+action-deferred = { $what } به تعویق افتاد: { $why }
+# $what - نام کنش
+action-display-only = { $what } فقط نمایشی است
 active = فعال
 activex-era-likely-cut-scope-cal = از دوران ActiveX — به احتمال زیاد حذف شده (تصمیم دامنه در #252)
 add = افزودن
@@ -38,6 +43,12 @@ align-top = بالا
 align-top-edges = تراز لبه‌های بالا
 align-top-kind = بالا
 align-vertical-centers = تراز مراکز عمودی
+align-word-bottom = پایین
+align-word-centers = مراکز
+align-word-left = چپ
+align-word-middles = میانه‌ها
+align-word-right = راست
+align-word-top = بالا
 aligning-to-the-first-selected-s = تراز نسبت به نخستین شکلِ گزینش‌شده
 aligning-to-the-page = تراز نسبت به صفحه
 alignment-and-spacing-hints-whil = راهنمای تراز و فاصله‌گذاری هنگام کشیدن
@@ -63,6 +74,7 @@ autocorrect-options-planned = گزینه‌های خودتصحیح — برنا�
 automatic-resize = تغییر اندازهٔ خودکار
 automatically-link = پیوند خودکار
 background = پس‌زمینه
+background-cleared = پس‌زمینه پاک شد
 background-page-name = صفحهٔ پس‌زمینه: { $name }
 backgrounds = پس‌زمینه‌ها
 behavior = رفتار
@@ -77,6 +89,13 @@ bring-forward-planned = آوردن به جلو — برنامه‌ریزی شد�
 bring-to-front = آوردن به رو
 browse = مرور…
 browse-for-an-existing-visio-pac = مرور یک بستهٔ Visio موجود.
+# $ok - تعداد استخراج‌شده
+# $failed - تعداد شکست‌خورده
+builtin-extracted-summary = شابلون‌های درون‌ساخت: { $ok } استخراج شد، { $failed } شکست خورد — از نسخه‌های درون‌ساخت استفاده می‌شود
+# $n - تعداد پرونده‌های استخراج‌شده
+builtin-extracted-to = { $n } پروندهٔ شابلون درون‌ساخت در My Shapes/Built-ins استخراج شد
+# $title - عنوان شابلون
+builtin-stencil-failed = بارگذاری شابلون درون‌ساخت شکست خورد: { $title }
 bullets = فهرست نقطه‌ای
 bullets-planned = فهرست نقطه‌ای — برنامه‌ریزی شده
 cad-drawing = نقاشی CAD
@@ -85,6 +104,9 @@ calibri = Calibri
 callout = حاشیه‌نویسی
 callouts-planned = حاشیه‌نویسی‌ها — برنامه‌ریزی شده
 cancel = لغو
+# $name - نام سلول
+# $f - فرمول نگهبان
+cell-is-formula-driven = { $name } فرمول‌محور است ({ $f })
 center = وسط
 chart = نمودار
 charts-planned-later-milestone = نمودارها — برنامه‌ریزی شده (نقطهٔ عطف بعدی)
@@ -105,6 +127,10 @@ closed-switched-to-name = بسته شد؛ به { $name } تغییر یافت
 closed-title = بسته شد: { $title }
 code = کد
 color = رنگ
+color-fill-bkgnd-window = رنگ پس‌زمینهٔ پرکردن
+color-fill-window = رنگ پرکردن
+color-line-window = رنگ خط
+color-text-window = رنگ متن
 colors = رنگ‌ها
 com-add-ins = افزونه‌های COM
 comment-add = افزودن نظر
@@ -122,16 +148,26 @@ connection-point-ix-selected-del = نقطهٔ اتصال { $ix } انتخاب ش
 connection-point-next-ix-added-t = نقطهٔ اتصال { $next_ix } به شکل { $hit } افزوده شد
 connection-point-tool-off = ابزار نقطهٔ اتصال خاموش است
 connector = اتصال‌دهنده
+connector-drawn-free-ends = کانکتور کشیده شد (دو سر آزاد)
 connector-end-released = انتهای اتصال‌دهنده رها شد
+connector-glued-at-both-ends = کانکتور در هر دو سر چسبیده شد
+connector-glued-at-one-end = کانکتور در یک سر چسبیده شد
+# $id - شناسهٔ شکل
+connector-glued-shape = کانکتور به شکل { $id } چسبید
+# $id - شناسهٔ شکل
+connector-glued-shape-point = کانکتور به نقطهٔ اتصال شکل { $id } چسبید
 connector-is-glued-at-both-ends = اتصال‌دهنده در هر دو سر چسبیده است — برای رهاکردن از شعاع جذب فراتر بروید، یا یک درگاه یا شکل‌هایش را بکشید
 connector-move-refused-reason = جابه‌جایی اتصال‌دهنده رد شد: { $reason }
 connector-moved-release-ends-glu = اتصال‌دهنده جابه‌جا شد — { $release_ends } سرِ چسبیده از شعاع جذب فراتر رها شد
+# $id - شناسهٔ شکل
+connector-stays-glued = کانکتور به شکل { $id } چسبیده می‌ماند
 connector-tool-drag-from-one-sha = ابزار اتصال‌دهنده: از یک شکل به شکل دیگر بکشید (Esc برای پایان)
 connector-tool-status = ابزار اتصال‌دهنده — ترسیم اتصال‌دهنده میان شکل‌ها یا نقاط (Esc برای پایان)
 connector-tool-tip = ابزار اتصال‌دهنده — ترسیم اتصال‌دهنده میان شکل‌ها یا نقاط
 connectors = اتصال‌دهنده‌ها
 connpoint-tool-status = ابزار نقطهٔ اتصال: برای افزودن نقطهٔ اتصال روی یک شکل کلیک کنید
 container = ظرف
+container-flyout =   کانتینر  ‹
 container-margins-planned = حاشیه‌های ظرف — برنامه‌ریزی شده
 container-style-style-applied = سبک ظرف { $style } اعمال شد
 container-style-style-not-found = سبک ظرف { $style } یافت نشد
@@ -149,6 +185,9 @@ copy-as-picture-menu = رونوشت به‌صورت تصویر…
 copy-picture = رونوشت تصویر
 copy-planned = رونوشت — برنامه‌ریزی شده
 could-not-open-address-e = بازکردن { $address } ممکن نشد: { $e }
+# $path - مسیر پرونده
+# $e - متن خطا
+could-not-read-path = خواندن { $path } ممکن نشد: { $e }
 create-a-background-page-planned = ساخت صفحهٔ پس‌زمینه — برنامه‌ریزی‌شده (امروز از طریق Design ▸ Backgrounds منتسب می‌شود)
 create-a-stencil-planned = ساخت شابلون — برنامه‌ریزی شده
 create-new-data-graphic = ساخت نمودار دادهٔ جدید
@@ -174,6 +213,9 @@ date-time = تاریخ و ساعت
 date-time-field-planned = فیلد تاریخ و ساعت — برنامه‌ریزی شده
 decrease-indent = کاهش تودرتو
 decrease-indent-planned = کاهش تودرتویی — برنامه‌ریزی شده
+# $entry - ورودی پیش‌فرض شابلون
+# $e - متن خطا
+default-stencil-failed = بارگذاری شابلون پیش‌فرض { $entry } شکست خورد: { $e }
 define-shape-data = تعریف دادهٔ شکل
 define-shape-data-m6 = تعریف دادهٔ شکل (M6)
 delete = حذف
@@ -200,6 +242,7 @@ distribute-needs-three-or-more-s = توزیع به سه شکل یا بیشتر �
 distribute-vertical-spacing = توزیع فاصلهٔ عمودی
 document-closed = سند بسته شد
 document-inspection-arrives-with = بازرسی سند با نقطهٔ عطف بعدی عرضه می‌شود
+document-masters = استادهای سند
 document-protection-arrives-with = حفاظت سند با نقطهٔ عطف بعدی عرضه می‌شود
 document-stencil = شابلون سند
 document-stencil-planned = شابلون سند — برنامه‌ریزی شده
@@ -213,6 +256,8 @@ double-tick-ring = تیک دوتایی + حلقه
 drawing-aids = ابزارهای ترسیم
 drawing-explorer = کاوشگر نقاشی
 drawing-explorer-planned = کاوشگر نقاشی — برنامه‌ریزی شده
+# $n - شمارهٔ سند بی‌نام
+drawing-n = نقشه{ $n }
 drawing-scale-planned = مقیاس نقاشی — برنامه‌ریزی شده
 drawings-you-open-will-appear-he = نقاشی‌هایی که باز می‌کنید این‌جا ظاهر می‌شوند.
 duplicate = تکثیر
@@ -230,17 +275,31 @@ editing-text-of-shape-shape-id = ویرایش متن شکل { $shape_id }
 effects = جلوه‌ها
 ellipse-tool = ابزار بیضی
 ellipse-tool-planned = ابزار بیضی — برنامه‌ریزی شده
+endpoint-begin = آغاز
 endpoint-drag-refused-reason = کشیدن درگاه رد شد: { $reason }
+endpoint-end = پایان
+# $hit - متن بومی‌شدهٔ هدفِ خطا
+endpoint-glued-to = نقطهٔ پایانی به { $hit } چسبید
 endpoint-moved-but-name-is-formu = درگاه جابه‌جا شد، اما { $name } فرمول‌محور است و حفظ شد
 even-horizontal-spacing-3-shapes = فاصله‌گذاری افقی یکنواخت (۳ شکل یا بیشتر)
 even-vertical-spacing-3-shapes = فاصله‌گذاری عمودی یکنواخت (۳ شکل یا بیشتر)
 eventdblclick-f-macro-and-naviga = EventDblClick «{ $f }» — عمل‌های ماکرو و ناوبری با نقطهٔ عطف بعدی عرضه می‌شوند
 export-entry-desc = ذخیرهٔ نقاشی در قالبی دیگر
+export-failed-e = صادر کردن شکست خورد: { $e }
 export-failed-worker-lost = برون‌بری شکست خورد: کارگر از دست رفت
 export-finished = برون‌بری تمام شد.
 export-page-sub = ذخیرهٔ نقاشی در قالبی دیگر.
+export-pdf-hint = سند با متن قابل انتخاب (همهٔ صفحه‌ها در یک پرونده)
+export-png-hint = تصویر شطرنجی با چگالی انتخاب‌شده
 export-save-as-label = ذخیره به‌نام
 export-start = برون‌بری…
+export-svg-hint = گرافیک برداری — قالب بومی رندرکننده
+# $n - تعداد پرونده‌ها
+exported-files =
+    { $n ->
+        [one] { $n } پرونده صادر شد.
+       *[other] { $n } پرونده صادر شد.
+    }
 exporting = در حال برون‌بری…
 external-data = دادهٔ بیرونی
 external-data-window = پنجرهٔ دادهٔ بیرونی
@@ -253,6 +312,9 @@ fill = پرکنندگی
 filled-arrow-plain = پیکان توپر (ساده)
 filled-circle = دایرهٔ توپر
 filled-square = مربع توپر
+filter-pdf = PDF (سند)
+filter-png = PNG (تصویر شطرنجی)
+filter-svg = SVG (گرافیک برداری)
 find = یافتن
 find-planned-later-milestone = یافتن — برنامه‌ریزی‌شده (نقطهٔ عطف بعدی)
 fine-dash = خط‌چین ریز
@@ -302,17 +364,32 @@ gradient-radial = طیفی شعاعی
 gradient-vert = طیفی عمودی
 grid = شبکه
 group = گروه
+# $names - نام‌های صفحه/گروهِ زنجیره‌شده
+group-breadcrumb = صفحه › { $names }
+group-flyout =   گروه  ‹
 group-needs-2-shapes-on-the-page = گروه‌سازی به ۲ شکل یا بیشتر روی صفحه نیاز دارد
 group-the-selection-one-undo-ste = گروه‌سازی گزینش (یک گام واگرد؛ درون گروه موجود تودرتو می‌شود)
 grow-with-the-members-planned = رشد همراه با اعضا — برنامه‌ریزی شده
+# $v - مختصات راهنما
+guide-added-horizontal = راهنمای افقی در { $v } افزوده شد
+# $v - جفت مختصات راهنما
+guide-added-point = نقطهٔ راهنما در { $v } افزوده شد
+# $v - مختصات راهنما
+guide-added-vertical = راهنمای عمودی در { $v } افزوده شد
 guide-id = راهنما { $id }
 guides = راهنماها
 guides-planned-113-s-objects-exi = راهنماها — برنامه‌ریزی‌شده (اشیای #113 موجودند؛ کلید در آینده)
 heading-style = سبک عنوان
 heading-style-gallery-planned = گالری سبک عنوان — برنامه‌ریزی شده
+height = ارتفاع
+# $g - فرمول نگهبان
+height-not-resized-guard = ارتفاع تغییر نکرد: { $g } (فقط عرض)
 help-about = راهنما / درباره
 high-192-dpi = بالا (۱۹۲ dpi)
 highlight-members = برجسته‌سازی اعضا
+hl-address = نشانی
+hl-description = توضیح
+hl-subaddress = زیرنشانی
 home = خانه
 hyperlink = پیوند
 hyperlink-menu = پیوند…
@@ -337,6 +414,8 @@ italic-planned = مورب — برنامه‌ریزی شده
 jump-size = اندازهٔ پرش
 justify = هم‌تراز از دو سو
 justify-planned = هم‌ترازی از دو سو — برنامه‌ریزی شده
+# $key - کلید میان‌بر
+keytip-unavailable = { $key } در دسترس نیست
 label-a-choice-cannot-contain = { $label }: یک انتخاب نمی‌تواند «;» داشته باشد
 label-dialog-planned-for-a-later = گفت‌وگوی { $label } — برنامه‌ریزی‌شده برای نقطهٔ عطف بعدی
 label-not-a-number = { $label }: عدد نیست
@@ -355,6 +434,11 @@ lasso-selected-n-shape-s =
     }
 last-page = صفحهٔ آخر
 layer = لایه
+# $id - شناسهٔ لایه
+# $e - متن خطا
+layer-composite-failed = لایهٔ { $id }: { $e }
+# $ix - شاخص سطر لایه
+layer-ix-fallback = لایهٔ { $ix }
 layout = چیدمان
 layout-options = گزینه‌های چیدمان
 layout-options-planned = گزینه‌های چیدمان — برنامه‌ریزی شده
@@ -365,6 +449,8 @@ legend = راهنمای نمودار
 legends-m6-visio-paints-legend-o = راهنمای نمودارها (M6؛ Visio راهنما را هنگام Insert ترسیم می‌کند، نه Data)
 line = خط
 line-color-label = رنگ خط
+# $factor - ضریب پرش
+line-jump-factor-set = اندازهٔ پرش خط ×{ $factor }
 line-jumps = پرش‌های خط
 line-jumps-hidden = پرش‌های خط پنهان است
 line-jumps-shown = پرش‌های خط نشان داده می‌شود
@@ -390,6 +476,8 @@ margins = حاشیه‌ها
 markup = بازبینی‌ها
 markup-tracking-planned-no-marku = ردیابی بازبینی — برنامه‌ریزی‌شده (هنوز مدل بازبینی وجود ندارد)
 master = شابلون
+# $id - شناسهٔ استاد
+master-armed-click-place = استاد { $id } آماده است — برای جای‌گذاری روی بوم کلیک کنید
 master-mid = شابلون { $mid }
 member-highlight-off = برجسته‌سازی اعضا خاموش است
 member-highlight-on = برجسته‌سازی اعضا روشن است
@@ -422,12 +510,16 @@ no-background = بدون پس‌زمینه
 no-background-pages-right-click = صفحهٔ پس‌زمینه‌ای نیست. روی زبانهٔ صفحه راست‌کلیک کنید و «تنظیم به‌عنوان پس‌زمینه» را برگزینید.
 no-comments-on-this-shape-yet = هنوز نظری روی این شکل نیست.
 no-document-open = سندی باز نیست
+no-formula = بدون فرمول
 no-hyperlinks-on-this-shape = روی این شکل پیوندی نیست.
 no-keytip-key = کلید میان‌بر { $key } وجود ندارد
 no-matching-shapes = شکل همخوانی نیست.
 no-picture-on-the-clipboard = تصویری روی کلیپ‌بورد نیست
 no-shapes = شکلی نیست.
+# $q - متن جستجو
+no-templates-match = هیچ الگویی با «{ $q }» همخوان نیست.
 none = هیچ
+not-saved-yet = هنوز ذخیره نشده
 nothing-on-this-page-matches-the = (هیچ‌چیز در این صفحه با معیار همخوان نیست)
 nothing-selected-to-copy = برای رونوشت چیزی انتخاب نشده
 nothing-to-redo = چیزی برای اجرای دوباره نیست
@@ -455,6 +547,8 @@ open-file-title = بازکردن یک پرونده
 open-fork = چنگال باز
 open-group-label = بازکردن { $group_label }
 open-square = مربع باز
+# $e - متن خطا
+open-stencil-failed-e = گشودن شابلون شکست خورد: { $e }
 open-triangle-convex-base = مثلث باز (قاعدهٔ کوژ)
 open-triangle-large = مثلث باز (بزرگ)
 open-triangle-medium = مثلث باز (متوسط)
@@ -463,7 +557,19 @@ open-triangle-small = مثلث باز (کوچک)
 open-v-tall = V باز (بلند)
 open-vsdx-vstx-vssx-ctrl-o = بازکردن ‎.vsdx / .vstx / .vssx (Ctrl+O)
 open-wide = باز پهن
+# $address - نشانی پیوند
+opened-address = { $address } گشوده شد
+# $title - عنوان شابلون
+opened-builtin-metric = { $title } گشوده شد (متریک)
+# $title - عنوان شابلون
+opened-builtin-myshapes = { $title } گشوده شد (My Shapes)
+# $name - نام گروه
+opened-group = گروه { $name } گشوده شد — برای بازگشت Esc یا «بستن گروه»
+# $path - مسیر پرونده
+opened-path = { $path } گشوده شد
 opened-stencil-stem = شابلون { $stem } باز شد
+# $name - نام پرونده
+opening-file = در حال گشودن { $name }…
 operations = عملیات
 options = گزینه‌ها
 options-arrive-with-a-later-mile = گزینه‌ها با نقطهٔ عطف بعدی می‌آیند
@@ -475,12 +581,20 @@ page-breaks-planned = شکستن صفحه — برنامه‌ریزی شده
 page-name = نام صفحه
 page-name-is-a-foreground-page-a = صفحهٔ { $name } دوباره صفحهٔ پیش‌زمینه شد
 page-name-marked-as-a-background = صفحهٔ { $name } به‌عنوان پس‌زمینه نشانه‌گذاری شد
+# $sub - نام صفحهٔ زیرنشانی
+page-not-found = صفحهٔ { $sub } پیدا نشد
 page-number = شمارهٔ صفحه
 page-number-field-planned = فیلد شمارهٔ صفحه — برنامه‌ریزی شده
 page-setup = تنظیم صفحه
 page-setup-menu = تنظیم صفحه…
 page-size = اندازهٔ صفحه
 page-size-iso-ansi-presets-or-cu = اندازهٔ صفحه — پیش‌تنظیم‌های ISO/ANSI یا سفارشی
+# $w - مقدار عرض
+# $h - مقدار ارتفاع
+page-size-set = اندازهٔ صفحه { $w } × { $h }
+# $n - شمارهٔ صفحه، از ۱
+# $id - شناسهٔ صفحه
+page-tab-tooltip = صفحهٔ { $n } (شناسهٔ { $id })
 page-width = عرض صفحه
 paint-formatting-onto-shape-to = اعمال قالب‌بندی روی شکل { $to }
 painter-cells = { $n } سلول قالب‌بندی به شکل { $to } رونویسی شد
@@ -488,6 +602,15 @@ painter-cells-sticky = { $n } سلول قالب‌بندی به شکل { $to } �
 paragraph = بند
 paste = چسباندن
 pick-an-output-file-first = نخست یک پروندهٔ خروجی برگزینید
+# $w - پهنای پیکسلی
+# $h - بلندی پیکسلی
+# $factor - ضریب بزرگ‌نمایی
+picture-copied = تصویر کپی شد ({ $w }×{ $h } پیکسل با { $factor }×)
+# $w - پهنای پیکسلی
+# $h - بلندی پیکسلی
+# $w_in - عرض بر حسب اینچ
+# $h_in - ارتفاع بر حسب اینچ
+picture-inserted = تصویر درج شد ({ $w }×{ $h } پیکسل در { $w_in }×{ $h_in } اینچ)
 pictures = تصاویر
 pointer-tool = ابزار اشاره‌گر
 pointer-tool-select-and-drag-esc = ابزار اشاره‌گر — گزینش و کشیدن (از ابزار اتصال‌دهنده با Esc)
@@ -525,6 +648,7 @@ remove-connection-point-ix = حذف نقطهٔ اتصال { $ix }
 remove-from-quick-shapes = حذف از شکل‌های سریع
 removed-from-quick-shapes = از شکل‌های سریع حذف شد
 rename-page = تغییر نام صفحه
+rendering-scrim = در حال رندر…
 reorder-pages = بازچینی صفحه‌ها
 reorder-pages-menu = بازچینی صفحه‌ها…
 replace = جایگزینی
@@ -550,6 +674,9 @@ rotate-shapes = چرخش شکل‌ها
 rotate-the-selection-90-clockwis = چرخش گزینش ۹۰ درجه ساعت‌گرد
 rotate-the-selection-90-counter = چرخش گزینش ۹۰ درجه پادساعت‌گرد
 rounding = گردکردن گوشه‌ها
+rtl-text-menu = متن راست‌به‌چپ
+rtl-text-off = متن چپ‌به‌راست شد
+rtl-text-on = متن راست‌به‌چپ شد
 ruler-subdivisions = تقسیم‌بندی خط‌کش
 rulers = خط‌کش‌ها
 save = ذخیره
@@ -557,9 +684,13 @@ save-as = ذخیره به‌نام
 save-changes = ذخیرهٔ تغییرات؟
 save-changes-to-name = ذخیرهٔ تغییرات { $name }؟
 save-ctrl-s = ذخیره (Ctrl+S)
+# $e - متن خطا
+save-failed-e = ذخیره شکست خورد: { $e }
 save-new = ذخیره و جدید
 save-stencil = ذخیرهٔ شابلون
 save-the-stencil-planned = ذخیرهٔ شابلون — برنامه‌ریزی شده
+# $path - مسیر پرونده
+saved-path = { $path } ذخیره شد
 scale = مقیاس
 screen-96-dpi = نمایشگر (۹۶ dpi)
 search-results = نتایج جستجو
@@ -582,7 +713,20 @@ select-shapes-by-type-master-or = گزینش شکل‌ها بر اساس نوع�
 select-the-container-s-members-p = گزینش اعضای ظرف — برنامه‌ریزی شده
 select-the-shapes-to-contain-fir = نخست شکل‌هایی را که باید درون‌گرفته شوند برگزینید
 select-two-or-more-shapes-to-ali = برای تراز، دو شکل یا بیشتر برگزینید
+# $label - نام مقدار
+# $n - تعداد شکل‌های منطبق
+select-value-n-shapes = { $label } ({ $n ->
+    [one] یک شکل
+   *[other] { $n } شکل
+})
 selected-all-shapes = همهٔ شکل‌ها انتخاب شدند
+# $n - تعداد شکل‌های انتخاب‌شده
+# $crit - برچسب ملاک
+selected-n-by-criterion =
+    { $n ->
+        [one] یک شکل بر پایهٔ { $crit } انتخاب شد
+       *[other] { $n } شکل بر پایهٔ { $crit } انتخاب شد
+    }
 selected-shape-shape-id = شکل { $shape_id } انتخاب شد
 selection = گزینش
 selection-pane = قاب گزینش
@@ -652,6 +796,7 @@ snap-conn-points = نقاط اتصال
 snap-dynamic-grid = شبکهٔ پویا
 snap-glue = جذب و چسباندن
 snap-to = جذب به:
+snapglue-note = تنظیمات در خود نقش ذخیره می‌شوند. راهنماها به‌عنوان هدف با #113 می‌آیند؛ چسبندگی کانکتور با #108.
 solid = ممتد
 spacing = فاصله‌گذاری
 spell-check-planned = بررسی املا — برنامه‌ریزی شده
@@ -659,6 +804,24 @@ spelling = املا
 splash-wordmark = طارحی
 split = تقسیم
 split-view-planned = نمای تقسیم‌شده — برنامه‌ریزی شده
+ss-section-1d-endpoints = نقطه‌پایان‌های یک‌بعدی
+ss-section-connection-points = نقاط اتصال
+ss-section-control-points = نقاط کنترل
+ss-section-fill-gradient-stops = پله‌های گرادیان پرکردن
+# $ix - شاخص بخش هندسه
+ss-section-geometry-n = هندسهٔ { $ix }
+ss-section-layer-membership = عضویت در لایه
+ss-section-line-gradient-stops = پله‌های گرادیان خط
+ss-section-page-layout = چیدمان صفحه
+ss-section-page-properties = ویژگی‌های صفحه
+ss-section-print-setup = برپایی چاپ
+ss-section-ruler-grid = خط‌کش و شبکه
+ss-section-shape-data = داده‌های شکل
+ss-section-smart-tags = برچسب‌های هوشمند
+ss-section-text-fields = فیلدهای متن
+ss-section-text-transform = تبدیل متن
+ss-section-user-defined-cells = سلول‌های تعریف‌شدهٔ کاربر
+ss-shape-not-found = شکل پیدا نشد
 stamp-tool = ابزار مهر
 stamp-tool-planned = ابزار مهر — برنامه‌ریزی شده
 start-an-empty-drawing = آغاز یک نقاشی خالی
@@ -706,6 +869,7 @@ text-shapes-planned = شکل‌های متنی — برنامه‌ریزی شد�
 text-tool = ابزار متن
 text-tool-planned-double-click-e = ابزار متن — برنامه‌ریزی‌شده (امروز دابل‌کلیک متن را ویرایش می‌کند)
 the-current-drawing-has-unsaved = نقاشی جاری تغییرات ذخیره‌نشده دارد.
+the-drawing = نقشه
 the-grid = شبکه
 the-last-page-cannot-be-deleted = آخرین صفحه را نمی‌توان حذف کرد
 the-link-has-no-address = پیوند نشانی ندارد
@@ -740,8 +904,68 @@ triple-tick-dot = تیک سه‌گانه + نقطه
 triple-tick-ring = تیک سه‌گانه + حلقه
 underline = زیرخط
 underline-planned = زیرخط — برنامه‌ریزی شده
+# $name - نام ویژگی
+# $v - گزینهٔ افزوده‌شده
+undo-add-choice = افزودن گزینهٔ { $v } به { $name }
+# $id - شناسهٔ شکل
+undo-add-connector = افزودن کانکتور { $id }
+# $n - تعداد شکل‌ها
+# $c - نام کانتینر
+undo-add-n-to-container =
+    { $n ->
+        [one] افزودن یک شکل به کانتینر { $c }
+       *[other] افزودن { $n } شکل به کانتینر { $c }
+    }
+# $what - واژهٔ لبهٔ هم‌ترازشده
+undo-align-what = هم‌ترازی { $what }
+# $style - نام‌وی مستر سبک کانتینر
+undo-apply-container-style = اعمال سبک کانتینر { $style }
+# $id - شناسهٔ شکل
+undo-autoconnect = شکل AutoConnect { $id }
 undo-ctrl-z = واگرد (Ctrl+Z)
+# $n - تعداد شکل‌ها
+undo-delete-n-shapes =
+    { $n ->
+        [one] حذف یک شکل
+       *[other] حذف { $n } شکل
+    }
+# $id - شناسهٔ شکل
+undo-delete-shape = حذف شکل { $id }
+# $n - تعداد اعضای آزادشده
+undo-disband-container =
+    { $n ->
+        [one] منحل کردن کانتینر (یک عضو آزاد شد)
+       *[other] منحل کردن کانتینر ({ $n } عضو آزاد شد)
+    }
+# $sid - شناسهٔ شکل کانکتور
+# $end - واژهٔ بومی‌شدهٔ نقطهٔ پایانی
+undo-glue-connector = چسباندن کانکتور { $sid } به { $end }
 undo-l = واگرد: { $l }
+# $id - شناسهٔ کانکتور
+undo-move-connector = جابه‌جایی کانکتور { $id }
+# $end - واژهٔ بومی‌شدهٔ نقطهٔ پایانی
+undo-move-endpoint = جابه‌جایی نقطهٔ پایانی { $end }
+# $id - شناسهٔ راهنما
+undo-move-guide = جابه‌جایی راهنمای { $id }
+# $id - شناسهٔ شکل
+undo-move-line-shape = جابه‌جایی شکل خط { $id }
+# $id - شناسهٔ شکل
+undo-move-shape = جابه‌جایی شکل { $id }
+# $n - شاخص سطر رأس
+undo-move-vertex = جابه‌جایی رأس { $n }
+# $id - شناسهٔ شکل
+undo-resize-shape = تغییر اندازهٔ شکل { $id }
+# $name - نام سلول
+undo-set-cell = تنظیم { $name }
+# $section - نام بخش
+# $cell - نام سلول
+undo-set-section-cell = تنظیم { $section }.{ $cell }
+# $n - تعداد گروه‌ها
+undo-ungroup-n =
+    { $n ->
+        [one] حل یک گروه
+       *[other] حل { $n } گروه
+    }
 ungroup = واگروه‌سازی
 ungroup-the-selected-group-s = واگروه‌کردن گروه‌های گزینش‌شده
 unsaved-changes = تغییرات ذخیره‌نشده
@@ -754,6 +978,8 @@ variant-effects-planned = جلوه‌های دگرگون — برنامه‌ری
 variants = دگرگون‌ها
 vba-arrives-with-m7-vsdm = VBA با M7 می‌آید (.vsdm)
 vector-svg = برداری (SVG)
+# $cell - توصیف سلول فرمول‌محور
+vertex-drag-refused = کشیدن رأس رد شد: { $cell } فرمول‌محور است — برای تغییر، فرمول را ویرایش کنید
 view = نما
 views = نماها
 visio-drawing = نقاشی Visio
@@ -762,11 +988,19 @@ visio-vsdx-family = Visio (خانوادهٔ VSDX)
 visual-aids = ابزارهای دیداری
 visual-basic = Visual Basic
 weight = قطر
+# $sub - نام صفحهٔ زیرنشانی
+went-to-page = به صفحهٔ { $sub } رفت
 whole-page = تمام صفحه
 wide-arrow = پیکان پهن
+width = عرض
+# $g - فرمول نگهبان
+width-not-resized-guard = عرض تغییر نکرد: { $g } (فقط ارتفاع)
 window = پنجره
+# $n - تعداد پنجره‌ها
+window-n = پنجرهٔ { $n }
 word-count = شمارش واژه‌ها
 word-count-planned = شمارش واژه‌ها — برنامه‌ریزی شده
+worker-lost = کارگر گم شد
 wrap-the-selection-in-this-conta = پیچاندن گزینش در این سبک ظرف
 x-cancel-placement = لغو جای‌گذاری
 zoom = بزرگ‌نمایی

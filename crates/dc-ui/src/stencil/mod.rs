@@ -225,7 +225,14 @@ impl Stencil {
         // Stencil… (#83) — then the search box, then the stencil list.
         ui.horizontal(|ui| {
             ui.strong(crate::i18n::strs().msg_shapes());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // #257 item 3: the header pin mirrors with the chrome —
+            // More Shapes + search hug the LEFT end under RTL.
+            let header_dir = if crate::i18n::rtl() {
+                egui::Layout::left_to_right(egui::Align::Center)
+            } else {
+                egui::Layout::right_to_left(egui::Align::Center)
+            };
+            ui.with_layout(header_dir, |ui| {
                 ui.menu_button(crate::i18n::strs().msg_more_shapes(), |ui| {
                     // Unit variant for built-ins (US default): a session
                     // preference — the shipped U/M stencil pairs differ

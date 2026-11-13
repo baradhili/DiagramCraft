@@ -1053,7 +1053,7 @@ impl App {
                     );
                     return;
                 }
-                self.status = format!("opened {}", path.display());
+                self.status = crate::i18n::strs().msg_opened_path(path.display().to_string());
                 self.recent.record(&path);
                 // #192 spec: opening ADDS a document — the active one
                 // (if any) becomes an inactive session first.
@@ -1547,7 +1547,7 @@ impl App {
                     crate::i18n::strs().msg_opened_stencil_stem(stem)
                 };
             }
-            Err(e) => self.status = format!("open stencil failed: {e:#}"),
+            Err(e) => self.status = crate::i18n::strs().msg_open_stencil_failed_e(format!("{e:#}")),
         }
     }
 
@@ -1616,15 +1616,15 @@ impl App {
                 );
                 self.stencil.reveal = Some(StencilId::Open(ix));
                 self.status = if from_disk {
-                    format!("opened {title} (My Shapes)", title = b.title)
+                    crate::i18n::strs().msg_opened_builtin_myshapes(b.title)
                 } else if metric {
-                    format!("opened {title} (metric)", title = b.title)
+                    crate::i18n::strs().msg_opened_builtin_metric(b.title)
                 } else {
                     format!("opened {title}", title = b.title)
                 };
             }
             None => {
-                self.status = format!("built-in stencil failed to load: {title}", title = b.title);
+                self.status = crate::i18n::strs().msg_builtin_stencil_failed(b.title);
             }
         }
     }
@@ -1661,7 +1661,10 @@ impl App {
             let p = dir.join(entry.trim_start_matches(['/', '\\']));
             if p.is_file() {
                 if let Err(e) = self.stencils.open_file(&p) {
-                    self.status = format!("default stencil {entry:?} failed to load: {e:#}");
+                    self.status = crate::i18n::strs().msg_default_stencil_failed(
+                        format!("{entry:?}"),
+                        format!("{e:#}"),
+                    );
                 }
             }
         }
@@ -1782,15 +1785,16 @@ impl App {
                         .pick_file(),
                     // Any file can be a hyperlink target (#71).
                     PendingKind::HyperlinkAddress => rfd::FileDialog::new().pick_file(),
-                    PendingKind::ExportSave(format) => rfd::FileDialog::new()
-                        .add_filter(
-                            match format {
-                                dc::export::Format::Svg => "SVG (vector graphics)",
-                                dc::export::Format::Png => "PNG (raster image)",
-                                dc::export::Format::Pdf => "PDF (document)",
-                            },
-                            format.extensions(),
-                        )
+                    PendingKind::ExportSave(format) => {
+                        // bound so the catalog Strings outlive the call
+                        let label = match format {
+                            dc::export::Format::Svg => crate::i18n::strs().msg_filter_svg(),
+                            dc::export::Format::Png => crate::i18n::strs().msg_filter_png(),
+                            dc::export::Format::Pdf => crate::i18n::strs().msg_filter_pdf(),
+                        };
+                        rfd::FileDialog::new()
+                            .add_filter(label.as_str(), format.extensions())
+                    }
                         .set_file_name(&default_export_name)
                         .save_file(),
                 },
@@ -1825,15 +1829,11 @@ impl App {
             }
             Some(crate::stencil::disk::ExtractionMsg::Done(e)) => {
                 if e.failed > 0 {
-                    self.status = format!(
-                        "Built-in stencils: {} extracted, {} failed — embedded copies in use",
-                        e.written, e.failed
-                    );
+                    self.status = crate::i18n::strs()
+                        .msg_builtin_extracted_summary(e.written, e.failed);
                 } else if e.written > 0 {
-                    self.status = format!(
-                        "Extracted {} built-in stencil files to My Shapes/Built-ins",
-                        e.written
-                    );
+                    self.status = crate::i18n::strs()
+                        .msg_builtin_extracted_to(e.written);
                 }
                 // Nothing written (files already current): no noise.
             }
@@ -1925,12 +1925,12 @@ impl App {
         let Some(ed) = self.ed() else { return };
         match ed.save_as(path) {
             Ok(()) => {
-                self.status = format!("saved {}", path.display());
+                self.status = crate::i18n::strs().msg_saved_path(path.display().to_string());
                 self.dirty = false;
                 self.path = path.to_path_buf();
                 self.recent.record(path);
             }
-            Err(e) => self.status = format!("save failed: {e:#}"),
+            Err(e) => self.status = crate::i18n::strs().msg_save_failed_e(format!("{e:#}")),
         }
     }
 
@@ -2665,10 +2665,9 @@ impl App {
                 )
                 .is_some()
                 {
-                    self.status = format!(
-                        "vertex drag refused: Geometry{section_ix}.{name}{row_ix} is formula-driven \
-                         — edit the formula to change it"
-                    );
+                    self.status = crate::i18n::strs().msg_vertex_drag_refused(format!(
+                        "Geometry{section_ix}.{name}{row_ix}"
+                    ));
                     return;
                 }
                 // Row-cell formulas live on the row cell itself too.
@@ -2677,10 +2676,9 @@ impl App {
                     .and_then(|c| c.f.as_deref())
                     .is_some_and(|f| f != "Inh" && f != "No Formula")
                 {
-                    self.status = format!(
-                        "vertex drag refused: row {row_ix}'s {name} is formula-driven \
-                         — edit the formula to change it"
-                    );
+                    self.status = crate::i18n::strs().msg_vertex_drag_refused(format!(
+                        "row {row_ix}'s {name}"
+                    ));
                     return;
                 }
             }
@@ -2886,7 +2884,10 @@ impl App {
                 )));
             }
         }
-        self.apply(Macro::new(format!("move vertex {}", row_ix), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_move_vertex(row_ix),
+            cmds,
+        ));
         if customizes {
             if let canvas::GeoCell::NurbsPt(_) = cell {
                 self.status =
@@ -3261,7 +3262,7 @@ impl App {
                     self.dispatch(action);
                     self.keytips.disarm();
                 } else {
-                    self.status = format!("{} is unavailable", key);
+                    self.status = crate::i18n::strs().msg_keytip_unavailable(key.clone());
                 }
             }
             None => {
@@ -3352,7 +3353,7 @@ impl App {
             }
             cmds.extend(self.connect_cleanup_cmds(page_id, &ids));
             let n = ids.len();
-            self.apply(Macro::new(format!("delete {} shapes", n), cmds));
+            self.apply(Macro::new(crate::i18n::strs().msg_undo_delete_n_shapes(n as i64), cmds));
         } else {
             let shape_id = self.sel.unwrap().1;
             self.delete_one(page_id, shape_id);
@@ -3377,7 +3378,10 @@ impl App {
                 &[shape_id],
             ));
         }
-        self.apply(Macro::new(format!("delete shape {}", shape_id), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_delete_shape(shape_id),
+            cmds,
+        ));
     }
 
     /// Marquee selection: page-inch rect (y-down) → every top-level
@@ -3607,8 +3611,8 @@ impl App {
         // The partial-guard note is written AFTER `apply`, which
         // overwrites the status with the command label.
         let guard_note = match (&w_guard, &h_guard) {
-            (Some(g), _) => Some(format!("width not resized: {} (height only)", g)),
-            (_, Some(g)) => Some(format!("height not resized: {} (width only)", g)),
+            (Some(g), _) => Some(crate::i18n::strs().msg_width_not_resized_guard(g.clone())),
+            (_, Some(g)) => Some(crate::i18n::strs().msg_height_not_resized_guard(g.clone())),
             _ => None,
         };
         // Anchor the OPPOSITE corner: fractions (0|1) of its y-up bbox
@@ -3668,7 +3672,10 @@ impl App {
         if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
             cmds.push(r);
         }
-        self.apply(Macro::new(format!("resize shape {}", shape_id), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_resize_shape(shape_id),
+            cmds,
+        ));
         if let Some(note) = guard_note {
             self.status = note;
         }
@@ -3687,7 +3694,7 @@ impl App {
             let resolved = ed.doc.resolve_cell(sh, &chain, name);
             if let Some(f) = resolved.as_ref().and_then(|c| c.f.as_deref()) {
                 if f != "Inh" {
-                    return Some(format!("{name} is formula-driven ({f})"));
+                    return Some(crate::i18n::strs().msg_cell_is_formula_driven(name, f));
                 }
             }
         }
@@ -3890,7 +3897,10 @@ impl App {
                 Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
             })
             .collect();
-        self.apply(Macro::new(format!("move line shape {shape_id}"), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_move_line_shape(shape_id),
+            cmds,
+        ));
         if let Some(note) = kept_note {
             self.status = note;
         }
@@ -4038,7 +4048,10 @@ impl App {
         if let Some(r) = self.reroute_cmd(page_id, &[shape_id]) {
             cmds.push(r);
         }
-        self.apply(Macro::new(format!("move connector {}", shape_id), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_move_connector(shape_id),
+            cmds,
+        ));
         if release_ends > 0 {
             self.status = crate::i18n::strs().msg_connector_moved_release_ends_glu(release_ends);
         }
@@ -4221,7 +4234,10 @@ impl App {
         }
         if !cmds.is_empty() {
             self.apply(Macro::new(
-                format!("add {0} shape(s) to container {container}", members.len()),
+                crate::i18n::strs().msg_undo_add_n_to_container(
+                    members.len() as i64,
+                    container.to_string(),
+                ),
                 cmds,
             ));
         }
@@ -4373,7 +4389,10 @@ impl App {
             Box::new(SetCell::new(scope.clone(), n, cell(v))) as Box<dyn dc_core::Command>
         })
         .collect();
-        Box::new(Macro::new(format!("move line shape {}", sid), cmds))
+        Box::new(Macro::new(
+            crate::i18n::strs().msg_undo_move_line_shape(sid),
+            cmds,
+        ))
     }
 
     // -- snap & glue (GitHub #109) ----------------------------------------
@@ -4735,13 +4754,13 @@ impl App {
             }));
             let same = existing.is_some_and(|idx| same_glue(&t, idx));
             self.status = if same {
-                format!("connector stays glued to shape {}", t.shape_id)
+                crate::i18n::strs().msg_connector_stays_glued(t.shape_id)
             } else {
                 match t.kind {
                     GlueKind::Static { .. } => {
-                        format!("connector glued to shape {}'s connection point", t.shape_id)
+                        crate::i18n::strs().msg_connector_glued_shape_point(t.shape_id)
                     }
-                    GlueKind::Dynamic => format!("connector glued to shape {}", t.shape_id),
+                    GlueKind::Dynamic => crate::i18n::strs().msg_connector_glued_shape(t.shape_id),
                 }
             };
         } else if existing.is_some() {
@@ -4773,7 +4792,10 @@ impl App {
         }
         cmds.push(Box::new(reroute));
         self.apply(Macro::new(
-            format!("glue connector {sid} {}", end.cell()),
+            crate::i18n::strs().msg_undo_glue_connector(
+                sid,
+                crate::connectors::endpoint_word(end),
+            ),
             cmds,
         ));
     }
@@ -4856,7 +4878,10 @@ impl App {
                 connect: glue_connect(conn_id, End::End, &end_t),
             }),
         ];
-        self.apply(Macro::new(format!("AutoConnect shape {}", sid), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_autoconnect(sid),
+            cmds,
+        ));
         self.set_selection(Some((page_id, dup_id)));
         self.sel_set = vec![(page_id, dup_id)];
         self.status = crate::i18n::strs().msg_shape_dup_id_connected_to_sid_au(dup_id, sid);
@@ -5130,7 +5155,10 @@ impl App {
         if let Some(old) = old_container {
             cmds.push(Box::new(dc_core::commands::RemoveShape::new(page_id, old)));
         }
-        self.apply(Macro::new(format!("apply container style {}", style), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_apply_container_style(style),
+            cmds,
+        ));
         self.set_selection(Some((page_id, new_id)));
         self.sel_set = vec![(page_id, new_id)];
         self.tab = Tab::ContainerTools;
@@ -5460,7 +5488,10 @@ impl App {
         })
         .collect();
         let _ = (w, angle);
-        Box::new(Macro::new(format!("move {} endpoint", end.cell()), cmds))
+        Box::new(Macro::new(
+            crate::i18n::strs().msg_undo_move_endpoint(crate::connectors::endpoint_word(end)),
+            cmds,
+        ))
     }
 
     /// The page's glue candidates (#108): every non-connector shape's
@@ -5662,13 +5693,15 @@ impl App {
                 }));
             }
         }
-        self.apply(Macro::new(format!("add connector {}", id), cmds));
+        self.apply(Macro::new(crate::i18n::strs().msg_undo_add_connector(id), cmds));
         self.set_selection(Some((page_id, id)));
         self.sel_set = vec![(page_id, id)];
         self.status = match (beg_t, end_t) {
-            (Some(_), Some(_)) => "connector glued at both ends".into(),
-            (Some(_), None) | (None, Some(_)) => "connector glued at one end".into(),
-            (None, None) => "connector drawn (free ends)".into(),
+            (Some(_), Some(_)) => crate::i18n::strs().msg_connector_glued_at_both_ends(),
+            (Some(_), None) | (None, Some(_)) => {
+                crate::i18n::strs().msg_connector_glued_at_one_end()
+            }
+            (None, None) => crate::i18n::strs().msg_connector_drawn_free_ends(),
         };
     }
 
@@ -5757,12 +5790,13 @@ impl App {
         self.set_selection(Some((page_id, id)));
         self.sel_set = vec![(page_id, id)];
         self.status = match kind {
-            GuideKind::Vertical => format!("vertical guide at {} added", self.view.unit.fmt(at.0)),
+            GuideKind::Vertical => crate::i18n::strs()
+                    .msg_guide_added_vertical(self.view.unit.fmt(at.0)),
             GuideKind::Horizontal => {
-                format!("horizontal guide at {} added", self.view.unit.fmt(at.1))
+                crate::i18n::strs().msg_guide_added_horizontal(self.view.unit.fmt(at.1))
             }
             GuideKind::Point => {
-                format!("guide point at {} added", self.view.unit.fmt_pt(at.0, at.1))
+                crate::i18n::strs().msg_guide_added_point(self.view.unit.fmt_pt(at.0, at.1))
             }
         };
         let _ = label;
@@ -5802,7 +5836,10 @@ impl App {
                 }
             }
         }
-        self.apply(Macro::new(format!("move guide {}", guide_id), cmds));
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_undo_move_guide(guide_id),
+            cmds,
+        ));
     }
 
     /// #109: snap a single dragged point — a 1D endpoint under the
@@ -6048,7 +6085,11 @@ impl App {
             AlignTarget::FirstSelected
         };
         let moves = crate::align::align_moves(&shapes, kind, target, (geom.w_in, geom.h_in));
-        self.apply_moves(&format!("align {}", kind.label()), page_id, &moves);
+        self.apply_moves(
+            &crate::i18n::strs().msg_undo_align_what(kind.label_i18n()),
+            page_id,
+            &moves,
+        );
     }
 
     /// #110 (URS-1161): distribute the selection with even gaps
@@ -6184,7 +6225,7 @@ impl App {
             "LineJumpFactorX",
             vsdx::Cell::value(format!("{factor:.6}")),
         ));
-        self.status = format!("line jump size ×{factor:.2}");
+        self.status = crate::i18n::strs().msg_line_jump_factor_set(factor as i64);
     }
 
     fn apply_page_size(&mut self, (w, h): (f64, f64)) {
@@ -6207,10 +6248,9 @@ impl App {
         self.apply(Macro::new(crate::i18n::strs().msg_set_page_size(), cmds));
         self.view.fit_pending = true;
         self.layers.set_page(-1); // force re-key on the new geometry
-        self.status = format!(
-            "page size {} × {}",
+        self.status = crate::i18n::strs().msg_page_size_set(
             self.view.unit.fmt(w),
-            self.view.unit.fmt(h)
+            self.view.unit.fmt(h),
         );
     }
 
@@ -6330,7 +6370,7 @@ impl App {
                     .unwrap_or_else(|| id.to_string());
                 crate::i18n::strs().msg_background_page_name(name)
             }
-            None => "background cleared".into(),
+            None => crate::i18n::strs().msg_background_cleared(),
         };
     }
 
@@ -6364,27 +6404,35 @@ impl App {
             .collapsible(false)
             .default_width(280.0)
             .show(ctx, |ui| {
-                ui.label(crate::i18n::strs().msg_this_page_renders_behind());
-                if this_is_bg {
-                    ui.weak(crate::i18n::strs().msg_this_page_is_itself_a_background());
-                }
-                ui.separator();
-                if ui.radio(current.is_none(), crate::i18n::strs().msg_no_background()).clicked() {
-                    pick = Some(None);
-                }
-                if entries.is_empty() {
-                    ui.weak(
-                        crate::i18n::strs().msg_no_background_pages_right_click(),
-                    );
-                }
-                for (id, name) in &entries {
+                // #257 item 3: the dialog pass mirrors every window
+                // (the Language-dialog exemplar — content right-aligns
+                // while RTL).
+                ui.with_layout(dialog_dir(), |ui| {
+                    ui.label(crate::i18n::strs().msg_this_page_renders_behind());
+                    if this_is_bg {
+                        ui.weak(crate::i18n::strs().msg_this_page_is_itself_a_background());
+                    }
+                    ui.separator();
                     if ui
-                        .radio(current == Some(*id), crate::i18n::strs().msg_name_page_id(name, id))
+                        .radio(current.is_none(), crate::i18n::strs().msg_no_background())
                         .clicked()
                     {
-                        pick = Some(Some(*id));
+                        pick = Some(None);
                     }
-                }
+                    if entries.is_empty() {
+                        ui.weak(
+                            crate::i18n::strs().msg_no_background_pages_right_click(),
+                        );
+                    }
+                    for (id, name) in &entries {
+                        if ui
+                            .radio(current == Some(*id), crate::i18n::strs().msg_name_page_id(name, id))
+                            .clicked()
+                        {
+                            pick = Some(Some(*id));
+                        }
+                    }
+                });
             });
         if let Some(bg) = pick {
             self.set_back_page(bg);
@@ -6496,7 +6544,10 @@ impl App {
     fn insert_picture_file(&mut self, path: &Path) {
         match std::fs::read(path) {
             Ok(bytes) => self.insert_picture_bytes(&bytes),
-            Err(e) => self.status = format!("could not read {}: {e}", path.display()),
+            Err(e) => {
+                self.status = crate::i18n::strs()
+                    .msg_could_not_read_path(path.display().to_string(), e.to_string())
+            }
         }
     }
 
@@ -6670,9 +6721,11 @@ impl App {
         });
         self.set_selection(Some((page_id, id)));
         self.sel_set = vec![(page_id, id)];
-        self.status = format!(
-            "picture inserted ({}×{} px at {:.2}×{:.2} in)",
-            mw as u32, mh as u32, w, h
+        self.status = crate::i18n::strs().msg_picture_inserted(
+            mw as i64,
+            mh as i64,
+            w,
+            h,
         );
     }
 
@@ -6783,18 +6836,29 @@ impl App {
             .collapsible(false)
             .default_width(260.0)
             .show(ctx, |ui| {
-                ui.weak(crate::i18n::strs().msg_contgal_prompt());
-                ui.add_space(4.0);
-                egui::Grid::new("dc-contgal")
-                    .num_columns(2)
-                    .spacing(egui::vec2(8.0, 4.0))
-                    .show(ui, |ui| {
-                        for name in CONTAINER_STYLES {
-                            if ui.button(name).clicked() {
-                                pick = Some(name);
+                ui.with_layout(dialog_dir(), |ui| {
+                    ui.weak(crate::i18n::strs().msg_contgal_prompt());
+                    ui.add_space(4.0);
+                    egui::Grid::new("dc-contgal")
+                        .num_columns(2)
+                        .spacing(egui::vec2(8.0, 4.0))
+                        .show(ui, |ui| {
+                            // #257: an RTL grid fills its rows right-to-left.
+                            let styles: Vec<&str> = if crate::i18n::rtl() {
+                                CONTAINER_STYLES
+                                    .chunks(2)
+                                    .flat_map(|c| c.iter().rev().copied())
+                                    .collect()
+                            } else {
+                                CONTAINER_STYLES.to_vec()
+                            };
+                            for name in styles {
+                                if ui.button(name).clicked() {
+                                    pick = Some(name);
+                                }
                             }
-                        }
-                    });
+                        });
+                });
             });
         if let Some(name) = pick {
             self.contgal_open = false;
@@ -6817,31 +6881,33 @@ impl App {
             .collapsible(false)
             .default_width(280.0)
             .show(ctx, |ui| {
-                ui.strong(crate::i18n::strs().msg_resolution());
-                if ui.radio(self.copypic_svg, crate::i18n::strs().msg_vector_svg()).clicked() {
-                    self.copypic_svg = true;
-                }
-                for (f, label) in [
-                    (1u32, crate::i18n::strs().msg_screen_96_dpi()),
-                    (2, crate::i18n::strs().msg_high_192_dpi()),
-                    (4, crate::i18n::strs().msg_print_384_dpi()),
-                ] {
-                    if ui
-                        .radio(!self.copypic_svg && self.copypic_factor == f, label)
-                        .clicked()
-                    {
-                        self.copypic_factor = f;
-                        self.copypic_svg = false;
+                ui.with_layout(dialog_dir(), |ui| {
+                    ui.strong(crate::i18n::strs().msg_resolution());
+                    if ui.radio(self.copypic_svg, crate::i18n::strs().msg_vector_svg()).clicked() {
+                        self.copypic_svg = true;
                     }
-                }
-                ui.add_space(6.0);
-                if ui.button(crate::i18n::strs().msg_copy_picture()).clicked() {
-                    copy = true;
-                }
-                ui.weak(if self.copypic_svg {
-                    crate::i18n::strs().msg_the_svg_markup_lands_on_the_clip()
-                } else {
-                    crate::i18n::strs().msg_the_picture_lands_on_the_clipboa()
+                    for (f, label) in [
+                        (1u32, crate::i18n::strs().msg_screen_96_dpi()),
+                        (2, crate::i18n::strs().msg_high_192_dpi()),
+                        (4, crate::i18n::strs().msg_print_384_dpi()),
+                    ] {
+                        if ui
+                            .radio(!self.copypic_svg && self.copypic_factor == f, label)
+                            .clicked()
+                        {
+                            self.copypic_factor = f;
+                            self.copypic_svg = false;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    if ui.button(crate::i18n::strs().msg_copy_picture()).clicked() {
+                        copy = true;
+                    }
+                    ui.weak(if self.copypic_svg {
+                        crate::i18n::strs().msg_the_svg_markup_lands_on_the_clip()
+                    } else {
+                        crate::i18n::strs().msg_the_picture_lands_on_the_clipboa()
+                    });
                 });
             });
         if copy && self.copypic_svg {
@@ -6869,9 +6935,10 @@ impl App {
                             );
                             {
                                 ctx.copy_image(ci);
-                                self.status = format!(
-                                    "picture copied ({w}×{h} px at {}×)",
-                                    self.copypic_factor
+                                self.status = crate::i18n::strs().msg_picture_copied(
+                                    w as i64,
+                                    h as i64,
+                                    self.copypic_factor as i64,
                                 );
                             }
                         }
@@ -6985,6 +7052,8 @@ impl App {
             .collapsible(false)
             .default_width(300.0)
             .show(ctx, |ui| {
+                // #257 item 3: the dialog pass mirrors the window.
+                let mut __rtl_body = |ui: &mut Ui| {
                 ui.label(crate::i18n::strs().msg_current());
                 ui.label(format!(
                     "{:.1} × {:.1} {}",
@@ -6999,10 +7068,23 @@ impl App {
                     .num_columns(3)
                     .spacing(egui::vec2(8.0, 4.0))
                     .show(ui, |ui| {
-                        for chunk in SIZES.chunks(3) {
+                        // #257: an RTL grid fills its rows right-to-left.
+                        let rows: Vec<Vec<(&str, f64, f64)>> = if crate::i18n::rtl() {
+                            SIZES
+                                .chunks(3)
+                                .map(|c| {
+                                    let mut v: Vec<_> = c.to_vec();
+                                    v.reverse();
+                                    v
+                                })
+                                .collect()
+                        } else {
+                            SIZES.chunks(3).map(|c| c.to_vec()).collect()
+                        };
+                        for chunk in rows {
                             for (name, w, h) in chunk {
-                                if ui.button(*name).clicked() {
-                                    picked = Some((*w, *h));
+                                if ui.button(name).clicked() {
+                                    picked = Some((w, h));
                                 }
                             }
                             ui.end_row();
@@ -7018,41 +7100,96 @@ impl App {
                 // The range is ~10 mm .. 2 m, expressed in display
                 // units so inches never clamps at 10 in.
                 let (lo, hi) = (unit.from_in(10.0 / 25.4), unit.from_in(2000.0 / 25.4));
+                // #257: mirrored emission under RTL — ui::horizontal
+                // keeps the wrap-aware measure (a with_layout flip here
+                // reserves the parent's full cross space and balloons
+                // the window).
+                let wd_label = crate::i18n::strs().msg_width();
+                let ht_label = crate::i18n::strs().msg_height();
+                let width_first = !crate::i18n::rtl();
                 ui.horizontal(|ui| {
-                    ui.label("Width");
+                    let (first_label, second_label) = if width_first {
+                        (wd_label.as_str(), ht_label.as_str())
+                    } else {
+                        (ht_label.as_str(), wd_label.as_str())
+                    };
+                    let mut first_val = if width_first { wd } else { ht };
+                    let mut second_val = if width_first { ht } else { wd };
+                    ui.label(first_label);
                     ui.add(
-                        egui::DragValue::new(&mut wd)
+                        egui::DragValue::new(&mut first_val)
                             .range(lo..=hi)
                             .suffix(unit.suffix()),
                     );
-                    ui.label("Height");
+                    ui.label(second_label);
                     ui.add(
-                        egui::DragValue::new(&mut ht)
+                        egui::DragValue::new(&mut second_val)
                             .range(lo..=hi)
                             .suffix(unit.suffix()),
                     );
+                    wd = first_val;
+                    ht = second_val;
                 });
                 if ui.button(crate::i18n::strs().msg_apply_custom_size()).clicked() && wd > 0.0 && ht > 0.0 {
                     custom = Some((unit.to_in(wd), unit.to_in(ht)));
                 }
                 ui.separator();
                 ui.strong(crate::i18n::strs().msg_orientation());
+                // #257: mirrored emission under RTL (horizontal keeps
+                // the wrap-aware measure).
+                let rtl_ori = crate::i18n::rtl();
+                let (mut p_clicked, mut l_clicked) = (false, false);
                 ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(geom.w_in <= geom.h_in, crate::i18n::strs().msg_portrait())
-                        .clicked()
-                        && geom.w_in > geom.h_in
-                    {
-                        apply = Some((geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in)));
-                    }
-                    if ui
-                        .selectable_label(geom.w_in > geom.h_in, crate::i18n::strs().msg_landscape())
-                        .clicked()
-                        && geom.w_in <= geom.h_in
-                    {
-                        apply = Some((geom.h_in.max(geom.w_in), geom.h_in.min(geom.w_in)));
+                    if rtl_ori {
+                        if ui
+                            .selectable_label(
+                                geom.w_in > geom.h_in,
+                                crate::i18n::strs().msg_landscape(),
+                            )
+                            .clicked()
+                            && geom.w_in <= geom.h_in
+                        {
+                            l_clicked = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                geom.w_in <= geom.h_in,
+                                crate::i18n::strs().msg_portrait(),
+                            )
+                            .clicked()
+                            && geom.w_in > geom.h_in
+                        {
+                            p_clicked = true;
+                        }
+                    } else {
+                        if ui
+                            .selectable_label(
+                                geom.w_in <= geom.h_in,
+                                crate::i18n::strs().msg_portrait(),
+                            )
+                            .clicked()
+                            && geom.w_in > geom.h_in
+                        {
+                            p_clicked = true;
+                        }
+                        if ui
+                            .selectable_label(
+                                geom.w_in > geom.h_in,
+                                crate::i18n::strs().msg_landscape(),
+                            )
+                            .clicked()
+                            && geom.w_in <= geom.h_in
+                        {
+                            l_clicked = true;
+                        }
                     }
                 });
+                if p_clicked {
+                    apply = Some((geom.w_in.min(geom.h_in), geom.w_in.max(geom.h_in)));
+                }
+                if l_clicked {
+                    apply = Some((geom.h_in.max(geom.w_in), geom.h_in.min(geom.w_in)));
+                }
                 // Layout and Routing (#251): the line-jump display
                 // switch and jump size — Visio's Page Setup group,
                 // persisted on the PageSheet.
@@ -7080,28 +7217,46 @@ impl App {
                     })
                     .unwrap_or(1.0) as f32;
                 let mut jump_factor = self.line_jump_draft.unwrap_or(doc_factor);
+                // #257: mirrored emission under RTL (horizontal).
+                let jump_label = crate::i18n::strs().msg_jump_size();
                 ui.horizontal(|ui| {
-                    ui.label(crate::i18n::strs().msg_jump_size());
-                    let r = ui.add(
-                        egui::DragValue::new(&mut jump_factor)
-                            .range(0.5..=3.0)
-                            .speed(0.05)
-                            .suffix("×"),
-                    );
-                    // Draft while dragging; commit ONCE at drag end
-                    // (or immediately for typed input) — the value
-                    // reloads from the document each frame, so the
-                    // draft is what carries the drag (#218 review).
-                    if r.dragged() {
-                        self.line_jump_draft = Some(jump_factor);
-                    }
-                    if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                        self.line_jump_draft = None;
-                        if (jump_factor - doc_factor).abs() > 1e-6 {
-                            self.apply_line_jump_factor(jump_factor as f64);
+                    let mut factor_row = |ui: &mut egui::Ui| {
+                        let r = ui.add(
+                            egui::DragValue::new(&mut jump_factor)
+                                .range(0.5..=3.0)
+                                .speed(0.05)
+                                .suffix("×"),
+                        );
+                        // Draft while dragging; commit ONCE at drag end
+                        // (or immediately for typed input) — the value
+                        // reloads from the document each frame, so the
+                        // draft is what carries the drag (#218 review).
+                        if r.dragged() {
+                            self.line_jump_draft = Some(jump_factor);
                         }
+                        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                            self.line_jump_draft = None;
+                            if (jump_factor - doc_factor).abs() > 1e-6 {
+                                self.apply_line_jump_factor(jump_factor as f64);
+                            }
+                        }
+                    };
+                    if !crate::i18n::rtl() {
+                        ui.label(jump_label);
+                        factor_row(ui);
+                    } else {
+                        factor_row(ui);
+                        ui.label(jump_label);
                     }
                 });
+                };
+                if crate::i18n::rtl() {
+                    ui.with_layout(egui::Layout::top_down(egui::Align::RIGHT), |ui| {
+                        __rtl_body(ui)
+                    });
+                } else {
+                    __rtl_body(ui);
+                }
             });
         if let Some((w, h)) = apply.or(custom) {
             self.apply_page_size((w, h));
@@ -7302,7 +7457,7 @@ impl App {
                         // #27): one undo step.
                         let member_ids = self.container_member_ids(page_id, d.shape);
                         if member_ids.is_empty() {
-                            let label = format!("move shape {}", d.shape);
+                            let label = crate::i18n::strs().msg_undo_move_shape(d.shape);
                             let cmd = self.move_cmd_for(page_id, d.shape, d.last_pin);
                             // #108: glued connectors re-attach and
                             // reroute in the same undo step.
@@ -7999,7 +8154,7 @@ impl App {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Drawing1".into());
+            .unwrap_or_else(|| crate::i18n::strs().msg_drawing_n(1));
         let title = format!("{name} - Tarahi{}", if self.dirty { " *" } else { "" });
         if self.window_title != title {
             self.window_title = title.clone();
@@ -8067,6 +8222,7 @@ impl App {
                         rect: fr,
                         key: "F".into(),
                         hit: crate::keytips::Hit::File,
+                        anchor: None,
                     });
                     ui.add_space(8.0);
                     // #156: the contextual Container Tools tab rides
@@ -8101,6 +8257,7 @@ impl App {
                                 rect: r,
                                 key: k.into(),
                                 hit: crate::keytips::Hit::Tab(*t),
+                                anchor: None,
                             });
                         }
                         if active {
@@ -8118,7 +8275,7 @@ impl App {
                     let n_docs = self.docs.len() + self.ed.is_some() as usize;
                     if n_docs > 0 {
                         ui.add_space(8.0);
-                        let label = format!("Window {}", n_docs);
+                        let label = crate::i18n::strs().msg_window_n(n_docs);
                         // (no widget_info override — the Button's own
                         // text is the accessible label, #56's concern is
                         // painted text only)
@@ -8216,6 +8373,7 @@ impl App {
                             rect: pr,
                             key: "Q".into(),
                             hit: crate::keytips::Hit::TellMe,
+                            anchor: None,
                         });
                         // The QAT cluster lands LEFT of Tell Me (this is
                         // a right-to-left layout): Save/Undo/Redo as
@@ -8262,7 +8420,17 @@ impl App {
         let groups = crate::ribbon::groups(self.tab, &ctx);
         let mut launcher: Option<String> = None;
         // #184: every content-row control captures its rect for the
-        // keytip badges (letters assigned at paint time).
+        // keytip badges (letters assigned at paint time). #257: under
+        // an RTL language the badges also carry the control's ENGLISH
+        // anchor label — the Latin name its keytip letter keys off
+        // (the RTL Office scheme; the localized label has no ASCII
+        // candidates) — zipped in content_row's traversal order.
+        let anchors = if crate::i18n::rtl() {
+            crate::ribbon::anchor_labels(self.tab, &ctx)
+        } else {
+            Vec::new()
+        };
+        let mut anchor_ix = 0usize;
         let badges = &mut self.keytips.badges;
         crate::ribbon::content_row(
             ui,
@@ -8270,6 +8438,8 @@ impl App {
             &mut |a| dispatch(a, &mut act),
             &mut |label: &str| launcher = Some(label.to_string()),
             &mut |b, r| {
+                let anchor = anchors.get(anchor_ix).cloned();
+                anchor_ix += 1;
                 badges.push(crate::keytips::Badge {
                     rect: r,
                     key: String::new(),
@@ -8278,6 +8448,7 @@ impl App {
                         enabled: b.enabled,
                         label: b.a11y_label().into(),
                     },
+                    anchor,
                 });
             },
         );
@@ -8457,7 +8628,7 @@ impl App {
                                     .frame(true);
                                 let resp =
                                     ui.add(b)
-                                        .on_hover_text(format!("page {} (id {})", i + 1, id));
+                                        .on_hover_text(crate::i18n::strs().msg_page_tab_tooltip(i + 1, id));
                                 if active && scroll_to_active {
                                     resp.scroll_to_me(Some(egui::Align::Center));
                                 }
@@ -8645,7 +8816,7 @@ impl App {
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new(format!("set {}", name), cmds));
+            self.apply(Macro::new(crate::i18n::strs().msg_undo_set_cell(name), cmds));
         }
     }
 
@@ -8666,7 +8837,10 @@ impl App {
             )));
         }
         if !cmds.is_empty() {
-            self.apply(Macro::new(format!("set {}.{}", section, cell), cmds));
+            self.apply(Macro::new(
+                crate::i18n::strs().msg_undo_set_section_cell(section, cell),
+                cmds,
+            ));
         }
     }
 
@@ -9180,7 +9354,14 @@ impl App {
                         self.load(p);
                     }
                 });
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                // #257 item 3: the New column hugs the mirrored far
+                // end of the start screen.
+                let start_new_dir = if crate::i18n::rtl() {
+                    egui::Layout::left_to_right(egui::Align::TOP)
+                } else {
+                    egui::Layout::right_to_left(egui::Align::TOP)
+                };
+                ui.with_layout(start_new_dir, |ui| {
                     ui.vertical(|ui| {
                         ui.add_space(24.0);
                         ui.heading(crate::i18n::strs().msg_rail_new());
@@ -9241,7 +9422,7 @@ impl App {
             let mut pop = false;
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("Page › {}", names.join(" › ")))
+                    egui::RichText::new(crate::i18n::strs().msg_group_breadcrumb(names.join(" › ")))
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
@@ -9945,7 +10126,7 @@ impl App {
                                 let (target, note) = match glue {
                                     Some((p, hit)) => (
                                         p,
-                                        Some(format!("endpoint glued to {}", snap_hit_text(hit))),
+                                        Some(crate::i18n::strs().msg_endpoint_glued_to(snap_hit_text(hit))),
                                     ),
                                     None => (raw, None),
                                 };
@@ -10311,11 +10492,11 @@ impl App {
             match target {
                 Some(i) => {
                     self.switch_page(i);
-                    self.status = format!("went to page {sub:?}");
+                    self.status = crate::i18n::strs().msg_went_to_page(sub);
                     return;
                 }
                 None => {
-                    self.status = format!("page {sub:?} not found");
+                    self.status = crate::i18n::strs().msg_page_not_found(sub);
                     return;
                 }
             }
@@ -10344,7 +10525,7 @@ impl App {
             cmd.arg(flag);
         }
         match cmd.arg(&address).spawn() {
-            Ok(_) => self.status = format!("opened {address}"),
+            Ok(_) => self.status = crate::i18n::strs().msg_opened_address(address.clone()),
             Err(e) => self.status = crate::i18n::strs().msg_could_not_open_address_e(address, e.to_string()),
         }
     }
@@ -10554,6 +10735,8 @@ impl App {
             .collapsible(false)
             .default_width(320.0)
             .show(ctx, |ui| {
+                // #257 item 3: the dialog pass mirrors the window.
+                ui.with_layout(dialog_dir(), |ui| {
                 if thread.is_empty() {
                     ui.weak(crate::i18n::strs().msg_no_comments_on_this_shape_yet());
                 }
@@ -10566,8 +10749,9 @@ impl App {
                         ))
                         .corner_radius(4.0)
                         .show(ui, |ui| {
-                            // 2016 header: avatar initial + author + date.
-                            ui.horizontal(|ui| {
+                            // 2016 header: avatar initial + author + date
+                            // (mirrored with the chrome under RTL).
+                            row(ui, |ui| {
                                 let initial = author
                                     .chars()
                                     .next()
@@ -10613,7 +10797,7 @@ impl App {
                                         crate::i18n::strs().msg_edit_comment(),
                                     )
                                 });
-                                ui.horizontal(|ui| {
+                                row(ui, |ui| {
                                     if ui.button(crate::i18n::strs().msg_save()).clicked() && !buf.trim().is_empty() {
                                         let author = author.clone();
                                         let date = date.clone();
@@ -10640,7 +10824,7 @@ impl App {
                             }
                             if !editing_here {
                                 ui.label(egui::RichText::new(cbody).size(12.0));
-                                ui.horizontal(|ui| {
+                                row(ui, |ui| {
                                     if ui.button(crate::i18n::strs().msg_edit()).clicked() {
                                         edit = Some((*ann_id, cbody.clone()));
                                     }
@@ -10685,7 +10869,7 @@ impl App {
                         },
                     )
                 });
-                ui.horizontal(|ui| {
+                row(ui, |ui| {
                     let caption = if thread.is_empty() { crate::i18n::strs().msg_ok() } else { crate::i18n::strs().msg_reply() };
                     if ui.button(caption).clicked() && !body.trim().is_empty() {
                         self.add_comment(shape_id, &body);
@@ -10694,6 +10878,7 @@ impl App {
                     if ui.button(crate::i18n::strs().msg_close()).clicked() {
                         close = true;
                     }
+                });
                 });
             });
         if !close {
@@ -10791,6 +10976,14 @@ impl App {
             .default_width(340.0)
             .default_pos(top_right)
             .show(ctx, |ui| {
+                // #257 item 3: the dialog pass mirrors the window; the
+                // property grid swaps its columns under RTL (field
+                // visual-left, label visual-right).
+                ui.with_layout(dialog_dir(), |ui| {
+                let rtl_grid = crate::i18n::rtl();
+                let emit_label = |ui: &mut egui::Ui, label: &str, tip: &str| {
+                    ui.label(label).on_hover_text(tip);
+                };
                 egui::Grid::new("dc-shape-data")
                     .num_columns(2)
                     .spacing(egui::vec2(8.0, 6.0))
@@ -10808,7 +11001,9 @@ impl App {
                                 .cell("Prompt")
                                 .and_then(|c| c.v.clone())
                                 .unwrap_or_default();
-                            ui.label(&label).on_hover_text(&tip);
+                            if !rtl_grid {
+                                emit_label(ui, &label, &tip);
+                            }
                             let _field_id = ();
                             match crate::props::field_kind(row) {
                                 crate::props::FieldKind::Bool => {
@@ -10902,10 +11097,15 @@ impl App {
                                     if let Some(v) = picked {
                                         write_value(self, page_id, shape_id, name, &v);
                                     }
-                                    // The add row (label column empty).
+                                    // The add row (label column empty —
+                                    // mirrored with the grid under RTL).
                                     if self.prop_add.as_deref() == Some(name.as_str()) {
                                         ui.end_row();
-                                        ui.label("");
+                                        if rtl_grid {
+                                            // the editor lands visual-left
+                                        } else {
+                                            ui.label("");
+                                        }
                                         let add_key = format!("{name}#add");
                                         let mut commit = false;
                                         let mut cancel = false;
@@ -10936,6 +11136,9 @@ impl App {
                                                 }
                                             });
                                         }
+                                        if rtl_grid {
+                                            ui.label("");
+                                        }
                                         if cancel {
                                             bufs.remove(&add_key);
                                             self.prop_add = None;
@@ -10951,7 +11154,7 @@ impl App {
                                                 // phantom choices. Keep the add
                                                 // row open for correction.
                                                 self.status =
-                                                    crate::i18n::strs().msg_label_a_choice_cannot_contain(label);
+                                                    crate::i18n::strs().msg_label_a_choice_cannot_contain(label.clone());
                                             } else if !v.is_empty() {
                                                 bufs.remove(&add_key);
                                                 self.prop_add = None;
@@ -10977,7 +11180,11 @@ impl App {
                                                         name.clone(),
                                                     );
                                                     self.apply(dc_core::Macro::new(
-                                                        format!("add {name} choice {v:?}"),
+                                                        crate::i18n::strs()
+                                                            .msg_undo_add_choice(
+                                                                name.clone(),
+                                                                format!("{v:?}"),
+                                                            ),
                                                         vec![
                                                             Box::new(dc_core::SetRowCell::new(
                                                                 scope.clone(),
@@ -11024,7 +11231,7 @@ impl App {
                                                 write_value(self, page_id, shape_id, name, &v);
                                             }
                                             Err(_) => {
-                                                self.status = crate::i18n::strs().msg_label_not_a_number(label);
+                                                self.status = crate::i18n::strs().msg_label_not_a_number(label.clone());
                                             }
                                         }
                                         bufs.remove(name);
@@ -11049,17 +11256,24 @@ impl App {
                                     }
                                 }
                             }
+                            if rtl_grid && self.prop_add.as_deref() != Some(name.as_str()) {
+                                // the mirrored row's second cell (the
+                                // add-row variant closed its own cells)
+                                emit_label(ui, &label, &tip);
+                            }
                             ui.end_row();
                         }
                     });
-                // Always-visible action bar: Close bottom-right.
+                // Always-visible action bar: Close bottom-right —
+                // #257: mirrored to the bottom-left under RTL.
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    row_rev(ui, |ui| {
                         if ui.button(crate::i18n::strs().msg_close()).clicked() {
                             close_btn = true;
                         }
                     });
+                });
                 });
             });
         if open && !close_btn {
@@ -11123,7 +11337,7 @@ impl App {
                                                 row.ix,
                                                 row.cell("Name")
                                                     .and_then(|c| c.v.clone())
-                                                    .unwrap_or_else(|| format!("layer {}", row.ix)),
+                                                    .unwrap_or_else(|| crate::i18n::strs().msg_layer_ix_fallback(row.ix)),
                                             )
                                         })
                                     })
@@ -11162,7 +11376,9 @@ impl App {
             .collapsible(false)
             .default_width(320.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // #257 item 3: the dialog pass mirrors the window.
+                ui.with_layout(dialog_dir(), |ui| {
+                row(ui, |ui| {
                     ui.label(crate::i18n::strs().msg_select_by());
                     for (i, label) in [crate::i18n::strs().msg_shape_type(), crate::i18n::strs().msg_master(), crate::i18n::strs().msg_layer()].into_iter().enumerate() {
                         if ui
@@ -11183,7 +11399,7 @@ impl App {
                         if ui
                             .selectable_label(
                                 self.selby_value == *label,
-                                format!("{label} ({} shapes)", ids.len()),
+                                crate::i18n::strs().msg_select_value_n_shapes(label.clone(), ids.len() as i64),
                             )
                             .clicked()
                         {
@@ -11198,6 +11414,7 @@ impl App {
                 if r.clicked() {
                     apply = true;
                 }
+                });
             });
         if apply {
             if let Some((_, _, ids)) = pairs.iter().find(|(l, _, _)| *l == self.selby_value) {
@@ -11211,14 +11428,13 @@ impl App {
                     }
                     let n = all.len();
                     self.sel_set = all;
-                    self.status = format!(
-                        "selected {n} shapes by {}",
-                        match self.selby_criterion {
-                            0 => "shape type",
-                            1 => "master",
-                            _ => "layer",
-                        }
-                    );
+                    let crit = match self.selby_criterion {
+                        0 => crate::i18n::strs().msg_shape_type(),
+                        1 => crate::i18n::strs().msg_master(),
+                        _ => crate::i18n::strs().msg_layer(),
+                    };
+                    self.status = crate::i18n::strs()
+                        .msg_selected_n_by_criterion(n as i64, crit);
                 }
             }
         }
@@ -11244,12 +11460,15 @@ impl App {
             .collapsible(false)
             .default_width(400.0)
             .show(ctx, |ui| {
+                // #257 item 3: the dialog pass mirrors the window; the
+                // two columns swap (Glue column reads first under RTL).
+                ui.with_layout(dialog_dir(), |ui| {
                 let s = &mut self.snap;
-                ui.horizontal(|ui| {
+                let snap_col = |ui: &mut egui::Ui, s: &mut crate::snap::SnapSettings, changed: &mut bool| {
                     ui.vertical(|ui| {
                         ui.strong(crate::i18n::strs().msg_snap());
                         if ui.checkbox(&mut s.snap_active, crate::i18n::strs().msg_active()).changed() {
-                            changed = true;
+                            *changed = true;
                         }
                         ui.add_enabled_ui(s.snap_active, |ui| {
                             ui.label(crate::i18n::strs().msg_snap_to());
@@ -11263,16 +11482,17 @@ impl App {
                                 (&mut s.snap_connection_points, crate::i18n::strs().msg_snap_conn_points()),
                             ] {
                                 if ui.checkbox(v, label).changed() {
-                                    changed = true;
+                                    *changed = true;
                                 }
                             }
                         });
                     });
-                    ui.separator();
+                };
+                let glue_col = |ui: &mut egui::Ui, s: &mut crate::snap::SnapSettings, changed: &mut bool| {
                     ui.vertical(|ui| {
                         ui.strong(crate::i18n::strs().msg_glue());
                         if ui.checkbox(&mut s.glue_active, crate::i18n::strs().msg_active()).changed() {
-                            changed = true;
+                            *changed = true;
                         }
                         ui.add_enabled_ui(s.glue_active, |ui| {
                             ui.label(crate::i18n::strs().msg_glue_to());
@@ -11283,11 +11503,25 @@ impl App {
                                 (&mut s.glue_connection_points, crate::i18n::strs().msg_snap_conn_points()),
                             ] {
                                 if ui.checkbox(v, label).changed() {
-                                    changed = true;
+                                    *changed = true;
                                 }
                             }
                         });
                     });
+                };
+                // #257: explicit emission order in a plain horizontal
+                // (the generic `row` flip reserves too little wrap
+                // width for the vertical columns under RTL).
+                ui.horizontal(|ui| {
+                    if crate::i18n::rtl() {
+                        glue_col(ui, s, &mut changed);
+                        ui.separator();
+                        snap_col(ui, s, &mut changed);
+                    } else {
+                        snap_col(ui, s, &mut changed);
+                        ui.separator();
+                        glue_col(ui, s, &mut changed);
+                    }
                 });
                 ui.separator();
                 ui.strong(crate::i18n::strs().msg_drawing_aids());
@@ -11295,10 +11529,8 @@ impl App {
                     changed = true;
                 }
                 ui.add_space(3.0);
-                ui.weak(
-                    "Settings are stored in the drawing. Guides as targets arrive with \
-                     #113; connector glue with #108.",
-                );
+                ui.weak(crate::i18n::strs().msg_snapglue_note());
+                });
             });
         if !open {
             self.snap_dlg_open = false;
@@ -11435,18 +11667,34 @@ impl App {
                 if let Some(d) = draft.as_mut() {
                     // Accessible names on the inputs (#56 pattern);
                     // the grid labels alone don't label the fields.
-                    let field = |ui: &mut Ui, label: &str, buf: &mut String| {
-                        ui.label(label);
+                    // #257: the RTL grid mirrors its rows — the label
+                    // cell lands last (visual right), the browse/combo
+                    // control first (visual left).
+                    let rtl_grid = crate::i18n::rtl();
+                    let input_cell = |ui: &mut Ui, label: &str, buf: &mut String| {
                         let r = ui.add(egui::TextEdit::singleline(buf).hint_text(label));
                         r.widget_info(|| {
                             egui::WidgetInfo::labeled(egui::Role::TextInput, true, label)
                         });
                     };
+                    let field = |ui: &mut Ui, label: &str, buf: &mut String| {
+                        ui.label(label);
+                        input_cell(ui, label, buf);
+                    };
                     egui::Grid::new("dc-hyperlink-draft")
                         .num_columns(3)
                         .spacing(egui::vec2(8.0, 4.0))
                         .show(ui, |ui| {
-                            field(ui, "Address", &mut d.address);
+                            if rtl_grid {
+                                // Browse… (#71) first (visual left).
+                                if ui.button(crate::i18n::strs().msg_browse()).clicked() {
+                                    self.begin_dialog(PendingKind::HyperlinkAddress);
+                                }
+                                input_cell(ui, crate::i18n::strs().msg_hl_address().as_str(), &mut d.address);
+                                ui.label(crate::i18n::strs().msg_hl_address());
+                                ui.end_row();
+                            } else {
+                            field(ui, crate::i18n::strs().msg_hl_address().as_str(), &mut d.address);
                             // Browse… (#71): the native file picker (the
                             // Open/Save As worker-thread pattern); the
                             // pick lands in the Address field once the
@@ -11455,7 +11703,35 @@ impl App {
                                 self.begin_dialog(PendingKind::HyperlinkAddress);
                             }
                             ui.end_row();
-                            field(ui, "Sub-address", &mut d.sub);
+                            }
+                            if rtl_grid {
+                                let combo = egui::ComboBox::from_id_salt("dc-hyperlink-sub-page")
+                                    .selected_text(if d.sub.is_empty() {
+                                        crate::i18n::strs().msg_hyperlink_pages()
+                                    } else {
+                                        d.sub.clone()
+                                    })
+                                    .width(110.0)
+                                    .show_ui(ui, |ui| {
+                                        for name in &page_names {
+                                            ui.selectable_value(&mut d.sub, name.clone(), name);
+                                        }
+                                    });
+                                combo.response.widget_info(|| {
+                                    egui::WidgetInfo::labeled(
+                                        egui::Role::ComboBox,
+                                        true,
+                                        crate::i18n::strs().msg_sub_address_page(),
+                                    )
+                                });
+                                input_cell(ui, crate::i18n::strs().msg_hl_subaddress().as_str(), &mut d.sub);
+                                ui.label(crate::i18n::strs().msg_hl_subaddress());
+                                ui.end_row();
+                                input_cell(ui, crate::i18n::strs().msg_hl_description().as_str(), &mut d.desc);
+                                ui.label(crate::i18n::strs().msg_hl_description());
+                                ui.end_row();
+                            } else {
+                            field(ui, crate::i18n::strs().msg_hl_subaddress().as_str(), &mut d.sub);
                             // Page picker (#71): a SubAddress names a
                             // page — the dropdown offers the document's.
                             // The accessible name satisfies the dialog
@@ -11480,8 +11756,9 @@ impl App {
                                 )
                             });
                             ui.end_row();
-                            field(ui, "Description", &mut d.desc);
+                            field(ui, crate::i18n::strs().msg_hl_description().as_str(), &mut d.desc);
                             ui.end_row();
+                            }
                         });
                     let (edit_row, from_master, address, sub, desc) = (
                         d.edit_row,
@@ -11560,7 +11837,7 @@ impl App {
                         self_.apply(dc_core::Macro::new(crate::i18n::strs().msg_edit_hyperlink(), cmds));
                         Some(ix)
                     };
-                    ui.horizontal(|ui| {
+                    row(ui, |ui| {
                         if ui.button(crate::i18n::strs().msg_ok()).clicked() {
                             commit(self);
                             close_draft = true;
@@ -11594,7 +11871,7 @@ impl App {
                 // Apple HIG: the dismiss control must be obvious, not
                 // hidden behind editor state): New… left, Close right.
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
+                row(ui, |ui| {
                     if draft.is_none() && ui.button(crate::i18n::strs().msg_hyperlink_new()).clicked() {
                         draft = Some(HyperlinkDraft {
                             edit_row: None,
@@ -11604,7 +11881,8 @@ impl App {
                             desc: String::new(),
                         });
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // #257: the Close pin mirrors with the chrome.
+                    row_rev(ui, |ui| {
                         if ui.button(crate::i18n::strs().msg_close()).clicked() {
                             draft = None;
                             close_btn = true;
@@ -11649,27 +11927,60 @@ impl App {
                     .num_columns(3)
                     .spacing(egui::vec2(8.0, 4.0))
                     .show(ui, |ui| {
+                        // #257: the RTL row puts the mover buttons on
+                        // the visual left, the page name on the right
+                        // (the LTR row keeps Visio's name first).
+                        let rtl_grid = crate::i18n::rtl();
                         for (i, name) in names.iter().enumerate() {
-                            ui.label(egui::RichText::new(name.clone()).size(12.0));
-                            if ui
-                                .add_enabled(i > 0, egui::Button::new(crate::i18n::strs().msg_move_up()).small())
-                                .clicked()
-                            {
+                            let mut up_clicked = false;
+                            let mut down_clicked = false;
+                            let name_cell = |ui: &mut egui::Ui, name: &str| {
+                                ui.label(egui::RichText::new(name.to_string()).size(12.0));
+                            };
+                            if rtl_grid {
+                                if ui
+                                    .add_enabled(i > 0, egui::Button::new(crate::i18n::strs().msg_move_up()).small())
+                                    .clicked()
+                                {
+                                    up_clicked = true;
+                                }
+                                if ui
+                                    .add_enabled(i + 1 < n, egui::Button::new(crate::i18n::strs().msg_move_down()).small())
+                                    .clicked()
+                                {
+                                    down_clicked = true;
+                                }
+                                name_cell(ui, name);
+                            } else {
+                                name_cell(ui, name);
+                                if ui
+                                    .add_enabled(i > 0, egui::Button::new(crate::i18n::strs().msg_move_up()).small())
+                                    .clicked()
+                                {
+                                    up_clicked = true;
+                                }
+                                if ui
+                                    .add_enabled(i + 1 < n, egui::Button::new(crate::i18n::strs().msg_move_down()).small())
+                                    .clicked()
+                                {
+                                    down_clicked = true;
+                                }
+                            }
+                            if up_clicked {
                                 self.tab_cmd_reorder(i, i - 1);
                             }
-                            if ui
-                                .add_enabled(i + 1 < n, egui::Button::new(crate::i18n::strs().msg_move_down()).small())
-                                .clicked()
-                            {
+                            if down_clicked {
                                 self.tab_cmd_reorder(i, i + 1);
                             }
                             ui.end_row();
                         }
                     });
                 ui.add_space(8.0);
-                if ui.button(crate::i18n::strs().msg_close()).clicked() {
-                    close = true;
-                }
+                row_rev(ui, |ui| {
+                    if ui.button(crate::i18n::strs().msg_close()).clicked() {
+                        close = true;
+                    }
+                });
             });
         if close || !open {
             self.reorder_open = false;
@@ -11842,14 +12153,18 @@ impl App {
         };
         match dc_core::commands::shape_action_commands(scope, &row.action, &env) {
             Ok(cmds) if cmds.is_empty() => {
-                self.status = format!("{:?} is display-only", row.menu);
+                self.status = crate::i18n::strs()
+                    .msg_action_display_only(format!("{:?}", row.menu));
             }
             Ok(cmds) => {
                 let label = format!("run shape action {:?}", row.menu);
                 self.apply(dc_core::Macro::new(label, cmds));
             }
             Err(why) => {
-                self.status = format!("{:?} deferred: {why}", row.menu);
+                self.status = crate::i18n::strs().msg_action_deferred(
+                    format!("{:?}", row.menu),
+                    why.clone(),
+                );
             }
         }
     }
@@ -11917,7 +12232,7 @@ impl App {
         }
         cmds.extend(self.connect_cleanup_cmds(page_id, &[cont]));
         self.apply(dc_core::Macro::new(
-            format!("disband container ({0} member(s) released)", members.len()),
+            crate::i18n::strs().msg_undo_disband_container(members.len() as i64),
             cmds,
         ));
         self.set_selection(None);
@@ -12000,7 +12315,7 @@ impl App {
             return;
         }
         let n = cmds.len();
-        self.apply(dc_core::Macro::new(format!("ungroup {} group(s)", n), cmds));
+        self.apply(dc_core::Macro::new(crate::i18n::strs().msg_undo_ungroup_n(n), cmds));
         // The selection becomes the first EX-MEMBER of a group that
         // was actually ungrouped — `groups.first()` can be a plain
         // shape (None member), which left sel_set holding the removed
@@ -12218,6 +12533,10 @@ impl App {
             RouteCurved,
             /// #113/URS-1200: render the selection to a picture.
             CopyAsPicture,
+            /// #257 text-direction: toggle the shape's paragraph base
+            /// direction (explicit U+202B/U+202A marks — VSDX has no
+            /// RTLText cell; Analysis/rtl-text-direction.md).
+            ToggleRtlText,
         }
         let mut act: Option<Act> = None;
         // Min menu width incl. frame, until the popup reports its own
@@ -12237,26 +12556,34 @@ impl App {
         .width(232.0);
         // Visio anchors the menu just outside the shape's top-right
         // corner, mirroring to the top-left corner when the right screen
-        // edge is too close (issue #49). Anchoring to the shape's live
-        // rect keeps the menu glued to it through zoom/pan; if the rect
-        // cannot be resolved, fall back to the pointer position like a
-        // classic context menu (egui defaults). Alternatives stay empty
-        // so the corner anchor is deterministic.
+        // edge is too close (issue #49). #257: an RTL chrome mirrors
+        // the anchor — the menu opens to the LEFT of the shape when the
+        // left screen edge has room, right edge otherwise. Anchoring to
+        // the shape's live rect keeps the menu glued to it through
+        // zoom/pan; if the rect cannot be resolved, fall back to the
+        // pointer position like a classic context menu (egui defaults).
+        // Alternatives stay empty so the corner anchor is deterministic.
         if let Some(r) = self.shape_screen_rect(shape_id) {
             let menu_w = menu
                 .get_expected_size()
                 .map_or(MENU_MIN_W, |s| s.x.max(MENU_MIN_W));
             // The popup Area is constrained into the content rect, so
             // measure room against the same rect.
-            let room_right = ctx.content_rect().right() - r.right() >= menu_w;
+            let rtl = crate::i18n::rtl();
+            let room_preferred = if rtl {
+                r.left() - ctx.content_rect().left() >= menu_w
+            } else {
+                ctx.content_rect().right() - r.right() >= menu_w
+            };
+            let (preferred, other) = if rtl {
+                (egui::RectAlign::LEFT_START, egui::RectAlign::RIGHT_START)
+            } else {
+                (egui::RectAlign::RIGHT_START, egui::RectAlign::LEFT_START)
+            };
             menu = menu
                 .anchor(r)
                 .gap(2.0)
-                .align(if room_right {
-                    egui::RectAlign::RIGHT_START
-                } else {
-                    egui::RectAlign::LEFT_START
-                })
+                .align(if room_preferred { preferred } else { other })
                 .align_alternatives(&[]);
         }
         let popup = menu.show(|ui| {
@@ -12280,15 +12607,17 @@ impl App {
             // icon) — wiring a guess would be worse than omitting.
             {
                 let can_group = self.sel_set.len() >= 2;
-                ui.horizontal(|ui| {
-                    ui.add_space(5.0);
-                    for (icon, label, enabled, a) in [
-                        (
-                            crate::ribbon::Icon::TextBox,
-                            crate::i18n::strs().msg_edit_text(),
-                            true,
-                            Act::EditText,
-                        ),
+                // #257 item 3: the bar mirrors with the chrome — under
+                // RTL the entries are EMITTED reversed (ui::horizontal's
+                // wrap-aware measure stays; a with_layout flip here
+                // balloons the popup's sizing pass).
+                let bar: [(crate::ribbon::Icon, String, bool, Act); 7] = [
+                    (
+                        crate::ribbon::Icon::TextBox,
+                        crate::i18n::strs().msg_edit_text(),
+                        true,
+                        Act::EditText,
+                    ),
                         // #218 review: the three Format-Shape entries
                         // carry DISTINCT accessible names (an ambiguous
                         // "Format Shape…" triplicated confuses screen
@@ -12329,7 +12658,15 @@ impl App {
                             Act::Rot(-std::f64::consts::FRAC_PI_2),
                         ),
                         (crate::ribbon::Icon::Group, crate::i18n::strs().msg_group(), can_group, Act::Group),
-                    ] {
+                ];
+                let bar: Vec<_> = if crate::i18n::rtl() {
+                    bar.into_iter().rev().collect()
+                } else {
+                    bar.into_iter().collect()
+                };
+                ui.horizontal(|ui| {
+                    ui.add_space(5.0);
+                    for (icon, label, enabled, a) in bar {
                         // A real (possibly disabled) button — egui-level
                         // disablement keeps a Menu-kind popup open on
                         // click, exactly like the disabled text rows.
@@ -12368,9 +12705,13 @@ impl App {
                 if row.begin_group && ai > 0 {
                     ui.separator();
                 }
-                // Flyout arrow: › (the pinned font set has no ▸).
+                // Flyout arrow: › (the pinned font set has no ▸);
+                // #257: the RTL menu's flyouts open leftward, so the
+                // arrow mirrors with the chrome.
                 let label = if row.flyout_child {
                     format!("     {}", row.menu)
+                } else if crate::i18n::rtl() {
+                    format!("‹  {}", row.menu)
                 } else {
                     format!("{}  ›", row.menu)
                 };
@@ -12478,9 +12819,19 @@ impl App {
             // The flyout parent row: drawn directly so we own its
             // Response for Popup::menu (the Container ▸ pattern).
             let tokens = theme::menu_tokens(ui.visuals());
-            let mut group_job = egui::text::LayoutJob::default();
+            // #257: the RTL row right-aligns (halign on the job) and
+            // its flyout arrow opens leftward; the same mirrored row
+            // routes the label through the catalog.
+            let mut group_job = egui::text::LayoutJob {
+                halign: if crate::i18n::rtl() {
+                    egui::Align::RIGHT
+                } else {
+                    egui::Align::LEFT
+                },
+                ..egui::text::LayoutJob::default()
+            };
             group_job.append(
-                "  Group  ›",
+                &crate::i18n::strs().msg_group_flyout(),
                 0.0,
                 egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
             );
@@ -12506,9 +12857,16 @@ impl App {
             // Container is a flyout, not an action (Visio 2016): the
             // parent row only opens the submenu. Anchor: draw the row
             // directly so we own its Response for Popup::menu.
-            let mut job = egui::text::LayoutJob::default();
+            let mut job = egui::text::LayoutJob {
+                halign: if crate::i18n::rtl() {
+                    egui::Align::RIGHT
+                } else {
+                    egui::Align::LEFT
+                },
+                ..egui::text::LayoutJob::default()
+            };
             job.append(
-                "  Container  ›",
+                &crate::i18n::strs().msg_container_flyout(),
                 0.0,
                 egui::TextFormat::simple(egui::FontId::proportional(12.5), tokens.label),
             );
@@ -12578,6 +12936,9 @@ impl App {
             ui.separator();
             if ctx_item(ui, None, &crate::i18n::strs().msg_edit_text(), "F2", true) {
                 act = Some(Act::EditText);
+            }
+            if ctx_item(ui, None, &crate::i18n::strs().msg_rtl_text_menu(), "", true) {
+                act = Some(Act::ToggleRtlText);
             }
         });
         self.ctx_menu_rect = popup.as_ref().map(|ir| ir.response.rect);
@@ -12651,9 +13012,8 @@ impl App {
                         vsdx::model::find_shape_by_id(&p.shapes, gid).and_then(|s| s.name_u.clone())
                     })
                 });
-                self.status = format!(
-                    "Opened group {} — Esc or Close Group to return",
-                    name.unwrap_or_else(|| format!("Group.{gid}"))
+                self.status = crate::i18n::strs().msg_opened_group(
+                    name.unwrap_or_else(|| format!("Group.{gid}")),
                 );
             }
             Act::Cut | Act::Copy => {
@@ -12706,6 +13066,55 @@ impl App {
                 let draft = self.selected_text(shape_id).unwrap_or_default();
                 self.begin_text_edit(shape_id, draft);
                 self.status = crate::i18n::strs().msg_editing_text_of_shape_shape_id(shape_id);
+            }
+            // #257 text-direction: prepend U+202B (RLE) to every
+            // paragraph — or strip leading U+202A/U+202B back — through
+            // the ordinary SetText path (one undo step, texture
+            // invalidation). VSDX carries no direction cell, so the
+            // explicit embedding marks are how the toggle persists
+            // (Analysis/rtl-text-direction.md); the renderer's
+            // explicit-override rule reads them.
+            Act::ToggleRtlText => {
+                let Some(text) = self.selected_text(shape_id) else {
+                    return;
+                };
+                let any_rtl = text.replace("\r\n", "\n").lines().any(|l| {
+                    l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}'])
+                        .starts_with('\u{202B}')
+                });
+                let toggled: Vec<String> = if any_rtl {
+                    // back to LTR: strip leading direction marks
+                    text.replace("\r\n", "\n")
+                        .split('\n')
+                        .map(|l| {
+                            l.trim_start_matches(['\u{202A}', '\u{202B}', '\u{202C}'])
+                                .to_string()
+                        })
+                        .collect()
+                } else {
+                    // to RTL: mark every paragraph
+                    text.replace("\r\n", "\n")
+                        .split('\n')
+                        .map(|l| format!("\u{202B}{l}"))
+                        .collect()
+                };
+                let scope = Scope::Shape {
+                    page: page_id,
+                    shape: shape_id,
+                };
+                let doc = self.ed().map(|ed| &ed.doc);
+                if let Some(doc) = doc {
+                    self.apply(dc::textfunc::text_edit_macro(
+                        doc,
+                        &scope,
+                        &toggled.join("\n"),
+                    ));
+                }
+                self.status = if any_rtl {
+                    crate::i18n::strs().msg_rtl_text_off()
+                } else {
+                    crate::i18n::strs().msg_rtl_text_on()
+                };
             }
             // #190/#192: a per-shape toggle for the CLICKED shape —
             // the one-way open left no reachable close; the spec made
@@ -14137,15 +14546,20 @@ impl App {
             return;
         };
         let mut open = true;
-        egui::Window::new(match target {
-            ColorTarget::Fill => "Fill Color",
-            ColorTarget::FillBkgnd => "Fill Background",
-            ColorTarget::Line => "Line Color",
-            ColorTarget::Text => "Text Color",
-        })
+        let title = match target {
+            ColorTarget::Fill => crate::i18n::strs().msg_color_fill_window(),
+            ColorTarget::FillBkgnd => crate::i18n::strs().msg_color_fill_bkgnd_window(),
+            ColorTarget::Line => crate::i18n::strs().msg_color_line_window(),
+            ColorTarget::Text => crate::i18n::strs().msg_color_text_window(),
+        };
+        egui::Window::new(title)
         .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
         .open(&mut open)
         .show(ctx, |ui| {
+            // #257 item 3: the dialog pass mirrors the window (the
+            // swatch grid itself is symmetric — the palette sweep
+            // stays LTR either way).
+            ui.with_layout(dialog_dir(), |ui| {
             let theme_colors = [
                 "#000000", "#FFFFFF", "#EEEEEE", "#969696", "#4472C4", "#5B9BD5", "#70AD47",
                 "#ED7D31", "#FFC000", "#FF0000", "#7030A0", "#00B0F0", "#FFF2CC", "#DEEAF6",
@@ -14177,6 +14591,7 @@ impl App {
                         }
                     }
                 });
+            });
         });
         if !open {
             self.color_pick = None;
@@ -14364,7 +14779,7 @@ impl App {
             // density-cap notes; the status mirrors it.
             self.status = self.export_pane.note_clone().unwrap_or_else(|| match result {
                 Ok(_) => crate::i18n::strs().msg_export_finished(),
-                Err(e) => format!("Export failed: {e}"),
+                Err(e) => crate::i18n::strs().msg_export_failed_e(e.to_string()),
             });
         }
         self.handle_close_request(&ctx);
@@ -14509,8 +14924,7 @@ impl App {
                             None => {}
                         }
                         if let Some(id) = armed {
-                            self.status =
-                                format!("master {} armed — click the canvas to place", id.1);
+                            self.status = crate::i18n::strs().msg_master_armed_click_place(id.1);
                         }
                         if self.stencil.armed.is_some() && ui.button(crate::i18n::strs().msg_x_cancel_placement()).clicked()
                         {
@@ -14669,7 +15083,7 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| path.display().to_string());
-                scrim = Some((format!("Opening {name}…"), started));
+                scrim = Some((crate::i18n::strs().msg_opening_file(name), started));
             }
         }
         if scrim.is_none() {
@@ -14684,7 +15098,7 @@ impl App {
                     self.status = format!("opened {}", path.display());
                     self.rendering = None;
                 } else {
-                    scrim = Some(("Rendering…".to_string(), *started));
+                    scrim = Some((crate::i18n::strs().msg_rendering_scrim(), *started));
                 }
             }
         }
@@ -14853,16 +15267,18 @@ impl App {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "the drawing".into());
+            .unwrap_or_else(|| crate::i18n::strs().msg_the_drawing());
         // MODAL (#166): the backdrop blocks input to everything
         // behind the prompt — the document cannot change underneath
         // the Save / Don't-Save decision. The title rides inside the
         // dialog frame (a modal has no title bar).
         egui::Modal::new(egui::Id::unique("dc-confirm-close")).show(ctx, |ui| {
+            // #257 item 3: the modal mirrors with the chrome.
+            ui.with_layout(dialog_dir(), |ui| {
             ui.strong(crate::i18n::strs().msg_save_changes());
             ui.add_space(4.0);
             ui.label(crate::i18n::strs().msg_save_changes_to_name(name));
-            ui.horizontal(|ui| {
+            row(ui, |ui| {
                 if ui.button(crate::i18n::strs().msg_save()).clicked() {
                     self.confirm_close = None;
                     // New and close chains are mutually exclusive.
@@ -14889,6 +15305,7 @@ impl App {
                 if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                     self.confirm_close = None;
                 }
+            });
             });
         });
     }
@@ -15020,10 +15437,12 @@ impl App {
         // MODAL (#166), same as the close prompt: nothing behind the
         // dialog is interactive while the decision is pending.
         egui::Modal::new(egui::Id::unique("dc-confirm-new")).show(ctx, |ui| {
+            // #257 item 3: the modal mirrors with the chrome.
+            ui.with_layout(dialog_dir(), |ui| {
             ui.strong(crate::i18n::strs().msg_save_changes());
             ui.add_space(4.0);
             ui.label(crate::i18n::strs().msg_the_current_drawing_has_unsaved());
-            ui.horizontal(|ui| {
+            row(ui, |ui| {
                 if ui.button(crate::i18n::strs().msg_save_new()).clicked() {
                     self.confirm_new = false;
                     if self.path.as_os_str().is_empty() {
@@ -15043,6 +15462,7 @@ impl App {
                 if ui.button(crate::i18n::strs().msg_cancel()).clicked() {
                     self.confirm_new = false;
                 }
+            });
             });
         });
     }
@@ -15151,7 +15571,12 @@ impl App {
                 // Band 3 — pinned footer, non-critical items only (Apple:
                 // "avoid putting critical information or actions at the
                 // bottom of a sidebar").
-                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                let rail_footer_dir = if crate::i18n::rtl() {
+                    egui::Layout::bottom_up(egui::Align::RIGHT)
+                } else {
+                    egui::Layout::bottom_up(egui::Align::LEFT)
+                };
+                ui.with_layout(rail_footer_dir, |ui| {
                     ui.add_enabled(
                         false,
                         egui::Button::new(
@@ -15188,7 +15613,7 @@ impl App {
                                 .parent()
                                 .map(|p| p.display().to_string())
                                 .filter(|s| !s.is_empty())
-                                .unwrap_or_else(|| "Not saved yet".into());
+                                .unwrap_or_else(|| crate::i18n::strs().msg_not_saved_yet());
                             let status = if self.dirty {
                                 crate::i18n::strs().msg_unsaved_changes()
                             } else {
@@ -15305,7 +15730,13 @@ impl App {
                     BackPage::Recent => {
                         ui.horizontal(|ui| {
                             ui.heading(crate::i18n::strs().msg_recent());
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            // #257: the Browse pin mirrors with the chrome.
+                            let recent_dir = if crate::i18n::rtl() {
+                                egui::Layout::left_to_right(egui::Align::TOP)
+                            } else {
+                                egui::Layout::right_to_left(egui::Align::TOP)
+                            };
+                            ui.with_layout(recent_dir, |ui| {
                                 if ui.button(crate::i18n::strs().msg_browse()).clicked() {
                                     open_browse = true;
                                 }
@@ -15343,7 +15774,13 @@ impl App {
                             // 2016's search-first New page; elementary/
                             // Apple: trailing toolbar position, instant
                             // type-to-filter.
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            // #257: the search pin mirrors with the chrome.
+                            let new_search_dir = if crate::i18n::rtl() {
+                                egui::Layout::left_to_right(egui::Align::TOP)
+                            } else {
+                                egui::Layout::right_to_left(egui::Align::TOP)
+                            };
+                            ui.with_layout(new_search_dir, |ui| {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut search_text)
                                         .hint_text(crate::i18n::strs().msg_search_templates())
@@ -15377,7 +15814,7 @@ impl App {
                                 .all(|(n, _)| !n.to_lowercase().contains(&q))
                         {
                             ui.add_space(8.0);
-                            ui.weak(format!("No templates match “{}”.", search_text.trim()));
+                            ui.weak(crate::i18n::strs().msg_no_templates_match(search_text.trim()));
                         }
                     }
                     BackPage::Print => backstage_stub(
@@ -15564,6 +16001,47 @@ fn backstage_stub(ui: &mut Ui, title: &str, context: &str, action: &str, tip: &s
 /// aligned; a single text run keeps the row one accessible widget).
 /// Label and hint colors come from the theme mapping over the live
 /// visuals, so rows stay readable in dark mode (GitHub #48).
+/// #257 item 3: the shared dialog-body scope. The planned RTL form
+/// was `top_down(Align::RIGHT)` — but egui 0.37's right-aligned
+/// vertical scope DEGENERATES inside nested children (each checkbox
+/// label wraps one character per line; observed in the Persian Snap &
+/// Glue golden), so the body scope keeps the plain LTR vertical
+/// layout in every language. The RTL dialog parity that matters is
+/// carried by [`row`]/[`row_rev`] (mirrored row, column and button
+/// order) and egui's own bidi shaping of each label; full-body
+/// right-alignment is recorded as an egui limitation on the issue.
+fn dialog_dir() -> egui::Layout {
+    egui::Layout::top_down(egui::Align::LEFT)
+}
+
+/// A mirrored row: the direction flip runs INSIDE a `ui::horizontal`
+/// child (its wrap-aware measure shields the parent — a bare
+/// `with_layout(left_to_right)` scope in a vertical parent reserves the
+/// parent's full cross space, voiding everything below it; the
+/// pre-existing end-pinned bars wrap the flip in horizontal for
+/// exactly that reason).
+fn row<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::Response {
+    let dir = if crate::i18n::rtl() {
+        egui::Layout::right_to_left(egui::Align::Center)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Center)
+    };
+    ui.horizontal(|inner| inner.with_layout(dir, add_contents)).response
+}
+
+/// The INVERSE of [`row`] — an end-pinned control bar whose LTR form
+/// was `right_to_left` and mirrors to `left_to_right` under RTL.
+fn row_rev<R>(ui: &mut Ui, add_contents: impl FnOnce(&mut Ui) -> R) -> egui::Response {
+    let dir = if crate::i18n::rtl() {
+        egui::Layout::left_to_right(egui::Align::Center)
+    } else {
+        egui::Layout::right_to_left(egui::Align::Center)
+    };
+    ui.horizontal(|inner| inner.with_layout(dir, add_contents)).response
+}
+
+/// The horizontal-row twin of [`dialog_dir`] — the `right_to_left` /
+/// `left_to_right` pair the mirrored strips use.
 fn ctx_item(
     ui: &mut Ui,
     icon: Option<crate::ribbon::Icon>,
@@ -15572,7 +16050,20 @@ fn ctx_item(
     enabled: bool,
 ) -> bool {
     let tokens = theme::menu_tokens(ui.visuals());
-    let mut job = egui::text::LayoutJob::default();
+    // #257 item 3: an RTL menu mirrors the row — the icon hugs the
+    // right edge, the label right-aligns (its icon gutter on the
+    // right), and the accelerator hint pins the LEFT edge (Office's
+    // RTL menus keep the shortcut column at the mirrored leading
+    // edge).
+    let rtl = crate::i18n::rtl();
+    let mut job = egui::text::LayoutJob {
+        halign: if rtl {
+            egui::Align::RIGHT
+        } else {
+            egui::Align::LEFT
+        },
+        ..egui::text::LayoutJob::default()
+    };
     let text = if icon.is_some() {
         format!("      {label}")
     } else {
@@ -15590,26 +16081,44 @@ fn ctx_item(
             },
         ),
     );
-    if !hint.is_empty() {
+    let mut trailing_hint = false;
+    if !hint.is_empty() && !rtl {
         job.append(
             &format!("   {hint}"),
             0.0,
             egui::TextFormat::simple(egui::FontId::proportional(11.0), tokens.hint),
         );
+        trailing_hint = true;
     }
     let resp = ui.add_enabled(
         enabled,
         egui::Button::new(job).min_size(Vec2::new(ui.available_width().max(150.0), 21.0)),
     );
     if let Some(ic) = icon {
-        let r = Rect::from_min_size(
-            Pos2::new(resp.rect.left() + 7.0, resp.rect.center().y - 8.0),
-            Vec2::splat(16.0),
-        );
+        let x = if rtl {
+            resp.rect.right() - 23.0
+        } else {
+            resp.rect.left() + 7.0
+        };
+        let r = Rect::from_min_size(Pos2::new(x, resp.rect.center().y - 8.0), Vec2::splat(16.0));
         // icons take the theme-derived tint: the light Office palette
         // (the gray ShapeSheet glyph included) vanishes on a dark menu
         // (GitHub #48 review).
         ic.paint_tinted(ui, r, tokens.icon_tint(ic.office_color(), enabled));
+    }
+    if !trailing_hint && !hint.is_empty() {
+        // RTL accelerator column: a left-pinned overlay galley (the
+        // hint cannot ride inside the right-aligned label job).
+        let gal = ui.painter().layout_no_wrap(
+            hint.to_string(),
+            egui::FontId::proportional(11.0),
+            tokens.hint,
+        );
+        ui.painter().galley(
+            Pos2::new(resp.rect.left() + 7.0, resp.rect.center().y - gal.size().y / 2.0),
+            gal,
+            tokens.hint,
+        );
     }
     resp.clicked()
 }
@@ -15680,6 +16189,7 @@ fn qat_button(
             enabled: true,
             label: String::new(),
         },
+        anchor: None,
     });
     // The icon is painted, so the control needs its name attached;
     // screen readers read "Save", not "Save (Ctrl+S)" (GitHub #56).
@@ -15834,7 +16344,7 @@ fn my_shapes_path(home: Option<PathBuf>) -> PathBuf {
 fn stencil_title(path: &Path) -> String {
     path.file_stem()
         .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Document Masters".into())
+        .unwrap_or_else(|| crate::i18n::strs().msg_document_masters())
 }
 
 #[cfg(test)]

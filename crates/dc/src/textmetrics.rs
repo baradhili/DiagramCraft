@@ -129,6 +129,12 @@ fn build_db(embedded_only: bool) -> MetricsDb {
     for bytes in EMBEDDED_FONTS {
         db.load_font_data(bytes.to_vec());
     }
+    // Runtime-registered faces (the dc-ui complex-script drop — see
+    // `register_face_bytes`); kept so BOTH databases see them no
+    // matter which builds first.
+    for bytes in pending_faces().lock().unwrap().iter() {
+        db.load_font_data(bytes.clone());
+    }
     if !embedded_only {
         db.load_system_fonts();
     }
@@ -162,6 +168,26 @@ fn build_db(embedded_only: bool) -> MetricsDb {
 /// database (see the module docs). Set once by the test harnesses;
 /// there is deliberately no way to unset it.
 static PIN_EMBEDDED: AtomicBool = AtomicBool::new(false);
+
+/// Faces registered at runtime after this module's vendored set
+/// (#257 text-direction coordination: ONE font drop for the complex
+/// script face — dc-ui's vendored Vazirmatn — registered into BOTH
+/// the metrics and the raster databases, never copied). The list is
+/// consulted when each database builds; callers must register before
+/// the first measurement (dc-ui's `theme::install_fonts` runs in
+/// every constructor ahead of any canvas render).
+fn pending_faces() -> &'static std::sync::Mutex<Vec<Vec<u8>>> {
+    static PENDING: OnceLock<std::sync::Mutex<Vec<Vec<u8>>>> = OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Register a face (its file bytes) into the metrics database. Must
+/// precede the first `resolve`/`width_in` call — the databases build
+/// once, lazily, and consult the pending list at build time.
+#[doc(hidden)]
+pub fn register_face_bytes(bytes: Vec<u8>) {
+    pending_faces().lock().unwrap().push(bytes);
+}
 
 /// Test hook for hermetic measurement (see the module docs).
 #[doc(hidden)]
@@ -414,15 +440,20 @@ fn shaped_face(
 }
 
 /// The usvg-0.49 shaping pipeline, measurement-side (#146): BIDI
-/// visual runs (base LTR), each run shaped by harfrust with DEFAULT
-/// features — pair kerning on, ligatures/contextual forms applied,
-/// script and language guessed — advances summed in em units. That is
-/// verbatim what usvg does per text chunk (its `shape_text`), so a
-/// width measured here is the width the rasterizer will draw.
+/// visual runs, each shaped by harfrust with DEFAULT features — pair
+/// kerning on, ligatures/contextual forms applied, script and
+/// language guessed — advances summed in em units. The base level is
+/// `None` (#257 text-direction): each PARAGRAPH takes the first-strong
+/// base (explicit U+202A/U+202B overrides honored), the reconstruction
+/// the analysis note pins for Visio-authored text. usvg's own pipeline
+/// still hardcodes base LTR — the SVG exporter compensates with
+/// isolates (see `svg::emit_text`) — but the advance SUM is
+/// base-invariant either way, so a width measured here is the width
+/// the rasterizer draws.
 fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> f64 {
     use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
     let shaper = face.shaper_data.shaper(face.font).build();
-    let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
+    let bidi = unicode_bidi::BidiInfo::new(text, None);
     let Some(paragraph) = bidi.paragraphs.first() else {
         return 0.0;
     };

@@ -9,6 +9,24 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use std::io::Write;
 
+/// Strip the zero-width bidi isolation marks fluent wraps interpolated
+/// values in (#257 item 3, `build.rs`): the marks render nothing but
+/// sit inside status strings, so string assertions compare against the
+/// stripped form.
+fn strip_bidi(s: &str) -> String {
+    // The Debug form escapes the marks as literal `\u{206X}` text —
+    // strip both the real characters and their escape spellings.
+    let real = s
+        .chars()
+        .filter(|c| !matches!(c, '\u{2066}'..='\u{2069}'))
+        .collect::<String>();
+    real
+        .replace("\\u{2066}", "")
+        .replace("\\u{2067}", "")
+        .replace("\\u{2068}", "")
+        .replace("\\u{2069}", "")
+}
+
 fn harness_with_blank() -> Harness<'static, App> {
     // Goldens/steps must be machine-independent: pin text to the
     // embedded Carlito rather than this machine's installed fonts.
@@ -117,6 +135,7 @@ fn backstage_export_writes_the_picked_file() {
     }
     let note = h.state().debug_export_pane_note().unwrap_or("");
     assert!(out.exists(), "the worker wrote the PNG (note: {note:?})");
+    let note = strip_bidi(note);
     assert!(
         note.contains("Exported 1 file"),
         "pane reports the export: {note:?}"
@@ -5003,7 +5022,7 @@ fn builtin_catalog_menu_opens_and_toggles_stencils() {
     }
     let entries = h.state().debug_stencil_entries();
     assert_eq!(entries, vec![("Containers".to_string(), true)]);
-    assert!(h.state().debug_status().contains("closed Basic Shapes"));
+    assert!(strip_bidi(h.state().debug_status()).contains("closed Basic Shapes"));
     assert!(
         !h.state()
             .debug_master_cells()
@@ -5476,7 +5495,7 @@ fn metric_toggle_opens_the_metric_variant() {
         h.state().debug_stencil_entries(),
         vec![("Basic Shapes".to_string(), true)]
     );
-    assert_eq!(h.state().debug_status(), "opened Basic Shapes");
+    assert_eq!(strip_bidi(h.state().debug_status()), "opened Basic Shapes");
 
     // Tick Metric Stencils, close, reopen: the metric twin opened.
     h.get_by_label("More Shapes").click();
@@ -5511,7 +5530,7 @@ fn metric_toggle_opens_the_metric_variant() {
         vec![("Basic Shapes".to_string(), true)]
     );
     assert_eq!(
-        h.state().debug_status(),
+        strip_bidi(h.state().debug_status()),
         "opened Basic Shapes (metric)",
         "the metric twin opened under the session preference"
     );
@@ -7186,7 +7205,9 @@ fn select_by_type_master_criterion() {
     h.run();
     h.get_by_label_contains("Master").click();
     h.run();
-    h.get_by_label_contains(&format!("Rectangle ({} shapes)", 2))
+    h.query_all_by_label_contains("Rectangle")
+        .find(|n| strip_bidi(&format!("{:?}", n)).contains("Rectangle (2 shapes)"))
+        .expect("the Rectangle value row")
         .click();
     h.run();
     h.get_by_label("Select").click();
@@ -7490,7 +7511,10 @@ fn multi_document_open_adds_and_switches() {
     );
 
     // The Window switcher lists all three (active marked).
-    h.get_by_label_contains("Window 3").click();
+    h.query_all_by_label_contains("Window")
+        .find(|n| strip_bidi(&format!("{:?}", n)).contains("Window 3"))
+        .expect("the Window switcher")
+        .click();
     h.run();
     assert!(
         h.query_all_by_label_contains("› second.vsdx").count() == 1,
@@ -7518,7 +7542,10 @@ fn multi_document_open_adds_and_switches() {
     h.run();
     let zoom_a = h.state().debug_zoom();
     assert!(zoom_a > 0.4, "A zoomed in: {zoom_a}");
-    h.get_by_label_contains("Window 3").click();
+    h.query_all_by_label_contains("Window")
+        .find(|n| strip_bidi(&format!("{:?}", n)).contains("Window 3"))
+        .expect("the Window switcher")
+        .click();
     h.run();
     h.get_by_label_contains("second.vsdx").click();
     h.run();
@@ -7527,7 +7554,10 @@ fn multi_document_open_adds_and_switches() {
         (zoom_b - zoom_a).abs() > 1e-3,
         "B kept its own zoom: {zoom_b} vs A's {zoom_a}"
     );
-    h.get_by_label_contains("Window 3").click();
+    h.query_all_by_label_contains("Window")
+        .find(|n| strip_bidi(&format!("{:?}", n)).contains("Window 3"))
+        .expect("the Window switcher")
+        .click();
     h.run();
     h.get_by_label_contains("hyperlink-master.vsdx").click();
     h.run();
@@ -8270,10 +8300,15 @@ fn page_tab_menu_marks_a_background() {
     h.run();
     h.get_by_label_contains("Backgrounds").click();
     h.run();
-    let listed = h.query_all_by_label_contains("(page 2)").count();
+    let listed = h
+        .query_all_by_label_contains("(page")
+        .filter(|n| strip_bidi(&format!("{:?}", n)).contains("(page 2)"))
+        .count();
     assert_eq!(listed, 1, "the marked page is the gallery entry");
     assert_eq!(
-        h.query_all_by_label_contains("(page 1)").count(),
+        h.query_all_by_label_contains("(page")
+            .filter(|n| strip_bidi(&format!("{:?}", n)).contains("(page 1)"))
+            .count(),
         0,
         "a foreground page never lists as a background"
     );
@@ -8397,6 +8432,7 @@ fn page_size_preset_applies_and_undoes() {
     h.get_by_label("Size").click();
     h.run();
     h.get_by_label("A4").click();
+    h.run();
     h.run();
     let (w1, h1) = h.state().debug_page_size();
     assert!(

@@ -213,6 +213,47 @@ pub fn show_overlay(
         session.focus_requested = true;
     }
 
+    // #257 text-direction: bidi segment-aware arrow stepping. egui's
+    // TextEdit moves the caret in LOGICAL order (Left = previous
+    // character), which reads backwards inside an RTL segment; the
+    // click caret is already visual (nearest-glyph). The arrows here
+    // step in VISUAL direction instead: the caret's laid-out position
+    // is nudged and the galley reports the nearest cursor — the
+    // adjacent glyph visually, wrapping across rows like the built-in
+    // movement. Consumed before the widget sees the key, so egui never
+    // double-steps. (Analysis/rtl-text-direction.md.)
+    let (left, right, extend) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowLeft),
+            i.key_pressed(egui::Key::ArrowRight),
+            i.modifiers.shift,
+        )
+    });
+    if left || right {
+        let mods = ui.input(|i| i.modifiers);
+        let key = if left {
+            egui::Key::ArrowLeft
+        } else {
+            egui::Key::ArrowRight
+        };
+        if ui.input_mut(|i| i.consume_key(mods, key)) {
+            let galley = ui.fonts_mut(|f| f.layout_job(build_job(session.draft.as_str())));
+            if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), id) {
+                if let Some(range) = state.cursor.char_range() {
+                    let anchor = galley.pos_from_cursor(range.primary);
+                    let dx = if right { 1.5 } else { -1.5 };
+                    let stepped = galley.cursor_from_pos(anchor.center().to_vec2() + Vec2::new(dx, 0.0));
+                    state.cursor.set_char_range(Some(egui::text::CCursorRange {
+                        primary: stepped,
+                        secondary: if extend { range.secondary } else { stepped },
+                        h_pos: None,
+                    }));
+                    state.store(ui.ctx(), id);
+                }
+            }
+        }
+    }
+
     // Baseline-exact anchoring (owner review: the edited text was
     // translated left-and-up). The renderer places the first baseline
     // `text_first_baseline` below the block's top edge (VertAlign

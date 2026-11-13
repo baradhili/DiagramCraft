@@ -60,8 +60,23 @@ impl SheetTextMeasure {
     fn lines_at(&self, text: &str, width: f64) -> Vec<String> {
         let face =
             crate::textmetrics::resolve(self.tb.font.as_deref(), self.tb.bold, self.tb.italic);
+        // The complex-script pair, resolved exactly as the renderer
+        // resolves it (#257 text-direction) so a TEXTHEIGHT refresh
+        // wraps an RTL paragraph at the size its glyphs paint with.
+        let cs_chain = self.tb.cs_font.as_deref().or(self.tb.font.as_deref());
+        let cs_face = crate::textmetrics::resolve(cs_chain, self.tb.bold, self.tb.italic);
         let usable = (width - self.tb.insets.0 - self.tb.insets.1).max(0.02);
-        crate::svg::wrap_block_text(&face, text, self.tb.font_size, usable)
+        crate::svg::wrap_block_text(
+            &face,
+            text,
+            self.tb.font_size,
+            usable,
+            &cs_face,
+            self.tb.cs_size.unwrap_or(self.tb.font_size),
+        )
+        .into_iter()
+        .map(|l| l.text)
+        .collect()
     }
 }
 

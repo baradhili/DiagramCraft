@@ -37,6 +37,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "action-deferred",
+        attribute: None,
+        vars: &["what", "why"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "action-display-only",
+        attribute: None,
+        vars: &["what"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "active",
         attribute: None,
         vars: &[],
@@ -254,6 +268,48 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "align-word-bottom",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "align-word-centers",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "align-word-left",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "align-word-middles",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "align-word-right",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "align-word-top",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "aligning-to-the-first-selected-s",
         attribute: None,
         vars: &[],
@@ -429,6 +485,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "background-cleared",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "background-page-name",
         attribute: None,
         vars: &["name"],
@@ -527,6 +590,27 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "builtin-extracted-summary",
+        attribute: None,
+        vars: &["ok", "failed"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "builtin-extracted-to",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "builtin-stencil-failed",
+        attribute: None,
+        vars: &["title"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "bullets",
         attribute: None,
         vars: &[],
@@ -579,6 +663,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "cancel",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "cell-is-formula-driven",
+        attribute: None,
+        vars: &["name", "f"],
         bool_vars: &[],
         elements: &[],
     },
@@ -723,6 +814,34 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "color-fill-bkgnd-window",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "color-fill-window",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "color-line-window",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "color-text-window",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "colors",
         attribute: None,
         vars: &[],
@@ -842,9 +961,44 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "connector-drawn-free-ends",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "connector-end-released",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "connector-glued-at-both-ends",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "connector-glued-at-one-end",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "connector-glued-shape",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "connector-glued-shape-point",
+        attribute: None,
+        vars: &["id"],
         bool_vars: &[],
         elements: &[],
     },
@@ -866,6 +1020,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "connector-moved-release-ends-glu",
         attribute: None,
         vars: &["release_ends"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "connector-stays-glued",
+        attribute: None,
+        vars: &["id"],
         bool_vars: &[],
         elements: &[],
     },
@@ -906,6 +1067,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "container",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "container-flyout",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -1027,6 +1195,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "could-not-open-address-e",
         attribute: None,
         vars: &["address", "e"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "could-not-read-path",
+        attribute: None,
+        vars: &["path", "e"],
         bool_vars: &[],
         elements: &[],
     },
@@ -1202,6 +1377,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "decrease-indent-planned",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "default-stencil-failed",
+        attribute: None,
+        vars: &["entry", "e"],
         bool_vars: &[],
         elements: &[],
     },
@@ -1388,6 +1570,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "document-masters",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "document-protection-arrives-with",
         attribute: None,
         vars: &[],
@@ -1475,6 +1664,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "drawing-explorer-planned",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "drawing-n",
+        attribute: None,
+        vars: &["n"],
         bool_vars: &[],
         elements: &[],
     },
@@ -1598,9 +1794,30 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "endpoint-begin",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "endpoint-drag-refused-reason",
         attribute: None,
         vars: &["reason"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "endpoint-end",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "endpoint-glued-to",
+        attribute: None,
+        vars: &["hit"],
         bool_vars: &[],
         elements: &[],
     },
@@ -1640,6 +1857,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "export-failed-e",
+        attribute: None,
+        vars: &["e"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "export-failed-worker-lost",
         attribute: None,
         vars: &[],
@@ -1661,6 +1885,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "export-pdf-hint",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "export-png-hint",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "export-save-as-label",
         attribute: None,
         vars: &[],
@@ -1671,6 +1909,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "export-start",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "export-svg-hint",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "exported-files",
+        attribute: None,
+        vars: &["n"],
         bool_vars: &[],
         elements: &[],
     },
@@ -1753,6 +2005,27 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "filled-square",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "filter-pdf",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "filter-png",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "filter-svg",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -2074,6 +2347,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "group-breadcrumb",
+        attribute: None,
+        vars: &["names"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "group-flyout",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "group-needs-2-shapes-on-the-page",
         attribute: None,
         vars: &[],
@@ -2091,6 +2378,27 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "grow-with-the-members-planned",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "guide-added-horizontal",
+        attribute: None,
+        vars: &["v"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "guide-added-point",
+        attribute: None,
+        vars: &["v"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "guide-added-vertical",
+        attribute: None,
+        vars: &["v"],
         bool_vars: &[],
         elements: &[],
     },
@@ -2130,6 +2438,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "height",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "height-not-resized-guard",
+        attribute: None,
+        vars: &["g"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "help-about",
         attribute: None,
         vars: &[],
@@ -2145,6 +2467,27 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "highlight-members",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "hl-address",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "hl-description",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "hl-subaddress",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -2319,6 +2662,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "keytip-unavailable",
+        attribute: None,
+        vars: &["key"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "label-a-choice-cannot-contain",
         attribute: None,
         vars: &["label"],
@@ -2417,6 +2767,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "layer-composite-failed",
+        attribute: None,
+        vars: &["id", "e"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "layer-ix-fallback",
+        attribute: None,
+        vars: &["ix"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "layout",
         attribute: None,
         vars: &[],
@@ -2483,6 +2847,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "line-color-label",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "line-jump-factor-set",
+        attribute: None,
+        vars: &["factor"],
         bool_vars: &[],
         elements: &[],
     },
@@ -2658,6 +3029,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "master",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "master-armed-click-place",
+        attribute: None,
+        vars: &["id"],
         bool_vars: &[],
         elements: &[],
     },
@@ -2886,6 +3264,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "no-formula",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "no-hyperlinks-on-this-shape",
         attribute: None,
         vars: &[],
@@ -2921,7 +3306,21 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "no-templates-match",
+        attribute: None,
+        vars: &["q"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "none",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "not-saved-yet",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -3117,6 +3516,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "open-stencil-failed-e",
+        attribute: None,
+        vars: &["e"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "open-triangle-convex-base",
         attribute: None,
         vars: &[],
@@ -3173,9 +3579,51 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "opened-address",
+        attribute: None,
+        vars: &["address"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "opened-builtin-metric",
+        attribute: None,
+        vars: &["title"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "opened-builtin-myshapes",
+        attribute: None,
+        vars: &["title"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "opened-group",
+        attribute: None,
+        vars: &["name"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "opened-path",
+        attribute: None,
+        vars: &["path"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "opened-stencil-stem",
         attribute: None,
         vars: &["stem"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "opening-file",
+        attribute: None,
+        vars: &["name"],
         bool_vars: &[],
         elements: &[],
     },
@@ -3257,6 +3705,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "page-not-found",
+        attribute: None,
+        vars: &["sub"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "page-number",
         attribute: None,
         vars: &[],
@@ -3295,6 +3750,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "page-size-iso-ansi-presets-or-cu",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "page-size-set",
+        attribute: None,
+        vars: &["w", "h"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "page-tab-tooltip",
+        attribute: None,
+        vars: &["n", "id"],
         bool_vars: &[],
         elements: &[],
     },
@@ -3344,6 +3813,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "pick-an-output-file-first",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "picture-copied",
+        attribute: None,
+        vars: &["w", "h", "factor"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "picture-inserted",
+        attribute: None,
+        vars: &["w", "h", "w_in", "h_in"],
         bool_vars: &[],
         elements: &[],
     },
@@ -3607,6 +4090,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "rendering-scrim",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "reorder-pages",
         attribute: None,
         vars: &[],
@@ -3782,6 +4272,27 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "rtl-text-menu",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "rtl-text-off",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "rtl-text-on",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "ruler-subdivisions",
         attribute: None,
         vars: &[],
@@ -3831,6 +4342,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "save-failed-e",
+        attribute: None,
+        vars: &["e"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "save-new",
         attribute: None,
         vars: &[],
@@ -3848,6 +4366,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         message: "save-the-stencil-planned",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "saved-path",
+        attribute: None,
+        vars: &["path"],
         bool_vars: &[],
         elements: &[],
     },
@@ -4006,9 +4531,23 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "select-value-n-shapes",
+        attribute: None,
+        vars: &["label", "n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "selected-all-shapes",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "selected-n-by-criterion",
+        attribute: None,
+        vars: &["n", "crit"],
         bool_vars: &[],
         elements: &[],
     },
@@ -4496,6 +5035,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "snapglue-note",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "solid",
         attribute: None,
         vars: &[],
@@ -4539,6 +5085,125 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "split-view-planned",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-1d-endpoints",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-connection-points",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-control-points",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-fill-gradient-stops",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-geometry-n",
+        attribute: None,
+        vars: &["ix"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-layer-membership",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-line-gradient-stops",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-page-layout",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-page-properties",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-print-setup",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-ruler-grid",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-shape-data",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-smart-tags",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-text-fields",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-text-transform",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-section-user-defined-cells",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "ss-shape-not-found",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -4874,6 +5539,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "the-drawing",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "the-grid",
         attribute: None,
         vars: &[],
@@ -5112,6 +5784,48 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "undo-add-choice",
+        attribute: None,
+        vars: &["name", "v"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-add-connector",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-add-n-to-container",
+        attribute: None,
+        vars: &["n", "c"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-align-what",
+        attribute: None,
+        vars: &["what"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-apply-container-style",
+        attribute: None,
+        vars: &["style"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-autoconnect",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "undo-ctrl-z",
         attribute: None,
         vars: &[],
@@ -5119,9 +5833,107 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "undo-delete-n-shapes",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-delete-shape",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-disband-container",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-glue-connector",
+        attribute: None,
+        vars: &["sid", "end"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "undo-l",
         attribute: None,
         vars: &["l"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-connector",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-endpoint",
+        attribute: None,
+        vars: &["end"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-guide",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-line-shape",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-shape",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-move-vertex",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-resize-shape",
+        attribute: None,
+        vars: &["id"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-set-cell",
+        attribute: None,
+        vars: &["name"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-set-section-cell",
+        attribute: None,
+        vars: &["section", "cell"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "undo-ungroup-n",
+        attribute: None,
+        vars: &["n"],
         bool_vars: &[],
         elements: &[],
     },
@@ -5210,6 +6022,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "vertex-drag-refused",
+        attribute: None,
+        vars: &["cell"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "view",
         attribute: None,
         vars: &[],
@@ -5266,6 +6085,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "went-to-page",
+        attribute: None,
+        vars: &["sub"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "whole-page",
         attribute: None,
         vars: &[],
@@ -5280,9 +6106,30 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "width",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "width-not-resized-guard",
+        attribute: None,
+        vars: &["g"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "window",
         attribute: None,
         vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "window-n",
+        attribute: None,
+        vars: &["n"],
         bool_vars: &[],
         elements: &[],
     },
@@ -5295,6 +6142,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "word-count-planned",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "worker-lost",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -5449,9 +6303,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..35844,
-            Self::En => 35844..70260,
-            Self::Fa => 70260..116050,
+            Self::De => 0..44555,
+            Self::En => 44555..87782,
+            Self::Fa => 87782..144485,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -5462,7 +6316,7 @@ impl L10n {
 
     /// Load all languages (L10nLanguage) from the embedded data.
     pub fn load_all() -> L10nLanguageVec {
-        L10nLanguageVec::load_without_isolation(
+        L10nLanguageVec::load(
             LANG_DATA,
             Self::iter().map(|lang| (lang, lang.byte_range())),
         )
@@ -5487,7 +6341,7 @@ impl L10nLanguage {
     /// one (`&[u8]`, `&str`) is copied once.
     #[allow(dead_code)]
     pub fn new(lang: impl AsRef<str>, bytes: impl Into<Vec<u8>>) -> Result<Self, L10nError> {
-        Ok(Self(L10nBundle::new_without_isolation(lang, bytes)?))
+        Ok(Self(L10nBundle::new(lang, bytes)?))
     }
 
     /// Load external `.ftl` bytes — read from disk, downloaded, etc. — after
@@ -5523,6 +6377,20 @@ impl L10nLanguage {
     }
     pub fn msg_about_tarahi(&self) -> String {
         self.0.msg("about-tarahi", None).unwrap()
+    }
+    /// $what (String) - the action name
+    /// $why (String) - the deferral reason
+    pub fn msg_action_deferred<F0: AsRef<str>, F1: AsRef<str>>(&self, what: F0, why: F1) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("what", what.as_ref());
+        _args.set("why", why.as_ref());
+        self.0.msg("action-deferred", Some(_args)).unwrap()
+    }
+    /// $what (String) - the action name
+    pub fn msg_action_display_only<F0: AsRef<str>>(&self, what: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("what", what.as_ref());
+        self.0.msg("action-display-only", Some(_args)).unwrap()
     }
     pub fn msg_active(&self) -> String {
         self.0.msg("active", None).unwrap()
@@ -5635,6 +6503,24 @@ impl L10nLanguage {
     pub fn msg_align_vertical_centers(&self) -> String {
         self.0.msg("align-vertical-centers", None).unwrap()
     }
+    pub fn msg_align_word_bottom(&self) -> String {
+        self.0.msg("align-word-bottom", None).unwrap()
+    }
+    pub fn msg_align_word_centers(&self) -> String {
+        self.0.msg("align-word-centers", None).unwrap()
+    }
+    pub fn msg_align_word_left(&self) -> String {
+        self.0.msg("align-word-left", None).unwrap()
+    }
+    pub fn msg_align_word_middles(&self) -> String {
+        self.0.msg("align-word-middles", None).unwrap()
+    }
+    pub fn msg_align_word_right(&self) -> String {
+        self.0.msg("align-word-right", None).unwrap()
+    }
+    pub fn msg_align_word_top(&self) -> String {
+        self.0.msg("align-word-top", None).unwrap()
+    }
     pub fn msg_aligning_to_the_first_selected_s(&self) -> String {
         self.0
             .msg("aligning-to-the-first-selected-s", None)
@@ -5719,6 +6605,9 @@ impl L10nLanguage {
     pub fn msg_background(&self) -> String {
         self.0.msg("background", None).unwrap()
     }
+    pub fn msg_background_cleared(&self) -> String {
+        self.0.msg("background-cleared", None).unwrap()
+    }
     pub fn msg_background_page_name<'a, F0: Into<FluentValue<'a>>>(&self, name: F0) -> String {
         let mut _args = FluentArgs::new();
         _args.set("name", name);
@@ -5767,6 +6656,32 @@ impl L10nLanguage {
             .msg("browse-for-an-existing-visio-pac", None)
             .unwrap()
     }
+    /// $ok (Number) - extracted count
+    /// $failed (Number) - failed count
+    pub fn msg_builtin_extracted_summary<F0: Into<FluentNumber>, F1: Into<FluentNumber>>(
+        &self,
+        ok: F0,
+        failed: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("ok", ok.into());
+        _args.set("failed", failed.into());
+        self.0
+            .msg("builtin-extracted-summary", Some(_args))
+            .unwrap()
+    }
+    /// $n (Number) - extracted file count
+    pub fn msg_builtin_extracted_to<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("builtin-extracted-to", Some(_args)).unwrap()
+    }
+    /// $title (String) - stencil title
+    pub fn msg_builtin_stencil_failed<F0: AsRef<str>>(&self, title: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("title", title.as_ref());
+        self.0.msg("builtin-stencil-failed", Some(_args)).unwrap()
+    }
     pub fn msg_bullets(&self) -> String {
         self.0.msg("bullets", None).unwrap()
     }
@@ -5792,6 +6707,18 @@ impl L10nLanguage {
     }
     pub fn msg_cancel(&self) -> String {
         self.0.msg("cancel", None).unwrap()
+    }
+    /// $name (String) - cell name
+    /// $f (String) - the guarding formula
+    pub fn msg_cell_is_formula_driven<F0: AsRef<str>, F1: AsRef<str>>(
+        &self,
+        name: F0,
+        f: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("name", name.as_ref());
+        _args.set("f", f.as_ref());
+        self.0.msg("cell-is-formula-driven", Some(_args)).unwrap()
     }
     pub fn msg_center(&self) -> String {
         self.0.msg("center", None).unwrap()
@@ -5866,6 +6793,18 @@ impl L10nLanguage {
     }
     pub fn msg_color(&self) -> String {
         self.0.msg("color", None).unwrap()
+    }
+    pub fn msg_color_fill_bkgnd_window(&self) -> String {
+        self.0.msg("color-fill-bkgnd-window", None).unwrap()
+    }
+    pub fn msg_color_fill_window(&self) -> String {
+        self.0.msg("color-fill-window", None).unwrap()
+    }
+    pub fn msg_color_line_window(&self) -> String {
+        self.0.msg("color-line-window", None).unwrap()
+    }
+    pub fn msg_color_text_window(&self) -> String {
+        self.0.msg("color-text-window", None).unwrap()
     }
     pub fn msg_colors(&self) -> String {
         self.0.msg("colors", None).unwrap()
@@ -5957,8 +6896,31 @@ impl L10nLanguage {
     pub fn msg_connector(&self) -> String {
         self.0.msg("connector", None).unwrap()
     }
+    pub fn msg_connector_drawn_free_ends(&self) -> String {
+        self.0.msg("connector-drawn-free-ends", None).unwrap()
+    }
     pub fn msg_connector_end_released(&self) -> String {
         self.0.msg("connector-end-released", None).unwrap()
+    }
+    pub fn msg_connector_glued_at_both_ends(&self) -> String {
+        self.0.msg("connector-glued-at-both-ends", None).unwrap()
+    }
+    pub fn msg_connector_glued_at_one_end(&self) -> String {
+        self.0.msg("connector-glued-at-one-end", None).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_connector_glued_shape<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("connector-glued-shape", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_connector_glued_shape_point<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0
+            .msg("connector-glued-shape-point", Some(_args))
+            .unwrap()
     }
     pub fn msg_connector_is_glued_at_both_ends(&self) -> String {
         self.0.msg("connector-is-glued-at-both-ends", None).unwrap()
@@ -5982,6 +6944,12 @@ impl L10nLanguage {
             .msg("connector-moved-release-ends-glu", Some(_args))
             .unwrap()
     }
+    /// $id (Number) - shape id
+    pub fn msg_connector_stays_glued<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("connector-stays-glued", Some(_args)).unwrap()
+    }
     pub fn msg_connector_tool_drag_from_one_sha(&self) -> String {
         self.0
             .msg("connector-tool-drag-from-one-sha", None)
@@ -6001,6 +6969,9 @@ impl L10nLanguage {
     }
     pub fn msg_container(&self) -> String {
         self.0.msg("container", None).unwrap()
+    }
+    pub fn msg_container_flyout(&self) -> String {
+        self.0.msg("container-flyout", None).unwrap()
     }
     pub fn msg_container_margins_planned(&self) -> String {
         self.0.msg("container-margins-planned", None).unwrap()
@@ -6074,6 +7045,18 @@ impl L10nLanguage {
         _args.set("address", address.as_ref());
         _args.set("e", e.as_ref());
         self.0.msg("could-not-open-address-e", Some(_args)).unwrap()
+    }
+    /// $path (String) - file path
+    /// $e (String) - error text
+    pub fn msg_could_not_read_path<F0: AsRef<str>, F1: AsRef<str>>(
+        &self,
+        path: F0,
+        e: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("path", path.as_ref());
+        _args.set("e", e.as_ref());
+        self.0.msg("could-not-read-path", Some(_args)).unwrap()
     }
     pub fn msg_create_a_background_page_planned(&self) -> String {
         self.0
@@ -6160,6 +7143,18 @@ impl L10nLanguage {
     pub fn msg_decrease_indent_planned(&self) -> String {
         self.0.msg("decrease-indent-planned", None).unwrap()
     }
+    /// $entry (String) - default stencil entry
+    /// $e (String) - error text
+    pub fn msg_default_stencil_failed<F0: AsRef<str>, F1: AsRef<str>>(
+        &self,
+        entry: F0,
+        e: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("entry", entry.as_ref());
+        _args.set("e", e.as_ref());
+        self.0.msg("default-stencil-failed", Some(_args)).unwrap()
+    }
     pub fn msg_define_shape_data(&self) -> String {
         self.0.msg("define-shape-data", None).unwrap()
     }
@@ -6244,6 +7239,9 @@ impl L10nLanguage {
             .msg("document-inspection-arrives-with", None)
             .unwrap()
     }
+    pub fn msg_document_masters(&self) -> String {
+        self.0.msg("document-masters", None).unwrap()
+    }
     pub fn msg_document_protection_arrives_with(&self) -> String {
         self.0
             .msg("document-protection-arrives-with", None)
@@ -6284,6 +7282,12 @@ impl L10nLanguage {
     }
     pub fn msg_drawing_explorer_planned(&self) -> String {
         self.0.msg("drawing-explorer-planned", None).unwrap()
+    }
+    /// $n (Number) - untitled document number
+    pub fn msg_drawing_n<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("drawing-n", Some(_args)).unwrap()
     }
     pub fn msg_drawing_scale_planned(&self) -> String {
         self.0.msg("drawing-scale-planned", None).unwrap()
@@ -6348,6 +7352,9 @@ impl L10nLanguage {
     pub fn msg_ellipse_tool_planned(&self) -> String {
         self.0.msg("ellipse-tool-planned", None).unwrap()
     }
+    pub fn msg_endpoint_begin(&self) -> String {
+        self.0.msg("endpoint-begin", None).unwrap()
+    }
     /// $reason (String) - argument
     pub fn msg_endpoint_drag_refused_reason<F0: AsRef<str>>(&self, reason: F0) -> String {
         let mut _args = FluentArgs::new();
@@ -6355,6 +7362,15 @@ impl L10nLanguage {
         self.0
             .msg("endpoint-drag-refused-reason", Some(_args))
             .unwrap()
+    }
+    pub fn msg_endpoint_end(&self) -> String {
+        self.0.msg("endpoint-end", None).unwrap()
+    }
+    /// $hit (String) - localized snap target text
+    pub fn msg_endpoint_glued_to<F0: AsRef<str>>(&self, hit: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("hit", hit.as_ref());
+        self.0.msg("endpoint-glued-to", Some(_args)).unwrap()
     }
     /// $name (String) - argument
     pub fn msg_endpoint_moved_but_name_is_formu<F0: AsRef<str>>(&self, name: F0) -> String {
@@ -6383,6 +7399,11 @@ impl L10nLanguage {
     pub fn msg_export_entry_desc(&self) -> String {
         self.0.msg("export-entry-desc", None).unwrap()
     }
+    pub fn msg_export_failed_e<'a, F0: Into<FluentValue<'a>>>(&self, e: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("e", e);
+        self.0.msg("export-failed-e", Some(_args)).unwrap()
+    }
     pub fn msg_export_failed_worker_lost(&self) -> String {
         self.0.msg("export-failed-worker-lost", None).unwrap()
     }
@@ -6392,11 +7413,26 @@ impl L10nLanguage {
     pub fn msg_export_page_sub(&self) -> String {
         self.0.msg("export-page-sub", None).unwrap()
     }
+    pub fn msg_export_pdf_hint(&self) -> String {
+        self.0.msg("export-pdf-hint", None).unwrap()
+    }
+    pub fn msg_export_png_hint(&self) -> String {
+        self.0.msg("export-png-hint", None).unwrap()
+    }
     pub fn msg_export_save_as_label(&self) -> String {
         self.0.msg("export-save-as-label", None).unwrap()
     }
     pub fn msg_export_start(&self) -> String {
         self.0.msg("export-start", None).unwrap()
+    }
+    pub fn msg_export_svg_hint(&self) -> String {
+        self.0.msg("export-svg-hint", None).unwrap()
+    }
+    /// $n (Number) - files written
+    pub fn msg_exported_files<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("exported-files", Some(_args)).unwrap()
     }
     pub fn msg_exporting(&self) -> String {
         self.0.msg("exporting", None).unwrap()
@@ -6446,6 +7482,15 @@ impl L10nLanguage {
     }
     pub fn msg_filled_square(&self) -> String {
         self.0.msg("filled-square", None).unwrap()
+    }
+    pub fn msg_filter_pdf(&self) -> String {
+        self.0.msg("filter-pdf", None).unwrap()
+    }
+    pub fn msg_filter_png(&self) -> String {
+        self.0.msg("filter-png", None).unwrap()
+    }
+    pub fn msg_filter_svg(&self) -> String {
+        self.0.msg("filter-svg", None).unwrap()
     }
     pub fn msg_find(&self) -> String {
         self.0.msg("find", None).unwrap()
@@ -6606,6 +7651,15 @@ impl L10nLanguage {
     pub fn msg_group(&self) -> String {
         self.0.msg("group", None).unwrap()
     }
+    /// $names (String) - joined page/group names
+    pub fn msg_group_breadcrumb<F0: AsRef<str>>(&self, names: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("names", names.as_ref());
+        self.0.msg("group-breadcrumb", Some(_args)).unwrap()
+    }
+    pub fn msg_group_flyout(&self) -> String {
+        self.0.msg("group-flyout", None).unwrap()
+    }
     pub fn msg_group_needs_2_shapes_on_the_page(&self) -> String {
         self.0
             .msg("group-needs-2-shapes-on-the-page", None)
@@ -6618,6 +7672,24 @@ impl L10nLanguage {
     }
     pub fn msg_grow_with_the_members_planned(&self) -> String {
         self.0.msg("grow-with-the-members-planned", None).unwrap()
+    }
+    /// $v (String) - guide coordinate
+    pub fn msg_guide_added_horizontal<F0: AsRef<str>>(&self, v: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("v", v.as_ref());
+        self.0.msg("guide-added-horizontal", Some(_args)).unwrap()
+    }
+    /// $v (String) - guide coordinate pair
+    pub fn msg_guide_added_point<F0: AsRef<str>>(&self, v: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("v", v.as_ref());
+        self.0.msg("guide-added-point", Some(_args)).unwrap()
+    }
+    /// $v (String) - guide coordinate
+    pub fn msg_guide_added_vertical<F0: AsRef<str>>(&self, v: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("v", v.as_ref());
+        self.0.msg("guide-added-vertical", Some(_args)).unwrap()
     }
     /// $id (Number) - argument
     pub fn msg_guide_id<F0: Into<FluentNumber>>(&self, id: F0) -> String {
@@ -6639,6 +7711,15 @@ impl L10nLanguage {
     pub fn msg_heading_style_gallery_planned(&self) -> String {
         self.0.msg("heading-style-gallery-planned", None).unwrap()
     }
+    pub fn msg_height(&self) -> String {
+        self.0.msg("height", None).unwrap()
+    }
+    /// $g (String) - guard formula
+    pub fn msg_height_not_resized_guard<F0: AsRef<str>>(&self, g: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("g", g.as_ref());
+        self.0.msg("height-not-resized-guard", Some(_args)).unwrap()
+    }
     pub fn msg_help_about(&self) -> String {
         self.0.msg("help-about", None).unwrap()
     }
@@ -6647,6 +7728,15 @@ impl L10nLanguage {
     }
     pub fn msg_highlight_members(&self) -> String {
         self.0.msg("highlight-members", None).unwrap()
+    }
+    pub fn msg_hl_address(&self) -> String {
+        self.0.msg("hl-address", None).unwrap()
+    }
+    pub fn msg_hl_description(&self) -> String {
+        self.0.msg("hl-description", None).unwrap()
+    }
+    pub fn msg_hl_subaddress(&self) -> String {
+        self.0.msg("hl-subaddress", None).unwrap()
     }
     pub fn msg_home(&self) -> String {
         self.0.msg("home", None).unwrap()
@@ -6726,6 +7816,12 @@ impl L10nLanguage {
     pub fn msg_justify_planned(&self) -> String {
         self.0.msg("justify-planned", None).unwrap()
     }
+    /// $key (String) - keytip key
+    pub fn msg_keytip_unavailable<F0: AsRef<str>>(&self, key: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("key", key.as_ref());
+        self.0.msg("keytip-unavailable", Some(_args)).unwrap()
+    }
     /// $label (String) - argument
     pub fn msg_label_a_choice_cannot_contain<F0: AsRef<str>>(&self, label: F0) -> String {
         let mut _args = FluentArgs::new();
@@ -6787,6 +7883,24 @@ impl L10nLanguage {
     pub fn msg_layer(&self) -> String {
         self.0.msg("layer", None).unwrap()
     }
+    /// $id (Number) - layer id
+    /// $e (String) - error text
+    pub fn msg_layer_composite_failed<F0: Into<FluentNumber>, F1: AsRef<str>>(
+        &self,
+        id: F0,
+        e: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        _args.set("e", e.as_ref());
+        self.0.msg("layer-composite-failed", Some(_args)).unwrap()
+    }
+    /// $ix (Number) - layer row index
+    pub fn msg_layer_ix_fallback<F0: Into<FluentNumber>>(&self, ix: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("ix", ix.into());
+        self.0.msg("layer-ix-fallback", Some(_args)).unwrap()
+    }
     pub fn msg_layout(&self) -> String {
         self.0.msg("layout", None).unwrap()
     }
@@ -6818,6 +7932,12 @@ impl L10nLanguage {
     }
     pub fn msg_line_color_label(&self) -> String {
         self.0.msg("line-color-label", None).unwrap()
+    }
+    /// $factor (Number) - jump factor
+    pub fn msg_line_jump_factor_set<F0: Into<FluentNumber>>(&self, factor: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("factor", factor.into());
+        self.0.msg("line-jump-factor-set", Some(_args)).unwrap()
     }
     pub fn msg_line_jumps(&self) -> String {
         self.0.msg("line-jumps", None).unwrap()
@@ -6912,6 +8032,12 @@ impl L10nLanguage {
     }
     pub fn msg_master(&self) -> String {
         self.0.msg("master", None).unwrap()
+    }
+    /// $id (Number) - master id
+    pub fn msg_master_armed_click_place<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("master-armed-click-place", Some(_args)).unwrap()
     }
     /// $mid (Number) - argument
     pub fn msg_master_mid<F0: Into<FluentNumber>>(&self, mid: F0) -> String {
@@ -7036,6 +8162,9 @@ impl L10nLanguage {
     pub fn msg_no_document_open(&self) -> String {
         self.0.msg("no-document-open", None).unwrap()
     }
+    pub fn msg_no_formula(&self) -> String {
+        self.0.msg("no-formula", None).unwrap()
+    }
     pub fn msg_no_hyperlinks_on_this_shape(&self) -> String {
         self.0.msg("no-hyperlinks-on-this-shape", None).unwrap()
     }
@@ -7054,8 +8183,17 @@ impl L10nLanguage {
     pub fn msg_no_shapes(&self) -> String {
         self.0.msg("no-shapes", None).unwrap()
     }
+    /// $q (String) - search text
+    pub fn msg_no_templates_match<F0: AsRef<str>>(&self, q: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("q", q.as_ref());
+        self.0.msg("no-templates-match", Some(_args)).unwrap()
+    }
     pub fn msg_none(&self) -> String {
         self.0.msg("none", None).unwrap()
+    }
+    pub fn msg_not_saved_yet(&self) -> String {
+        self.0.msg("not-saved-yet", None).unwrap()
     }
     pub fn msg_nothing_on_this_page_matches_the(&self) -> String {
         self.0
@@ -7155,6 +8293,12 @@ impl L10nLanguage {
     pub fn msg_open_square(&self) -> String {
         self.0.msg("open-square", None).unwrap()
     }
+    /// $e (String) - error text
+    pub fn msg_open_stencil_failed_e<F0: AsRef<str>>(&self, e: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("e", e.as_ref());
+        self.0.msg("open-stencil-failed-e", Some(_args)).unwrap()
+    }
     pub fn msg_open_triangle_convex_base(&self) -> String {
         self.0.msg("open-triangle-convex-base", None).unwrap()
     }
@@ -7179,11 +8323,47 @@ impl L10nLanguage {
     pub fn msg_open_wide(&self) -> String {
         self.0.msg("open-wide", None).unwrap()
     }
+    /// $address (String) - hyperlink address
+    pub fn msg_opened_address<F0: AsRef<str>>(&self, address: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("address", address.as_ref());
+        self.0.msg("opened-address", Some(_args)).unwrap()
+    }
+    /// $title (String) - stencil title
+    pub fn msg_opened_builtin_metric<F0: AsRef<str>>(&self, title: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("title", title.as_ref());
+        self.0.msg("opened-builtin-metric", Some(_args)).unwrap()
+    }
+    /// $title (String) - stencil title
+    pub fn msg_opened_builtin_myshapes<F0: AsRef<str>>(&self, title: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("title", title.as_ref());
+        self.0.msg("opened-builtin-myshapes", Some(_args)).unwrap()
+    }
+    /// $name (String) - group name
+    pub fn msg_opened_group<F0: AsRef<str>>(&self, name: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("name", name.as_ref());
+        self.0.msg("opened-group", Some(_args)).unwrap()
+    }
+    /// $path (String) - file path
+    pub fn msg_opened_path<F0: AsRef<str>>(&self, path: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("path", path.as_ref());
+        self.0.msg("opened-path", Some(_args)).unwrap()
+    }
     /// $stem (String) - argument
     pub fn msg_opened_stencil_stem<F0: AsRef<str>>(&self, stem: F0) -> String {
         let mut _args = FluentArgs::new();
         _args.set("stem", stem.as_ref());
         self.0.msg("opened-stencil-stem", Some(_args)).unwrap()
+    }
+    /// $name (String) - file name
+    pub fn msg_opening_file<F0: AsRef<str>>(&self, name: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("name", name.as_ref());
+        self.0.msg("opening-file", Some(_args)).unwrap()
     }
     pub fn msg_operations(&self) -> String {
         self.0.msg("operations", None).unwrap()
@@ -7230,6 +8410,12 @@ impl L10nLanguage {
             .msg("page-name-marked-as-a-background", Some(_args))
             .unwrap()
     }
+    /// $sub (String) - sub-address page name
+    pub fn msg_page_not_found<F0: AsRef<str>>(&self, sub: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("sub", sub.as_ref());
+        self.0.msg("page-not-found", Some(_args)).unwrap()
+    }
     pub fn msg_page_number(&self) -> String {
         self.0.msg("page-number", None).unwrap()
     }
@@ -7249,6 +8435,26 @@ impl L10nLanguage {
         self.0
             .msg("page-size-iso-ansi-presets-or-cu", None)
             .unwrap()
+    }
+    /// $w (String) - width value
+    /// $h (String) - height value
+    pub fn msg_page_size_set<F0: AsRef<str>, F1: AsRef<str>>(&self, w: F0, h: F1) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("w", w.as_ref());
+        _args.set("h", h.as_ref());
+        self.0.msg("page-size-set", Some(_args)).unwrap()
+    }
+    /// $n (Number) - page number, 1-based
+    /// $id (Number) - page id
+    pub fn msg_page_tab_tooltip<F0: Into<FluentNumber>, F1: Into<FluentNumber>>(
+        &self,
+        n: F0,
+        id: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        _args.set("id", id.into());
+        self.0.msg("page-tab-tooltip", Some(_args)).unwrap()
     }
     pub fn msg_page_width(&self) -> String {
         self.0.msg("page-width", None).unwrap()
@@ -7295,6 +8501,48 @@ impl L10nLanguage {
     }
     pub fn msg_pick_an_output_file_first(&self) -> String {
         self.0.msg("pick-an-output-file-first", None).unwrap()
+    }
+    /// $w (Number) - pixel width
+    /// $h (Number) - pixel height
+    /// $factor (Number) - zoom factor
+    pub fn msg_picture_copied<
+        F0: Into<FluentNumber>,
+        F1: Into<FluentNumber>,
+        F2: Into<FluentNumber>,
+    >(
+        &self,
+        w: F0,
+        h: F1,
+        factor: F2,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("w", w.into());
+        _args.set("h", h.into());
+        _args.set("factor", factor.into());
+        self.0.msg("picture-copied", Some(_args)).unwrap()
+    }
+    /// $w (Number) - pixel width
+    /// $h (Number) - pixel height
+    /// $w_in (Number) - width in inches
+    /// $h_in (Number) - height in inches
+    pub fn msg_picture_inserted<
+        F0: Into<FluentNumber>,
+        F1: Into<FluentNumber>,
+        F2: Into<FluentNumber>,
+        F3: Into<FluentNumber>,
+    >(
+        &self,
+        w: F0,
+        h: F1,
+        w_in: F2,
+        h_in: F3,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("w", w.into());
+        _args.set("h", h.into());
+        _args.set("w_in", w_in.into());
+        _args.set("h_in", h_in.into());
+        self.0.msg("picture-inserted", Some(_args)).unwrap()
     }
     pub fn msg_pictures(&self) -> String {
         self.0.msg("pictures", None).unwrap()
@@ -7419,6 +8667,9 @@ impl L10nLanguage {
     pub fn msg_rename_page(&self) -> String {
         self.0.msg("rename-page", None).unwrap()
     }
+    pub fn msg_rendering_scrim(&self) -> String {
+        self.0.msg("rendering-scrim", None).unwrap()
+    }
     pub fn msg_reorder_pages(&self) -> String {
         self.0.msg("reorder-pages", None).unwrap()
     }
@@ -7498,6 +8749,15 @@ impl L10nLanguage {
     pub fn msg_rounding(&self) -> String {
         self.0.msg("rounding", None).unwrap()
     }
+    pub fn msg_rtl_text_menu(&self) -> String {
+        self.0.msg("rtl-text-menu", None).unwrap()
+    }
+    pub fn msg_rtl_text_off(&self) -> String {
+        self.0.msg("rtl-text-off", None).unwrap()
+    }
+    pub fn msg_rtl_text_on(&self) -> String {
+        self.0.msg("rtl-text-on", None).unwrap()
+    }
     pub fn msg_ruler_subdivisions(&self) -> String {
         self.0.msg("ruler-subdivisions", None).unwrap()
     }
@@ -7522,6 +8782,12 @@ impl L10nLanguage {
     pub fn msg_save_ctrl_s(&self) -> String {
         self.0.msg("save-ctrl-s", None).unwrap()
     }
+    /// $e (String) - error text
+    pub fn msg_save_failed_e<F0: AsRef<str>>(&self, e: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("e", e.as_ref());
+        self.0.msg("save-failed-e", Some(_args)).unwrap()
+    }
     pub fn msg_save_new(&self) -> String {
         self.0.msg("save-new", None).unwrap()
     }
@@ -7530,6 +8796,12 @@ impl L10nLanguage {
     }
     pub fn msg_save_the_stencil_planned(&self) -> String {
         self.0.msg("save-the-stencil-planned", None).unwrap()
+    }
+    /// $path (String) - file path
+    pub fn msg_saved_path<F0: AsRef<str>>(&self, path: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("path", path.as_ref());
+        self.0.msg("saved-path", Some(_args)).unwrap()
     }
     pub fn msg_scale(&self) -> String {
         self.0.msg("scale", None).unwrap()
@@ -7609,8 +8881,32 @@ impl L10nLanguage {
             .msg("select-two-or-more-shapes-to-ali", None)
             .unwrap()
     }
+    /// $label (String) - the value label
+    /// $n (Number) - matching shape count
+    pub fn msg_select_value_n_shapes<F0: AsRef<str>, F1: Into<FluentNumber>>(
+        &self,
+        label: F0,
+        n: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("label", label.as_ref());
+        _args.set("n", n.into());
+        self.0.msg("select-value-n-shapes", Some(_args)).unwrap()
+    }
     pub fn msg_selected_all_shapes(&self) -> String {
         self.0.msg("selected-all-shapes", None).unwrap()
+    }
+    /// $n (Number) - selected shape count
+    /// $crit (String) - criterion label
+    pub fn msg_selected_n_by_criterion<F0: Into<FluentNumber>, F1: AsRef<str>>(
+        &self,
+        n: F0,
+        crit: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        _args.set("crit", crit.as_ref());
+        self.0.msg("selected-n-by-criterion", Some(_args)).unwrap()
     }
     /// $shape_id (Number) - argument
     pub fn msg_selected_shape_shape_id<F0: Into<FluentNumber>>(&self, shape_id: F0) -> String {
@@ -7881,6 +9177,9 @@ impl L10nLanguage {
     pub fn msg_snap_to(&self) -> String {
         self.0.msg("snap-to", None).unwrap()
     }
+    pub fn msg_snapglue_note(&self) -> String {
+        self.0.msg("snapglue-note", None).unwrap()
+    }
     pub fn msg_solid(&self) -> String {
         self.0.msg("solid", None).unwrap()
     }
@@ -7901,6 +9200,60 @@ impl L10nLanguage {
     }
     pub fn msg_split_view_planned(&self) -> String {
         self.0.msg("split-view-planned", None).unwrap()
+    }
+    pub fn msg_ss_section_1d_endpoints(&self) -> String {
+        self.0.msg("ss-section-1d-endpoints", None).unwrap()
+    }
+    pub fn msg_ss_section_connection_points(&self) -> String {
+        self.0.msg("ss-section-connection-points", None).unwrap()
+    }
+    pub fn msg_ss_section_control_points(&self) -> String {
+        self.0.msg("ss-section-control-points", None).unwrap()
+    }
+    pub fn msg_ss_section_fill_gradient_stops(&self) -> String {
+        self.0.msg("ss-section-fill-gradient-stops", None).unwrap()
+    }
+    /// $ix (Number) - geometry section index
+    pub fn msg_ss_section_geometry_n<F0: Into<FluentNumber>>(&self, ix: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("ix", ix.into());
+        self.0.msg("ss-section-geometry-n", Some(_args)).unwrap()
+    }
+    pub fn msg_ss_section_layer_membership(&self) -> String {
+        self.0.msg("ss-section-layer-membership", None).unwrap()
+    }
+    pub fn msg_ss_section_line_gradient_stops(&self) -> String {
+        self.0.msg("ss-section-line-gradient-stops", None).unwrap()
+    }
+    pub fn msg_ss_section_page_layout(&self) -> String {
+        self.0.msg("ss-section-page-layout", None).unwrap()
+    }
+    pub fn msg_ss_section_page_properties(&self) -> String {
+        self.0.msg("ss-section-page-properties", None).unwrap()
+    }
+    pub fn msg_ss_section_print_setup(&self) -> String {
+        self.0.msg("ss-section-print-setup", None).unwrap()
+    }
+    pub fn msg_ss_section_ruler_grid(&self) -> String {
+        self.0.msg("ss-section-ruler-grid", None).unwrap()
+    }
+    pub fn msg_ss_section_shape_data(&self) -> String {
+        self.0.msg("ss-section-shape-data", None).unwrap()
+    }
+    pub fn msg_ss_section_smart_tags(&self) -> String {
+        self.0.msg("ss-section-smart-tags", None).unwrap()
+    }
+    pub fn msg_ss_section_text_fields(&self) -> String {
+        self.0.msg("ss-section-text-fields", None).unwrap()
+    }
+    pub fn msg_ss_section_text_transform(&self) -> String {
+        self.0.msg("ss-section-text-transform", None).unwrap()
+    }
+    pub fn msg_ss_section_user_defined_cells(&self) -> String {
+        self.0.msg("ss-section-user-defined-cells", None).unwrap()
+    }
+    pub fn msg_ss_shape_not_found(&self) -> String {
+        self.0.msg("ss-shape-not-found", None).unwrap()
     }
     pub fn msg_stamp_tool(&self) -> String {
         self.0.msg("stamp-tool", None).unwrap()
@@ -8085,6 +9438,9 @@ impl L10nLanguage {
     pub fn msg_the_current_drawing_has_unsaved(&self) -> String {
         self.0.msg("the-current-drawing-has-unsaved", None).unwrap()
     }
+    pub fn msg_the_drawing(&self) -> String {
+        self.0.msg("the-drawing", None).unwrap()
+    }
     pub fn msg_the_grid(&self) -> String {
         self.0.msg("the-grid", None).unwrap()
     }
@@ -8201,14 +9557,156 @@ impl L10nLanguage {
     pub fn msg_underline_planned(&self) -> String {
         self.0.msg("underline-planned", None).unwrap()
     }
+    /// $name (String) - property name
+    /// $v (String) - the added choice
+    pub fn msg_undo_add_choice<F0: AsRef<str>, F1: AsRef<str>>(&self, name: F0, v: F1) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("name", name.as_ref());
+        _args.set("v", v.as_ref());
+        self.0.msg("undo-add-choice", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_add_connector<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-add-connector", Some(_args)).unwrap()
+    }
+    /// $n (Number) - shape count
+    /// $c (String) - container name
+    pub fn msg_undo_add_n_to_container<F0: Into<FluentNumber>, F1: AsRef<str>>(
+        &self,
+        n: F0,
+        c: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        _args.set("c", c.as_ref());
+        self.0.msg("undo-add-n-to-container", Some(_args)).unwrap()
+    }
+    /// $what (String) - the aligned edge word
+    pub fn msg_undo_align_what<F0: AsRef<str>>(&self, what: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("what", what.as_ref());
+        self.0.msg("undo-align-what", Some(_args)).unwrap()
+    }
+    /// $style (String) - container style master NameU
+    pub fn msg_undo_apply_container_style<F0: AsRef<str>>(&self, style: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("style", style.as_ref());
+        self.0
+            .msg("undo-apply-container-style", Some(_args))
+            .unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_autoconnect<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-autoconnect", Some(_args)).unwrap()
+    }
     pub fn msg_undo_ctrl_z(&self) -> String {
         self.0.msg("undo-ctrl-z", None).unwrap()
+    }
+    /// $n (Number) - shape count
+    pub fn msg_undo_delete_n_shapes<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("undo-delete-n-shapes", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_delete_shape<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-delete-shape", Some(_args)).unwrap()
+    }
+    /// $n (Number) - released member count
+    pub fn msg_undo_disband_container<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("undo-disband-container", Some(_args)).unwrap()
+    }
+    /// $sid (Number) - connector shape id
+    /// $end (String) - localized endpoint word
+    pub fn msg_undo_glue_connector<F0: Into<FluentNumber>, F1: AsRef<str>>(
+        &self,
+        sid: F0,
+        end: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("sid", sid.into());
+        _args.set("end", end.as_ref());
+        self.0.msg("undo-glue-connector", Some(_args)).unwrap()
     }
     /// $l (String) - argument
     pub fn msg_undo_l<F0: AsRef<str>>(&self, l: F0) -> String {
         let mut _args = FluentArgs::new();
         _args.set("l", l.as_ref());
         self.0.msg("undo-l", Some(_args)).unwrap()
+    }
+    /// $id (Number) - connector id
+    pub fn msg_undo_move_connector<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-move-connector", Some(_args)).unwrap()
+    }
+    /// $end (String) - localized endpoint word
+    pub fn msg_undo_move_endpoint<F0: AsRef<str>>(&self, end: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("end", end.as_ref());
+        self.0.msg("undo-move-endpoint", Some(_args)).unwrap()
+    }
+    /// $id (Number) - guide id
+    pub fn msg_undo_move_guide<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-move-guide", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_move_line_shape<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-move-line-shape", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_move_shape<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-move-shape", Some(_args)).unwrap()
+    }
+    /// $n (Number) - vertex row index
+    pub fn msg_undo_move_vertex<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("undo-move-vertex", Some(_args)).unwrap()
+    }
+    /// $id (Number) - shape id
+    pub fn msg_undo_resize_shape<F0: Into<FluentNumber>>(&self, id: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("id", id.into());
+        self.0.msg("undo-resize-shape", Some(_args)).unwrap()
+    }
+    /// $name (String) - cell name
+    pub fn msg_undo_set_cell<F0: AsRef<str>>(&self, name: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("name", name.as_ref());
+        self.0.msg("undo-set-cell", Some(_args)).unwrap()
+    }
+    /// $section (String) - section name
+    /// $cell (String) - cell name
+    pub fn msg_undo_set_section_cell<F0: AsRef<str>, F1: AsRef<str>>(
+        &self,
+        section: F0,
+        cell: F1,
+    ) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("section", section.as_ref());
+        _args.set("cell", cell.as_ref());
+        self.0.msg("undo-set-section-cell", Some(_args)).unwrap()
+    }
+    /// $n (Number) - group count
+    pub fn msg_undo_ungroup_n<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("undo-ungroup-n", Some(_args)).unwrap()
     }
     pub fn msg_ungroup(&self) -> String {
         self.0.msg("ungroup", None).unwrap()
@@ -8248,6 +9746,12 @@ impl L10nLanguage {
     pub fn msg_vector_svg(&self) -> String {
         self.0.msg("vector-svg", None).unwrap()
     }
+    /// $cell (String) - the formula-driven cell description
+    pub fn msg_vertex_drag_refused<F0: AsRef<str>>(&self, cell: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("cell", cell.as_ref());
+        self.0.msg("vertex-drag-refused", Some(_args)).unwrap()
+    }
     pub fn msg_view(&self) -> String {
         self.0.msg("view", None).unwrap()
     }
@@ -8272,20 +9776,44 @@ impl L10nLanguage {
     pub fn msg_weight(&self) -> String {
         self.0.msg("weight", None).unwrap()
     }
+    /// $sub (String) - sub-address page name
+    pub fn msg_went_to_page<F0: AsRef<str>>(&self, sub: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("sub", sub.as_ref());
+        self.0.msg("went-to-page", Some(_args)).unwrap()
+    }
     pub fn msg_whole_page(&self) -> String {
         self.0.msg("whole-page", None).unwrap()
     }
     pub fn msg_wide_arrow(&self) -> String {
         self.0.msg("wide-arrow", None).unwrap()
     }
+    pub fn msg_width(&self) -> String {
+        self.0.msg("width", None).unwrap()
+    }
+    /// $g (String) - guard formula
+    pub fn msg_width_not_resized_guard<F0: AsRef<str>>(&self, g: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("g", g.as_ref());
+        self.0.msg("width-not-resized-guard", Some(_args)).unwrap()
+    }
     pub fn msg_window(&self) -> String {
         self.0.msg("window", None).unwrap()
+    }
+    /// $n (Number) - window count
+    pub fn msg_window_n<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("window-n", Some(_args)).unwrap()
     }
     pub fn msg_word_count(&self) -> String {
         self.0.msg("word-count", None).unwrap()
     }
     pub fn msg_word_count_planned(&self) -> String {
         self.0.msg("word-count-planned", None).unwrap()
+    }
+    pub fn msg_worker_lost(&self) -> String {
+        self.0.msg("worker-lost", None).unwrap()
     }
     pub fn msg_wrap_the_selection_in_this_conta(&self) -> String {
         self.0

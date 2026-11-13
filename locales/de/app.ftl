@@ -7,6 +7,11 @@ a-ruler-subdivision = eine Linealunterteilung
 a-shape-intersection = eine Formüberschneidung
 about-name = Tarahi
 about-tarahi = Über Tarahi
+# $what - Name der Aktion
+# $why - Der Zurückstellungsgrund
+action-deferred = { $what } zurückgestellt: { $why }
+# $what - Name der Aktion
+action-display-only = { $what } ist rein Anzeige
 active = Aktiv
 activex-era-likely-cut-scope-cal = ActiveX-Ära — voraussichtlich entfallen (Rahmenentscheid zu #252)
 add = Hinzufügen
@@ -38,6 +43,12 @@ align-top = Oben
 align-top-edges = Obere Kanten ausrichten
 align-top-kind = obere
 align-vertical-centers = Vertikale Mittelpunkte ausrichten
+align-word-bottom = unten
+align-word-centers = Mitten
+align-word-left = links
+align-word-middles = Mitten (vertikal)
+align-word-right = rechts
+align-word-top = oben
 aligning-to-the-first-selected-s = Ausrichtung an der zuerst gewählten Form
 aligning-to-the-page = Ausrichtung an der Seite
 alignment-and-spacing-hints-whil = Ausrichtungs- und Abstandshinweise beim Ziehen
@@ -63,6 +74,7 @@ autocorrect-options-planned = AutoKorrektur-Optionen — geplant
 automatic-resize = Automatische Größe
 automatically-link = Automatisch verknüpfen
 background = Hintergrund
+background-cleared = Hintergrund entfernt
 background-page-name = Hintergrundseite: { $name }
 backgrounds = Hintergründe
 behavior = Verhalten
@@ -77,6 +89,13 @@ bring-forward-planned = Nach vorn — geplant
 bring-to-front = In den Vordergrund
 browse = Durchsuchen …
 browse-for-an-existing-visio-pac = Ein vorhandenes Visio-Paket auswählen.
+# $ok - Anzahl entpackt
+# $failed - Anzahl fehlgeschlagen
+builtin-extracted-summary = Eingebaute Schablonen: { $ok } entpackt, { $failed } fehlgeschlagen — eingebaute Kopien in Gebrauch
+# $n - Anzahl entpackter Dateien
+builtin-extracted-to = { $n } eingebaute Schablonendateien nach My Shapes/Built-ins entpackt
+# $title - Schablonentitel
+builtin-stencil-failed = eingebaute Schablone konnte nicht geladen werden: { $title }
 bullets = Aufzählungszeichen
 bullets-planned = Aufzählungszeichen — geplant
 cad-drawing = CAD-Zeichnung
@@ -85,6 +104,9 @@ calibri = Calibri
 callout = Legendenbeschriftung
 callouts-planned = Legendenbeschriftungen — geplant
 cancel = Abbrechen
+# $name - Zellenname
+# $f - die schützende Formel
+cell-is-formula-driven = { $name } ist formelgetrieben ({ $f })
 center = Mitte
 chart = Diagramm
 charts-planned-later-milestone = Diagramme — geplant (späterer Meilenstein)
@@ -105,6 +127,10 @@ closed-switched-to-name = geschlossen; gewechselt zu { $name }
 closed-title = { $title } geschlossen
 code = Code
 color = Farbe
+color-fill-bkgnd-window = Füllhintergrund
+color-fill-window = Füllfarbe
+color-line-window = Linienfarbe
+color-text-window = Textfarbe
 colors = Farben
 com-add-ins = COM-Add-Ins
 comment-add = Kommentar hinzufügen
@@ -122,16 +148,26 @@ connection-point-ix-selected-del = Verbindungspunkt { $ix } ausgewählt (Entf en
 connection-point-next-ix-added-t = Verbindungspunkt { $next_ix } zu Form { $hit } hinzugefügt
 connection-point-tool-off = Verbindungspunkt-Tool aus
 connector = Verbinder
+connector-drawn-free-ends = Konnektor gezeichnet (freie Enden)
 connector-end-released = Verbinderende gelöst
+connector-glued-at-both-ends = Konnektor an beiden Enden geklebt
+connector-glued-at-one-end = Konnektor an einem Ende geklebt
+# $id - Form-ID
+connector-glued-shape = Konnektor an Form { $id } geklebt
+# $id - Form-ID
+connector-glued-shape-point = Konnektor am Verbindungspunkt von Form { $id } geklebt
 connector-is-glued-at-both-ends = Der Verbinder ist an beiden Enden verklebt — ziehen Sie über den Einrastradius hinaus, um zu lösen, oder ziehen Sie einen Endpunkt oder seine Formen
 connector-move-refused-reason = Verbinderverschiebung abgelehnt: { $reason }
 connector-moved-release-ends-glu = Verbinder verschoben — { $release_ends } verklebte(n) End(en) über den Einrastradius gelöst
+# $id - Form-ID
+connector-stays-glued = Konnektor bleibt an Form { $id } geklebt
 connector-tool-drag-from-one-sha = Verbindertool: von einer Form zu einer anderen ziehen (Esc beendet)
 connector-tool-status = Verbindertool — einen Verbinder zwischen Formen oder Punkten zeichnen (Esc beendet)
 connector-tool-tip = Verbindertool — einen Verbinder zwischen Formen oder Punkten zeichnen
 connectors = Verbinder
 connpoint-tool-status = Verbindungspunkt-Tool: Klicken Sie auf eine Form, um einen Verbindungspunkt hinzuzufügen
 container = Container
+container-flyout =   Container  ›
 container-margins-planned = Containerränder — geplant
 container-style-style-applied = Containerstil { $style } angewendet
 container-style-style-not-found = Containerstil { $style } nicht gefunden
@@ -149,6 +185,9 @@ copy-as-picture-menu = Als Bild kopieren …
 copy-picture = Bild kopieren
 copy-planned = Kopieren — geplant
 could-not-open-address-e = { $address } konnte nicht geöffnet werden: { $e }
+# $path - Dateipfad
+# $e - Fehlertext
+could-not-read-path = { $path } konnte nicht gelesen werden: { $e }
 create-a-background-page-planned = Eine Hintergrundseite erstellen — geplant (Design ▸ Hintergründe weist heute zu)
 create-a-stencil-planned = Eine Schablone erstellen — geplant
 create-new-data-graphic = Neue Datengrafik erstellen
@@ -174,6 +213,9 @@ date-time = Datum & Uhrzeit
 date-time-field-planned = Datum-/Uhrzeitfeld — geplant
 decrease-indent = Einzug verkleinern
 decrease-indent-planned = Einzug verkleinern — geplant
+# $entry - Standardeintrag
+# $e - Fehlertext
+default-stencil-failed = Standardschablone { $entry } konnte nicht geladen werden: { $e }
 define-shape-data = Formdaten definieren
 define-shape-data-m6 = Formdaten definieren (M6)
 delete = Löschen
@@ -200,6 +242,7 @@ distribute-needs-three-or-more-s = Verteilen benötigt drei oder mehr Formen
 distribute-vertical-spacing = vertikale Abstände verteilen
 document-closed = Dokument geschlossen
 document-inspection-arrives-with = Dokumentprüfung kommt in einem späteren Meilenstein
+document-masters = Dokument-Master
 document-protection-arrives-with = Dokumentschutz kommt in einem späteren Meilenstein
 document-stencil = Dokumentschablone
 document-stencil-planned = Dokumentschablone — geplant
@@ -213,6 +256,8 @@ double-tick-ring = Doppelter Tick + Ring
 drawing-aids = Zeichenhilfen
 drawing-explorer = Zeichnungs-Explorer
 drawing-explorer-planned = Zeichnungs-Explorer — geplant
+# $n - Nummer des unbenannten Dokuments
+drawing-n = Zeichnung{ $n }
 drawing-scale-planned = Zeichnungsmaßstab — geplant
 drawings-you-open-will-appear-he = Hier erscheinen die Zeichnungen, die Sie öffnen.
 duplicate = Duplizieren
@@ -230,17 +275,31 @@ editing-text-of-shape-shape-id = Text der Form { $shape_id } wird bearbeitet
 effects = Effekte
 ellipse-tool = Ellipsenwerkzeug
 ellipse-tool-planned = Ellipsenwerkzeug — geplant
+endpoint-begin = Anfang
 endpoint-drag-refused-reason = Endpunktverschiebung abgelehnt: { $reason }
+endpoint-end = Ende
+# $hit - lokalisierter Fangziel-Text
+endpoint-glued-to = Endpunkt an { $hit } geklebt
 endpoint-moved-but-name-is-formu = Endpunkt verschoben, aber { $name } ist formelgesteuert und blieb erhalten
 even-horizontal-spacing-3-shapes = Gleichmäßiger horizontaler Abstand (3+ Formen)
 even-vertical-spacing-3-shapes = Gleichmäßiger vertikaler Abstand (3+ Formen)
 eventdblclick-f-macro-and-naviga = EventDblClick '{ $f }' — Makro- und Navigationsaktionen kommen in einem späteren Meilenstein
 export-entry-desc = Die Zeichnung in einem anderen Format speichern
+export-failed-e = Export fehlgeschlagen: { $e }
 export-failed-worker-lost = Export fehlgeschlagen: der Hintergrundprozess wurde beendet
 export-finished = Export abgeschlossen.
 export-page-sub = Die Zeichnung in einem anderen Format speichern.
+export-pdf-hint = Dokument mit wählbarem Text (alle Seiten in einer Datei)
+export-png-hint = Rasterbild mit der gewählten Dichte
 export-save-as-label = Speichern unter
 export-start = Exportieren …
+export-svg-hint = Vektorgrafik — das eigene Format des Renderers
+# $n - Anzahl der Dateien
+exported-files =
+    { $n ->
+        [one] { $n } Datei exportiert.
+       *[other] { $n } Dateien exportiert.
+    }
 exporting = Wird exportiert …
 external-data = Externe Daten
 external-data-window = Fenster für externe Daten
@@ -253,6 +312,9 @@ fill = Füllung
 filled-arrow-plain = Gefüllter Pfeil (schlicht)
 filled-circle = Gefüllter Kreis
 filled-square = Gefülltes Quadrat
+filter-pdf = PDF (Dokument)
+filter-png = PNG (Rasterbild)
+filter-svg = SVG (Vektorgrafik)
 find = Suchen
 find-planned-later-milestone = Suchen — geplant (späterer Meilenstein)
 fine-dash = Feiner Strich
@@ -302,17 +364,32 @@ gradient-radial = Verlauf radial
 gradient-vert = Verlauf vertikal
 grid = Raster
 group = Gruppe
+# $names - verkettete Seiten-/Gruppennamen
+group-breadcrumb = Seite › { $names }
+group-flyout =   Gruppe  ›
 group-needs-2-shapes-on-the-page = Gruppieren benötigt 2+ Formen auf der Seite
 group-the-selection-one-undo-ste = Die Auswahl gruppieren (ein Undo-Schritt; schachtelt in eine vorhandene Gruppe)
 grow-with-the-members-planned = Mit den Mitgliedern wachsen — geplant
+# $v - Führungslinien-Koordinate
+guide-added-horizontal = horizontale Führungslinie bei { $v } hinzugefügt
+# $v - Koordinatenpaar
+guide-added-point = Führungspunkt bei { $v } hinzugefügt
+# $v - Führungslinien-Koordinate
+guide-added-vertical = vertikale Führungslinie bei { $v } hinzugefügt
 guide-id = Führungslinie { $id }
 guides = Führungslinien
 guides-planned-113-s-objects-exi = Führungslinien — geplant (#113s Objekte existieren; der Schalter ist geplant)
 heading-style = Überschriftenstil
 heading-style-gallery-planned = Überschriftenstil-Galerie — geplant
+height = Höhe
+# $g - Schutzformel
+height-not-resized-guard = Höhe nicht geändert: { $g } (nur Breite)
 help-about = Hilfe / Über
 high-192-dpi = Hoch (192 dpi)
 highlight-members = Mitglieder hervorheben
+hl-address = Adresse
+hl-description = Beschreibung
+hl-subaddress = Unteradresse
 home = Start
 hyperlink = Hyperlink
 hyperlink-menu = Hyperlink …
@@ -337,6 +414,8 @@ italic-planned = Kursiv — geplant
 jump-size = Versatzgröße
 justify = Blocksatz
 justify-planned = Blocksatz — geplant
+# $key - Tastenkürzel
+keytip-unavailable = { $key } ist nicht verfügbar
 label-a-choice-cannot-contain = { $label }: eine Auswahl darf kein „;" enthalten
 label-dialog-planned-for-a-later = Dialog „{ $label }" — für einen späteren Meilenstein geplant
 label-not-a-number = { $label }: keine Zahl
@@ -355,6 +434,11 @@ lasso-selected-n-shape-s =
     }
 last-page = Letzte Seite
 layer = Ebene
+# $id - Layer-ID
+# $e - Fehlertext
+layer-composite-failed = Layer { $id }: { $e }
+# $ix - Layer-Zeilenindex
+layer-ix-fallback = Layer { $ix }
 layout = Layout
 layout-options = Layoutoptionen
 layout-options-planned = Layoutoptionen — geplant
@@ -365,6 +449,8 @@ legend = Legende
 legends-m6-visio-paints-legend-o = Legenden (M6; Visio legt Legend unter „Einfügen" ab, nicht unter „Daten")
 line = Linie
 line-color-label = Linienfarbe
+# $factor - Sprungfaktor
+line-jump-factor-set = Linien-Sprungsgröße ×{ $factor }
 line-jumps = Linienversätze
 line-jumps-hidden = Linienversätze ausgeblendet
 line-jumps-shown = Linienversätze eingeblendet
@@ -390,6 +476,8 @@ margins = Ränder
 markup = Markup
 markup-tracking-planned-no-marku = Markup-Verfolgung — geplant (noch kein Markup-Modell)
 master = Vorlage
+# $id - Master-ID
+master-armed-click-place = Master { $id } bereit — zum Platzieren auf die Zeichenfläche klicken
 master-mid = Vorlage { $mid }
 member-highlight-off = Member-Hervorhebung aus
 member-highlight-on = Member-Hervorhebung ein
@@ -422,12 +510,16 @@ no-background = Kein Hintergrund
 no-background-pages-right-click = Keine Hintergrundseiten. Klicken Sie mit der rechten Maustaste auf einen Seitenreiter und wählen Sie „Als Hintergrund festlegen".
 no-comments-on-this-shape-yet = Noch keine Kommentare zu dieser Form.
 no-document-open = Kein Dokument geöffnet
+no-formula = Keine Formel
 no-hyperlinks-on-this-shape = Keine Hyperlinks an dieser Form.
 no-keytip-key = Kein Keytip { $key }
 no-matching-shapes = Keine passenden Formen.
 no-picture-on-the-clipboard = Kein Bild in der Zwischenablage
 no-shapes = Keine Formen.
+# $q - Suchtext
+no-templates-match = Keine Vorlagen passen zu „{ $q }“.
 none = Keine
+not-saved-yet = Noch nicht gespeichert
 nothing-on-this-page-matches-the = (auf dieser Seite entspricht nichts dem Kriterium)
 nothing-selected-to-copy = Nichts zum Kopieren ausgewählt
 nothing-to-redo = Nichts wiederherzustellen
@@ -455,6 +547,8 @@ open-file-title = Datei öffnen
 open-fork = Offene Gabel
 open-group-label = { $group_label } öffnen
 open-square = Offenes Quadrat
+# $e - Fehlertext
+open-stencil-failed-e = Schablone öffnen fehlgeschlagen: { $e }
 open-triangle-convex-base = Offenes Dreieck (konvexe Basis)
 open-triangle-large = Offenes Dreieck (groß)
 open-triangle-medium = Offenes Dreieck (mittel)
@@ -463,7 +557,19 @@ open-triangle-small = Offenes Dreieck (klein)
 open-v-tall = Offenes V (hoch)
 open-vsdx-vstx-vssx-ctrl-o = .vsdx / .vstx / .vssx öffnen (Strg+O)
 open-wide = Offen (breit)
+# $address - Hyperlink-Adresse
+opened-address = { $address } geöffnet
+# $title - Schablonentitel
+opened-builtin-metric = { $title } geöffnet (metrisch)
+# $title - Schablonentitel
+opened-builtin-myshapes = { $title } geöffnet (My Shapes)
+# $name - Gruppenname
+opened-group = Gruppe { $name } geöffnet — Esc oder „Gruppe schließen“ zum Zurückkehren
+# $path - Dateipfad
+opened-path = { $path } geöffnet
 opened-stencil-stem = Schablone { $stem } geöffnet
+# $name - Dateiname
+opening-file = Öffne { $name } …
 operations = Operationen
 options = Optionen
 options-arrive-with-a-later-mile = Optionen kommen in einem späteren Meilenstein
@@ -475,12 +581,20 @@ page-breaks-planned = Seitenumbrüche — geplant
 page-name = Seitenname
 page-name-is-a-foreground-page-a = Seite { $name } ist wieder eine Vordergrundseite
 page-name-marked-as-a-background = Seite { $name } als Hintergrund markiert
+# $sub - Seitenname der Sub-Adresse
+page-not-found = Seite { $sub } nicht gefunden
 page-number = Seitenzahl
 page-number-field-planned = Seitenzahlfeld — geplant
 page-setup = Seite einrichten
 page-setup-menu = Seite einrichten …
 page-size = Seitengröße
 page-size-iso-ansi-presets-or-cu = Seitengröße — ISO/ANSI-Voreinstellungen oder benutzerdefiniert
+# $w - Breite
+# $h - Höhe
+page-size-set = Seitengröße { $w } × { $h }
+# $n - Seitennummer, 1-basiert
+# $id - Seiten-ID
+page-tab-tooltip = Seite { $n } (ID { $id })
 page-width = Seitenbreite
 paint-formatting-onto-shape-to = Formatierung auf Form { $to } übertragen
 painter-cells = { $n } Formatierungszellen an Form { $to } kopiert
@@ -488,6 +602,15 @@ painter-cells-sticky = { $n } Formatierungszellen an Form { $to } kopiert (weite
 paragraph = Absatz
 paste = Einfügen
 pick-an-output-file-first = Zuerst eine Ausgabedatei wählen
+# $w - Pixelbreite
+# $h - Pixelhöhe
+# $factor - Zoomfaktor
+picture-copied = Bild kopiert ({ $w }×{ $h } px bei { $factor }×)
+# $w - Pixelbreite
+# $h - Pixelhöhe
+# $w_in - Breite in Zoll
+# $h_in - Höhe in Zoll
+picture-inserted = Bild eingefügt ({ $w }×{ $h } px bei { $w_in }×{ $h_in } in)
 pictures = Bilder
 pointer-tool = Zeigerwerkzeug
 pointer-tool-select-and-drag-esc = Zeiger — auswählen und ziehen (Esc vom Verbindertool)
@@ -525,6 +648,7 @@ remove-connection-point-ix = Verbindungspunkt { $ix } entfernen
 remove-from-quick-shapes = Aus Schnellformen entfernen
 removed-from-quick-shapes = aus Schnellformen entfernt
 rename-page = Seite umbenennen
+rendering-scrim = Rendern …
 reorder-pages = Seiten neu anordnen
 reorder-pages-menu = Seiten neu anordnen …
 replace = Ersetzen
@@ -550,6 +674,9 @@ rotate-shapes = Formen drehen
 rotate-the-selection-90-clockwis = Die Auswahl 90° im Uhrzeigersinn drehen
 rotate-the-selection-90-counter = Die Auswahl 90° gegen den Uhrzeigersinn drehen
 rounding = Abrundung
+rtl-text-menu = Von rechts nach links
+rtl-text-off = Text läuft von links nach rechts
+rtl-text-on = Text läuft von rechts nach links
 ruler-subdivisions = Lineal-Unterteilungen
 rulers = Lineale
 save = Speichern
@@ -557,9 +684,13 @@ save-as = Speichern unter
 save-changes = Änderungen speichern?
 save-changes-to-name = Änderungen an { $name } speichern?
 save-ctrl-s = Speichern (Strg+S)
+# $e - Fehlertext
+save-failed-e = Speichern fehlgeschlagen: { $e }
 save-new = Speichern & Neu
 save-stencil = Schablone speichern
 save-the-stencil-planned = Die Schablone speichern — geplant
+# $path - Dateipfad
+saved-path = { $path } gespeichert
 scale = Skalieren
 screen-96-dpi = Bildschirm (96 dpi)
 search-results = Suchergebnisse
@@ -582,7 +713,20 @@ select-shapes-by-type-master-or = Formen nach Typ, Vorlage oder Ebene auswählen
 select-the-container-s-members-p = Die Mitglieder des Containers auswählen — geplant
 select-the-shapes-to-contain-fir = Wählen Sie zuerst die Formen für den Container aus
 select-two-or-more-shapes-to-ali = Wählen Sie zwei oder mehr Formen zum Ausrichten aus
+# $label - Wertname
+# $n - Anzahl passender Formen
+select-value-n-shapes = { $label } ({ $n ->
+    [one] eine Form
+   *[other] { $n } Formen
+})
 selected-all-shapes = alle Formen ausgewählt
+# $n - Anzahl gewählter Formen
+# $crit - Kriterium
+selected-n-by-criterion =
+    { $n ->
+        [one] eine Form nach { $crit } gewählt
+       *[other] { $n } Formen nach { $crit } gewählt
+    }
 selected-shape-shape-id = Form { $shape_id } ausgewählt
 selection = Auswahl
 selection-pane = Auswahlbereich
@@ -652,6 +796,7 @@ snap-conn-points = Verbindungspunkte
 snap-dynamic-grid = Dynamisches Raster
 snap-glue = Einrasten & Kleben
 snap-to = Einrasten an:
+snapglue-note = Einstellungen liegen in der Zeichnung. Führungslinien als Ziele kommen mit #113; Konnektor-Klebung mit #108.
 solid = Einfarbig
 spacing = Abstand
 spell-check-planned = Rechtschreibprüfung — geplant
@@ -659,6 +804,24 @@ spelling = Rechtschreibung
 splash-wordmark = tarahi
 split = Teilen
 split-view-planned = Geteilte Ansicht — geplant
+ss-section-1d-endpoints = 1-D-Endpunkte
+ss-section-connection-points = Verbindungspunkte
+ss-section-control-points = Kontrollpunkte
+ss-section-fill-gradient-stops = Füllverlauf-Stufen
+# $ix - Geometrie-Abschnittsindex
+ss-section-geometry-n = Geometrie { $ix }
+ss-section-layer-membership = Layerzugehörigkeit
+ss-section-line-gradient-stops = Linienverlauf-Stufen
+ss-section-page-layout = Seitenlayout
+ss-section-page-properties = Seiteneigenschaften
+ss-section-print-setup = Druckeinrichtung
+ss-section-ruler-grid = Lineal & Raster
+ss-section-shape-data = Formdaten
+ss-section-smart-tags = Smarttags
+ss-section-text-fields = Textfelder
+ss-section-text-transform = Texttransformation
+ss-section-user-defined-cells = Benutzerdefinierte Zellen
+ss-shape-not-found = Form nicht gefunden
 stamp-tool = Stempelwerkzeug
 stamp-tool-planned = Stempelwerkzeug — geplant
 start-an-empty-drawing = Eine leere Zeichnung beginnen
@@ -706,6 +869,7 @@ text-shapes-planned = Textformen — geplant
 text-tool = Textwerkzeug
 text-tool-planned-double-click-e = Textwerkzeug — geplant (Doppelklick bearbeitet heute den Text)
 the-current-drawing-has-unsaved = Die aktuelle Zeichnung hat ungespeicherte Änderungen.
+the-drawing = die Zeichnung
 the-grid = das Raster
 the-last-page-cannot-be-deleted = Die letzte Seite kann nicht gelöscht werden
 the-link-has-no-address = Der Link hat keine Adresse
@@ -740,8 +904,68 @@ triple-tick-dot = Dreifacher Tick + Punkt
 triple-tick-ring = Dreifacher Tick + Ring
 underline = Unterstrichen
 underline-planned = Unterstrichen — geplant
+# $name - Eigenschaftsname
+# $v - die hinzugefügte Wahl
+undo-add-choice = Wahl { $v } zu { $name } hinzugefügt
+# $id - Form-ID
+undo-add-connector = Konnektor { $id } hinzugefügt
+# $n - Formanzahl
+# $c - Containername
+undo-add-n-to-container =
+    { $n ->
+        [one] eine Form zum Container { $c } hinzugefügt
+       *[other] { $n } Formen zum Container { $c } hinzugefügt
+    }
+# $what - das ausgerichtete Kantenwort
+undo-align-what = ausgerichtet: { $what }
+# $style - Container-Stil Master-NameU
+undo-apply-container-style = Container-Stil { $style } angewendet
+# $id - Form-ID
+undo-autoconnect = AutoConnect-Form { $id }
 undo-ctrl-z = Rückgängig (Strg+Z)
+# $n - Formanzahl
+undo-delete-n-shapes =
+    { $n ->
+        [one] eine Form gelöscht
+       *[other] { $n } Formen gelöscht
+    }
+# $id - Form-ID
+undo-delete-shape = Form { $id } gelöscht
+# $n - Anzahl freigesetzter Mitglieder
+undo-disband-container =
+    { $n ->
+        [one] Container aufgelöst (ein Mitglied freigesetzt)
+       *[other] Container aufgelöst ({ $n } Mitglieder freigesetzt)
+    }
+# $sid - Konnektor-Form-ID
+# $end - lokalisiertes Endpunkt-Wort
+undo-glue-connector = Konnektor { $sid } an { $end } geklebt
 undo-l = Rückgängig: { $l }
+# $id - Konnektor-ID
+undo-move-connector = Konnektor { $id } bewegt
+# $end - lokalisiertes Endpunkt-Wort
+undo-move-endpoint = { $end }-Endpunkt bewegt
+# $id - Führungslinien-ID
+undo-move-guide = Führungslinie { $id } bewegt
+# $id - Form-ID
+undo-move-line-shape = Linienform { $id } bewegt
+# $id - Form-ID
+undo-move-shape = Form { $id } bewegt
+# $n - Eckpunkt-Zeilenindex
+undo-move-vertex = Eckpunkt { $n } bewegt
+# $id - Form-ID
+undo-resize-shape = Größe von Form { $id } geändert
+# $name - Zellenname
+undo-set-cell = { $name } gesetzt
+# $section - Abschnittsname
+# $cell - Zellenname
+undo-set-section-cell = { $section }.{ $cell } gesetzt
+# $n - Gruppenanzahl
+undo-ungroup-n =
+    { $n ->
+        [one] eine Gruppe aufgelöst
+       *[other] { $n } Gruppen aufgelöst
+    }
 ungroup = Gruppierung aufheben
 ungroup-the-selected-group-s = Die ausgewählte(n) Gruppe(n) auflösen
 unsaved-changes = Ungespeicherte Änderungen
@@ -754,6 +978,8 @@ variant-effects-planned = Varianteneffekte — geplant
 variants = Varianten
 vba-arrives-with-m7-vsdm = VBA kommt mit M7 (.vsdm)
 vector-svg = Vektor (SVG)
+# $cell - Beschreibung der formelgetriebenen Zelle
+vertex-drag-refused = Eckpunktzug abgelehnt: { $cell } ist formelgetrieben — die Formel bearbeiten, um ihn zu ändern
 view = Ansicht
 views = Ansichten
 visio-drawing = Visio-Zeichnung
@@ -762,11 +988,19 @@ visio-vsdx-family = Visio (VSDX-Familie)
 visual-aids = Visuelle Hilfen
 visual-basic = Visual Basic
 weight = Stärke
+# $sub - Seitenname der Sub-Adresse
+went-to-page = zu Seite { $sub } gewechselt
 whole-page = Ganze Seite
 wide-arrow = Breiter Pfeil
+width = Breite
+# $g - Schutzformel
+width-not-resized-guard = Breite nicht geändert: { $g } (nur Höhe)
 window = Fenster
+# $n - Fensteranzahl
+window-n = Fenster { $n }
 word-count = Wortzahl
 word-count-planned = Wortzahl — geplant
+worker-lost = Arbeitsprozess verloren
 wrap-the-selection-in-this-conta = Die Auswahl in diesen Containerstil einhüllen
 x-cancel-placement = x Platzierung abbrechen
 zoom = Zoom

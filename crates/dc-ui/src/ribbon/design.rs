@@ -7,99 +7,99 @@
 
 use super::{Action, Group, Icon, RibbonButton, TabCtx, big, grid, stack};
 
-pub(crate) fn groups(ctx: &TabCtx) -> Vec<Group> {
+pub(crate) fn groups(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<Group> {
     vec![
-        Group::new(crate::i18n::strs().msg_page_setup(), page_setup_grid(ctx)),
-        Group::new(crate::i18n::strs().msg_themes(), themes_cols()),
-        Group::new(crate::i18n::strs().msg_variants(), variants_cols()),
-        Group::new(crate::i18n::strs().msg_layout(), layout_cols()),
+        Group::new(s.msg_page_setup(), page_setup_grid(s, ctx)),
+        Group::new(s.msg_themes(), themes_cols(s, )),
+        Group::new(s.msg_variants(), variants_cols(s, )),
+        Group::new(s.msg_layout(), layout_cols(s, )),
         // Real Visio 2016 Design carries a Backgrounds gallery; ours
         // stays the #113 dialog (placeholder per the disposition).
-        Group::new(crate::i18n::strs().msg_backgrounds(), vec![backgrounds_col(ctx)]),
+        Group::new(s.msg_backgrounds(), vec![backgrounds_col(s, ctx)]),
     ]
 }
 
-fn page_setup_grid(ctx: &TabCtx) -> Vec<super::Col> {
+fn page_setup_grid(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> Vec<super::Col> {
     vec![grid(vec![
         vec![
-            RibbonButton::new(Icon::Orientation, crate::i18n::strs().msg_orientation(), Action::PageOrientation)
-                .tip(crate::i18n::strs().msg_swap_portrait_landscape_swaps_wi()),
-            RibbonButton::new(Icon::NewPage, crate::i18n::strs().msg_size(), Action::PageSizeDialog)
+            RibbonButton::new(Icon::Orientation, s.msg_orientation(), Action::PageOrientation)
+                .tip(s.msg_swap_portrait_landscape_swaps_wi()),
+            RibbonButton::new(Icon::NewPage, s.msg_size(), Action::PageSizeDialog)
                 .selected(ctx.pagesetup_open)
-                .tip(crate::i18n::strs().msg_page_size_iso_ansi_presets_or_cu()),
+                .tip(s.msg_page_size_iso_ansi_presets_or_cu()),
         ],
         vec![
-            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_auto_size(), Action::Macros)
+            RibbonButton::new(Icon::Shapes, s.msg_auto_size(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_auto_page_size_planned()),
-            RibbonButton::new(Icon::Fit, crate::i18n::strs().msg_scale(), Action::Macros)
+                .tip(s.msg_auto_page_size_planned()),
+            RibbonButton::new(Icon::Fit, s.msg_scale(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_drawing_scale_planned()),
+                .tip(s.msg_drawing_scale_planned()),
         ],
     ])]
 }
 
-fn themes_cols() -> Vec<super::Col> {
+fn themes_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![
         big(
-            RibbonButton::new(Icon::Theme, crate::i18n::strs().msg_themes(), Action::Macros)
+            RibbonButton::new(Icon::Theme, s.msg_themes(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_themes_planned_gallery_folds_bro()),
+                .tip(s.msg_themes_planned_gallery_folds_bro()),
         ),
     ]
 }
 
-fn variants_cols() -> Vec<super::Col> {
+fn variants_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     vec![grid(vec![
         vec![
-            RibbonButton::new(Icon::Theme, crate::i18n::strs().msg_variants(), Action::Macros)
+            RibbonButton::new(Icon::Theme, s.msg_variants(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_theme_variants_planned()),
-            RibbonButton::new(Icon::Bucket, crate::i18n::strs().msg_colors(), Action::Macros)
+                .tip(s.msg_theme_variants_planned()),
+            RibbonButton::new(Icon::Bucket, s.msg_colors(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_variant_colors_planned()),
+                .tip(s.msg_variant_colors_planned()),
         ],
         vec![
-            RibbonButton::new(Icon::Effects, crate::i18n::strs().msg_effects(), Action::Macros)
+            RibbonButton::new(Icon::Effects, s.msg_effects(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_variant_effects_planned()),
-            RibbonButton::new(Icon::Connector, crate::i18n::strs().msg_connectors(), Action::Macros)
+                .tip(s.msg_variant_effects_planned()),
+            RibbonButton::new(Icon::Connector, s.msg_connectors(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_variant_connectors_planned()),
+                .tip(s.msg_variant_connectors_planned()),
         ],
     ])]
 }
 
-fn layout_cols() -> Vec<super::Col> {
+fn layout_cols(s: &'static crate::l10n::L10nLanguage) -> Vec<super::Col> {
     // Fed from the removed Process tab (owner 2026-11-09): Visio
     // paints Re-Layout/Layout Options/Spacing on Design ▸ Layout.
     vec![grid(vec![
         vec![
-            RibbonButton::new(Icon::Shapes, crate::i18n::strs().msg_re_layout_page(), Action::Macros)
+            RibbonButton::new(Icon::Shapes, s.msg_re_layout_page(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_auto_layout_planned()),
-            RibbonButton::new(Icon::Align, crate::i18n::strs().msg_layout_options(), Action::Macros)
+                .tip(s.msg_auto_layout_planned()),
+            RibbonButton::new(Icon::Align, s.msg_layout_options(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_layout_options_planned()),
+                .tip(s.msg_layout_options_planned()),
         ],
         vec![
-            RibbonButton::new(Icon::DistV, crate::i18n::strs().msg_spacing(), Action::Macros)
+            RibbonButton::new(Icon::DistV, s.msg_spacing(), Action::Macros)
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_layout_spacing_planned()),
+                .tip(s.msg_layout_spacing_planned()),
             RibbonButton::new(Icon::NewPage, "", Action::Macros)
-                .alt(crate::i18n::strs().msg_layout_size())
+                .alt(s.msg_layout_size())
                 .enabled(false)
-                .tip(crate::i18n::strs().msg_layout_size_planned()),
+                .tip(s.msg_layout_size_planned()),
         ],
     ])]
 }
 
-fn backgrounds_col(ctx: &TabCtx) -> super::Col {
+fn backgrounds_col(s: &'static crate::l10n::L10nLanguage, ctx: &TabCtx) -> super::Col {
     stack(vec![RibbonButton::new(
         Icon::Picture,
-        crate::i18n::strs().msg_backgrounds(),
+        s.msg_backgrounds(),
         Action::PageBackgrounds,
     )
     .selected(ctx.backgrounds_open)
-    .tip(crate::i18n::strs().msg_assign_a_background_page_behind())])
+    .tip(s.msg_assign_a_background_page_behind())])
 }

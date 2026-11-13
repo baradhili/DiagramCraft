@@ -10,6 +10,16 @@
 //! tab's controls take the first unused letter of each label (skipping
 //! non-alphanumerics), falling back to unused digits.
 //!
+//! #257 item 3: a label that carries no ASCII alphanumerics (Persian,
+//! Arabic, Hebrew chrome) must not degrade the whole tab to the digit
+//! fallback — the RTL Office editions keep LATIN keytips anchored to
+//! the English command names while the visible labels localize (the
+//! keyboard surface stays stable across languages and layouts, so the
+//! same Alt sequence drives every edition). [`assign_control_letters`]
+//! therefore takes per-control ANCHOR labels (the English a11y names,
+//! supplied by the badge collector) and keys the letters off them when
+//! the visible label offers no candidates.
+//!
 //! | Strip target  | Letter | Note                                     |
 //! |---------------|--------|------------------------------------------|
 //! | File          | F      | Office family letter                     |
@@ -66,6 +76,11 @@ pub(crate) struct Badge {
     pub rect: Rect,
     pub key: String,
     pub hit: Hit,
+    /// The control's English label (#257): the Latin anchor a
+    /// non-Latin label keys its letter off (Office's RTL editions
+    /// keep English access keys). `None` for strip-level badges,
+    /// which carry fixed keys and never join the assignment.
+    pub anchor: Option<String>,
 }
 
 /// Per-app keytip state. The app collects badges during layout, then
@@ -128,28 +143,38 @@ pub fn tab_keytip(t: Tab) -> Option<&'static str> {
 
 /// Assign each label its control letter, in order (Office's rule,
 /// deterministic): the first still-unused ASCII alphanumeric of the
-/// label (case-insensitive), else the first unused digit `1`..=`9`.
-/// Labels whose alphabet and digits are exhausted get `None` (no
-/// badge — with a tab's worth of controls this does not happen).
+/// label (case-insensitive), else of the control's English anchor
+/// (#257 — a Persian/Arabic/Hebrew label has no ASCII candidates and
+/// keys off its English name, the RTL Office scheme), else the first
+/// unused digit `1`..=`9`. Labels whose alphabet and digits are
+/// exhausted get `None` (no badge — with a tab's worth of controls
+/// this does not happen).
 pub fn assign_control_letters(labels: &[String]) -> Vec<Option<char>> {
-    assign_control_letters_reserved(labels, &[])
+    assign_control_letters_reserved(labels, &[], &[])
 }
 
 /// [`assign_control_letters`] with keys other visible badges already
 /// carry — the QAT digits stay visible at the Controls level, so a
-/// fallback digit must never repeat one (#218 review round).
+/// fallback digit must never repeat one (#218 review round) — and the
+/// English anchors for non-Latin labels (#257). `anchors` runs
+/// parallel to `labels`; a missing/empty anchor falls straight
+/// through to the digits.
 pub fn assign_control_letters_reserved(
     labels: &[String],
     reserved: &[char],
+    anchors: &[Option<String>],
 ) -> Vec<Option<char>> {
     let mut taken: Vec<char> = reserved.to_vec();
     let mut out = Vec::with_capacity(labels.len());
-    for label in labels {
-        let pick = label
-            .chars()
-            .map(|c| c.to_ascii_uppercase())
-            .filter(|c| c.is_ascii_alphanumeric())
-            .find(|c| !taken.contains(c))
+    for (i, label) in labels.iter().enumerate() {
+        let letter = |s: &str| {
+            s.chars()
+                .map(|c| c.to_ascii_uppercase())
+                .filter(|c| c.is_ascii_alphanumeric())
+                .find(|c| !taken.contains(c))
+        };
+        let pick = letter(label)
+            .or_else(|| anchors.get(i).and_then(|a| a.as_deref()).and_then(letter))
             .or_else(|| ('1'..='9').find(|d| !taken.contains(d)));
         if let Some(c) = pick {
             taken.push(c);
@@ -184,9 +209,13 @@ pub(crate) fn assign_badge_letters(badges: &mut [Badge]) {
             _ => String::new(),
         })
         .collect();
+    let anchors: Vec<Option<String>> = pending
+        .iter()
+        .map(|&i| badges[i].anchor.clone())
+        .collect();
     for (&i, letter) in pending
         .iter()
-        .zip(assign_control_letters_reserved(&labels, &reserved))
+        .zip(assign_control_letters_reserved(&labels, &reserved, &anchors))
     {
         if let Some(c) = letter {
             badges[i].key = c.to_string();
@@ -324,11 +353,27 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let out = assign_control_letters_reserved(&labels, &reserved);
+        let out = assign_control_letters_reserved(&labels, &reserved, &[]);
         assert_eq!(
             out,
             vec![Some('1'), Some('2'), Some('5'), Some('6'), Some('7')]
         );
+    }
+
+    /// #257: a Persian label has no ASCII candidates — the letter keys
+    /// off the control's English anchor (the RTL Office scheme), not
+    /// the digit fallback. An empty anchor still falls through to the
+    /// digits.
+    #[test]
+    fn non_latin_labels_key_off_english_anchors() {
+        let labels: Vec<String> = ["چسباندن", "برش", "کپی"].iter().map(|s| s.to_string()).collect();
+        let anchors: Vec<Option<String>> = vec![
+            Some("Paste".to_string()),
+            Some("Cut".to_string()),
+            None, // no anchor → digit fallback
+        ];
+        let out = assign_control_letters_reserved(&labels, &[], &anchors);
+        assert_eq!(out, vec![Some('P'), Some('C'), Some('1')]);
     }
 
     #[test]

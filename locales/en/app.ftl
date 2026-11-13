@@ -10,6 +10,11 @@ a-ruler-subdivision = a ruler subdivision
 a-shape-intersection = a shape intersection
 about-name = Tarahi
 about-tarahi = About Tarahi
+# $what (String) - the action name
+# $why (String) - the deferral reason
+action-deferred = { $what } deferred: { $why }
+# $what (String) - the action name
+action-display-only = { $what } is display-only
 active = Active
 activex-era-likely-cut-scope-cal = ActiveX-era — likely cut (scope call on #252)
 add = Add
@@ -44,6 +49,12 @@ align-top = Top
 align-top-edges = Align top edges
 align-top-kind = top
 align-vertical-centers = Align vertical centers
+align-word-bottom = bottom
+align-word-centers = centers
+align-word-left = left
+align-word-middles = middles
+align-word-right = right
+align-word-top = top
 aligning-to-the-first-selected-s = aligning to the first-selected shape
 aligning-to-the-page = aligning to the page
 alignment-and-spacing-hints-whil = Alignment and spacing hints while dragging
@@ -70,6 +81,7 @@ autocorrect-options-planned = AutoCorrect options — planned
 automatic-resize = Automatic Resize
 automatically-link = Automatically Link
 background = Background
+background-cleared = background cleared
 background-page-name = background page: { $name }
 backgrounds = Backgrounds
 behavior = Behavior
@@ -84,6 +96,13 @@ bring-forward-planned = Bring forward — planned
 bring-to-front = Bring to Front
 browse = Browse…
 browse-for-an-existing-visio-pac = Browse for an existing Visio package.
+# $ok (Number) - extracted count
+# $failed (Number) - failed count
+builtin-extracted-summary = Built-in stencils: { $ok } extracted, { $failed } failed — embedded copies in use
+# $n (Number) - extracted file count
+builtin-extracted-to = Extracted { $n } built-in stencil files to My Shapes/Built-ins
+# $title (String) - stencil title
+builtin-stencil-failed = built-in stencil failed to load: { $title }
 bullets = Bullets
 bullets-planned = Bullets — planned
 cad-drawing = CAD Drawing
@@ -92,6 +111,9 @@ calibri = Calibri
 callout = Callout
 callouts-planned = Callouts — planned
 cancel = Cancel
+# $name (String) - cell name
+# $f (String) - the guarding formula
+cell-is-formula-driven = { $name } is formula-driven ({ $f })
 center = Center
 chart = Chart
 charts-planned-later-milestone = Charts — planned (later milestone)
@@ -114,6 +136,10 @@ closed-switched-to-name = closed; switched to { $name }
 closed-title = closed { $title }
 code = Code
 color = Color
+color-fill-bkgnd-window = Fill Background
+color-fill-window = Fill Color
+color-line-window = Line Color
+color-text-window = Text Color
 colors = Colors
 com-add-ins = COM Add-Ins
 comment-add = Add Comment
@@ -136,18 +162,28 @@ connection-point-ix-selected-del = connection point { $ix } selected (Delete rem
 connection-point-next-ix-added-t = connection point { $next_ix } added to shape { $hit }
 connection-point-tool-off = connection point tool off
 connector = Connector
+connector-drawn-free-ends = connector drawn (free ends)
 connector-end-released = connector end released
+connector-glued-at-both-ends = connector glued at both ends
+connector-glued-at-one-end = connector glued at one end
+# $id (Number) - shape id
+connector-glued-shape = connector glued to shape { $id }
+# $id (Number) - shape id
+connector-glued-shape-point = connector glued to the connection point of shape { $id }
 connector-is-glued-at-both-ends = connector is glued at both ends — drag past the snap radius to release, or drag an endpoint or its shapes
 # $reason (String) - argument
 connector-move-refused-reason = connector move refused: { $reason }
 # $release_ends (Number) - argument
 connector-moved-release-ends-glu = connector moved — { $release_ends } glued end(s) released past the snap radius
+# $id (Number) - shape id
+connector-stays-glued = connector stays glued to shape { $id }
 connector-tool-drag-from-one-sha = Connector Tool: drag from one shape to another (Esc to finish)
 connector-tool-status = Connector tool — draw a connector between shapes or points (Esc to finish)
 connector-tool-tip = Connector tool — draw a connector between shapes or points
 connectors = Connectors
 connpoint-tool-status = Connection Point tool: click a shape to add a connection point
 container = Container
+container-flyout =   Container  ›
 container-margins-planned = Container margins — planned
 # $style (String) - argument
 container-style-style-applied = container style { $style } applied
@@ -170,6 +206,9 @@ copy-planned = Copy — planned
 # $address (String) - argument
 # $e (String) - argument
 could-not-open-address-e = could not open { $address }: { $e }
+# $path (String) - file path
+# $e (String) - error text
+could-not-read-path = could not read { $path }: { $e }
 create-a-background-page-planned = Create a background page — planned (Design ▸ Backgrounds assigns today)
 create-a-stencil-planned = Create a stencil — planned
 create-new-data-graphic = Create New Data Graphic
@@ -196,6 +235,9 @@ date-time = Date & Time
 date-time-field-planned = Date & time field — planned
 decrease-indent = Decrease Indent
 decrease-indent-planned = Decrease indent — planned
+# $entry (String) - default stencil entry
+# $e (String) - error text
+default-stencil-failed = default stencil { $entry } failed to load: { $e }
 define-shape-data = Define Shape Data
 define-shape-data-m6 = Define shape data (M6)
 delete = Delete
@@ -222,6 +264,7 @@ distribute-needs-three-or-more-s = distribute needs three or more shapes
 distribute-vertical-spacing = distribute vertical spacing
 document-closed = document closed
 document-inspection-arrives-with = Document inspection arrives with a later milestone
+document-masters = Document Masters
 document-protection-arrives-with = Document protection arrives with a later milestone
 document-stencil = Document Stencil
 document-stencil-planned = Document stencil — planned
@@ -235,6 +278,8 @@ double-tick-ring = Double Tick + Ring
 drawing-aids = Drawing aids
 drawing-explorer = Drawing Explorer
 drawing-explorer-planned = Drawing explorer — planned
+# $n (Number) - untitled document number
+drawing-n = Drawing{ $n }
 drawing-scale-planned = Drawing scale — planned
 drawings-you-open-will-appear-he = Drawings you open will appear here.
 duplicate = Duplicate
@@ -253,8 +298,12 @@ editing-text-of-shape-shape-id = editing text of shape { $shape_id }
 effects = Effects
 ellipse-tool = Ellipse Tool
 ellipse-tool-planned = Ellipse tool — planned
+endpoint-begin = begin
 # $reason (String) - argument
 endpoint-drag-refused-reason = endpoint drag refused: { $reason }
+endpoint-end = end
+# $hit (String) - localized snap target text
+endpoint-glued-to = endpoint glued to { $hit }
 # $name (String) - argument
 endpoint-moved-but-name-is-formu = endpoint moved, but { $name } is formula-driven and kept
 even-horizontal-spacing-3-shapes = Even horizontal spacing (3+ shapes)
@@ -262,11 +311,21 @@ even-vertical-spacing-3-shapes = Even vertical spacing (3+ shapes)
 # $f (String) - argument
 eventdblclick-f-macro-and-naviga = EventDblClick '{ $f }' — macro and navigation actions arrive with a later milestone
 export-entry-desc = Save the drawing in another format
+export-failed-e = Export failed: { $e }
 export-failed-worker-lost = Export failed: worker lost
 export-finished = Export finished.
 export-page-sub = Save the drawing in another format.
+export-pdf-hint = Document with selectable text (all pages in one file)
+export-png-hint = Raster image at the chosen density
 export-save-as-label = Save as
 export-start = Export…
+export-svg-hint = Vector graphics — the renderer's own format
+# $n (Number) - files written
+exported-files =
+    { $n ->
+        [one] Exported { $n } file.
+       *[other] Exported { $n } files.
+    }
 exporting = Exporting…
 external-data = External Data
 external-data-window = External Data Window
@@ -279,6 +338,9 @@ fill = Fill
 filled-arrow-plain = Filled Arrow (Plain)
 filled-circle = Filled Circle
 filled-square = Filled Square
+filter-pdf = PDF (document)
+filter-png = PNG (raster image)
+filter-svg = SVG (vector graphics)
 find = Find
 find-planned-later-milestone = Find — planned (later milestone)
 fine-dash = Fine Dash
@@ -332,18 +394,33 @@ gradient-radial = Gradient radial
 gradient-vert = Gradient vert.
 grid = Grid
 group = Group
+# $names (String) - joined page/group names
+group-breadcrumb = Page › { $names }
+group-flyout =   Group  ›
 group-needs-2-shapes-on-the-page = Group needs 2+ shapes on the page
 group-the-selection-one-undo-ste = Group the selection (one undo step; nests into an existing group)
 grow-with-the-members-planned = Grow with the members — planned
+# $v (String) - guide coordinate
+guide-added-horizontal = horizontal guide at { $v } added
+# $v (String) - guide coordinate pair
+guide-added-point = guide point at { $v } added
+# $v (String) - guide coordinate
+guide-added-vertical = vertical guide at { $v } added
 # $id (Number) - argument
 guide-id = guide { $id }
 guides = Guides
 guides-planned-113-s-objects-exi = Guides — planned (#113's objects exist; the toggle is planned)
 heading-style = Heading Style
 heading-style-gallery-planned = Heading style gallery — planned
+height = Height
+# $g (String) - guard formula
+height-not-resized-guard = height not resized: { $g } (width only)
 help-about = Help / About
 high-192-dpi = High (192 dpi)
 highlight-members = Highlight Members
+hl-address = Address
+hl-description = Description
+hl-subaddress = Sub-address
 home = Home
 hyperlink = Hyperlink
 hyperlink-menu = Hyperlink…
@@ -368,6 +445,8 @@ italic-planned = Italic — planned
 jump-size = Jump size
 justify = Justify
 justify-planned = Justify — planned
+# $key (String) - keytip key
+keytip-unavailable = { $key } is unavailable
 # $label (String) - argument
 label-a-choice-cannot-contain = { $label }: a choice cannot contain ';'
 # $label (String) - argument
@@ -390,6 +469,11 @@ lasso-selected-n-shape-s =
     }
 last-page = Last page
 layer = Layer
+# $id (Number) - layer id
+# $e (String) - error text
+layer-composite-failed = layer { $id }: { $e }
+# $ix (Number) - layer row index
+layer-ix-fallback = layer { $ix }
 layout = Layout
 layout-options = Layout Options
 layout-options-planned = Layout options — planned
@@ -400,6 +484,8 @@ legend = Legend
 legends-m6-visio-paints-legend-o = Legends (M6; Visio paints Legend on Insert, not Data)
 line = Line
 line-color-label = Line color
+# $factor (Number) - jump factor
+line-jump-factor-set = line jump size ×{ $factor }
 line-jumps = Line jumps
 line-jumps-hidden = line jumps hidden
 line-jumps-shown = line jumps shown
@@ -428,6 +514,8 @@ margins = Margins
 markup = Markup
 markup-tracking-planned-no-marku = Markup tracking — planned (no markup model yet)
 master = Master
+# $id (Number) - master id
+master-armed-click-place = master { $id } armed — click the canvas to place
 # $mid (Number) - argument
 master-mid = master { $mid }
 member-highlight-off = member highlight off
@@ -462,13 +550,17 @@ no-background = No background
 no-background-pages-right-click = No background pages. Right-click a page tab and pick "Set as Background".
 no-comments-on-this-shape-yet = No comments on this shape yet.
 no-document-open = No document open
+no-formula = No Formula
 no-hyperlinks-on-this-shape = No hyperlinks on this shape.
 # $key (String) - argument
 no-keytip-key = no keytip { $key }
 no-matching-shapes = No matching shapes.
 no-picture-on-the-clipboard = no picture on the clipboard
 no-shapes = No shapes.
+# $q (String) - search text
+no-templates-match = No templates match “{ $q }”.
 none = None
+not-saved-yet = Not saved yet
 nothing-on-this-page-matches-the = (nothing on this page matches the criterion)
 nothing-selected-to-copy = nothing selected to copy
 nothing-to-redo = nothing to redo
@@ -499,6 +591,8 @@ open-fork = Open Fork
 # $group_label (String) - argument
 open-group-label = Open { $group_label }
 open-square = Open Square
+# $e (String) - error text
+open-stencil-failed-e = open stencil failed: { $e }
 open-triangle-convex-base = Open Triangle (Convex Base)
 open-triangle-large = Open Triangle (Large)
 open-triangle-medium = Open Triangle (Medium)
@@ -507,8 +601,20 @@ open-triangle-small = Open Triangle (Small)
 open-v-tall = Open V (Tall)
 open-vsdx-vstx-vssx-ctrl-o = Open .vsdx / .vstx / .vssx (Ctrl+O)
 open-wide = Open Wide
+# $address (String) - hyperlink address
+opened-address = opened { $address }
+# $title (String) - stencil title
+opened-builtin-metric = opened { $title } (metric)
+# $title (String) - stencil title
+opened-builtin-myshapes = opened { $title } (My Shapes)
+# $name (String) - group name
+opened-group = Opened group { $name } — Esc or Close Group to return
+# $path (String) - file path
+opened-path = opened { $path }
 # $stem (String) - argument
 opened-stencil-stem = opened stencil { $stem }
+# $name (String) - file name
+opening-file = Opening { $name }…
 operations = Operations
 options = Options
 options-arrive-with-a-later-mile = Options arrive with a later milestone
@@ -522,12 +628,20 @@ page-name = Page name
 page-name-is-a-foreground-page-a = page { $name } is a foreground page again
 # $name (String) - argument
 page-name-marked-as-a-background = page { $name } marked as a background
+# $sub (String) - sub-address page name
+page-not-found = page { $sub } not found
 page-number = Page Number
 page-number-field-planned = Page-number field — planned
 page-setup = Page Setup
 page-setup-menu = Page Setup…
 page-size = Page Size
 page-size-iso-ansi-presets-or-cu = Page size — ISO/ANSI presets or custom
+# $w (String) - width value
+# $h (String) - height value
+page-size-set = page size { $w } × { $h }
+# $n (Number) - page number, 1-based
+# $id (Number) - page id
+page-tab-tooltip = page { $n } (id { $id })
 page-width = Page Width
 # $to (Number) - argument
 paint-formatting-onto-shape-to = paint formatting onto shape { $to }
@@ -542,6 +656,15 @@ painter-cells-sticky = { $n } formatting cells copied to shape { $to } (click mo
 paragraph = Paragraph
 paste = Paste
 pick-an-output-file-first = Pick an output file first
+# $w (Number) - pixel width
+# $h (Number) - pixel height
+# $factor (Number) - zoom factor
+picture-copied = picture copied ({ $w }×{ $h } px at { $factor }×)
+# $w (Number) - pixel width
+# $h (Number) - pixel height
+# $w_in (Number) - width in inches
+# $h_in (Number) - height in inches
+picture-inserted = picture inserted ({ $w }×{ $h } px at { $w_in }×{ $h_in } in)
 pictures = Pictures
 pointer-tool = Pointer Tool
 pointer-tool-select-and-drag-esc = Pointer tool — select and drag (Esc from the Connector Tool)
@@ -581,6 +704,7 @@ remove-connection-point-ix = remove connection point { $ix }
 remove-from-quick-shapes = Remove from Quick Shapes
 removed-from-quick-shapes = removed from Quick Shapes
 rename-page = Rename Page
+rendering-scrim = Rendering…
 reorder-pages = Reorder Pages
 reorder-pages-menu = Reorder Pages…
 replace = Replace
@@ -606,6 +730,9 @@ rotate-shapes = rotate shapes
 rotate-the-selection-90-clockwis = Rotate the selection 90° clockwise
 rotate-the-selection-90-counter = Rotate the selection 90° counter-clockwise
 rounding = Rounding
+rtl-text-menu = Right-to-Left Text
+rtl-text-off = text set left-to-right
+rtl-text-on = text set right-to-left
 ruler-subdivisions = Ruler subdivisions
 rulers = Rulers
 save = Save
@@ -614,9 +741,13 @@ save-changes = Save changes?
 # $name (String) - argument
 save-changes-to-name = Save changes to { $name }?
 save-ctrl-s = Save (Ctrl+S)
+# $e (String) - error text
+save-failed-e = save failed: { $e }
 save-new = Save & New
 save-stencil = Save Stencil
 save-the-stencil-planned = Save the stencil — planned
+# $path (String) - file path
+saved-path = saved { $path }
 scale = Scale
 screen-96-dpi = Screen (96 dpi)
 search-results = Search Results
@@ -639,7 +770,20 @@ select-shapes-by-type-master-or = Select shapes by type, master, or layer
 select-the-container-s-members-p = Select the container's members — planned
 select-the-shapes-to-contain-fir = select the shapes to contain first
 select-two-or-more-shapes-to-ali = select two or more shapes to align
+# $label (String) - the value label
+# $n (Number) - matching shape count
+select-value-n-shapes = { $label } ({ $n ->
+    [one] one shape
+   *[other] { $n } shapes
+})
 selected-all-shapes = selected all shapes
+# $n (Number) - selected shape count
+# $crit (String) - criterion label
+selected-n-by-criterion =
+    { $n ->
+        [one] selected one shape by { $crit }
+       *[other] selected { $n } shapes by { $crit }
+    }
 # $shape_id (Number) - argument
 selected-shape-shape-id = selected shape { $shape_id }
 selection = Selection
@@ -719,6 +863,7 @@ snap-conn-points = Connection points
 snap-dynamic-grid = Dynamic grid
 snap-glue = Snap & Glue
 snap-to = Snap to:
+snapglue-note = Settings are stored in the drawing. Guides as targets arrive with #113; connector glue with #108.
 solid = Solid
 spacing = Spacing
 spell-check-planned = Spell check — planned
@@ -726,6 +871,24 @@ spelling = Spelling
 splash-wordmark = tarahi
 split = Split
 split-view-planned = Split view — planned
+ss-section-1d-endpoints = 1-D Endpoints
+ss-section-connection-points = Connection Points
+ss-section-control-points = Control Points
+ss-section-fill-gradient-stops = Fill Gradient Stops
+# $ix (Number) - geometry section index
+ss-section-geometry-n = Geometry { $ix }
+ss-section-layer-membership = Layer Membership
+ss-section-line-gradient-stops = Line Gradient Stops
+ss-section-page-layout = Page Layout
+ss-section-page-properties = Page Properties
+ss-section-print-setup = Print Setup
+ss-section-ruler-grid = Ruler & Grid
+ss-section-shape-data = Shape Data
+ss-section-smart-tags = Smart Tags
+ss-section-text-fields = Text Fields
+ss-section-text-transform = Text Transform
+ss-section-user-defined-cells = User-defined Cells
+ss-shape-not-found = shape not found
 stamp-tool = Stamp Tool
 stamp-tool-planned = Stamp tool — planned
 start-an-empty-drawing = Start an empty drawing
@@ -777,6 +940,7 @@ text-shapes-planned = Text shapes — planned
 text-tool = Text Tool
 text-tool-planned-double-click-e = Text tool — planned (double-click edits text today)
 the-current-drawing-has-unsaved = The current drawing has unsaved changes.
+the-drawing = the drawing
 the-grid = the grid
 the-last-page-cannot-be-deleted = the last page cannot be deleted
 the-link-has-no-address = the link has no address
@@ -811,9 +975,69 @@ triple-tick-dot = Triple Tick + Dot
 triple-tick-ring = Triple Tick + Ring
 underline = Underline
 underline-planned = Underline — planned
+# $name (String) - property name
+# $v (String) - the added choice
+undo-add-choice = add { $name } choice { $v }
+# $id (Number) - shape id
+undo-add-connector = add connector { $id }
+# $n (Number) - shape count
+# $c (String) - container name
+undo-add-n-to-container =
+    { $n ->
+        [one] add one shape to container { $c }
+       *[other] add { $n } shapes to container { $c }
+    }
+# $what (String) - the aligned edge word
+undo-align-what = align { $what }
+# $style (String) - container style master NameU
+undo-apply-container-style = apply container style { $style }
+# $id (Number) - shape id
+undo-autoconnect = AutoConnect shape { $id }
 undo-ctrl-z = Undo (Ctrl+Z)
+# $n (Number) - shape count
+undo-delete-n-shapes =
+    { $n ->
+        [one] delete one shape
+       *[other] delete { $n } shapes
+    }
+# $id (Number) - shape id
+undo-delete-shape = delete shape { $id }
+# $n (Number) - released member count
+undo-disband-container =
+    { $n ->
+        [one] disband container (one member released)
+       *[other] disband container ({ $n } members released)
+    }
+# $sid (Number) - connector shape id
+# $end (String) - localized endpoint word
+undo-glue-connector = glue connector { $sid } { $end }
 # $l (String) - argument
 undo-l = undo: { $l }
+# $id (Number) - connector id
+undo-move-connector = move connector { $id }
+# $end (String) - localized endpoint word
+undo-move-endpoint = move { $end } endpoint
+# $id (Number) - guide id
+undo-move-guide = move guide { $id }
+# $id (Number) - shape id
+undo-move-line-shape = move line shape { $id }
+# $id (Number) - shape id
+undo-move-shape = move shape { $id }
+# $n (Number) - vertex row index
+undo-move-vertex = move vertex { $n }
+# $id (Number) - shape id
+undo-resize-shape = resize shape { $id }
+# $name (String) - cell name
+undo-set-cell = set { $name }
+# $section (String) - section name
+# $cell (String) - cell name
+undo-set-section-cell = set { $section }.{ $cell }
+# $n (Number) - group count
+undo-ungroup-n =
+    { $n ->
+        [one] ungroup one group
+       *[other] ungroup { $n } groups
+    }
 ungroup = Ungroup
 ungroup-the-selected-group-s = Ungroup the selected group(s)
 unsaved-changes = Unsaved changes
@@ -826,6 +1050,8 @@ variant-effects-planned = Variant effects — planned
 variants = Variants
 vba-arrives-with-m7-vsdm = VBA arrives with M7 (.vsdm)
 vector-svg = Vector (SVG)
+# $cell (String) - the formula-driven cell description
+vertex-drag-refused = vertex drag refused: { $cell } is formula-driven — edit the formula to change it
 view = View
 views = Views
 visio-drawing = Visio drawing
@@ -834,11 +1060,19 @@ visio-vsdx-family = Visio (VSDX family)
 visual-aids = Visual Aids
 visual-basic = Visual Basic
 weight = Weight
+# $sub (String) - sub-address page name
+went-to-page = went to page { $sub }
 whole-page = Whole Page
 wide-arrow = Wide Arrow
+width = Width
+# $g (String) - guard formula
+width-not-resized-guard = width not resized: { $g } (height only)
 window = Window
+# $n (Number) - window count
+window-n = Window { $n }
 word-count = Word Count
 word-count-planned = Word count — planned
+worker-lost = worker lost
 wrap-the-selection-in-this-conta = Wrap the selection in this container style
 x-cancel-placement = x cancel placement
 zoom = Zoom

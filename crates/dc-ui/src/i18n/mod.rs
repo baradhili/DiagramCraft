@@ -88,8 +88,16 @@ pub fn rtl() -> bool {
 /// per language (bounded by [`L10n::iter`]). Every chrome string in the
 /// shell resolves through this.
 pub fn strs() -> &'static L10nLanguage {
+    strs_for(current())
+}
+
+/// One language's generated accessors, loaded once and leaked per
+/// language (bounded by [`L10n::iter`]). #257: the RTL keytip scheme
+/// reads the ENGLISH labels through this — the Latin anchors a
+/// non-Latin chrome keys its letters off — while the visible strings
+/// stay on [`strs()`].
+pub fn strs_for(lang: L10n) -> &'static L10nLanguage {
     static LOADED: Mutex<Vec<Option<&'static L10nLanguage>>> = Mutex::new(Vec::new());
-    let lang = current();
     let ix = L10n::iter().position(|l| *l == lang).unwrap_or(0);
     let mut slots = LOADED.lock().unwrap();
     slots.resize_with(L10n::iter().len(), || None);

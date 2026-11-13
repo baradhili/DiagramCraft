@@ -423,3 +423,12 @@ pub fn shell_fixture_pages(dir: &std::path::Path, names: &[&str]) -> std::path::
     path
 }
 
+/// Strip the zero-width bidi isolation marks fluent wraps interpolated
+/// values in (#257 item 3, `build.rs`): the marks render nothing but
+/// sit inside status strings, so string assertions compare against the
+/// stripped form.
+pub fn strip_bidi(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2066}'..='\u{2069}'))
+        .collect()
+}

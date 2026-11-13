@@ -42,7 +42,7 @@ fn cli_vssx_argument_lands_in_the_shapes_pane_and_the_app_frames() {
         "the stencil landed in the Shapes pane"
     );
     assert!(
-        app.debug_status().contains("opened stencil custom"),
+        common::strip_bidi(app.debug_status()).contains("opened stencil custom"),
         "got: {}",
         app.debug_status()
     );

@@ -56,17 +56,7 @@ pub(crate) struct TabCtx {
 /// contextual Container Tools tab (File opens the backstage view
 /// instead of ribbon content).
 pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
-    let mut groups = match tab {
-        Tab::File => Vec::new(),
-        Tab::Home => home::groups(ctx),
-        Tab::Insert => insert::groups(ctx),
-        Tab::Design => design::groups(ctx),
-        Tab::Data => data::groups(ctx),
-        Tab::Review => review::groups(ctx),
-        Tab::View => view::groups(ctx),
-        Tab::Developer => developer::groups(ctx),
-        Tab::ContainerTools => container_tools::groups(ctx),
-    };
+    let mut groups = build(crate::i18n::strs(), tab, ctx);
     // #257 item 3: an RTL chrome reads right-to-left — group order,
     // column order within a group, and button order within a column
     // (and each grid's rows) flip so the eye travels the ribbon the
@@ -90,6 +80,51 @@ pub(crate) fn groups(tab: Tab, ctx: &TabCtx) -> Vec<Group> {
         }
     }
     groups
+}
+
+
+/// The tab layouts under one language's strings (#257): the `groups`
+/// dispatcher reads the current language through it; `anchor_labels`
+/// rebuilds the same tree under ENGLISH so a non-Latin chrome keys its
+/// keytip letters off the English command names (the RTL Office
+/// scheme) instead of collapsing to the digit fallback.
+fn build(s: &'static crate::l10n::L10nLanguage, tab: Tab, ctx: &TabCtx) -> Vec<Group> {
+    match tab {
+        Tab::File => Vec::new(),
+        Tab::Home => home::groups(s, ctx),
+        Tab::Insert => insert::groups(s, ctx),
+        Tab::Design => design::groups(s, ctx),
+        Tab::Data => data::groups(s, ctx),
+        Tab::Review => review::groups(s, ctx),
+        Tab::View => view::groups(s, ctx),
+        Tab::Developer => developer::groups(s, ctx),
+        Tab::ContainerTools => container_tools::groups(s, ctx),
+    }
+}
+
+/// The English a11y labels of a tab's content-row buttons, in the SAME
+/// traversal order [`content_row`] lays the localized buttons out —
+/// the parallel list the keytip anchor zip walks (#257). The tree is
+/// rebuilt under [`L10n::En`]'s strings and flattened in the identical
+/// group→column→button order (the builders are pure functions of the
+/// snapshot, so the two runs are structurally identical).
+pub(crate) fn anchor_labels(tab: Tab, ctx: &TabCtx) -> Vec<String> {
+    let en = crate::i18n::strs_for(crate::l10n::L10n::En);
+    let mut out = Vec::new();
+    for g in build(en, tab, ctx) {
+        for col in g.cols {
+            match col {
+                Col::Big(b) => out.push(b.a11y_label().to_string()),
+                Col::Stack(v) => out.extend(v.iter().map(|b| b.a11y_label().to_string())),
+                Col::Grid(rows) => {
+                    for row in rows {
+                        out.extend(row.iter().map(|b| b.a11y_label().to_string()));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Everything the ribbon can ask the app to do.

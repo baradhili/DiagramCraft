@@ -360,6 +360,24 @@ pub(crate) fn install_fonts(ctx: &egui::Context) {
         mono.push("vazirmatn".into());
     }
     ctx.set_fonts(fonts);
+    // #257 text-direction coordination: the SAME Vazirmatn drop feeds
+    // the canvas stack — wrap metrics (dc::textmetrics) and the raster
+    // fontdb (dc::raster) both consult their registered faces at lazy
+    // init, and this runs in every constructor before any canvas
+    // render, so RTL shape text measures and rasterizes with the
+    // vendored face everywhere (Analysis/rtl-text-direction.md).
+    dc::textmetrics::register_face_bytes(
+        include_bytes!("../assets/fonts/vazirmatn/Vazirmatn-Regular.ttf").to_vec(),
+    );
+    dc::textmetrics::register_face_bytes(
+        include_bytes!("../assets/fonts/vazirmatn/Vazirmatn-Bold.ttf").to_vec(),
+    );
+    dc::raster::register_face_bytes(
+        include_bytes!("../assets/fonts/vazirmatn/Vazirmatn-Regular.ttf").to_vec(),
+    );
+    dc::raster::register_face_bytes(
+        include_bytes!("../assets/fonts/vazirmatn/Vazirmatn-Bold.ttf").to_vec(),
+    );
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique(KEY), true));
 }
 
