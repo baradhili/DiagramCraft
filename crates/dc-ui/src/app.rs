@@ -6225,7 +6225,10 @@ impl App {
             "LineJumpFactorX",
             vsdx::Cell::value(format!("{factor:.6}")),
         ));
-        self.status = crate::i18n::strs().msg_line_jump_factor_set(factor as i64);
+        // The factor steps in fractions (0.5 .. 3.0) — the i64 cast
+        // truncated them to ×0/×1 in the status note (PR #269
+        // review); FluentNumber carries the decimal through.
+        self.status = crate::i18n::strs().msg_line_jump_factor_set(factor);
     }
 
     fn apply_page_size(&mut self, (w, h): (f64, f64)) {
@@ -7127,8 +7130,12 @@ impl App {
                             .range(lo..=hi)
                             .suffix(unit.suffix()),
                     );
-                    wd = first_val;
-                    ht = second_val;
+                    // The RTL dialog swaps the FIELDS (height first);
+                    // the write-back must swap with them — the fixed
+                    // order traded a Persian page's W and H on every
+                    // Apply (PR #269 review).
+                    wd = if width_first { first_val } else { second_val };
+                    ht = if width_first { second_val } else { first_val };
                 });
                 if ui.button(crate::i18n::strs().msg_apply_custom_size()).clicked() && wd > 0.0 && ht > 0.0 {
                     custom = Some((unit.to_in(wd), unit.to_in(ht)));
