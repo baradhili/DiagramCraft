@@ -2003,20 +2003,46 @@ pub fn text_block_page_rect(
     Some((min_x, min_y, max_x - min_x, max_y - min_y))
 }
 
+/// The complex-script size an RTL line's glyphs actually paint with
+/// (#257 text-direction, PR #269 review): the resolved
+/// ComplexScriptSize (negative-percent semantics already applied)
+/// when it EXCEEDS the Latin size — a smaller CS size keeps the
+/// block's Latin slot (Visio's LineSpacing is a block cell; only
+/// larger glyphs need a taller slot or adjacent lines overlap).
+pub(crate) fn effective_cs_size(tb: &TextBlock) -> f64 {
+    tb.cs_size.unwrap_or(tb.font_size).max(tb.font_size)
+}
+
+/// One wrapped line's vertical slot: the block's line height, scaled
+/// by the line's effective size when its glyphs paint larger than the
+/// Latin size (RTL lines under a bigger ComplexScriptSize — PR #269
+/// review: default spacing is 1.2 em, so 2 em glyphs in 1.2 em slots
+/// overlapped).
+pub(crate) fn line_slot_height(tb: &TextBlock, rtl: bool) -> f64 {
+    if rtl {
+        tb.line_height * (effective_cs_size(tb) / tb.font_size)
+    } else {
+        tb.line_height
+    }
+}
+
 /// The first baseline's offset below the text-block's TOP edge, in
 /// the block's local inches (y-down) — the single placement authority
 /// shared by `emit_text` and the GUI's in-place editor overlay, so
 /// the editing caret sits on the very line the renderer draws (the
 /// #22 review's "no translation between edit and render"). Subsequent
-/// lines sit one [`TextBlock::line_height`] lower. `total_h` is the
-/// wrapped text's height (lines × line height).
-pub fn text_first_baseline(tb: &TextBlock, total_h: f64) -> f64 {
+/// lines sit their [`line_slot_height`] lower. `total_h` is the
+/// wrapped text's height (the SUM of the line slots), and
+/// `first_line_size` is the first line's effective glyph size — a
+/// first line of larger complex-script glyphs ascends from a higher
+/// baseline than the Latin ascent.
+pub fn text_first_baseline(tb: &TextBlock, total_h: f64, first_line_size: f64) -> f64 {
     let (_ins_l, _ins_r, ins_t, ins_b) = tb.insets;
     let th = tb.size.1;
     match tb.valign {
-        1 => ins_t + tb.font_size * 0.8,                // top
-        3 => th - ins_b - total_h + tb.font_size * 0.8, // bottom
-        _ => (th - total_h) / 2.0 + tb.font_size * 0.8, // middle
+        1 => ins_t + first_line_size * 0.8,                // top
+        3 => th - ins_b - total_h + first_line_size * 0.8, // bottom
+        _ => (th - total_h) / 2.0 + first_line_size * 0.8, // middle
     }
 }
 
@@ -2426,7 +2452,20 @@ fn emit_text(
     } else {
         lines.len()
     } as f64;
-    let total_h = n_lines * line_h;
+    // Per-line slots (PR #269 review): an RTL line under a bigger
+    // ComplexScriptSize needs a proportionally taller slot — the flat
+    // n × line_h overlapped larger glyphs onto their neighbors, and
+    // TEXTHEIGHT (textfunc) measured the same too-small block.
+    let slots: Vec<f64> = if greeked {
+        vec![line_h; n_lines as usize]
+    } else {
+        lines.iter().map(|l| line_slot_height(&tb, l.rtl)).collect()
+    };
+    let total_h: f64 = slots.iter().sum();
+    // The first line's ascent rides its own effective size.
+    let first_size = lines
+        .first()
+        .map_or(size, |l| if l.rtl { effective_cs_size(&tb) } else { size });
 
     // Text-block rect from the sheet: the pin (TxtPinX/TxtPinY, y-up local)
     // sits TxtLocPinX/TxtLocPinY from the block's lower-left corner, so that
@@ -2435,7 +2474,7 @@ fn emit_text(
     // is -(ty - lpy + th).
     let (lpx, lpy) = tb.loc_pin;
     let top_edge = -(ty - lpy + th);
-    let first_baseline = top_edge + text_first_baseline(&tb, total_h);
+    let first_baseline = top_edge + text_first_baseline(&tb, total_h, first_size);
     let _ = (valign, ins_t, ins_b);
     // Line x per alignment: left edge of the text area, center, or right.
     // #257 text-direction: an RTL-base line reads 0/2 as start/end
@@ -2452,12 +2491,14 @@ fn emit_text(
     };
 
     let mut body = String::new();
+    // Both loops advance baseline-to-baseline by each line's OWN slot
+    // (uniform for greek bars, per-direction for glyph lines).
+    let mut y = first_baseline;
     if greeked {
         // Greek bars (#124 item 2): one neutral-gray rect per line,
         // anchored like the tspan it replaces (left/center/right).
         // Height sits in the x-height band of the line's em box.
-        for (i, w) in bar_widths.iter().enumerate() {
-            let y = first_baseline + i as f64 * line_h;
+        for (w, slot) in bar_widths.iter().zip(&slots) {
             let (bx, bw) = match anchor {
                 "start" => (x, *w),
                 "end" => (x - *w, *w),
@@ -2469,11 +2510,11 @@ fn emit_text(
                 y = y - size * 0.72,
                 h = size * 0.62,
             );
+            y += slot;
         }
     }
     let mut any_rtl = false;
-    for (i, line) in lines.iter().enumerate() {
-        let y = first_baseline + i as f64 * line_h;
+    for (line, slot) in lines.iter().zip(&slots) {
         let (content, line_x, line_attrs) = if line.rtl {
             any_rtl = true;
             // The RTL line paints with the complex-script pair; its
@@ -2519,6 +2560,7 @@ fn emit_text(
             line_attrs,
             escape_text(&content)
         );
+        y += slot;
     }
     // Flip-aware block rotation (issue #19): the counter-scale keeps the
     // glyphs un-mirrored inside the caller's flipped frame, and the
@@ -7235,6 +7277,69 @@ mod tests {
             .unwrap_or_else(|e| panic!("RTL emission parses as well-formed SVG: {e}\n{full}"));
     }
 
+    /// #257 text-direction (PR #269 review): RTL lines under a larger
+    /// ComplexScriptSize take proportionally taller slots — with
+    /// default 1.2 em spacing and 2 em glyphs, the flat line height
+    /// overlapped adjacent lines.
+    #[test]
+    fn larger_complex_script_lines_take_taller_slots() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("Width", Cell::value("3.0"));
+        s.sheet.set_cell("TxtWidth", Cell::value("3.0"));
+        s.sheet.set_cell("TxtHeight", Cell::value("1.2"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Character".into(),
+            rows: vec![Row {
+                ix: 0,
+                cells: vec![("ComplexScriptSize".into(), Cell::value("-200"))],
+                ..Row::default()
+            }],
+            ..Section::default()
+        }));
+        // Two RTL paragraphs (the explicit mark decides the base).
+        let fa = "\u{0633}\u{0644}\u{0627}\u{0645}";
+        s.sheet.text = Some(format!("{fa}\r\n{fa}"));
+        let chain = [&s];
+        let mut out = String::new();
+        emit_text(&doc, &s, &chain, 3.0, 1.2, 1.5, 0.6, false, None, &mut out);
+        let ys: Vec<f64> = out
+            .split(r#" y=""#)
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next().and_then(|v| v.parse().ok()))
+            .collect();
+        assert_eq!(ys.len(), 2, "two rtl lines: {out}");
+        let (tb, _) = {
+            let chain = [&s];
+            let tb = resolve_text_block(&doc, &s, &chain, 3.0, 1.2);
+            (tb, chain)
+        };
+        let slot = line_slot_height(&tb, true);
+        let naive = tb.line_height;
+        assert!(
+            slot > naive * 1.5,
+            "the double-size cs glyphs take a taller slot: {slot} vs {naive}"
+        );
+        assert!(
+            (ys[1] - ys[0] - slot).abs() < 2e-3,
+            "the second line advances by the taller slot: {} vs {slot}",
+            ys[1] - ys[0]
+        );
+        // TEXTHEIGHT agrees with the painted slots (the refreshed
+        // cache feeds TxtHeight the same sum).
+        let m = crate::textfunc::SheetTextMeasure::new(&doc, &s, &[&s], format!("{fa}\r\n{fa}"));
+        let h = {
+            use vsdx::formula::TextMeasure as _;
+            m.text_height(&format!("{fa}\r\n{fa}"), 3.0).unwrap()
+        };
+        let ins_tb = tb.insets.2 + tb.insets.3;
+        assert!(
+            (h - (2.0 * slot + ins_tb)).abs() < 1e-3,
+            "TEXTHEIGHT sums the slots (+ insets): {h} vs {}",
+            2.0 * slot + ins_tb
+        );
+    }
+
     /// #257 text-direction: LTR-only blocks keep the pre-#257 byte
     /// form (no direction attribute, no isolates) — golden stability.
     #[test]
@@ -7419,15 +7524,37 @@ mod tests {
         let total = 2.0 * 0.16667;
         let ascent = 0.13889 * 0.8;
         tb.valign = 1; // top
-        assert!((text_first_baseline(&tb, total) - (0.0555 + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size) - (0.0555 + ascent)).abs() < 1e-9
+        );
         tb.valign = 2; // middle (default)
-        assert!((text_first_baseline(&tb, total) - ((1.0 - total) / 2.0 + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size) - ((1.0 - total) / 2.0 + ascent)).abs()
+                < 1e-9
+        );
         tb.valign = 3; // bottom
-        assert!((text_first_baseline(&tb, total) - (1.0 - 0.0555 - total + ascent)).abs() < 1e-9);
+        assert!(
+            (text_first_baseline(&tb, total, tb.font_size)
+                - (1.0 - 0.0555 - total + ascent))
+                .abs()
+                < 1e-9
+        );
         // More wrapped lines raise the first line in the middle band.
-        let two = text_first_baseline(&tb, total);
-        let four = text_first_baseline(&tb, total * 2.0);
+        let two = text_first_baseline(&tb, total, tb.font_size);
+        let four = text_first_baseline(&tb, total * 2.0, tb.font_size);
         assert!(four < two, "taller text starts its first line higher");
+        // PR #269 review: a first line of larger complex-script glyphs
+        // ascends from a higher baseline, and its slot (not the flat
+        // line height) is what the next line advances by.
+        tb.line_height = 0.16667;
+        tb.cs_size = Some(tb.font_size * 2.0);
+        let eff = effective_cs_size(&tb);
+        assert_eq!(eff, tb.font_size * 2.0);
+        assert_eq!(line_slot_height(&tb, true), tb.line_height * 2.0);
+        assert_eq!(line_slot_height(&tb, false), tb.line_height, "ltr keeps the latin slot");
+        // A SMALLER complex-script size never shrinks the slot.
+        tb.cs_size = Some(tb.font_size * 0.5);
+        assert_eq!(line_slot_height(&tb, true), tb.line_height);
     }
 
     /// GitHub #22's no-ghost guarantee: `render_page_no_text` drops

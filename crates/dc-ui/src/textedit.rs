@@ -293,7 +293,11 @@ pub fn show_overlay(
     // `ascent` below the editor's text-area top. Solving for that top
     // makes the caret sit ON the rendered line — entering the editor
     // moves nothing.
-    let baseline_off_in = dc::svg::text_first_baseline(&tb, n_lines * tb.line_height);
+    // The overlay editor lays every row out at ONE size, so its
+                // baseline uses the Latin ascent; the renderer's
+                // per-line complex-script slots are its own.
+                let baseline_off_in =
+                    dc::svg::text_first_baseline(&tb, n_lines * tb.line_height, tb.font_size);
     let baseline_page_y_up = (by + bh) - baseline_off_in;
     let baseline_screen = canvas::page_to_screen(bx, baseline_page_y_up, view, geom).y;
     let editor_top = baseline_screen - (ascent_em * font_pts as f64) as f32;
