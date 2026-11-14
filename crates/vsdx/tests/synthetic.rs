@@ -639,3 +639,102 @@ fn container_user_rows_resolve_through_the_master_chain() {
     assert_eq!(v(local, "msvStructureType").as_deref(), Some("Group"));
     assert_eq!(v(local, "msvSDContainerNoHighlight"), None);
 }
+
+/// #196: `effective_section` resolves a section across the master
+/// chain — instance sheet first, then the master root — which the
+/// either/or `effective_sheet` cannot do for an instance carrying
+/// local sections. This is the lookup `SetRowCell`'s first-edit
+/// materialization seeds a missing section from.
+#[test]
+fn effective_section_walks_the_master_chain() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = write_container_package(tmp.path());
+    let doc = vsdx::parse::parse(&path).unwrap();
+
+    // Through the chain: the master root's User section stays visible
+    // behind the instance's local Geometry snapshot (shape 10 has
+    // local sections, so effective_sheet would hide it — pinned by
+    // the #191 test above).
+    let inst = &doc.pages[0].shapes[0];
+    let user = doc
+        .effective_section(inst, &[], "User", 0)
+        .expect("master root User section resolves through the chain");
+    assert_eq!(user.rows.len(), 3);
+    assert!(
+        user.named_row("msvSDContainerNoHighlight")
+            .unwrap()
+            .cell("Prompt")
+            .is_some(),
+        "the master's Prompt cells come along"
+    );
+
+    // Instance-first shadowing and the no-local-section fallback, on
+    // an in-code document (the fixture's Geometry is identical on
+    // both levels, so the instance's User row set distinguishes).
+    use vsdx::model::*;
+    let user_section = |rows: Vec<Row>| {
+        let mut s = Sheet::default();
+        s.children.push(SheetChild::Section(Section {
+            name: "User".into(),
+            rows,
+            ..Default::default()
+        }));
+        s
+    };
+    let named = |n: &str, v: &str| Row {
+        n: Some(n.into()),
+        cells: vec![("Value".into(), Cell::value(v))],
+        ..Default::default()
+    };
+    let mut doc2 = Document::default();
+    doc2.masters.push(Master {
+        id: 7,
+        shapes: vec![Shape {
+            id: 1,
+            sheet: user_section(vec![named("Foo", "master"), named("Bar", "master")]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    doc2.pages.push(Page {
+        id: 0,
+        shapes: vec![
+            Shape {
+                id: 10,
+                master: Some(7),
+                sheet: user_section(vec![named("Foo", "instance")]),
+                ..Default::default()
+            },
+            Shape {
+                id: 11,
+                master: Some(7),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    });
+    let sh10 = &doc2.pages[0].shapes[0];
+    let shadowed = doc2.effective_section(sh10, &[], "User", 0).unwrap();
+    assert_eq!(shadowed.rows.len(), 1, "the instance's own section wins");
+    assert_eq!(
+        shadowed
+            .named_row("Foo")
+            .unwrap()
+            .cell("Value")
+            .unwrap()
+            .v
+            .as_deref(),
+        Some("instance")
+    );
+    let sh11 = &doc2.pages[0].shapes[1];
+    let inherited = doc2.effective_section(sh11, &[], "User", 0).unwrap();
+    assert_eq!(
+        inherited.rows.len(),
+        2,
+        "no local section: the master root's resolves"
+    );
+    assert!(
+        doc2.effective_section(sh11, &[], "Prop", 0).is_none(),
+        "a section on neither level stays None"
+    );
+}
