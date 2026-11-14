@@ -971,6 +971,12 @@ undo-ungroup-n =
         [one] eine Gruppe aufgelöst
        *[other] { $n } Gruppen aufgelöst
     }
+# $n - wie viele Verbinder gelöst wurden
+unglue-connectors =
+    { $n ->
+        [one] ein Verbinder gelöst
+       *[other] { $n } Verbinder gelöst
+    }
 ungroup = Gruppierung aufheben
 ungroup-the-selected-group-s = Die ausgewählte(n) Gruppe(n) auflösen
 unsaved-changes = Ungespeicherte Änderungen
@@ -2062,6 +2068,12 @@ undo-ungroup-n =
         [one] ungroup one group
        *[other] ungroup { $n } groups
     }
+# $n (Number) - how many connectors were unglued
+unglue-connectors =
+    { $n ->
+        [one] unglued one connector
+       *[other] unglued { $n } connectors
+    }
 ungroup = Ungroup
 ungroup-the-selected-group-s = Ungroup the selected group(s)
 unsaved-changes = Unsaved changes
@@ -3080,6 +3092,12 @@ undo-ungroup-n =
     { $n ->
         [1] حل یک گروه
        *[other] حل { $n } گروه
+    }
+# $n - تعداد اتصال‌دهنده‌هایی که رها شدند
+unglue-connectors =
+    { $n ->
+        [1] یک اتصال‌دهنده رها شد
+       *[other] { $n } اتصال‌دهنده رها شد
     }
 ungroup = واگروه‌سازی
 ungroup-the-selected-group-s = واگروه‌کردن گروه‌های گزینش‌شده

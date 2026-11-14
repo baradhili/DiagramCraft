@@ -3032,17 +3032,32 @@ impl App {
             }
             // Arrow-key nudging (#110, URS-1217 keyboard slice):
             // arrows move the selection, Shift widens the step.
+            // #180: with glued connectors selected, the documented
+            // Visio operation takes the press instead — any arrow key
+            // unglues all ends of every selected connector in one
+            // undo step (MS Learn, Glue or unglue connectors; its
+            // Ctrl is multi-SELECT, not a modifier on the key).
             if !kb_owned && self.sel.is_some() {
-                let step = if i.modifiers.shift { 1.0 } else { 0.25 };
-                let nudge = [
-                    (egui::Key::ArrowLeft, (-step, 0.0)),
-                    (egui::Key::ArrowRight, (step, 0.0)),
-                    (egui::Key::ArrowUp, (0.0, step)),
-                    (egui::Key::ArrowDown, (0.0, -step)),
-                ];
-                for (key, (dx, dy)) in nudge {
-                    if i.key_pressed(key) {
-                        self.nudge_selection(dx, dy);
+                let arrow = [
+                    egui::Key::ArrowLeft,
+                    egui::Key::ArrowRight,
+                    egui::Key::ArrowUp,
+                    egui::Key::ArrowDown,
+                ]
+                .into_iter()
+                .any(|k| i.key_pressed(k));
+                if !(arrow && self.unglue_selection_connectors()) {
+                    let step = if i.modifiers.shift { 1.0 } else { 0.25 };
+                    let nudge = [
+                        (egui::Key::ArrowLeft, (-step, 0.0)),
+                        (egui::Key::ArrowRight, (step, 0.0)),
+                        (egui::Key::ArrowUp, (0.0, step)),
+                        (egui::Key::ArrowDown, (0.0, -step)),
+                    ];
+                    for (key, (dx, dy)) in nudge {
+                        if i.key_pressed(key) {
+                            self.nudge_selection(dx, dy);
+                        }
                     }
                 }
             }
@@ -6199,6 +6214,56 @@ impl App {
         };
         let moves: Vec<(i64, (f64, f64))> = ids.iter().map(|id| (*id, (dx, dy))).collect();
         self.apply_moves(&crate::i18n::strs().msg_nudge_selection(), page_id, &moves);
+    }
+
+    /// #180: the documented Visio unglue-all operation — any arrow key
+    /// with glued connectors selected releases every end of every
+    /// selected connector in ONE undo step ("select one or more
+    /// connectors and press any arrow key", MS Learn — Glue or unglue
+    /// connectors). The press is consumed: a glued connector does not
+    /// nudge until unglued, Visio's own tradeoff. Returns false when
+    /// nothing in the selection is glued so the arrow falls through to
+    /// nudge; locked ends refuse atomically through the Macro
+    /// rollback (a failed child leaves the document untouched).
+    fn unglue_selection_connectors(&mut self) -> bool {
+        let Some(page_id) = self.page_id() else {
+            return false;
+        };
+        let ids: Vec<i64> = if self.sel_set.len() > 1 {
+            self.sel_set
+                .iter()
+                .filter(|(p, _)| *p == page_id)
+                .map(|(_, s)| *s)
+                .collect()
+        } else {
+            self.sel.map(|(_, s)| vec![s]).unwrap_or_default()
+        };
+        let Some(ed) = self.ed() else {
+            return false;
+        };
+        let Some(page) = ed.doc.pages.iter().find(|p| p.id == page_id) else {
+            return false;
+        };
+        let (mut cmds, released) = crate::connectors::unglue_cmds(&ed.doc, page, &ids);
+        if released.is_empty() {
+            return false;
+        }
+        // The released connectors' routes refresh in the same undo
+        // step (FixedRoute skips), and anything glued TO them
+        // re-attaches — the same tail every release path carries.
+        cmds.push(Box::new(crate::cmd::RerouteConnectors::new_including(
+            page_id,
+            released.clone(),
+        )));
+        if let Some(r) = self.reroute_cmd(page_id, &released) {
+            cmds.push(r);
+        }
+        let n = released.len();
+        self.apply(Macro::new(
+            crate::i18n::strs().msg_unglue_connectors(n),
+            cmds,
+        ));
+        true
     }
 
     /// #113 (URS-1122): swap the page's width/height — portrait ↔

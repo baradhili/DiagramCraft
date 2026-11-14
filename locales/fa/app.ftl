@@ -968,6 +968,12 @@ undo-ungroup-n =
         [1] حل یک گروه
        *[other] حل { $n } گروه
     }
+# $n - تعداد اتصال‌دهنده‌هایی که رها شدند
+unglue-connectors =
+    { $n ->
+        [1] یک اتصال‌دهنده رها شد
+       *[other] { $n } اتصال‌دهنده رها شد
+    }
 ungroup = واگروه‌سازی
 ungroup-the-selected-group-s = واگروه‌کردن گروه‌های گزینش‌شده
 unsaved-changes = تغییرات ذخیره‌نشده

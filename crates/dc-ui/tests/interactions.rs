@@ -7365,6 +7365,186 @@ fn arrow_keys_nudge_the_selection() {
     assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
 }
 
+/// #180: the documented Visio unglue-all operation — "select one or
+/// more connectors and press any arrow key" (MS Learn, Glue or unglue
+/// connectors). Any arrow key with a glued connector selected
+/// releases BOTH ends in one undo step; the press does not nudge,
+/// undo restores the glue, and once unglued the same key nudges
+/// again (the documented operation yields the key back to #110).
+#[test]
+fn arrow_key_unglues_selected_connector_one_undo() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let glue_count = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn)
+            .count()
+    };
+    assert_eq!(glue_count(&h), 2, "drawn glued at both ends");
+    let val = |h: &Harness<'_, App>, cell: &str| {
+        h.state()
+            .debug_cell(page, conn, cell)
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+    };
+    let (bx0, ex0, px0) = (
+        val(&h, "BeginX").expect("BeginX"),
+        val(&h, "EndX").expect("EndX"),
+        val(&h, "PinX").expect("PinX"),
+    );
+
+    // Any arrow key: the press unglues — nothing moves.
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert_eq!(glue_count(&h), 0, "both Connect records dropped");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "BeginX").is_none(),
+        "the begin glue formula is gone"
+    );
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "the end glue formula is gone"
+    );
+    assert!(
+        (val(&h, "BeginX").unwrap() - bx0).abs() < 1e-5
+            && (val(&h, "EndX").unwrap() - ex0).abs() < 1e-5,
+        "the endpoints keep their resolved positions"
+    );
+    assert!(
+        (val(&h, "PinX").unwrap() - px0).abs() < 1e-5,
+        "the press did not nudge"
+    );
+    assert!(
+        strip_bidi(h.state().debug_status()).contains("unglued one connector"),
+        "status notes the unglue: {}",
+        h.state().debug_status()
+    );
+
+    // Nothing glued anymore: the same key falls through to nudge.
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert!(
+        (val(&h, "PinX").unwrap() - px0 - 0.25).abs() < 1e-5,
+        "unglued, the arrow nudges again"
+    );
+
+    // One undo removes the nudge (still unglued), a second restores
+    // the glue records, formulas, and pose.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (val(&h, "PinX").unwrap() - px0).abs() < 1e-5,
+        "first undo removes just the nudge"
+    );
+    assert_eq!(glue_count(&h), 0, "still unglued after the nudge undo");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(glue_count(&h), 2, "second undo restores the glue records");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "BeginX").is_some(),
+        "undo restores the glue formula"
+    );
+    assert!(
+        (val(&h, "BeginX").unwrap() - bx0).abs() < 1e-5,
+        "undo restores the begin pose"
+    );
+}
+
+/// #180's multi-connector half: "to unglue several connectors at
+/// once, hold Ctrl as you select the connectors, and then press any
+/// arrow key" — every selected glued connector releases in ONE undo
+/// step and nothing else in the selection moves.
+#[test]
+fn arrow_key_unglues_every_selected_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    // Two connectors between the same pair — both glued both ends.
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn1 = h.state().debug_sel().expect("connector 1 selected").1;
+    drag_naturally(&mut h, bsr2.center(), asr2.center() - bsr2.center());
+    let conn2 = h.state().debug_sel().expect("connector 2 selected").1;
+    let total_glue = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn1 || *from == conn2)
+            .count()
+    };
+    assert_eq!(total_glue(&h), 4, "both connectors glued at both ends");
+    let pin = |h: &Harness<'_, App>, s: i64| {
+        h.state()
+            .debug_cell(page, s, "PinX")
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+            .expect("PinX")
+    };
+    let (a0, b0) = (pin(&h, a), pin(&h, b));
+
+    // Ctrl+A gathers shapes AND connectors (#110), then the arrow
+    // releases every glued connector without moving anything.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::A);
+    h.run();
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    assert_eq!(total_glue(&h), 0, "all four Connect records dropped");
+    assert!(
+        (pin(&h, a) - a0).abs() < 1e-5 && (pin(&h, b) - b0).abs() < 1e-5,
+        "the shapes in the selection did not move"
+    );
+    assert!(
+        strip_bidi(h.state().debug_status()).contains("unglued 2 connectors"),
+        "status notes the batch: {}",
+        h.state().debug_status()
+    );
+
+    // One undo restores all four records.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(total_glue(&h), 4, "one undo restores every record");
+}
+
 /// #110 remainder: a DOUBLE-clicked Format Painter stays armed across
 /// applications — two shapes painted from one arming, then Esc
 /// finishes. (The 0.05 s-step harness groups the click pair; see the

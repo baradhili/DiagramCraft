@@ -1040,6 +1040,12 @@ undo-ungroup-n =
         [one] ungroup one group
        *[other] ungroup { $n } groups
     }
+# $n (Number) - how many connectors were unglued
+unglue-connectors =
+    { $n ->
+        [one] unglued one connector
+       *[other] unglued { $n } connectors
+    }
 ungroup = Ungroup
 ungroup-the-selected-group-s = Ungroup the selected group(s)
 unsaved-changes = Unsaved changes

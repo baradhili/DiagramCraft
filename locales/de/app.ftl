@@ -968,6 +968,12 @@ undo-ungroup-n =
         [one] eine Gruppe aufgelöst
        *[other] { $n } Gruppen aufgelöst
     }
+# $n - wie viele Verbinder gelöst wurden
+unglue-connectors =
+    { $n ->
+        [one] ein Verbinder gelöst
+       *[other] { $n } Verbinder gelöst
+    }
 ungroup = Gruppierung aufheben
 ungroup-the-selected-group-s = Die ausgewählte(n) Gruppe(n) auflösen
 unsaved-changes = Ungespeicherte Änderungen

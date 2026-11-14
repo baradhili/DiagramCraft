@@ -5952,6 +5952,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "unglue-connectors",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "ungroup",
         attribute: None,
         vars: &[],
@@ -6317,9 +6324,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..44649,
-            Self::En => 44649..87957,
-            Self::Fa => 87957..144738,
+            Self::De => 0..44806,
+            Self::En => 44806..88279,
+            Self::Fa => 88279..145284,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -9727,6 +9734,12 @@ impl L10nLanguage {
         let mut _args = FluentArgs::new();
         _args.set("n", n.into());
         self.0.msg("undo-ungroup-n", Some(_args)).unwrap()
+    }
+    /// $n (Number) - how many connectors were unglued
+    pub fn msg_unglue_connectors<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("unglue-connectors", Some(_args)).unwrap()
     }
     pub fn msg_ungroup(&self) -> String {
         self.0.msg("ungroup", None).unwrap()
