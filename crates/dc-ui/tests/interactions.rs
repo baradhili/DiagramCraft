@@ -4114,13 +4114,16 @@ fn format_pane_edits_cells_for_whole_selection() {
     // line ends on a closed geometry whatever the arrow cells say
     // (the cell write is asserted above; heads render on open
     // geometry only, pinned by the arrow-gallery unit tests). The
-    // SVG render must SUCCEED before the negative assertion — a
-    // render error returning an empty string used to pass vacuously
-    // (CodeRabbit, #278).
+    // SVG render must SUCCEED before the negative assertion, and
+    // BOTH placed rectangles must paint — each solid-filled shape
+    // contributes one even-odd fill path, so a count of 2 pins the
+    // EDITED shape's own presence (a bare `<path` check could pass
+    // on the other rectangle alone; CodeRabbit, #278).
     let closed_svg = h.state().debug_page_svg().expect("the page renders");
-    assert!(
-        closed_svg.contains("<path"),
-        "the rectangle still paints: {closed_svg}"
+    assert_eq!(
+        closed_svg.matches("fill-rule=\"evenodd\"").count(),
+        2,
+        "both placed rectangles paint (the edited one included): {closed_svg}"
     );
     assert!(
         !closed_svg.contains("dc-ah"),
