@@ -208,6 +208,26 @@ mod tests {
         }
     }
 
+    /// #279: Visio's My Shapes ships a ZERO-LENGTH Favorites.vssx
+    /// placeholder, and the #266 My Shapes scan lists it — opening it
+    /// must yield an EMPTY stencil entry (no error), exactly like
+    /// Visio.
+    #[test]
+    fn zero_length_placeholder_opens_as_an_empty_stencil() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("Favorites.vssx");
+        std::fs::write(&path, b"").unwrap();
+        let mut set = StencilSet::default();
+        let (ix, dup) = set.open_file(&path).expect("the placeholder opens");
+        assert!(!dup);
+        assert_eq!(set.len(), 1);
+        assert!(set.open[ix].doc.masters.is_empty(), "the stencil is empty");
+        assert_eq!(
+            set.open[ix].title, "Favorites",
+            "the entry carries the file stem as its title"
+        );
+    }
+
     #[test]
     fn reopen_dedupes_by_path_and_expands() {
         let mut set = StencilSet::default();

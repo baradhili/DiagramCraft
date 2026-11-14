@@ -282,6 +282,14 @@ pub fn open_from_disk(
 ) -> Option<(vsdx::Document, PathBuf)> {
     let my_shapes = my_shapes?;
     let bytes = std::fs::read(variant_path(my_shapes, b, metric)).ok()?;
+    // #279: `parse_bytes` now returns an empty Document for 0-length
+    // input (Visio's own Favorites-placeholder contract) — but here a
+    // 0-byte file is a PARTIAL extraction, not a placeholder, and the
+    // self-heal contract is embedded fallback on any failed read or
+    // parse. Guard the length so the fallback keeps firing.
+    if bytes.is_empty() {
+        return None;
+    }
     let doc = vsdx::parse::parse_bytes(&bytes).ok()?;
     Some((doc, extracted_path(my_shapes, b.slug)))
 }
@@ -345,6 +353,30 @@ mod tests {
             builtin::by_slug("basic").unwrap().bytes,
             "healed back to the embedded bytes"
         );
+    }
+
+    /// #279: `vsdx::parse::parse_bytes` now returns an empty Document
+    /// for 0-length input (Visio's own Favorites-placeholder
+    /// contract) — but a 0-byte EXTRACTED built-in is a partial
+    /// extraction, and `open_from_disk` must keep returning None so
+    /// the caller falls back to the embedded bytes.
+    #[test]
+    fn a_zero_byte_extracted_builtin_falls_back_to_embedded() {
+        let tmp = tempfile::tempdir().unwrap();
+        let my_shapes = tmp.path();
+        extract_catalog(Some(my_shapes));
+        let b = builtin::by_slug("basic").unwrap();
+        let path = variant_path(my_shapes, b, false);
+        std::fs::write(&path, b"").unwrap();
+        assert!(
+            open_from_disk(Some(my_shapes), b, false).is_none(),
+            "a 0-byte partial extraction falls back, never an empty stencil"
+        );
+        // Sanity: the intact variant still opens from disk.
+        std::fs::write(&path, b.bytes).unwrap();
+        let (doc, source) = open_from_disk(Some(my_shapes), b, false).expect("intact opens");
+        assert!(!doc.masters.is_empty());
+        assert!(source.ends_with("basic.vssx"));
     }
 
     /// The background pass completes and reports; the callback form

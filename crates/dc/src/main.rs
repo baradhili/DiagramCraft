@@ -239,6 +239,16 @@ fn main() -> Result<()> {
 }
 
 fn info(path: &Path) -> Result<()> {
+    // #279: a 0-byte file is Visio's empty placeholder (it opens as a
+    // new document), not a broken archive — the raw inventory is
+    // simply empty, so say that instead of raising a zip error.
+    if std::fs::metadata(path).is_ok_and(|m| m.len() == 0) {
+        println!(
+            "OPC package: {} (0 bytes — empty placeholder, no parts; opens as a new document)",
+            path.display()
+        );
+        return Ok(());
+    }
     let pkg = vsdx::Package::open(path).with_context(|| format!("opening {}", path.display()))?;
     println!("OPC package: {}", path.display());
     for name in pkg.part_names() {
