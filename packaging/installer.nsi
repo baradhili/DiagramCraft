@@ -1,8 +1,8 @@
-; DiagramCraft Windows installer (NSIS). Build:
+; Tarahi Windows installer (NSIS). Build:
 ;   makensis -DVERSION=<ver> packaging/installer.nsi
 ; from the repo root; expects target\release\diagramcraft.exe.
 
-!define APPNAME "DiagramCraft"
+!define APPNAME "Tarahi"
 ; Local builds: makensis -DVERSION=x packaging/installer.nsi from the
 ; repo root defaults LICENSEDIR to the repo root.
 !ifndef LICENSEDIR
@@ -11,7 +11,7 @@
 ; Binary directory passed in via -DBINDIR=... (NSIS resolves File
 ; paths relative to this script, not the invocation directory).
 Name "${APPNAME}"
-OutFile "diagramcraft_${VERSION}_windows_x64_setup.exe"
+OutFile "Tarahi_${VERSION}_windows_x64_setup.exe"
 InstallDir "$PROGRAMFILES64\${APPNAME}"
 InstallDirRegKey HKLM "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel admin

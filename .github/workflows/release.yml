@@ -83,7 +83,7 @@ jobs:
         working-directory: crates/dc-ui
         run: |
           cargo generate-rpm
-          mv target/generate-rpm/*.rpm "${GITHUB_WORKSPACE}/diagramcraft_${{ steps.ver.outputs.version }}_amd64.rpm"
+          mv target/generate-rpm/*.rpm "${GITHUB_WORKSPACE}/Tarahi_${{ steps.ver.outputs.version }}_amd64.rpm"
       - name: AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -132,7 +132,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/debian/*.deb dist/
-          cp diagramcraft_*_amd64.rpm dist/
+          cp Tarahi_*_amd64.rpm dist/
           cp Tarahi_*_x86_64.AppImage dist/
           ls -la dist/
       - uses: actions/upload-artifact@v7
@@ -170,12 +170,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          7z a -tzip "dist/diagramcraft_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/diagramcraft.exe
+          7z a -tzip "dist/Tarahi_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/diagramcraft.exe
       - name: Collect artifacts
         shell: bash
         run: |
           # NSIS writes OutFile relative to the script directory.
-          cp packaging/diagramcraft_*_setup.exe dist/
+          cp packaging/Tarahi_*_setup.exe dist/
           ls -la dist/
       - uses: actions/upload-artifact@v7
         with:
@@ -203,11 +203,11 @@ jobs:
         run: |
           cargo build --release -p dc-ui --locked --target x86_64-apple-darwin
           cargo build --release -p dc-ui --locked --target aarch64-apple-darwin
-          mkdir -p "DiagramCraft.app/Contents/MacOS" "DiagramCraft.app/Contents/Resources"
+          mkdir -p "Tarahi.app/Contents/MacOS" "Tarahi.app/Contents/Resources"
           lipo -create \
             target/x86_64-apple-darwin/release/diagramcraft \
             target/aarch64-apple-darwin/release/diagramcraft \
-            -output "DiagramCraft.app/Contents/MacOS/DiagramCraft"
+            -output "Tarahi.app/Contents/MacOS/Tarahi"
       - name: Bundle icon
         run: |
           mkdir AppIcon.iconset
@@ -216,18 +216,18 @@ jobs:
             big=$((size * 2))
             sips -z $big $big packaging/diagramcraft.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
           done
-          iconutil -c icns AppIcon.iconset -o "DiagramCraft.app/Contents/Resources/AppIcon.icns"
+          iconutil -c icns AppIcon.iconset -o "Tarahi.app/Contents/Resources/AppIcon.icns"
       - name: Bundle app + dmg
         run: |
-          cp packaging/Info.plist "DiagramCraft.app/Contents/Info.plist"
-          mkdir -p "DiagramCraft.app/Contents/Resources/licenses"
-          cp LICENSE-MIT LICENSE-APACHE "DiagramCraft.app/Contents/Resources/licenses/"
-          cp crates/dc/assets/fonts/LICENSE-Carlito "DiagramCraft.app/Contents/Resources/licenses/"
-          codesign --force --sign - --deep "DiagramCraft.app"
+          cp packaging/Info.plist "Tarahi.app/Contents/Info.plist"
+          mkdir -p "Tarahi.app/Contents/Resources/licenses"
+          cp LICENSE-MIT LICENSE-APACHE "Tarahi.app/Contents/Resources/licenses/"
+          cp crates/dc/assets/fonts/LICENSE-Carlito "Tarahi.app/Contents/Resources/licenses/"
+          codesign --force --sign - --deep "Tarahi.app"
           mkdir -p dist
-          hdiutil create -volname "DiagramCraft" \
-            -srcfolder "DiagramCraft.app" -ov -format UDZO \
-            "dist/diagramcraft_${{ steps.ver.outputs.version }}_universal.dmg"
+          hdiutil create -volname "Tarahi" \
+            -srcfolder "Tarahi.app" -ov -format UDZO \
+            "dist/Tarahi_${{ steps.ver.outputs.version }}_universal.dmg"
       - uses: actions/upload-artifact@v7
         with:
           name: macos
