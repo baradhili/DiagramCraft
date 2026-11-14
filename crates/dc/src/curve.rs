@@ -140,7 +140,13 @@ impl SplineData {
         while i < self.knots.len() {
             let mut j = i;
             while j + 1 < self.knots.len() {
-                let (a, b) = (self.knots[j], self.knots[j + 1]);
+                // The run's TOTAL spread from its first member — not
+                // each adjacent gap — must stay within the tolerance:
+                // chained near-equal steps used to bridge past the cap
+                // through middle knots and collapse the domain
+                // (Greptile P1, #278: [big, big+0.5, big+1] chained
+                // two half-span gaps and flattened the curve).
+                let (a, b) = (self.knots[i], self.knots[j + 1]);
                 let mag = a.abs().max(b.abs());
                 // ×1.5: two doubles sharing a 14-digit string can sit
                 // a hair over one quantum apart (the f64 grid at the
@@ -437,6 +443,28 @@ mod tests {
             off.knots[0] == 0.0 && off.knots[5] == 1.0,
             "the domain endpoints survive: {:?}",
             off.knots
+        );
+        // A large-offset domain with a MIDDLE knot half a span in:
+        // the pairwise-chained run used to bridge both half-span
+        // gaps through it and collapse everything (Greptile P1,
+        // #278); the spread-bounded run stops at the cap.
+        let base = 1125899906842624.0;
+        let mid = SplineData {
+            degree: 1,
+            points: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            weights: vec![],
+            knots: vec![base, base + 0.5, base + 1.0, base + 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        assert!(
+            mid.knots.first() == Some(&0.0) && mid.knots.last() == Some(&1.0),
+            "the domain survives the middle knot: {:?}",
+            mid.knots
+        );
+        assert!(
+            mid.flatten(16).len() > 2,
+            "the curve flattens past its endpoints, not to the chord"
         );
         // A unit span parked at ~2^50: the old magnitude-based
         // tolerance (~4) fused the endpoints; the span-bounded one
