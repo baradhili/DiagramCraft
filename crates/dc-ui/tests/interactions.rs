@@ -4113,13 +4113,18 @@ fn format_pane_edits_cells_for_whole_selection() {
     // #227: the placed shape is a CLOSED rectangle — Visio draws no
     // line ends on a closed geometry whatever the arrow cells say
     // (the cell write is asserted above; heads render on open
-    // geometry only, pinned by the arrow-gallery unit tests).
+    // geometry only, pinned by the arrow-gallery unit tests). The
+    // SVG render must SUCCEED before the negative assertion — a
+    // render error returning an empty string used to pass vacuously
+    // (CodeRabbit, #278).
+    let closed_svg = h.state().debug_page_svg().expect("the page renders");
     assert!(
-        !h.state()
-            .debug_page_svg()
-            .unwrap_or_default()
-            .contains("dc-ah"),
-        "a closed rectangle draws no arrowhead (#227)"
+        closed_svg.contains("<path"),
+        "the rectangle still paints: {closed_svg}"
+    );
+    assert!(
+        !closed_svg.contains("dc-ah"),
+        "a closed rectangle draws no arrowhead (#227): {closed_svg}"
     );
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();

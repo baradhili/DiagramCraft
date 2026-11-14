@@ -121,14 +121,37 @@ impl SplineData {
         // #233 rider (MisterDiagram knot-precision evidence): Visio
         // serializes NURBS knots at 14 significant digits, so adjacent
         // "repeated" knots can arrive differing in their last bits —
-        // coalesce neighbors within 16 machine epsilons to the larger
-        // value (their reconciliation rule) so the flattener never
-        // divides by a phantom knot difference.
-        for i in 1..self.knots.len() {
-            let (a, b) = (self.knots[i - 1], self.knots[i]);
-            if (b - a).abs() <= 16.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0) {
-                self.knots[i - 1] = b; // b >= a after the clamp pass
+        // coalesce near-equal neighbors to the larger value (their
+        // reconciliation rule) so the flattener never divides by a
+        // phantom knot difference. Two review corrections (#278):
+        // the tolerance is bounded by the parameter SPAN, not the
+        // knots' absolute magnitude (a huge-offset unit-span domain
+        // used to collapse onto itself and flatten to the chord), and
+        // a whole RUN of near-equal knots reconciles to the run's
+        // maximum — the old forward pass left [a,b,b,b] from
+        // [a,a,b,b], keeping a phantom span inside the run.
+        let span = (self.knots[self.knots.len() - 1] - self.knots[0]).abs();
+        let mut i = 0;
+        while i < self.knots.len() {
+            let mut j = i;
+            while j + 1 < self.knots.len() {
+                let (a, b) = (self.knots[j], self.knots[j + 1]);
+                let tol = 16.0 * f64::EPSILON * span.min(a.abs().max(b.abs()).max(1.0));
+                if (b - a).abs() <= tol {
+                    j += 1;
+                } else {
+                    break;
+                }
             }
+            if j > i {
+                // Non-decreasing after the clamp pass, so the run's
+                // maximum is its last member.
+                let hi = self.knots[j];
+                for k in i..=j {
+                    self.knots[k] = hi;
+                }
+            }
+            i = j + 1;
         }
         let d = self.degree.clamp(1, (n - 1).max(1));
         let first = self.knots[0];
@@ -333,6 +356,51 @@ impl SplineAcc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #278 review: the near-equal knot coalescing reconciles whole
+    /// RUNS to the run's maximum (the old forward pass left
+    /// [a,b,b,b] from [a,a,b,b], keeping a phantom span), and its
+    /// tolerance is bounded by the parameter SPAN — a huge-offset
+    /// unit-span domain stays distinct instead of collapsing onto
+    /// itself and flattening the curve to its chord.
+    #[test]
+    fn knot_reconciliation_is_run_based_and_span_bounded() {
+        // The interior run [0.5, 0.5+1e-16] reconciles to one value.
+        let run = SplineData {
+            degree: 1,
+            points: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            weights: vec![],
+            knots: vec![0.0, 0.5, 0.5 + 1e-16, 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        assert_eq!(
+            run.knots[2], run.knots[3],
+            "the near-equal interior run reconciles to one knot"
+        );
+        // A unit span parked at ~2^50: the old magnitude-based
+        // tolerance (~4) fused the endpoints; the span-bounded one
+        // must not, so the quadratic keeps its apex.
+        let big = 1125899906842624.0;
+        let wide = SplineData {
+            degree: 2,
+            points: vec![(0.0, 0.0), (1.0, 2.0), (2.0, 0.0)],
+            weights: vec![],
+            knots: vec![big, big + 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        let pts = wide.flatten(16);
+        assert!(pts.len() > 2, "the curve survives, not just the chord");
+        let apex = pts.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        // The Bézier quadratic's true apex is 1.0 (half the control
+        // height); the old domain collapse flattened it to the y=0
+        // chord.
+        assert!(
+            (apex - 1.0).abs() < 1e-9,
+            "the quadratic keeps its apex: {apex}"
+        );
+    }
 
     /// A clamped cubic (4 control points, knots 0,0,0,0,1,1,1,1) with
     /// all weights 1 IS a cubic Bézier: the midpoint lands on the
