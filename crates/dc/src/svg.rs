@@ -3573,10 +3573,12 @@ fn render_geometry(
         // gallery kind draws at its measured proportions in that unit
         // ([`GALLERY`]), and the shaft trims back by the per-kind
         // setback ([`arrow_setback`]) so hollow heads keep their
-        // interiors clear. Evidence: the owner-authored 600 dpi print
-        // (Sample/test files/arrows.vsdx + arrows.png — the
-        // authoritative oracle) cross-checked against the #223 parity
-        // witnesses; see Analysis/arrow-gallery-visio2016.md.
+        // interiors clear — the open diamonds trim two pens short of
+        // their rear vertex ([`diamond_shaft_trim`], #239). Evidence:
+        // the owner-authored 600 dpi print (Sample/test files/
+        // arrows.vsdx + arrows.png — the authoritative oracle)
+        // cross-checked against the #223 parity witnesses; see
+        // Analysis/arrow-gallery-visio2016.md.
         let kind = |a: f64| -> Option<i64> {
             if a < 0.5 || (46.0..=50.5).contains(&a) {
                 None
@@ -3595,9 +3597,15 @@ fn render_geometry(
             let i = (sz.round() as i64).clamp(0, 6) as usize;
             head_weight + ARROW_SIZE_PT[i] / 72.0
         };
-        let end_setback = kind(end_arrow).map_or(0.0, |k| arrow_setback(k) * head_unit(esz));
+        let end_setback = kind(end_arrow).map_or(0.0, |k| {
+            diamond_shaft_trim(k, arrow_setback(k) * head_unit(esz), head_weight)
+        });
         let begin_setback = kind(begin_arrow).map_or(0.0, |k| {
-            arrow_begin_setback(arrow_setback(k) * head_unit(bsz))
+            arrow_begin_setback(diamond_shaft_trim(
+                k,
+                arrow_setback(k) * head_unit(bsz),
+                head_weight,
+            ))
         });
         // The shaft stops at (or under) the head's rear; the heads
         // themselves anchor at the ORIGINAL endpoints, so the trim must
@@ -3843,12 +3851,15 @@ const GALLERY: &[(i64, &[HeadPart])] = &[
             sp("M-2.25,-0.75 L-2.25,0.75 M-3,-0.75 L-3,0.75 M-3.75,-0.75 L-3.75,0.75"),
         ],
     ),
-    // 38 — filled diamond (1.5–6) + the filled dot.
+    // 38 — OPEN diamond (1.5–6) + the filled dot. #239's fixture pass:
+    // the 600 dpi print's center-line runs a gap through the diamond
+    // interior (no fill between the apex and the shaft stub) — the
+    // earlier "filled" gallery read was the low-res screenshot's.
     (
         38,
         &[
             dot(-0.75, 0.0, 0.825),
-            fp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
+            sp("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z"),
         ],
     ),
     // 39 — double filled triangle (two solid heads).
@@ -3942,6 +3953,25 @@ fn arrow_setback(kind: i64) -> f64 {
 /// zero (#185).
 fn arrow_begin_setback(end_setback: f64) -> f64 {
     (end_setback - (end_setback * 0.01).max(0.36 / 72.0)).max(0.0)
+}
+
+/// #239: the open diamonds (22, 34/38) trim their shaft TWO PENS short
+/// of the rear vertex, not at it. The 600 dpi fixture's ink shows the
+/// stop where the shaft's ink would first touch the outline's ink —
+/// the outline center one full pen off-axis, which the slope-½ rear
+/// halves doubles: `rear − 2 × pen` (22's on-axis ink ends ≈3.79 u of
+/// its 4.5 rear; 34/38's ≈5.45 of 6 — the model puts the geometric
+/// stops at 3.77/5.27 and the butt-cap/AA residuals land inside
+/// ±0.2 u; the flat-rear hollow heads keep the full extent because
+/// their trim hides under the rear stroke). Floored at half the
+/// setback — never in front of the diamond's widest point, so a fat
+/// pen cannot push the stop into the wide half.
+fn diamond_shaft_trim(kind: i64, setback: f64, head_weight: f64) -> f64 {
+    if matches!(kind, 22 | 34 | 38) {
+        (setback - 2.0 * head_weight).max(0.5 * setback)
+    } else {
+        setback
+    }
 }
 
 fn path_command_arity(c: char) -> Option<usize> {
@@ -7742,6 +7772,18 @@ mod tests {
             parts[0].d.contains("L-2.25,-1.125 L-4.5,0"),
             "diamond profile"
         );
+        // #239: 38's diamond STROKES (the 600 dpi print's interior runs
+        // a gap — the earlier "filled" read was the low-res gallery's);
+        // its dot stays filled, like 34's ring stays open.
+        let d38 = arrow_spec(38).unwrap();
+        assert!(
+            d38[0].circle.is_some() && d38[0].filled,
+            "38's dot fills"
+        );
+        assert!(
+            !d38[1].filled && d38[1].circle.is_none(),
+            "38's diamond strokes open"
+        );
         // 12 is ONE wide open V; 43 is the double chevron (the print
         // correction — the old table had the two swapped up).
         let v12 = arrow_spec(12).unwrap();
@@ -7847,16 +7889,37 @@ mod tests {
         // The unit at the default 0.75 pt pen, size 2: 0.75/72 +
         // 2.52/72 = 0.045417 in.
         let unit = 0.75 / 72.0 + 2.52 / 72.0;
-        // The open diamond 22 strokes, and its 4.5-unit setback trims
-        // the shaft to 2 − 4.5·unit.
+        // #239: the diamonds trim TWO PENS short of their rear vertex
+        // (the ink-tangency rule), so 22's setback is 4.5·unit − 2·pen.
+        let pen = 0.75 / 72.0;
+        // The open diamond 22 strokes, and its setback trims the shaft
+        // to 2 − (4.5·unit − 2·pen).
         let open22 = fixture(22);
         assert!(open22.contains("dc-ah"), "head attached: {open22}");
         assert!(open22.contains("M0,0 L-2.25,-1.125 L-4.5,0 L-2.25,1.125 Z"));
         assert!(open22.contains("fill=\"none\" stroke=\"#000000\""));
-        let cut = 2.0 - 4.5 * unit;
+        let cut = 2.0 - (4.5 * unit - 2.0 * pen);
         assert!(
             open22.contains(&format!("{cut:.5}")),
-            "the shaft trims at the diamond's rear: {open22}"
+            "the shaft trims two pens short of the diamond's rear: {open22}"
+        );
+        // 34 (ring + open diamond) trims the same rule under its 6-unit
+        // rear; 38's diamond STROKES (the #239 fixture pass: the print's
+        // interior is hollow) and trims identically.
+        let comp34 = fixture(34);
+        let cut34 = 2.0 - (6.0 * unit - 2.0 * pen);
+        assert!(
+            comp34.contains(&format!("{cut34:.5}")),
+            "34 trims two pens short of its rear: {comp34}"
+        );
+        let comp38 = fixture(38);
+        assert!(
+            comp38.contains("M-1.5,0 L-3.75,-1.125 L-6,0 L-3.75,1.125 Z\" fill=\"none\""),
+            "38's diamond strokes open (the print's interior is hollow): {comp38}"
+        );
+        assert!(
+            comp38.contains(&format!("{cut34:.5}")),
+            "38 trims with the diamond rule: {comp38}"
         );
         // The classic triangle 4 fills; its 2-unit setback hides under
         // the fill (trim to 2 − 2·unit).

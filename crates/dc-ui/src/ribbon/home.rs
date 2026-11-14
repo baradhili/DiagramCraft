@@ -145,10 +145,13 @@ fn font_grid(s: &'static crate::l10n::L10nLanguage, has_sel: bool) -> super::Col
                 .alt(s.msg_strikethrough())
                 .enabled(false)
                 .tip(s.msg_strikethrough_planned()),
-            RibbonButton::new(Icon::TextColor, "", Action::Macros)
+            // #150: wired to the shared palette like Fill/Line — a
+            // pick writes the Character row-0 Color cell across the
+            // selection (#73's ColorTarget::Text path).
+            RibbonButton::new(Icon::TextColor, "", Action::TextColorMenu)
                 .alt(s.msg_text_color())
-                .enabled(false)
-                .tip(s.msg_text_color_planned()),
+                .enabled(has_sel)
+                .tip(s.msg_text_color_tip()),
         ],
     ])
 }

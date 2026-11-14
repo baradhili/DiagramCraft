@@ -41,6 +41,105 @@ fn variant_path(my_shapes: &Path, b: &BuiltinStencil, metric: bool) -> PathBuf {
     builtins_dir(my_shapes).join(name)
 }
 
+/// One subfolder of My Shapes (#266): its display name (the submenu
+/// label) and the `.vssx` files directly inside it.
+pub struct MyShapesFolder {
+    pub name: String,
+    pub files: Vec<PathBuf>,
+}
+
+/// What [`scan_my_shapes`] found (#266): the `.vssx` files in the My
+/// Shapes root plus one level of subfolders (folder → submenu,
+/// observed Visio 2016), both name-sorted. The app-managed
+/// `Built-ins` directory is skipped — the built-in categories already
+/// represent it — and folders with no stencil inside are dropped.
+#[derive(Default)]
+pub struct MyShapesScan {
+    pub root: Vec<PathBuf>,
+    pub folders: Vec<MyShapesFolder>,
+}
+
+impl MyShapesScan {
+    pub fn is_empty(&self) -> bool {
+        self.root.is_empty() && self.folders.is_empty()
+    }
+}
+
+/// Case-insensitive sort key of one file/folder name — the menu lists
+/// stencils deterministically regardless of the filesystem's order.
+fn name_sort_key(name: &std::ffi::OsStr) -> String {
+    name.to_string_lossy().to_lowercase()
+}
+
+fn is_vssx(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("vssx"))
+}
+
+/// Scan My Shapes for user stencils (#266): root `.vssx` files plus
+/// one level of subfolders, mirroring Visio's folder→submenu mapping.
+/// The scan is cheap and per-menu-open by design — never cached, so a
+/// stencil dropped into the folder shows the next time More Shapes
+/// opens. An absent or unreadable My Shapes yields an empty scan (the
+/// menu hides its entry); nothing here panics.
+pub fn scan_my_shapes(my_shapes: Option<&Path>) -> MyShapesScan {
+    let Some(dir) = my_shapes else {
+        return MyShapesScan::default();
+    };
+    let mut scan = MyShapesScan::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return scan;
+    };
+    // The app-managed extraction target (#104) is not user content:
+    // the built-in categories already list it.
+    let builtins = builtins_dir(dir).file_name().map(std::ffi::OsStr::to_owned);
+    let mut folders: Vec<(std::ffi::OsString, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        // Dot entries are filesystem noise, not user stencils (lossy
+        // conversion only affects invalid sequences, never the first
+        // byte's dot).
+        if name.to_string_lossy().starts_with('.') {
+            continue;
+        }
+        if builtins.as_deref() == Some(name.as_os_str()) {
+            continue;
+        }
+        let path = entry.path();
+        // Symlinks resolve through `is_dir`/`is_file`; an unreadable
+        // entry's file type simply drops it from the listing.
+        if path.is_dir() {
+            folders.push((name, path));
+        } else if path.is_file() && is_vssx(&path) {
+            scan.root.push(path);
+        }
+    }
+    scan.root
+        .sort_by_key(|p| p.file_name().map_or_default(name_sort_key));
+    folders.sort_by_key(|(name, _)| name_sort_key(name));
+    scan.folders = folders
+        .into_iter()
+        .filter_map(|(name, dir)| {
+            // One level only: subfolders of subfolders are not
+            // walked (Visio maps one nesting level to submenus).
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+                .map(|rd| {
+                    rd.flatten()
+                        .map(|e| e.path())
+                        .filter(|p| p.is_file() && is_vssx(p))
+                        .collect()
+                })
+                .unwrap_or_default();
+            files.sort_by_key(|p| p.file_name().map_or_default(name_sort_key));
+            (!files.is_empty()).then_some(MyShapesFolder {
+                name: name.to_string_lossy().into_owned(),
+                files,
+            })
+        })
+        .collect();
+    scan
+}
+
 /// Outcome of one extraction pass.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Extraction {
@@ -277,6 +376,84 @@ mod tests {
     fn extraction_without_my_shapes_is_a_noop() {
         let e = extract_catalog(None);
         assert_eq!(e, Extraction::default());
+    }
+
+    /// #266: the My Shapes scan lists root `.vssx` files and one
+    /// level of subfolders (as submenus), skips the app-managed
+    /// `Built-ins` directory and dot entries, ignores non-stencil
+    /// files and deeper nesting, and hides empty folders. Sorting is
+    /// name-based and case-insensitive.
+    #[test]
+    fn my_shapes_scan_lists_root_files_and_subfolders() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for name in [
+            "Beta.vssx",
+            "alpha.vssx",
+            "notastencil.txt",
+            ".hidden.vssx",
+            "UPPER.VSSX",
+        ] {
+            std::fs::write(root.join(name), b"synthetic").unwrap();
+        }
+        // Two folders with stencils (unsorted creation order), one
+        // empty, one holding only non-stencils, one the app-managed
+        // built-ins home, one a dot-folder.
+        std::fs::create_dir(root.join("Zed")).unwrap();
+        std::fs::write(root.join("Zed").join("z1.vssx"), b"synthetic").unwrap();
+        std::fs::create_dir(root.join("community")).unwrap();
+        std::fs::write(root.join("community").join("c2.vssx"), b"synthetic").unwrap();
+        std::fs::write(root.join("community").join("c1.vssx"), b"synthetic").unwrap();
+        std::fs::create_dir(root.join("empty")).unwrap();
+        std::fs::create_dir(root.join("textonly")).unwrap();
+        std::fs::write(root.join("textonly").join("note.txt"), b"x").unwrap();
+        std::fs::create_dir(root.join("Built-ins")).unwrap();
+        std::fs::write(root.join("Built-ins").join("basic.vssx"), b"synthetic").unwrap();
+        std::fs::create_dir(root.join(".cache")).unwrap();
+        std::fs::write(root.join(".cache").join("h.vssx"), b"synthetic").unwrap();
+        // Deeper nesting is NOT walked (one submenu level only).
+        std::fs::create_dir_all(root.join("community").join("nested")).unwrap();
+        std::fs::write(root.join("community").join("nested").join("deep.vssx"), b"x").unwrap();
+
+        let scan = scan_my_shapes(Some(root));
+        let stems = |files: &[PathBuf]| {
+            files
+                .iter()
+                .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            stems(&scan.root),
+            vec!["alpha.vssx", "Beta.vssx", "UPPER.VSSX"],
+            "root stencils, case-insensitive name order, extensions and dot files skipped"
+        );
+        assert_eq!(
+            scan.folders.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            vec!["community", "Zed"],
+            "stencil-holding subfolders only, name-sorted; empty/text-only/built-ins/dot folders skipped"
+        );
+        assert_eq!(
+            stems(&scan.folders[0].files),
+            vec!["c1.vssx", "c2.vssx"],
+            "folder stencils sorted; nested subfolders not walked"
+        );
+        assert!(!scan.is_empty());
+    }
+
+    /// #266: an absent My Shapes (no home / not created yet) or an
+    /// unreadable one scans empty — the menu hides its entry, never
+    /// panics.
+    #[test]
+    fn my_shapes_scan_degrades_to_empty() {
+        assert!(scan_my_shapes(None).is_empty());
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("never-created");
+        assert!(scan_my_shapes(Some(&missing)).is_empty());
+        // A My Shapes with nothing stencil-like in it also hides the
+        // menu entry.
+        std::fs::create_dir(&missing).unwrap();
+        std::fs::write(missing.join("readme.txt"), b"x").unwrap();
+        assert!(scan_my_shapes(Some(&missing)).is_empty());
     }
 
     /// Disk-first opens parse the extracted file and carry the base

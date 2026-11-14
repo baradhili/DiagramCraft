@@ -483,6 +483,108 @@ pub fn glue_connect(connector: i64, end: End, target: &GlueTarget) -> dc_core::C
     )
 }
 
+/// #180: the documented Visio unglue-all operation — "select one or
+/// more connectors and press any arrow key" ([MS Learn] Glue or unglue
+/// connectors; the page's Ctrl is for multi-SELECTING, not a key
+/// modifier). Builds every listed connector's release as one batch:
+/// plain-value [`SetGluedCell`] writes that replace the glue formulas
+/// at the ends' RESOLVED positions (the connector does not move), and
+/// [`dc_core::RemoveConnect`]s for the connectors' records — highest
+/// index first, because each removal shifts the tail. Locked ends
+/// refuse inside `SetGluedCell`; the caller wraps the batch in one
+/// transactional `Macro`, so a refusal rolls the whole operation back.
+/// Returns the commands and the ids of the connectors that release
+/// (empty = nothing glued; the caller falls through to nudge).
+pub fn unglue_cmds(
+    doc: &vsdx::model::Document,
+    page: &vsdx::model::Page,
+    ids: &[i64],
+) -> (Vec<Box<dyn dc_core::Command>>, Vec<i64>) {
+    use dc_core::connects::ConnectsHost;
+    let connects = page.connects();
+    let mut cmds: Vec<Box<dyn dc_core::Command>> = Vec::new();
+    let mut releases: Vec<usize> = Vec::new();
+    let mut released: Vec<i64> = Vec::new();
+    for &sid in ids {
+        let Some(sh) = vsdx::model::find_shape_by_id(&page.shapes, sid) else {
+            continue;
+        };
+        let Ok(chain) = dc_core::scope::shape_chain(doc, page.id, sid) else {
+            continue;
+        };
+        if !is_connector_in(doc, &chain, sh) {
+            continue;
+        }
+        let mut released_cells: Vec<&'static str> = Vec::new();
+        for end in [End::Begin, End::End] {
+            // A glued end: its X cell carries a RECOGNIZED glue formula
+            // (static `PAR(PNT(...))` or dynamic `_WALKGLUE` — the glue
+            // engine's own signature, the same #250 rule geom.rs's
+            // connector check uses; any OTHER endpoint formula is
+            // user-authored and must survive the release) or a Connect
+            // record names it. Either way the record drops and the
+            // glue formula yields to its resolved value (the body-drag
+            // release's write set, without the drag).
+            let glue_formula =
+                dc_core::commands::effective_formula(doc, sh, &chain, end.cell()).is_some_and(
+                    |f| f.contains("PAR(PNT(") || f.contains("_WALKGLUE("),
+                );
+            let glued = glue_formula
+                || connects
+                    .list
+                    .iter()
+                    .any(|c| c.from_sheet == sid && c.from_cell == end.cell());
+            if !glued {
+                continue;
+            }
+            let v = |n: &str| doc.resolve_cell(sh, &chain, n).and_then(|c| c.numeric());
+            let (Some(x), Some(y)) = (v(end.cell()), v(end.y_cell())) else {
+                continue;
+            };
+            released_cells.push(end.cell());
+            for (name, val) in [(end.cell(), x), (end.y_cell(), y)] {
+                cmds.push(
+                    Box::new(dc_core::SetGluedCell::new(
+                        dc_core::Scope::Shape {
+                            page: page.id,
+                            shape: sid,
+                        },
+                        name,
+                        Cell::value(fmt(val)),
+                    )) as Box<dyn dc_core::Command>,
+                );
+            }
+        }
+        if !released_cells.is_empty() {
+            released.push(sid);
+            // Only the ends whose release writes were queued lose their
+            // records — an end that stayed glued (e.g. an unresolvable
+            // formula skipped above) keeps its Connect (CodeRabbit
+            // #239-batch review: a per-shape filter would orphan it).
+            releases.extend(
+                connects
+                    .list
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| {
+                        c.from_sheet == sid && released_cells.contains(&c.from_cell.as_str())
+                    })
+                    .map(|(i, _)| i),
+            );
+        }
+    }
+    releases.sort_unstable_by(|a, b| b.cmp(a));
+    releases.dedup();
+    for idx in releases {
+        cmds.push(Box::new(dc_core::RemoveConnect::new(
+            dc_core::ConnectsOwner::Page(page.id),
+            idx,
+        )));
+    }
+    (cmds, released)
+}
+
+
 /// The route polyline (page inches) between two endpoints under a
 /// style: straight is the chord; right-angle runs a Z with the elbow
 /// pair on the mid-perpendicular of the dominant axis; curved returns

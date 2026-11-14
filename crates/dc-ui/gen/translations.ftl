@@ -326,6 +326,7 @@ first-page = Erste Seite
 fit-the-page-width-planned = An die Seitenbreite anpassen — geplant
 fit-the-whole-page-in-the-window = Die ganze Seite ins Fenster einpassen
 fit-to-contents = An Inhalt anpassen
+flip = Spiegeln
 flip-horizontal = Horizontal spiegeln
 flip-vertical = Vertikal spiegeln
 floor-plan = Grundriss
@@ -494,6 +495,8 @@ move-down = Nach unten
 move-line-endpoint-shape-shape-i = Linienendpunkt verschieben (Form { $shape_id })
 move-shapes = Formen verschieben
 move-up = Nach oben
+my-shapes = Meine Shapes
+my-shapes-tip = Eine Schablone aus dem Ordner „Meine Shapes“ öffnen
 name = Name
 name-page-id = { $name } (Seite { $id })
 name-u-master-id = { $name_u } (Vorlage { $id })
@@ -843,6 +846,7 @@ strikethrough = Durchgestrichen
 strikethrough-planned = Durchgestrichen — geplant
 style = Format
 style-gallery-planned = Formatvorlagen-Galerie — geplant
+styles = Formatvorlagen
 sub-address-page = Unteradresse: Seite
 suggested-flowchart-network-floo = Vorschläge: Flussdiagramm · Netzwerk · Grundriss
 svg-copied-n-bytes-vector-paste = SVG kopiert ({ $n } Bytes, Vektor — in Editoren einfügen, die SVG-Text akzeptieren)
@@ -865,7 +869,7 @@ text-align-left = Linksbündig
 text-align-right = Rechtsbündig
 text-box = Textfeld
 text-color = Textfarbe
-text-color-planned = Textfarbe — geplant
+text-color-tip = Textfarbe der Auswahl
 text-field = Textfeld (Feld)
 text-formatting-arrives-with-a-l = Textformatierung kommt in einem späteren Meilenstein
 text-shapes-planned = Textformen — geplant
@@ -968,6 +972,12 @@ undo-ungroup-n =
     { $n ->
         [one] eine Gruppe aufgelöst
        *[other] { $n } Gruppen aufgelöst
+    }
+# $n - wie viele Verbinder gelöst wurden
+unglue-connectors =
+    { $n ->
+        [one] ein Verbinder gelöst
+       *[other] { $n } Verbinder gelöst
     }
 ungroup = Gruppierung aufheben
 ungroup-the-selected-group-s = Die ausgewählte(n) Gruppe(n) auflösen
@@ -1369,6 +1379,7 @@ first-page = First page
 fit-the-page-width-planned = Fit the page width — planned
 fit-the-whole-page-in-the-window = Fit the whole page in the window
 fit-to-contents = Fit to Contents
+flip = Flip
 flip-horizontal = Flip Horizontal
 flip-vertical = Flip Vertical
 floor-plan = Floor Plan
@@ -1551,6 +1562,8 @@ move-down = Move Down
 move-line-endpoint-shape-shape-i = move line endpoint (shape { $shape_id })
 move-shapes = move shapes
 move-up = Move Up
+my-shapes = My Shapes
+my-shapes-tip = Open a stencil from your My Shapes folder
 name = Name
 name-page-id = { $name } (page { $id })
 name-u-master-id = { $name_u } (master { $id })
@@ -1928,6 +1941,7 @@ strikethrough = Strikethrough
 strikethrough-planned = Strikethrough — planned
 style = Style
 style-gallery-planned = Style gallery — planned
+styles = Styles
 sub-address-page = Sub-address page
 suggested-flowchart-network-floo = Suggested: flowchart · network · floor plan
 # $n (Number) - argument
@@ -1953,7 +1967,7 @@ text-align-left = Align Left
 text-align-right = Align Right
 text-box = Text Box
 text-color = Text Color
-text-color-planned = Text color — planned
+text-color-tip = Text color of the selection
 text-field = Text Field
 text-formatting-arrives-with-a-l = Text formatting arrives with a later milestone
 text-shapes-planned = Text shapes — planned
@@ -2057,6 +2071,12 @@ undo-ungroup-n =
     { $n ->
         [one] ungroup one group
        *[other] ungroup { $n } groups
+    }
+# $n (Number) - how many connectors were unglued
+unglue-connectors =
+    { $n ->
+        [one] unglued one connector
+       *[other] unglued { $n } connectors
     }
 ungroup = Ungroup
 ungroup-the-selected-group-s = Ungroup the selected group(s)
@@ -2432,6 +2452,7 @@ first-page = صفحهٔ نخست
 fit-the-page-width-planned = بر اندازهٔ عرض صفحه — برنامه‌ریزی شده
 fit-the-whole-page-in-the-window = گنجاندن تمام صفحه در پنجره
 fit-to-contents = هم‌اندازه با محتوا
+flip = قرینه
 flip-horizontal = وارون افقی
 flip-vertical = وارون عمودی
 floor-plan = پلان طبقه
@@ -2600,6 +2621,8 @@ move-down = جابه‌جایی به پایین
 move-line-endpoint-shape-shape-i = جابه‌جایی درگاه خط (شکل { $shape_id })
 move-shapes = جابه‌جایی شکل‌ها
 move-up = جابه‌جایی به بالا
+my-shapes = شکل‌های من
+my-shapes-tip = بازکردن شابلون از پوشهٔ «شکل‌های من»
 name = نام
 name-page-id = { $name } (صفحهٔ { $id })
 name-u-master-id = { $name_u } (شابلون { $id })
@@ -2949,6 +2972,7 @@ strikethrough = خط‌خورده
 strikethrough-planned = خط‌خورده — برنامه‌ریزی شده
 style = قالب
 style-gallery-planned = گالری قالب — برنامه‌ریزی شده
+styles = قالب‌ها
 sub-address-page = زیرنشانی صفحه
 suggested-flowchart-network-floo = پیشنهادی: فلوچارت · شبکه · پلان طبقه
 svg-copied-n-bytes-vector-paste = SVG رونوشت شد ({ $n } بایت، برداری — در ویرایشگرهای پذیرندهٔ متن SVG بچسبانید)
@@ -2971,7 +2995,7 @@ text-align-left = تراز چپ
 text-align-right = تراز راست
 text-box = جعبهٔ متن
 text-color = رنگ متن
-text-color-planned = رنگ متن — برنامه‌ریزی شده
+text-color-tip = رنگ متن انتخاب
 text-field = فیلد متنی
 text-formatting-arrives-with-a-l = قالب‌بندی متن با نقطهٔ عطف بعدی می‌آید
 text-shapes-planned = شکل‌های متنی — برنامه‌ریزی شده
@@ -3074,6 +3098,12 @@ undo-ungroup-n =
     { $n ->
         [1] حل یک گروه
        *[other] حل { $n } گروه
+    }
+# $n - تعداد اتصال‌دهنده‌هایی که رها شدند
+unglue-connectors =
+    { $n ->
+        [1] یک اتصال‌دهنده رها شد
+       *[other] { $n } اتصال‌دهنده رها شد
     }
 ungroup = واگروه‌سازی
 ungroup-the-selected-group-s = واگروه‌کردن گروه‌های گزینش‌شده

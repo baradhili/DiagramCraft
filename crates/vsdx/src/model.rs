@@ -642,6 +642,28 @@ impl Document {
             .iter()
             .find_map(|sec| sec.named_row(name))
     }
+
+    /// Resolve a section (by name and IX) for `shape` across the master
+    /// chain: the instance sheet first, then the master root's — the
+    /// same layering [`effective_user_row`](Self::effective_user_row)
+    /// uses for rows. Like that accessor, `effective_sheet` cannot
+    /// serve this: it is either/or (a sheet with ANY local sections
+    /// returns only that sheet), so a real Visio-authored instance
+    /// would hide the master root's other sections — the seed
+    /// `SetRowCell` materializes a missing section from (#196).
+    pub fn effective_section<'a>(
+        &'a self,
+        shape: &'a Shape,
+        ancestors: &[&'a Shape],
+        name: &str,
+        ix: i64,
+    ) -> Option<&'a Section> {
+        if let Some(s) = shape.sheet.section(name, ix) {
+            return Some(s);
+        }
+        let src = self.instance_source(shape, ancestors)?;
+        src.sheet.section(name, ix)
+    }
 }
 
 /// Built-in defaults observed in shipped stylesheets ("No Style", ID 0).

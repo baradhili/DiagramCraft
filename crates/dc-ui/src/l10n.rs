@@ -2088,6 +2088,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "flip",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "flip-horizontal",
         attribute: None,
         vars: &[],
@@ -3125,6 +3132,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
     },
     MessageContract {
         message: "move-up",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "my-shapes",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "my-shapes-tip",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -5336,6 +5357,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "styles",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "sub-address-page",
         attribute: None,
         vars: &[],
@@ -5490,7 +5518,7 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
-        message: "text-color-planned",
+        message: "text-color-tip",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -5938,6 +5966,13 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "unglue-connectors",
+        attribute: None,
+        vars: &["n"],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "ungroup",
         attribute: None,
         vars: &[],
@@ -6303,9 +6338,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..44555,
-            Self::En => 44555..87782,
-            Self::Fa => 87782..144471,
+            Self::De => 0..44846,
+            Self::En => 44846..88347,
+            Self::Fa => 88347..145395,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -7518,6 +7553,9 @@ impl L10nLanguage {
     pub fn msg_fit_to_contents(&self) -> String {
         self.0.msg("fit-to-contents", None).unwrap()
     }
+    pub fn msg_flip(&self) -> String {
+        self.0.msg("flip", None).unwrap()
+    }
     pub fn msg_flip_horizontal(&self) -> String {
         self.0.msg("flip-horizontal", None).unwrap()
     }
@@ -8088,6 +8126,12 @@ impl L10nLanguage {
     }
     pub fn msg_move_up(&self) -> String {
         self.0.msg("move-up", None).unwrap()
+    }
+    pub fn msg_my_shapes(&self) -> String {
+        self.0.msg("my-shapes", None).unwrap()
+    }
+    pub fn msg_my_shapes_tip(&self) -> String {
+        self.0.msg("my-shapes-tip", None).unwrap()
     }
     pub fn msg_name(&self) -> String {
         self.0.msg("name", None).unwrap()
@@ -9320,6 +9364,9 @@ impl L10nLanguage {
     pub fn msg_style_gallery_planned(&self) -> String {
         self.0.msg("style-gallery-planned", None).unwrap()
     }
+    pub fn msg_styles(&self) -> String {
+        self.0.msg("styles", None).unwrap()
+    }
     pub fn msg_sub_address_page(&self) -> String {
         self.0.msg("sub-address-page", None).unwrap()
     }
@@ -9413,8 +9460,8 @@ impl L10nLanguage {
     pub fn msg_text_color(&self) -> String {
         self.0.msg("text-color", None).unwrap()
     }
-    pub fn msg_text_color_planned(&self) -> String {
-        self.0.msg("text-color-planned", None).unwrap()
+    pub fn msg_text_color_tip(&self) -> String {
+        self.0.msg("text-color-tip", None).unwrap()
     }
     pub fn msg_text_field(&self) -> String {
         self.0.msg("text-field", None).unwrap()
@@ -9707,6 +9754,12 @@ impl L10nLanguage {
         let mut _args = FluentArgs::new();
         _args.set("n", n.into());
         self.0.msg("undo-ungroup-n", Some(_args)).unwrap()
+    }
+    /// $n (Number) - how many connectors were unglued
+    pub fn msg_unglue_connectors<F0: Into<FluentNumber>>(&self, n: F0) -> String {
+        let mut _args = FluentArgs::new();
+        _args.set("n", n.into());
+        self.0.msg("unglue-connectors", Some(_args)).unwrap()
     }
     pub fn msg_ungroup(&self) -> String {
         self.0.msg("ungroup", None).unwrap()

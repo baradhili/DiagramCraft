@@ -349,6 +349,7 @@ first-page = First page
 fit-the-page-width-planned = Fit the page width — planned
 fit-the-whole-page-in-the-window = Fit the whole page in the window
 fit-to-contents = Fit to Contents
+flip = Flip
 flip-horizontal = Flip Horizontal
 flip-vertical = Flip Vertical
 floor-plan = Floor Plan
@@ -531,6 +532,8 @@ move-down = Move Down
 move-line-endpoint-shape-shape-i = move line endpoint (shape { $shape_id })
 move-shapes = move shapes
 move-up = Move Up
+my-shapes = My Shapes
+my-shapes-tip = Open a stencil from your My Shapes folder
 name = Name
 name-page-id = { $name } (page { $id })
 name-u-master-id = { $name_u } (master { $id })
@@ -908,6 +911,7 @@ strikethrough = Strikethrough
 strikethrough-planned = Strikethrough — planned
 style = Style
 style-gallery-planned = Style gallery — planned
+styles = Styles
 sub-address-page = Sub-address page
 suggested-flowchart-network-floo = Suggested: flowchart · network · floor plan
 # $n (Number) - argument
@@ -933,7 +937,7 @@ text-align-left = Align Left
 text-align-right = Align Right
 text-box = Text Box
 text-color = Text Color
-text-color-planned = Text color — planned
+text-color-tip = Text color of the selection
 text-field = Text Field
 text-formatting-arrives-with-a-l = Text formatting arrives with a later milestone
 text-shapes-planned = Text shapes — planned
@@ -1037,6 +1041,12 @@ undo-ungroup-n =
     { $n ->
         [one] ungroup one group
        *[other] ungroup { $n } groups
+    }
+# $n (Number) - how many connectors were unglued
+unglue-connectors =
+    { $n ->
+        [one] unglued one connector
+       *[other] unglued { $n } connectors
     }
 ungroup = Ungroup
 ungroup-the-selected-group-s = Ungroup the selected group(s)

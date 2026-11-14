@@ -58,6 +58,19 @@ fn row_index(rows: &[Row], sel: &RowSel) -> Option<usize> {
     })
 }
 
+/// Find a row (by [`RowSel`]) inside a sheet's section — the per-level
+/// lookup `SetRowCell`'s first-edit materialization walks (#196).
+fn section_row<'a>(
+    sheet: &'a vsdx::model::Sheet,
+    section: &str,
+    section_ix: i64,
+    row: &RowSel,
+) -> Option<&'a vsdx::model::Row> {
+    let sec = sheet.section(section, section_ix)?;
+    let ri = row_index(&sec.rows, row)?;
+    sec.rows.get(ri)
+}
+
 /// Set a cell inside a section row (replace preserving position, or push).
 pub fn set_row_cell(
     sheet: &mut vsdx::model::Sheet,
@@ -665,9 +678,17 @@ impl crate::Command for SetRowCell {
     fn apply(&mut self, doc: &mut Document) -> Result<()> {
         // Visio materializes inherited sections/rows on first edit: when
         // the local sheet lacks the section or row, create it seeded with
-        // the inherited cells (effective sheet) so untouched values keep
-        // their master's appearance.
-        let inherited_sec: Option<vsdx::model::Section> = (|| {
+        // the inherited cells so untouched values keep their master's
+        // appearance. #196: both seed lookups are chain-aware per target
+        // — instance sheet first, then the master root, like #191's
+        // `effective_user_row` — because `effective_sheet` is either/or:
+        // an instance with ANY local sections hides the master root's
+        // row, and the materialized row landed empty (no Prompt, no
+        // unit attribute, no sibling cells).
+        let (inherited_sec, inherited_row): (
+            Option<vsdx::model::Section>,
+            Option<vsdx::model::Row>,
+        ) = (|| {
             let Scope::Shape {
                 page: page_id,
                 shape: shape_id,
@@ -678,19 +699,24 @@ impl crate::Command for SetRowCell {
             let page = doc.pages.iter().find(|p| p.id == *page_id)?;
             let sh = crate::scope::find_shape(&page.shapes, *shape_id)?;
             let chain = crate::scope::shape_chain(doc, *page_id, *shape_id).ok()?;
-            let eff = doc.effective_sheet(sh, &chain);
-            eff.sections_named(&self.section)
-                .into_iter()
-                .find(|s| s.ix == self.section_ix)
-                .cloned()
-        })();
-        let inherited_row: Option<vsdx::model::Row> = inherited_sec.as_ref().and_then(|sec| {
-            match &self.row {
-                RowSel::Ix(ix) => sec.rows.iter().find(|r| r.ix == *ix),
-                RowSel::Named(n) => sec.rows.iter().find(|r| r.n.as_deref() == Some(n.as_str())),
-            }
-            .cloned()
-        });
+            // Section seed: the instance's own section when it has
+            // one, else the master root's.
+            let sec = doc
+                .effective_section(sh, &chain, &self.section, self.section_ix)
+                .cloned();
+            // Row seed: a chain walk of its own — the instance's
+            // section can exist WITHOUT the row (the row still
+            // lives on the master root), so deriving the row from
+            // the section seed would stop at the instance section.
+            let row = section_row(&sh.sheet, &self.section, self.section_ix, &self.row)
+                .or_else(|| {
+                    let src = doc.instance_source(sh, &chain)?;
+                    section_row(&src.sheet, &self.section, self.section_ix, &self.row)
+                })
+                .cloned();
+            Some((sec, row))
+        })()
+        .unwrap_or((None, None));
 
         let s = sheet_mut(doc, &self.scope)?;
         let has_section = s.children.iter().any(|c| {

@@ -31,14 +31,22 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
+          # file — appimagetool's 2026-11 continuous build requires it (#274)
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential binutils \
+            ca-certificates curl git file build-essential binutils \
             libxkbcommon-x11-0 libxkbcommon0 libx11-6 libx11-xcb1 libxcb1 libxcb-xkb1 \
             libxcursor1 libxrandr2 libxi6 libxrender1 libxfixes3 libxext6 \
             libxau6 libxdmcp6 libbsd0 libmd0 libwayland-client0 \
             libwayland-cursor0 libwayland-egl1 libffi8 libdbus-1-3
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        # #271: this container has no preinstalled Rust for the rustup
+        # proxy to fall back to, and the action installs the minimal
+        # profile — no rustfmt. dc-ui's fluent-typed build script
+        # (since #246) pipes its generated code through rustfmt, so it
+        # is a hard build dependency.
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install packaging tools
         run: cargo install cargo-deb cargo-generate-rpm --locked
@@ -53,7 +61,7 @@ jobs:
           # older-baseline linker (e.g. cargo-zigbuild) instead.
           GLIBC_FLOOR: "2.35"
         run: |
-          BIN=target/release/diagramcraft
+          BIN=target/release/tarahi
           MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
           MAXN="${MAXV#GLIBC_}"
           echo "highest GLIBC symbol version required: ${MAXV:-none}"
@@ -75,7 +83,7 @@ jobs:
         working-directory: crates/dc-ui
         run: |
           cargo generate-rpm
-          mv target/generate-rpm/*.rpm "${GITHUB_WORKSPACE}/diagramcraft_${{ steps.ver.outputs.version }}_amd64.rpm"
+          mv target/generate-rpm/*.rpm "${GITHUB_WORKSPACE}/Tarahi_${{ steps.ver.outputs.version }}_amd64.rpm"
       - name: AppImage
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -116,15 +124,15 @@ jobs:
           # diagramcraft_*.AppImage for it (#261).
           OUTPUT="Tarahi_${{ steps.ver.outputs.version }}_x86_64.AppImage" /tmp/linuxdeploy \
             --appdir AppDir \
-            -e target/release/diagramcraft \
+            -e target/release/tarahi \
             -d packaging/tarahi.desktop \
-            -i packaging/diagramcraft.png \
+            -i packaging/tarahi.png \
             --output appimage
       - name: Collect artifacts
         run: |
           mkdir -p dist
           cp target/debian/*.deb dist/
-          cp diagramcraft_*_amd64.rpm dist/
+          cp Tarahi_*_amd64.rpm dist/
           cp Tarahi_*_x86_64.AppImage dist/
           ls -la dist/
       - uses: actions/upload-artifact@v7
@@ -138,6 +146,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        # rustfmt is a dc-ui build dependency (#246/#271); the runner
+        # images happen to preinstall it — don't rely on that.
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install NSIS
         run: choco install nsis -y
@@ -158,12 +170,12 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          7z a -tzip "dist/diagramcraft_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/diagramcraft.exe
+          7z a -tzip "dist/Tarahi_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/tarahi.exe
       - name: Collect artifacts
         shell: bash
         run: |
           # NSIS writes OutFile relative to the script directory.
-          cp packaging/diagramcraft_*_setup.exe dist/
+          cp packaging/Tarahi_*_setup.exe dist/
           ls -la dist/
       - uses: actions/upload-artifact@v7
         with:
@@ -176,8 +188,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        # rustfmt: see the windows job note (#246/#271).
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Version
         id: ver
@@ -189,31 +203,31 @@ jobs:
         run: |
           cargo build --release -p dc-ui --locked --target x86_64-apple-darwin
           cargo build --release -p dc-ui --locked --target aarch64-apple-darwin
-          mkdir -p "DiagramCraft.app/Contents/MacOS" "DiagramCraft.app/Contents/Resources"
+          mkdir -p "Tarahi.app/Contents/MacOS" "Tarahi.app/Contents/Resources"
           lipo -create \
-            target/x86_64-apple-darwin/release/diagramcraft \
-            target/aarch64-apple-darwin/release/diagramcraft \
-            -output "DiagramCraft.app/Contents/MacOS/DiagramCraft"
+            target/x86_64-apple-darwin/release/tarahi \
+            target/aarch64-apple-darwin/release/tarahi \
+            -output "Tarahi.app/Contents/MacOS/Tarahi"
       - name: Bundle icon
         run: |
           mkdir AppIcon.iconset
           for size in 16 32 128 256; do
-            sips -z $size $size packaging/diagramcraft.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
+            sips -z $size $size packaging/tarahi.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
             big=$((size * 2))
-            sips -z $big $big packaging/diagramcraft.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
+            sips -z $big $big packaging/tarahi.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
           done
-          iconutil -c icns AppIcon.iconset -o "DiagramCraft.app/Contents/Resources/AppIcon.icns"
+          iconutil -c icns AppIcon.iconset -o "Tarahi.app/Contents/Resources/AppIcon.icns"
       - name: Bundle app + dmg
         run: |
-          cp packaging/Info.plist "DiagramCraft.app/Contents/Info.plist"
-          mkdir -p "DiagramCraft.app/Contents/Resources/licenses"
-          cp LICENSE-MIT LICENSE-APACHE "DiagramCraft.app/Contents/Resources/licenses/"
-          cp crates/dc/assets/fonts/LICENSE-Carlito "DiagramCraft.app/Contents/Resources/licenses/"
-          codesign --force --sign - --deep "DiagramCraft.app"
+          cp packaging/Info.plist "Tarahi.app/Contents/Info.plist"
+          mkdir -p "Tarahi.app/Contents/Resources/licenses"
+          cp LICENSE-MIT LICENSE-APACHE "Tarahi.app/Contents/Resources/licenses/"
+          cp crates/dc/assets/fonts/LICENSE-Carlito "Tarahi.app/Contents/Resources/licenses/"
+          codesign --force --sign - --deep "Tarahi.app"
           mkdir -p dist
-          hdiutil create -volname "DiagramCraft" \
-            -srcfolder "DiagramCraft.app" -ov -format UDZO \
-            "dist/diagramcraft_${{ steps.ver.outputs.version }}_universal.dmg"
+          hdiutil create -volname "Tarahi" \
+            -srcfolder "Tarahi.app" -ov -format UDZO \
+            "dist/Tarahi_${{ steps.ver.outputs.version }}_universal.dmg"
       - uses: actions/upload-artifact@v7
         with:
           name: macos

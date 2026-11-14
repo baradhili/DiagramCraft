@@ -337,6 +337,150 @@ fn ctx_menu_icon_bar_dispatches_and_mirrors_enablement() {
     );
 }
 
+/// #149 item 1: the mini-toolbar's Flip slot is a DROPDOWN — one
+/// glyph cannot pick Vertical vs Horizontal, so the click opens a
+/// two-entry flyout whose items dispatch the text rows' flips.
+#[test]
+fn ctx_bar_flip_flyout_flips_both_orientations() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    // Flip cells start ABSENT on the blank rectangle (default 0).
+    let cell = |h: &Harness<'_, App>, n: &str| {
+        h.state()
+            .debug_cell(page, a, n)
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let flip = |h: &mut Harness<'_, App>, which: &str| {
+        let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+        click_at(h, to, egui::PointerButton::Secondary);
+        h.run();
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+        let btn = h
+            .get_all_by_label("Flip")
+            .into_iter()
+            .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+            .expect("the Flip dropdown button");
+        btn.click();
+        h.run();
+        // The flyout renders at the panel (the menu's top); the menu's
+        // own Flip text rows sit far below — the topmost match is the
+        // flyout entry.
+        let entry = h
+            .get_all_by_label_contains(which)
+            .min_by(|a, b| {
+                a.rect()
+                    .top()
+                    .partial_cmp(&b.rect().top())
+                    .expect("finite rects")
+            })
+            .unwrap_or_else(|| panic!("the {which} flyout entry"));
+        entry.click();
+        h.run();
+    };
+    flip(&mut h, "Flip Vertical");
+    let fy = cell(&h, "FlipY");
+    assert!(
+        (fy - 1.0).abs() < 1e-6,
+        "Flip Vertical wrote FlipY=1, got {fy}"
+    );
+    // The menu consumed, so a second open + flip lands Horizontal.
+    flip(&mut h, "Flip Horizontal");
+    let fx = cell(&h, "FlipX");
+    assert!(
+        (fx - 1.0).abs() < 1e-6,
+        "Flip Horizontal wrote FlipX=1, got {fx}"
+    );
+    // One undo removes the last flip.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let fx = cell(&h, "FlipX");
+    assert!(fx.abs() < 1e-6, "undo restored FlipX=0, got {fx}");
+}
+
+/// #149 item 2: the three Format icons open the Format Shape pane
+/// FOCUSED on their section (Fill / Line / Text), not generically.
+/// The seam reports the LAST targeted section (the one-shot scroll
+/// focus is consumed by the pane's first render, which can land in
+/// the same frame as the click) — so the Fill icon is additionally
+/// pinned END-TO-END (Greptile PR #277): the pane actually opens
+/// with the section expanded, and the one-shot focus forces a
+/// collapsed target back open. (The scroll half of the focus is
+/// inert in the tall harness pane by design — scroll_to_me on a
+/// non-overflowing area is a no-op.)
+#[test]
+fn ctx_bar_format_icons_focus_their_pane_section() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    // End-to-end on the Fill icon: the click opens the pane with the
+    // Fill section expanded (its Foreground row renders).
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Format Shape Fill…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label("Format Shape").next().is_some(),
+        "the pane opened (its heading renders)"
+    );
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_some(),
+        "the Fill section renders expanded"
+    );
+    // Collapse the pane's Fill header (the right-side "Fill" — the
+    // ribbon carries its own) and confirm the body disappears.
+    let fill_hdr = h
+        .get_all_by_label("Fill")
+        .into_iter()
+        .find(|n| n.rect().left() > 1000.0)
+        .expect("the pane's Fill header");
+    fill_hdr.click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_none(),
+        "collapsed: the section body is gone"
+    );
+    // The icon again: the one-shot focus forces the section open.
+    // (Re-read the shape's center — the opened pane narrowed the
+    // canvas and shifted every screen position.)
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Format Shape Fill…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_some(),
+        "the focused section is forced back open"
+    );
+    // The per-icon targets, via the seam.
+    for (bar_label, section) in [
+        ("Format Shape Fill…", "fill"),
+        ("Format Shape Line…", "line"),
+        ("Format Shape Text…", "text"),
+    ] {
+        let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+        click_at(&mut h, to, egui::PointerButton::Secondary);
+        h.run();
+        h.run();
+        // Exact match picks the bar icon (the text rows carry
+        // leading-space layout text).
+        h.get_by_label(bar_label).click();
+        h.run();
+        assert_eq!(
+            h.state().debug_format_pane_focus(),
+            Some(section),
+            "{bar_label} targets the {section} section"
+        );
+    }
+}
+
 #[test]
 fn right_click_menu_delete_removes_shape() {
     let mut h = harness_with_blank();
@@ -3982,6 +4126,47 @@ fn format_pane_edits_cells_for_whole_selection() {
     );
 }
 
+// #150: the Home ▸ Font Text color button opens the shared palette
+// on #73's ColorTarget::Text — a pick writes the Character row-0
+// Color cell through the whole-selection macro (first-edit
+// materialization), and one undo removes the materialized row.
+// (The WYSIWYG render of that cell is pinned by the #73 pane leg
+// above — same apply_color path.)
+#[test]
+fn ribbon_text_color_button_writes_character_color() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let canvas = h.state().debug_canvas_rect();
+    click_at(&mut h, cells[0].1.center(), egui::PointerButton::Primary);
+    click_at(&mut h, canvas.center(), egui::PointerButton::Primary);
+    h.run();
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    // The icon-only ribbon button carries its name in the a11y label
+    // (#252 compact tier); the palette window it opens shares the
+    // "Text Color" title, so the button query runs while it is closed.
+    h.get_by_label("Text Color").click();
+    h.run();
+    // The swatch click is also the palette-open assert (the label
+    // exists only inside the popup).
+    h.get_by_label("#FFC000").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        Some("#FFC000".into()),
+        "the ribbon button's palette wrote the Character row-0 Color cell"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        None,
+        "one undo removed the materialized Color cell"
+    );
+}
+
 /// GitHub #29 rework: the badge indicates a comment; the popup edits,
 /// replies, and deletes — one undo per action.
 #[test]
@@ -7322,6 +7507,194 @@ fn arrow_keys_nudge_the_selection() {
     h.run();
     let x3 = cell_of(&h, page, a, "PinX");
     assert!((x3 - x1).abs() < 1e-5, "one undo = one nudge");
+}
+
+/// #180: the documented Visio unglue-all operation — "select one or
+/// more connectors and press any arrow key" (MS Learn, Glue or unglue
+/// connectors). Any arrow key with a glued connector selected
+/// releases BOTH ends in one undo step; the press does not nudge,
+/// undo restores the glue, and once unglued the same key nudges
+/// again (the documented operation yields the key back to #110).
+#[test]
+fn arrow_key_unglues_selected_connector_one_undo() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn = h.state().debug_sel().expect("connector selected").1;
+    let glue_count = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn)
+            .count()
+    };
+    assert_eq!(glue_count(&h), 2, "drawn glued at both ends");
+    let val = |h: &Harness<'_, App>, cell: &str| {
+        h.state()
+            .debug_cell(page, conn, cell)
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+    };
+    let (bx0, ex0, px0) = (
+        val(&h, "BeginX").expect("BeginX"),
+        val(&h, "EndX").expect("EndX"),
+        val(&h, "PinX").expect("PinX"),
+    );
+
+    // Any arrow key: the press unglues — nothing moves.
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert_eq!(glue_count(&h), 0, "both Connect records dropped");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "BeginX").is_none(),
+        "the begin glue formula is gone"
+    );
+    assert!(
+        h.state().debug_cell_formula(page, conn, "EndX").is_none(),
+        "the end glue formula is gone"
+    );
+    assert!(
+        (val(&h, "BeginX").unwrap() - bx0).abs() < 1e-5
+            && (val(&h, "EndX").unwrap() - ex0).abs() < 1e-5,
+        "the endpoints keep their resolved positions"
+    );
+    assert!(
+        (val(&h, "PinX").unwrap() - px0).abs() < 1e-5,
+        "the press did not nudge"
+    );
+    assert!(
+        strip_bidi(h.state().debug_status()).contains("unglued one connector"),
+        "status notes the unglue: {}",
+        h.state().debug_status()
+    );
+
+    // Nothing glued anymore: the same key falls through to nudge.
+    h.key_press(egui::Key::ArrowRight);
+    h.run();
+    assert!(
+        (val(&h, "PinX").unwrap() - px0 - 0.25).abs() < 1e-5,
+        "unglued, the arrow nudges again"
+    );
+
+    // One undo removes the nudge (still unglued), a second restores
+    // the glue records, formulas, and pose.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert!(
+        (val(&h, "PinX").unwrap() - px0).abs() < 1e-5,
+        "first undo removes just the nudge"
+    );
+    assert_eq!(glue_count(&h), 0, "still unglued after the nudge undo");
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(glue_count(&h), 2, "second undo restores the glue records");
+    assert!(
+        h.state().debug_cell_formula(page, conn, "BeginX").is_some(),
+        "undo restores the glue formula"
+    );
+    assert!(
+        (val(&h, "BeginX").unwrap() - bx0).abs() < 1e-5,
+        "undo restores the begin pose"
+    );
+}
+
+/// #180's multi-connector half: "to unglue several connectors at
+/// once, hold Ctrl as you select the connectors, and then press any
+/// arrow key" — every selected glued connector releases in ONE undo
+/// step and nothing else in the selection moves.
+#[test]
+fn arrow_key_unglues_every_selected_connector() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    let asr = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    drag_naturally(&mut h, asr.center(), egui::vec2(150.0, 0.0));
+    let (_, b) = place_master(&mut h, 2);
+    h.get_by_label_contains("Home").click();
+    h.run();
+    h.get_by_label_contains("Connector").click();
+    h.run();
+    let asr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(a)
+        .expect("A rect");
+    let bsr2 = h
+        .state()
+        .debug_shape_screen_rect_for_test(b)
+        .expect("B rect");
+    // Two connectors between the same pair — both glued both ends.
+    drag_naturally(&mut h, asr2.center(), bsr2.center() - asr2.center());
+    let conn1 = h.state().debug_sel().expect("connector 1 selected").1;
+    drag_naturally(&mut h, bsr2.center(), asr2.center() - bsr2.center());
+    let conn2 = h.state().debug_sel().expect("connector 2 selected").1;
+    let total_glue = |h: &Harness<'_, App>| {
+        h.state()
+            .debug_connects()
+            .iter()
+            .filter(|(from, _, _, _, _, _)| *from == conn1 || *from == conn2)
+            .count()
+    };
+    assert_eq!(total_glue(&h), 4, "both connectors glued at both ends");
+    let pin = |h: &Harness<'_, App>, s: i64, n: &str| {
+        h.state()
+            .debug_cell(page, s, n)
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+            .unwrap_or_else(|| panic!("{n}"))
+    };
+    // Both axes: the press is ArrowUp, so a vertical nudge must fail
+    // the check too (CodeRabbit on the #239 batch).
+    let (a0, b0) = (
+        (pin(&h, a, "PinX"), pin(&h, a, "PinY")),
+        (pin(&h, b, "PinX"), pin(&h, b, "PinY")),
+    );
+
+    // Ctrl+A gathers shapes AND connectors (#110), then the arrow
+    // releases every glued connector without moving anything.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::A);
+    h.run();
+    h.key_press(egui::Key::ArrowUp);
+    h.run();
+    assert_eq!(total_glue(&h), 0, "all four Connect records dropped");
+    assert!(
+        (pin(&h, a, "PinX") - a0.0).abs() < 1e-5
+            && (pin(&h, a, "PinY") - a0.1).abs() < 1e-5
+            && (pin(&h, b, "PinX") - b0.0).abs() < 1e-5
+            && (pin(&h, b, "PinY") - b0.1).abs() < 1e-5,
+        "the shapes in the selection did not move on either axis"
+    );
+    assert!(
+        strip_bidi(h.state().debug_status()).contains("unglued 2 connectors"),
+        "status notes the batch: {}",
+        h.state().debug_status()
+    );
+
+    // One undo restores all four records.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(total_glue(&h), 4, "one undo restores every record");
 }
 
 /// #110 remainder: a DOUBLE-clicked Format Painter stays armed across

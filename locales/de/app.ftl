@@ -323,6 +323,7 @@ first-page = Erste Seite
 fit-the-page-width-planned = An die Seitenbreite anpassen — geplant
 fit-the-whole-page-in-the-window = Die ganze Seite ins Fenster einpassen
 fit-to-contents = An Inhalt anpassen
+flip = Spiegeln
 flip-horizontal = Horizontal spiegeln
 flip-vertical = Vertikal spiegeln
 floor-plan = Grundriss
@@ -491,6 +492,8 @@ move-down = Nach unten
 move-line-endpoint-shape-shape-i = Linienendpunkt verschieben (Form { $shape_id })
 move-shapes = Formen verschieben
 move-up = Nach oben
+my-shapes = Meine Shapes
+my-shapes-tip = Eine Schablone aus dem Ordner „Meine Shapes“ öffnen
 name = Name
 name-page-id = { $name } (Seite { $id })
 name-u-master-id = { $name_u } (Vorlage { $id })
@@ -840,6 +843,7 @@ strikethrough = Durchgestrichen
 strikethrough-planned = Durchgestrichen — geplant
 style = Format
 style-gallery-planned = Formatvorlagen-Galerie — geplant
+styles = Formatvorlagen
 sub-address-page = Unteradresse: Seite
 suggested-flowchart-network-floo = Vorschläge: Flussdiagramm · Netzwerk · Grundriss
 svg-copied-n-bytes-vector-paste = SVG kopiert ({ $n } Bytes, Vektor — in Editoren einfügen, die SVG-Text akzeptieren)
@@ -862,7 +866,7 @@ text-align-left = Linksbündig
 text-align-right = Rechtsbündig
 text-box = Textfeld
 text-color = Textfarbe
-text-color-planned = Textfarbe — geplant
+text-color-tip = Textfarbe der Auswahl
 text-field = Textfeld (Feld)
 text-formatting-arrives-with-a-l = Textformatierung kommt in einem späteren Meilenstein
 text-shapes-planned = Textformen — geplant
@@ -965,6 +969,12 @@ undo-ungroup-n =
     { $n ->
         [one] eine Gruppe aufgelöst
        *[other] { $n } Gruppen aufgelöst
+    }
+# $n - wie viele Verbinder gelöst wurden
+unglue-connectors =
+    { $n ->
+        [one] ein Verbinder gelöst
+       *[other] { $n } Verbinder gelöst
     }
 ungroup = Gruppierung aufheben
 ungroup-the-selected-group-s = Die ausgewählte(n) Gruppe(n) auflösen

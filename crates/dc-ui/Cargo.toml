@@ -7,11 +7,19 @@ description = "Tarahi desktop application (Visio-compatible diagram editor)"
 
 # Distribution name for the GUI binary (packaging + desktop entry).
 [[bin]]
-name = "diagramcraft"
+name = "tarahi"
 path = "src/main.rs"
 
 [package.metadata.deb]
-name = "diagramcraft"
+name = "tarahi"
+# Rename transition (CodeRabbit PR #277): the package was
+# `diagramcraft`, and it already shipped packaging/tarahi.desktop
+# (the desktop entry was renamed ahead of the package) — so the two
+# packages SHARE usr/share/applications/tarahi.desktop. Replaces
+# licenses the file takeover on upgrade; Breaks moves the old
+# package out. Conflicts is unnecessary (nothing else collides).
+replaces = ["diagramcraft"]
+breaks = ["diagramcraft"]
 maintainer = "Tarahi contributors"
 depends = "$auto"
 section = "graphics"
@@ -20,22 +28,22 @@ extended-description = """Native Linux diagram editor for Visio files: read, ren
 write .vsdx/.vstx/.vssx packages losslessly, with a Visio-style ribbon
 GUI, stencils and ShapeSheet inspector."""
 assets = [
-    ["target/release/diagramcraft", "usr/bin/", "755"],
+    ["target/release/tarahi", "usr/bin/", "755"],
     ["../../packaging/tarahi.desktop", "usr/share/applications/", "644"],
-    ["../../packaging/diagramcraft.png", "usr/share/icons/hicolor/512x512/apps/diagramcraft.png", "644"],
-    ["../../LICENSE-MIT", "usr/share/doc/diagramcraft/LICENSE-MIT", "644"],
-    ["../../LICENSE-APACHE", "usr/share/doc/diagramcraft/LICENSE-APACHE", "644"],
-    ["../../crates/dc/assets/fonts/LICENSE-Carlito", "usr/share/doc/diagramcraft/LICENSE-Carlito", "644"],
+    ["../../packaging/tarahi.png", "usr/share/icons/hicolor/512x512/apps/tarahi.png", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/tarahi/LICENSE-MIT", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/tarahi/LICENSE-APACHE", "644"],
+    ["../../crates/dc/assets/fonts/LICENSE-Carlito", "usr/share/doc/tarahi/LICENSE-Carlito", "644"],
 ]
 
 [package.metadata.generate-rpm]
 assets = [
-    { source = "../../target/release/diagramcraft", dest = "/usr/bin/diagramcraft", mode = "755" },
+    { source = "../../target/release/tarahi", dest = "/usr/bin/tarahi", mode = "755" },
     { source = "../../packaging/tarahi.desktop", dest = "/usr/share/applications/tarahi.desktop", mode = "644" },
-    { source = "../../packaging/diagramcraft.png", dest = "/usr/share/icons/hicolor/512x512/apps/diagramcraft.png", mode = "644" },
-    { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/diagramcraft/LICENSE-MIT", mode = "644" },
-    { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/diagramcraft/LICENSE-APACHE", mode = "644" },
-    { source = "../../crates/dc/assets/fonts/LICENSE-Carlito", dest = "/usr/share/licenses/diagramcraft/LICENSE-Carlito", mode = "644" },
+    { source = "../../packaging/tarahi.png", dest = "/usr/share/icons/hicolor/512x512/apps/tarahi.png", mode = "644" },
+    { source = "../../LICENSE-MIT", dest = "/usr/share/licenses/tarahi/LICENSE-MIT", mode = "644" },
+    { source = "../../LICENSE-APACHE", dest = "/usr/share/licenses/tarahi/LICENSE-APACHE", mode = "644" },
+    { source = "../../crates/dc/assets/fonts/LICENSE-Carlito", dest = "/usr/share/licenses/tarahi/LICENSE-Carlito", mode = "644" },
 ]
 
 [dependencies]
