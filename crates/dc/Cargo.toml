@@ -20,7 +20,7 @@ unicode-bidi = "0.3"
 # The shared SVG raster stack (#35): the same resvg 0.49 the GUI's
 # svgimg canvas half uses (matching lock entries), so PNG exports are
 # the canvas picture.
-resvg = "0.49.0"
+resvg = "0.50.0"
 # PDF export (#35): vector writer (shapes as paths, text as real
 # embedded Type0 fonts with ToUnicode — selectable, copyable).
 pdf-writer = "0.15"
