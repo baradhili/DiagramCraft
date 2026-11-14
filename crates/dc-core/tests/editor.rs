@@ -1913,6 +1913,133 @@ fn set_row_cell_materializes_section_seeded_from_master_root() {
     assert!(sh.sheet.section("User", 0).is_none());
 }
 
+/// #196 review (the #239 batch): the Hyperlink dialog's REPLACE flow
+/// removes the local row and rewrites the fields — and the removal
+/// path's re-materialization now seeds from the master root (#196),
+/// so a field the draft CLEARED must be written as an explicit empty
+/// value or the master's cell resurrects. Pins the composition: the
+/// cleared cells land empty, not "S"/"D".
+#[test]
+fn hyperlink_replace_does_not_resurrect_master_cleared_fields() {
+    let mut ed = Editor::new_blank();
+    // A master whose root carries a full hyperlink row.
+    let mut root_sheet = vsdx::model::Sheet::default();
+    root_sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Hyperlink".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                ix: 0,
+                cells: vec![
+                    ("Address".into(), vsdx::model::Cell::value("https://master")),
+                    ("SubAddress".into(), vsdx::model::Cell::value("S")),
+                    ("Description".into(), vsdx::model::Cell::value("D")),
+                ],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        }));
+    ed.doc.masters.push(vsdx::model::Master {
+        id: 903,
+        shapes: vec![vsdx::model::Shape {
+            id: 1,
+            sheet: root_sheet,
+            ..vsdx::model::Shape::default()
+        }],
+        ..vsdx::model::Master::default()
+    });
+    // The instance's local override row, SubAddress already cleared.
+    let mut sheet = vsdx::model::Sheet::default();
+    sheet
+        .children
+        .push(vsdx::model::SheetChild::Section(vsdx::model::Section {
+            name: "Hyperlink".into(),
+            ix: 0,
+            rows: vec![vsdx::model::Row {
+                ix: 0,
+                cells: vec![
+                    ("Address".into(), vsdx::model::Cell::value("https://local")),
+                    ("SubAddress".into(), vsdx::model::Cell::value("")),
+                ],
+                ..vsdx::model::Row::default()
+            }],
+            ..vsdx::model::Section::default()
+        }));
+    let page = ed.doc.pages[0].id;
+    let sid = dc_core::commands::next_shape_id(&ed.doc, page);
+    ed.apply(dc_core::AddShape {
+        page,
+        parent: None,
+        shape: vsdx::model::Shape {
+            id: sid,
+            master: Some(903),
+            sheet,
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let scope = dc_core::Scope::Shape { page, shape: sid };
+
+    // The dialog's replace flow: remove the local row, then write
+    // EVERY field — cleared ones as explicit empties.
+    ed.apply(dc_core::Macro::new(
+        "edit hyperlink",
+        vec![
+            Box::new(dc_core::commands::RemoveSectionRow::new(
+                scope.clone(),
+                "Hyperlink",
+                0,
+                dc_core::commands::RowSel::Ix(0),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Hyperlink",
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                "Address",
+                vsdx::model::Cell::value("https://local2"),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope.clone(),
+                "Hyperlink",
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                "SubAddress",
+                vsdx::model::Cell::value(""),
+            )),
+            Box::new(dc_core::SetRowCell::new(
+                scope,
+                "Hyperlink",
+                0,
+                dc_core::commands::RowSel::Ix(0),
+                "Description",
+                vsdx::model::Cell::value(""),
+            )),
+        ],
+    ))
+    .unwrap();
+
+    let sh = vsdx::model::find_shape_by_id(&ed.doc.pages[0].shapes, sid).unwrap();
+    let row = sh
+        .sheet
+        .section("Hyperlink", 0)
+        .and_then(|s| s.row_by_ix(0))
+        .expect("row replaced");
+    let v = |n: &str| row.cell(n).and_then(|c| c.v.clone());
+    assert_eq!(v("Address").as_deref(), Some("https://local2"));
+    assert_eq!(
+        v("SubAddress").as_deref(),
+        Some(""),
+        "the cleared field stays empty — the master's 'S' must not resurrect"
+    );
+    assert_eq!(
+        v("Description").as_deref(),
+        Some(""),
+        "the cleared field stays empty — the master's 'D' must not resurrect"
+    );
+}
+
 /// #196, row-level seed: the instance HAS a local User section but
 /// not the target row (the row still lives on the master root) — the
 /// materialized row is seeded from the master root's row, not created

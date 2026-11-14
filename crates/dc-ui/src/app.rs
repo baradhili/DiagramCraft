@@ -11975,18 +11975,31 @@ impl App {
                                 )));
                             }
                         }
+                        let all_empty = address.trim().is_empty()
+                            && sub.trim().is_empty()
+                            && desc.trim().is_empty();
                         for (name, val) in [
                             ("Address", &address),
                             ("SubAddress", &sub),
                             ("Description", &desc),
                         ] {
-                            // A materializing edit writes every
-                            // field, cleared ones as explicit
-                            // empty values: the materialized row
-                            // is seeded with the inherited cells,
-                            // so a skipped field would silently
-                            // keep its master value (#139 review).
-                            if from_master || !val.trim().is_empty() {
+                            // A materializing or REPLACING edit writes
+                            // every field, cleared ones as explicit
+                            // empty values: the materialized row is
+                            // seeded with the inherited cells, so a
+                            // skipped field would silently keep its
+                            // master value (#139 review; #196 extended
+                            // the seeding to the remove-then-rewrite
+                            // path, where it resurrects cleared fields
+                            // the same way — CodeRabbit on the #239
+                            // batch). An all-empty draft keeps the pure
+                            // row deletion (no write, nothing
+                            // re-seeds); a brand-new row keeps the
+                            // non-empty-only writes.
+                            if from_master
+                                || !val.trim().is_empty()
+                                || (edit_row.is_some() && !all_empty)
+                            {
                                 cmds.push(Box::new(dc_core::SetRowCell::new(
                                     scope.clone(),
                                     "Hyperlink",

@@ -7610,13 +7610,18 @@ fn arrow_key_unglues_every_selected_connector() {
             .count()
     };
     assert_eq!(total_glue(&h), 4, "both connectors glued at both ends");
-    let pin = |h: &Harness<'_, App>, s: i64| {
+    let pin = |h: &Harness<'_, App>, s: i64, n: &str| {
         h.state()
-            .debug_cell(page, s, "PinX")
+            .debug_cell(page, s, n)
             .and_then(|(v, _)| v.parse::<f64>().ok())
-            .expect("PinX")
+            .unwrap_or_else(|| panic!("{n}"))
     };
-    let (a0, b0) = (pin(&h, a), pin(&h, b));
+    // Both axes: the press is ArrowUp, so a vertical nudge must fail
+    // the check too (CodeRabbit on the #239 batch).
+    let (a0, b0) = (
+        (pin(&h, a, "PinX"), pin(&h, a, "PinY")),
+        (pin(&h, b, "PinX"), pin(&h, b, "PinY")),
+    );
 
     // Ctrl+A gathers shapes AND connectors (#110), then the arrow
     // releases every glued connector without moving anything.
@@ -7626,8 +7631,11 @@ fn arrow_key_unglues_every_selected_connector() {
     h.run();
     assert_eq!(total_glue(&h), 0, "all four Connect records dropped");
     assert!(
-        (pin(&h, a) - a0).abs() < 1e-5 && (pin(&h, b) - b0).abs() < 1e-5,
-        "the shapes in the selection did not move"
+        (pin(&h, a, "PinX") - a0.0).abs() < 1e-5
+            && (pin(&h, a, "PinY") - a0.1).abs() < 1e-5
+            && (pin(&h, b, "PinX") - b0.0).abs() < 1e-5
+            && (pin(&h, b, "PinY") - b0.1).abs() < 1e-5,
+        "the shapes in the selection did not move on either axis"
     );
     assert!(
         strip_bidi(h.state().debug_status()).contains("unglued 2 connectors"),

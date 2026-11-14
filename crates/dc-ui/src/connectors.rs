@@ -515,14 +515,21 @@ pub fn unglue_cmds(
         if !is_connector_in(doc, &chain, sh) {
             continue;
         }
-        let mut any = false;
+        let mut released_cells: Vec<&'static str> = Vec::new();
         for end in [End::Begin, End::End] {
-            // A glued end: its X cell carries the glue formula (static
-            // `PAR(PNT(...))` or dynamic `_WALKGLUE`) or a Connect
-            // record names it — either way the record drops and the
-            // formula yields to its resolved value (the body-drag
+            // A glued end: its X cell carries a RECOGNIZED glue formula
+            // (static `PAR(PNT(...))` or dynamic `_WALKGLUE` — the glue
+            // engine's own signature, the same #250 rule geom.rs's
+            // connector check uses; any OTHER endpoint formula is
+            // user-authored and must survive the release) or a Connect
+            // record names it. Either way the record drops and the
+            // glue formula yields to its resolved value (the body-drag
             // release's write set, without the drag).
-            let glued = dc_core::commands::effective_formula(doc, sh, &chain, end.cell()).is_some()
+            let glue_formula =
+                dc_core::commands::effective_formula(doc, sh, &chain, end.cell()).is_some_and(
+                    |f| f.contains("PAR(PNT(") || f.contains("_WALKGLUE("),
+                );
+            let glued = glue_formula
                 || connects
                     .list
                     .iter()
@@ -534,7 +541,7 @@ pub fn unglue_cmds(
             let (Some(x), Some(y)) = (v(end.cell()), v(end.y_cell())) else {
                 continue;
             };
-            any = true;
+            released_cells.push(end.cell());
             for (name, val) in [(end.cell(), x), (end.y_cell(), y)] {
                 cmds.push(
                     Box::new(dc_core::SetGluedCell::new(
@@ -548,16 +555,19 @@ pub fn unglue_cmds(
                 );
             }
         }
-        if any {
+        if !released_cells.is_empty() {
             released.push(sid);
+            // Only the ends whose release writes were queued lose their
+            // records — an end that stayed glued (e.g. an unresolvable
+            // formula skipped above) keeps its Connect (CodeRabbit
+            // #239-batch review: a per-shape filter would orphan it).
             releases.extend(
                 connects
                     .list
                     .iter()
                     .enumerate()
                     .filter(|(_, c)| {
-                        c.from_sheet == sid
-                            && matches!(c.from_cell.as_str(), "BeginX" | "EndX")
+                        c.from_sheet == sid && released_cells.contains(&c.from_cell.as_str())
                     })
                     .map(|(i, _)| i),
             );
