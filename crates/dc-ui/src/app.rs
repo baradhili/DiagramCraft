@@ -1596,6 +1596,26 @@ impl App {
         self.open_builtin_stencil(b);
     }
 
+    /// "More Shapes ▸ My Shapes ▸ <stencil>" (#266): open (or focus)
+    /// the file through the user-stencil path — exactly a picker
+    /// result: title = file stem, pane identity = the file path — or
+    /// close its entry when it is already open (the menu checkbox
+    /// state, the built-in categories' semantics). An unreadable
+    /// stencil surfaces as a status note, like other load failures.
+    fn toggle_my_shapes_stencil(&mut self, path: PathBuf) {
+        if let Some(ix) = self.stencils.position_for(&path) {
+            let title = self
+                .stencils
+                .get(ix)
+                .map(|st| st.title.clone())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            self.stencil.close_entry(&mut self.stencils, ix);
+            self.status = crate::i18n::strs().msg_closed_title(title);
+            return;
+        }
+        self.open_stencil(path);
+    }
+
     /// Open one built-in catalog stencil (#87), DISK-FIRST (#104):
     /// the extracted `.vssx` under My Shapes when it is there (the
     /// file identity — the same entry the user gets opening that
@@ -14907,6 +14927,10 @@ impl App {
                         let mut armed = None;
                         let mut request = None;
                         let title = stencil_title(&self.path);
+                        // #266: the My Shapes menu scan is gated on the
+                        // same disk flag the headless ctors pin false —
+                        // kittest never reads the user's real folder.
+                        let my_shapes = self.stencil_disk.then(Self::my_shapes_dir).flatten();
                         {
                             let App {
                                 ed,
@@ -14917,9 +14941,15 @@ impl App {
                                 ..
                             } = self;
                             if let Some(ed) = ed.as_ref() {
-                                if let Some(id) =
-                                    stencil.show(ui, ed, stencils, &title, pool, quick_shapes)
-                                {
+                                if let Some(id) = stencil.show(
+                                    ui,
+                                    ed,
+                                    stencils,
+                                    &title,
+                                    pool,
+                                    quick_shapes,
+                                    my_shapes.as_deref(),
+                                ) {
                                     armed = Some(id);
                                 }
                                 request = stencil.request.take();
@@ -14934,6 +14964,9 @@ impl App {
                             }
                             Some(crate::stencil::Request::ToggleBuiltin(slug)) => {
                                 self.toggle_builtin(slug);
+                            }
+                            Some(crate::stencil::Request::MyShapes(path)) => {
+                                self.toggle_my_shapes_stencil(path);
                             }
                             Some(crate::stencil::Request::QuickShapesMenu(key)) => {
                                 let anchor = ui
@@ -16381,6 +16414,43 @@ mod tests {
             my_shapes_path(Some(PathBuf::from("/home/bret"))),
             PathBuf::from("/home/bret/Documents/My Shapes")
         );
+    }
+
+    /// #266: the My Shapes menu toggle opens a user stencil through
+    /// the file path — exactly a picker result (title = file stem,
+    /// pane identity = the path) — and the toggle on an open entry
+    /// closes it (the menu checkbox state). An unparseable file
+    /// surfaces as a status note, never a panic.
+    #[test]
+    fn my_shapes_toggle_opens_and_closes_the_file_stencil() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("community-pack.vssx");
+        let basic = crate::stencil::builtin::by_slug("basic").expect("basic ships");
+        std::fs::write(&path, basic.bytes).unwrap();
+
+        let mut app = App::with_doc_opt(None);
+        app.toggle_my_shapes_stencil(path.clone());
+        assert_eq!(
+            app.debug_open_stencil_titles(),
+            vec!["community-pack".to_string()],
+            "the menu open lands like a picker result: stem title, file identity"
+        );
+        app.toggle_my_shapes_stencil(path.clone());
+        assert!(
+            app.debug_open_stencil_titles().is_empty(),
+            "the toggle on an open entry closes it"
+        );
+        app.toggle_my_shapes_stencil(path);
+        assert_eq!(
+            app.debug_open_stencil_titles(),
+            vec!["community-pack".to_string()],
+            "a closed entry re-opens through the same menu path"
+        );
+
+        let bad = tmp.path().join("broken.vssx");
+        std::fs::write(&bad, b"not a package").unwrap();
+        app.toggle_my_shapes_stencil(bad);
+        assert!(!app.status.is_empty(), "an unreadable stencil is surfaced");
     }
 
     /// #188: a NURBSTo row's E-formula interior control points join

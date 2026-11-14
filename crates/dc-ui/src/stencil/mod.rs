@@ -53,7 +53,7 @@ fn matches(m: &vsdx::Master, q: &str) -> bool {
 
 /// Something the pane asks the app to do (the pane cannot reach the
 /// dialog worker or the catalog itself).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// "More Shapes ▸ Open Existing Stencil…" — launch the native
     /// file dialog filtered to `.vssx` (#83).
@@ -62,6 +62,12 @@ pub enum Request {
     /// stencil, or close it when its entry is already open (the menu
     /// checkbox state, #87).
     ToggleBuiltin(&'static str),
+    /// "More Shapes ▸ My Shapes ▸ <stencil>" (#266): open the user
+    /// stencil at `path` through the file path (exactly a picker
+    /// result — title = file stem, pane identity = the path), or
+    /// close its entry when it is already open (the menu checkbox
+    /// state, the built-in categories' semantics).
+    MyShapes(std::path::PathBuf),
     /// A master cell was right-clicked (#143): App opens the
     /// add/remove Quick Shapes menu for that master.
     QuickShapesMenu(MasterKey),
@@ -189,6 +195,7 @@ impl Stencil {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // pane inputs; entry_grid carries the same allow
     pub fn show(
         &mut self,
         ui: &mut Ui,
@@ -197,6 +204,7 @@ impl Stencil {
         stencil_title: &str,
         pool: &mut crate::rasterpool::RasterPool,
         quick_membership: &crate::quickshapes::QuickShapes,
+        my_shapes: Option<&std::path::Path>,
     ) -> Option<MasterKey> {
         // Pane chrome follows the active visual mode (GitHub #52);
         // thumbnails keep their own light raster (paper-like tiles).
@@ -278,6 +286,40 @@ impl Stencil {
                                     }
                                 });
                         });
+                    }
+                    // #266: user stencils from My Shapes — rescan while
+                    // the menu is open (cheap; a dropped-in stencil
+                    // shows the next time it opens), root `.vssx`
+                    // files plus one level of subfolders as submenus
+                    // (observed Visio 2016 folder→submenu mapping). An
+                    // empty My Shapes hides the entry entirely; the
+                    // app-managed Built-ins directory is skipped (the
+                    // categories above already carry it). `my_shapes`
+                    // is None in every headless ctor (`stencil_disk`),
+                    // so kittest never reads the real folder.
+                    let mine = crate::stencil::disk::scan_my_shapes(my_shapes);
+                    if !mine.is_empty() {
+                        let submenu = ui.menu_button(
+                            crate::i18n::strs().msg_my_shapes(),
+                            |ui| {
+                                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                                    my_shapes_files(ui, set, &mut self.request, &mine.root);
+                                    for folder in &mine.folders {
+                                        ui.menu_button(folder.name.as_str(), |ui| {
+                                            my_shapes_files(
+                                                ui,
+                                                set,
+                                                &mut self.request,
+                                                &folder.files,
+                                            );
+                                        });
+                                    }
+                                });
+                            },
+                        );
+                        submenu
+                            .response
+                            .on_hover_text(crate::i18n::strs().msg_my_shapes_tip());
                     }
                     ui.separator();
                     if ui.button(crate::i18n::strs().msg_open_existing_stencil()).clicked() {
@@ -717,6 +759,37 @@ impl Stencil {
             .iter()
             .find(|(s, m, _)| (*s, *m) == (serial, master))
             .map(|(_, _, t)| t.id())
+    }
+}
+
+/// One My Shapes file list (#266): a checkable entry per stencil —
+/// checked when its file's entry is open, opening through the file
+/// path (exactly a picker result) and closing when already open, the
+/// built-in categories' menu semantics (#87). The entry's tooltip is
+/// the file's full path — data, not chrome — distinguishing
+/// same-named stencils across subfolders.
+fn my_shapes_files(
+    ui: &mut Ui,
+    set: &StencilSet,
+    request: &mut Option<Request>,
+    files: &[std::path::PathBuf],
+) {
+    for path in files {
+        // The open check resolves exactly how the app's toggle will
+        // (canonicalized paths), so the checkbox state and the click
+        // outcome can never disagree.
+        let mut open = set.position_for(path).is_some();
+        let label = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_string_lossy().into_owned());
+        let resp = ui.checkbox(&mut open, label).on_hover_text(
+            path.to_string_lossy().into_owned(),
+        );
+        if resp.changed() {
+            *request = Some(Request::MyShapes(path.clone()));
+            ui.close();
+        }
     }
 }
 

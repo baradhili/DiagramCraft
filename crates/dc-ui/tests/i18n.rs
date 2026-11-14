@@ -399,6 +399,11 @@ fn litscan_flags_unrouted_chrome_literals() {
         "Container".to_string(),
         "Background".to_string(),
         "Calibri".to_string(),
+        // The My Shapes FOLDER NAME on disk (Visio convention; never
+        // translated — `my_shapes_path` joins it literally). The
+        // More Shapes MENU label translates (#266); the directory
+        // itself is filesystem vocabulary.
+        "My Shapes".to_string(),
         "Width".to_string(),
         "Height".to_string(),
         // Hyperlink-section cell names (#257 added the dialog labels).

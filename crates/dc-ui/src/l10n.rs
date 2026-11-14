@@ -3131,6 +3131,20 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
+        message: "my-shapes",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
+        message: "my-shapes-tip",
+        attribute: None,
+        vars: &[],
+        bool_vars: &[],
+        elements: &[],
+    },
+    MessageContract {
         message: "name",
         attribute: None,
         vars: &[],
@@ -6303,9 +6317,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..44551,
-            Self::En => 44551..87779,
-            Self::Fa => 87779..144442,
+            Self::De => 0..44649,
+            Self::En => 44649..87957,
+            Self::Fa => 87957..144738,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -8088,6 +8102,12 @@ impl L10nLanguage {
     }
     pub fn msg_move_up(&self) -> String {
         self.0.msg("move-up", None).unwrap()
+    }
+    pub fn msg_my_shapes(&self) -> String {
+        self.0.msg("my-shapes", None).unwrap()
+    }
+    pub fn msg_my_shapes_tip(&self) -> String {
+        self.0.msg("my-shapes-tip", None).unwrap()
     }
     pub fn msg_name(&self) -> String {
         self.0.msg("name", None).unwrap()
