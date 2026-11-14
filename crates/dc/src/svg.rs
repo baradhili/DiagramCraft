@@ -2636,7 +2636,7 @@ fn emit_text(
     // xml:space="preserve" (#144): SVG's default whitespace handling
     // strips leading/trailing spaces of text-node content, so the
     // spaces the splitter now preserves would be dropped again at
-    // raster time. usvg (resvg 0.49) honors the attribute — inherited
+    // raster time. usvg (resvg 0.50) honors the attribute — inherited
     // by every tspan — and skips its stripping only for preserve, so
     // the authored spacing reaches the pixels. Greeked blocks (#124)
     // carry plain rects in `body`, never glyph nodes: they emit as a
@@ -2806,6 +2806,9 @@ fn render_all_geometry(
     // so group geometry renders too; degenerate leftover rows collapse
     // to invisible zero-area paths after the row-cell merge below.
     let env = shape_env(doc, s, chain);
+    // #228: both frames below accumulate into ONE shape-level paint —
+    // the alternate-fill union flushes under the per-section strokes.
+    let mut paint = ShapePaint::default();
     let own: Vec<&vsdx::Section> = s.sheet.sections_named("Geometry");
     if !own.is_empty() {
         // Row-cell inheritance: inline copies often keep only the Y cells
@@ -2993,8 +2996,9 @@ fn render_all_geometry(
             // Instance frame: formulas and cached values are both in
             // instance units.
             let gname = format!("Geometry{}", i + 1);
-            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, &gname, out);
+            render_geometry(doc, s, chain, geo, (1.0, 1.0), Frame::Instance, &gname, out, &mut paint);
         }
+        flush_shape_paint(&mut paint, out);
         return;
     }
     let Some(src) = doc.instance_source(s, chain) else {
@@ -3059,8 +3063,9 @@ fn render_all_geometry(
         // Master frame: rows are master-local; their formulas reference
         // the MASTER's dims and must not be re-evaluated in instance
         // units (that skews rectangles into triangles).
-        render_geometry(doc, s, chain, geo, scale, Frame::Master(&mut menv), &format!("Geometry{}", i + 1), out);
+        render_geometry(doc, s, chain, geo, scale, Frame::Master(&mut menv), &format!("Geometry{}", i + 1), out, &mut paint);
     }
+    flush_shape_paint(&mut paint, out);
 }
 
 /// Which frame geometry rows live in — picks the formula environment.
@@ -3087,6 +3092,7 @@ fn render_geometry(
     frame: Frame<'_>,
     gname: &str,
     out: &mut String,
+    paint: &mut ShapePaint,
 ) {
     let rows = &section.rows;
     let (width, height) = shape_size(doc, s, chain);
@@ -3218,6 +3224,10 @@ fn render_geometry(
         line_weight,
         dash.as_deref(),
     );
+    // #228: the section's own element is STROKE-only (fill
+    // participation joins the shape's one even-odd path); standalone
+    // Ellipse rows keep the full `style` above.
+    let stroke_a = stroke_attr(no_line, &line_color, line_weight, dash.as_deref());
 
     // Master-space (unscaled) path state: geometry rows are authored in the
     // master's local units and scaled to the instance afterwards.
@@ -3331,12 +3341,28 @@ fn render_geometry(
                 cur = (x, y);
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
+                // (Authored unit codes for future writers: D carries
+                // unit 32, C the angle unit 81 — MisterDiagram #233
+                // rider; we only read today, preserve-bytes covers
+                // round-trips.)
                 let m = (
                     row_num(env, row, "A").unwrap_or((cur.0 + x) / 2.0),
                     row_num(env, row, "B").unwrap_or((cur.1 + y) / 2.0),
                 );
                 let c_ang = row_num(env, row, "C").unwrap_or(0.0);
-                let ratio = row_num(env, row, "D").unwrap_or(1.0).abs().max(1e-6);
+                let d_cell = row_num(env, row, "D");
+                // #233: an authored D=0 is a ZERO-WIDTH arc — the
+                // minor axis collapses onto the major, so the arc IS
+                // the endpoint chord. Visio draws the chord even when
+                // the A/B control sits off it (MisterDiagram M5.50);
+                // the old fallback's quadratic-through-m doubled back.
+                // Corpus-common: 887 masters / 18,860 visible rows.
+                if d_cell.is_some_and(|d| d.abs() < 1e-9) {
+                    let _ = write!(d, "L {}", emit_pt((x, y)));
+                    cur = (x, y);
+                    continue;
+                }
+                let ratio = d_cell.unwrap_or(1.0).abs().max(1e-6);
                 // Sane bounds: the arc must fit (loosely) inside the
                 // shape's scaled extent — a solved ellipse or on-arc point
                 // far outside means the numeric solver diverged on a tiny
@@ -3367,7 +3393,10 @@ fn render_geometry(
                         );
                     }
                     _ => {
-                        // Flat / degenerate: quadratic Bézier through m.
+                        // The solver diverged on a genuinely 2-D arc
+                        // (tiny or wild): quadratic Bézier through m.
+                        // Authored zero-width (D=0) never reaches here
+                        // — it short-circuits to the chord (#233).
                         let q = emit_pt(m);
                         let e = emit_pt((x, y));
                         let _ = write!(d, "Q {} {}", q.trim_end(), e.trim_end());
@@ -3389,8 +3418,12 @@ fn render_geometry(
                     transform_ellipse(rx.max(ry), (rx.min(ry)) / rx.max(ry), ang, scale);
                 let (rx2, ry2) = if rx >= ry { (rx2, ry2) } else { (ry2, rx2) };
                 let p = sc((x, y));
+                // A standalone full-ellipse row keeps its own element
+                // (fill + stroke) — it does not join the even-odd union
+                // (#228 scope: the witness covers path sections; an
+                // ellipse row overlapping path sections is unwitnessed).
                 let _ = writeln!(
-                    out,
+                    paint.strokes,
                     r#"<ellipse cx="{cx:.5}" cy="{cy:.5}" rx="{rx:.5}" ry="{ry:.5}" transform="rotate({rot:.4} {cx:.5} {cy:.5})" {style}/>"#,
                     cx = p.0,
                     cy = -p.1,
@@ -3616,17 +3649,34 @@ fn render_geometry(
         } else {
             d.clone()
         };
-        let _ = writeln!(out, r#"<path d="{}" {style}/>"#, escape_attr(shaft.trim()));
+        // #228: a fill-eligible section's `d` (UNtrimmed — setbacks
+        // trim the shaft only) joins the shape's ONE alternate-fill
+        // path; NoFill sections opt out here, NoLine changes nothing
+        // for the fill, and the implicit close SVG already applies to
+        // open subpaths leaves the stroke open per section.
+        if !no_fill && fill != "none" {
+            paint.fill_d.push_str(&d);
+            paint.fill_d.push(' ');
+            paint.fill = fill.clone();
+        }
+        if !no_line {
+            let _ = writeln!(
+                paint.strokes,
+                r#"<path d="{}" fill="none" {stroke_a}/>"#,
+                escape_attr(shaft.trim())
+            );
+        }
         // Heads as inline translate·rotate·scale groups of the
         // unit-space parts (begin faces outward along the reversed
         // start tangent, end along the end tangent) — no marker defs,
-        // so the size law holds without markerUnits scaling.
+        // so the size law holds without markerUnits scaling. #227: a
+        // CLOSED walk gets no frames — and so no heads — at all.
         if let Some((begin, end)) = path_frames(&d) {
             if let Some(k) = kind(begin_arrow) {
-                emit_arrow_head(out, k, bsz, head_weight, &line_color, begin.0, begin.1);
+                emit_arrow_head(&mut paint.strokes, k, bsz, head_weight, &line_color, begin.0, begin.1);
             }
             if let Some(k) = kind(end_arrow) {
-                emit_arrow_head(out, k, esz, head_weight, &line_color, end.0, end.1);
+                emit_arrow_head(&mut paint.strokes, k, esz, head_weight, &line_color, end.0, end.1);
             }
         }
     }
@@ -4372,15 +4422,33 @@ fn seg_end_tangent(c: char, f: &[f64], s: (f64, f64)) -> Option<(f64, f64)> {
 /// The path's two head frames: the BEGIN tip with its OUTWARD
 /// direction (the reversed start tangent) and the END tip with the
 /// travel direction. True segment tangents where available, the
-/// chord otherwise; needs two distinct points. `M`-only or malformed
-/// data returns None (the caller skips the heads but keeps the
-/// shaft).
+/// chord otherwise; needs two distinct points. `M`-only, malformed,
+/// or CLOSED single-subpath data returns None (the caller skips the
+/// heads but keeps the shaft — #227: a closed geometry draws no line
+/// ends).
 fn path_frames(d: &str) -> Option<(HeadFrame, HeadFrame)> {
     let cmds = parse_path_commands(d)?;
     let segs = path_segments(&cmds)?;
     let eps = 1e-12;
     let first = segs.first()?;
     let last = segs.last()?;
+    // #227: a geometry whose walk closes draws no line ends whatever
+    // the arrow cells say — a closed rect with EndArrow=5 gets a clean
+    // corner in Visio, not an arrowhead (MisterDiagram #105 witness;
+    // the cells stay in the file, only rendering is gated). Closure =
+    // the single-subpath walk returning to its start (the same test
+    // `trim_path` uses to refuse trimming a loop). Multi-subpath
+    // sections take no heads either — the same evidence note
+    // `trim_path` carries (Visio gives them no heads; CodeRabbit
+    // flagged the last-subpath-closed case, #278).
+    if cmds.iter().filter(|(c, _)| *c == 'M').count() != 1 {
+        return None;
+    }
+    let start = first.2;
+    let last_end = last.3;
+    if ((last_end.0 - start.0).powi(2) + (last_end.1 - start.1).powi(2)).sqrt() < 1e-9 {
+        return None;
+    }
     let begin = seg_start_tangent(first.0, &first.1, first.2)
         .or_else(|| {
             let (dx, dy) = (first.3 .0 - first.2 .0, first.3 .1 - first.2 .1);
@@ -4598,6 +4666,28 @@ fn rel_adjust(t: &str, x: f64, y: f64, w: f64, h: f64) -> (f64, f64) {
     }
 }
 
+/// The stroke half of a style attribute (#228 split): dashed strokes
+/// carry `stroke-linecap="round"` — the cap the dash table's
+/// ink→geometry conversion assumes (#235).
+fn stroke_attr(no_line: bool, line_color: &str, line_weight: f64, dash: Option<&str>) -> String {
+    if no_line {
+        r#"stroke="none""#.to_string()
+    } else {
+        let dash = dash
+            .map(|d| format!(r#" stroke-dasharray="{d}" stroke-linecap="round""#))
+            .unwrap_or_default();
+        // #235: an explicit-zero LineWeight stays zero — SVG paints
+        // nothing at stroke-width 0, exactly the Visio behavior (a
+        // fallback pen drew stray hairlines; MisterDiagram witness).
+        // The old `.max(0.001)` fallback pen is gone.
+        format!(
+            r#"stroke="{}" stroke-width="{:.5}"{dash}"#,
+            escape_attr(line_color),
+            line_weight
+        )
+    }
+}
+
 fn style_attr(
     no_fill: bool,
     no_line: bool,
@@ -4611,32 +4701,74 @@ fn style_attr(
     } else {
         fill.to_string()
     };
-    let stroke = if no_line {
-        r#"stroke="none""#.to_string()
-    } else {
-        let dash = dash
-            .map(|d| format!(r#" stroke-dasharray="{d}""#))
-            .unwrap_or_default();
-        format!(
-            r#"stroke="{}" stroke-width="{:.5}"{dash}"#,
-            escape_attr(line_color),
-            line_weight.max(0.001)
-        )
-    };
-    format!(r#"fill="{}" {}"#, escape_attr(&fill), stroke)
+    format!(
+        r#"fill="{}" {}"#,
+        escape_attr(&fill),
+        stroke_attr(no_line, line_color, line_weight, dash)
+    )
+}
+
+/// One shape's accumulated paint, #228: every FILL-ELIGIBLE Geometry
+/// section's path concatenates into ONE fill path the caller emits
+/// with `fill-rule="evenodd"` — Visio's alternate rule, where nesting
+/// and overlap toggle coverage regardless of winding direction
+/// (MisterDiagram M5.109: inner nested region clear for both
+/// directions, overlap clear, third nesting filled). Per-section
+/// flags gate participation: NoFill opts a section out of the fill
+/// only, NoShow already skipped it entirely, NoLine leaves the fill
+/// intact; open contours close implicitly for the fill (SVG fills
+/// open subpaths as closed) without gaining a stroked closing edge —
+/// the strokes stay per-section, in section order, OVER the fill.
+struct ShapePaint {
+    /// The concatenated fill subpaths (each section's `d`, which all
+    /// start with `M`).
+    fill_d: String,
+    /// The fill style (shape-level cells — identical for every
+    /// participating section; the last one computed wins).
+    fill: String,
+    /// Stroke-only paths, arrow shafts/heads, and standalone ellipse
+    /// rows, in emission order.
+    strokes: String,
+}
+
+impl Default for ShapePaint {
+    fn default() -> Self {
+        Self {
+            fill_d: String::new(),
+            fill: "none".to_string(),
+            strokes: String::new(),
+        }
+    }
+}
+
+/// Emit the accumulated paint under the caller's ink (#228): the ONE
+/// even-odd fill path first, then the per-section strokes.
+fn flush_shape_paint(paint: &mut ShapePaint, out: &mut String) {
+    if !paint.fill_d.is_empty() {
+        let _ = writeln!(
+            out,
+            r#"<path fill-rule="evenodd" d="{}" fill="{}"/>"#,
+            escape_attr(paint.fill_d.trim()),
+            escape_attr(&paint.fill)
+        );
+    }
+    out.push_str(&paint.strokes);
 }
 
 /// Visio's built-in dash/dot line patterns (LinePattern 2–23) as SVG
 /// `stroke-dasharray` values in LineWeight multiples (patterns scale with
-/// the line weight — the ShapeSheet gallery's defining property). Numbers
-/// follow the ECMA-376 preset-dash primitives (`dash` 4,3 · `lgDash` 8,3 ·
-/// `dot` 1,3), composed per the Visio gallery semantics confirmed against
-/// labeled Visio 2016 reference crops (issue #13): 4 = dash-dot, 5 =
-/// dash-dot-dot, 7 = long dash + normal dash, 8 = long dash + two normal
-/// dashes. The crops' long dash measures ≈12w; the ECMA `lgDash` (8w) is
-/// used per owner decision — flip that constant if 7/8 read too short
-/// against the gold. Patterns outside this set stay solid until a corpus
-/// exercises them.
+/// the line weight — the ShapeSheet gallery's defining property). The
+/// table is MEASURED INK — run/gap lengths as painted at 600 dpi — and
+/// the caller strokes it with ROUND caps, so the values convert to
+/// Visio's canonical GEOMETRY before emission (#235 cap-aware split):
+/// a round cap extends each mark by one weight (half at each end) and
+/// eats one weight from the gap, i.e. geometry on = ink − 1w, gap =
+/// ink + 1w — exactly MisterDiagram's canonical grammar (pattern 2 =
+/// 7/5 where our ink reads 8/4; 14 = 9/3/3; 21 = 39/9/15/9). Dots
+/// (ink ≤ 1w marks) are weight-diameter circles: geometry length 0,
+/// plus a 0.0001w lead so rasterizers keep a tangent for the
+/// zero-length subpath (their dot fix; the following gap gives the
+/// lead back, period preserved).
 fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
     // #171: the table is measured from Visio 2016 itself — the
     // owner-authored fixture `Sample/test files/lines.vsdx` (patterns
@@ -4668,9 +4800,48 @@ fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
         23 => &[2.0, 1.0], // fine dash
         _ => return None,
     };
+    // Ink → geometry under round caps (#235): marks give up one
+    // weight to their caps, gaps take it back; a dot's mark becomes
+    // the 0.0001w tangent lead and its gap returns the difference so
+    // the period is unchanged.
+    let dot_lead = 0.0001;
+    let geom: Vec<f64> = spec
+        .iter()
+        .enumerate()
+        .map(|(i, ink)| {
+            if i % 2 == 0 {
+                // An on-mark: a dot (ink ≤ 1w) draws as the lead
+                // alone; a dash shortens by its caps.
+                if *ink <= 1.0 {
+                    dot_lead
+                } else {
+                    ink - 1.0
+                }
+            } else {
+                // A gap: regains the mark's cap width, minus the
+                // lead when the preceding mark was a dot.
+                let prev_was_dot = spec[i - 1] <= 1.0;
+                ink + 1.0 - if prev_was_dot { dot_lead } else { 0.0 }
+            }
+        })
+        .collect();
     Some(
-        spec.iter()
-            .map(|m| format!("{:.5}", (m * weight).max(1e-4)))
+        geom.iter()
+            .map(|m| {
+                let v = m * weight;
+                // The dot lead (0.0001w) sits far below the 5-decimal
+                // rounding floor — print sub-floor values at 10
+                // decimals so the lead and its gap compensation
+                // survive (CodeRabbit, #278: the old `.max(1e-4)`
+                // clamp inflated the lead 50× at a 0.02 weight and
+                // stretched the period). Every value is positive by
+                // construction, so no zero-length dash entries occur.
+                if v < 1e-4 {
+                    format!("{v:.10}")
+                } else {
+                    format!("{v:.5}")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" "),
     )
@@ -5325,73 +5496,79 @@ mod tests {
 
     #[test]
     fn line_pattern_dasharrays_scale_with_weight() {
-        // #171: every value measured from Visio 2016 itself (the
-        // owner-authored lines.vsdx fixture printed at 600 dpi — see
-        // Analysis/line-patterns-visio2016.md); units are stroke
-        // widths, so the numbers below are pattern × weight.
+        // #171 measured the INK (the owner-authored lines.vsdx fixture
+        // printed at 600 dpi — Analysis/line-patterns-visio2016.md);
+        // #235 reconciles it with MisterDiagram's canonical grammar:
+        // Visio strokes dashes with ROUND caps, so the emitted
+        // geometry is ink − 1w per mark / ink + 1w per gap (pattern 2
+        // = the canonical 7/5, 14 = 9/3/3, 21 = 39/9/15/9), and dots
+        // (ink 1w) become the 0.0001w tangent lead with the following
+        // gap returning it — same painted ink, canonical parameters.
+        // The values below are the CANONICAL GEOMETRY × weight, dotted
+        // against the three witnessed grammar entries.
         let w = 0.02; // the fixture's weight
         let arr = |p: f64| line_dasharray(p, w);
-        assert_eq!(arr(2.0).as_deref(), Some("0.16000 0.08000"));
-        assert_eq!(arr(3.0).as_deref(), Some("0.02000 0.08000"));
-        assert_eq!(arr(4.0).as_deref(), Some("0.16000 0.08000 0.02000 0.08000"));
+        assert_eq!(arr(2.0).as_deref(), Some("0.14000 0.10000")); // canonical 7/5
+        assert_eq!(arr(3.0).as_deref(), Some("0.0000020000 0.10000"));
+        assert_eq!(arr(4.0).as_deref(), Some("0.14000 0.10000 0.0000020000 0.10000"));
         assert_eq!(
             arr(5.0).as_deref(),
-            Some("0.16000 0.08000 0.02000 0.08000 0.02000 0.08000")
+            Some("0.14000 0.10000 0.0000020000 0.10000 0.0000020000 0.10000")
         );
         assert_eq!(
             arr(6.0).as_deref(),
-            Some("0.16000 0.08000 0.16000 0.08000 0.02000 0.08000")
+            Some("0.14000 0.10000 0.14000 0.10000 0.0000020000 0.10000")
         );
-        assert_eq!(arr(7.0).as_deref(), Some("0.40000 0.08000 0.16000 0.08000"));
+        assert_eq!(arr(7.0).as_deref(), Some("0.38000 0.10000 0.14000 0.10000"));
         assert_eq!(
             arr(8.0).as_deref(),
-            Some("0.40000 0.08000 0.16000 0.08000 0.16000 0.08000")
+            Some("0.38000 0.10000 0.14000 0.10000 0.14000 0.10000")
         );
-        assert_eq!(arr(9.0).as_deref(), Some("0.08000 0.04000"));
-        assert_eq!(arr(10.0).as_deref(), Some("0.02000 0.04000"));
+        assert_eq!(arr(9.0).as_deref(), Some("0.06000 0.06000"));
+        assert_eq!(arr(10.0).as_deref(), Some("0.0000020000 0.06000"));
         assert_eq!(
             arr(11.0).as_deref(),
-            Some("0.08000 0.04000 0.02000 0.04000")
+            Some("0.06000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(12.0).as_deref(),
-            Some("0.08000 0.04000 0.02000 0.04000 0.02000 0.04000")
+            Some("0.06000 0.06000 0.0000020000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(13.0).as_deref(),
-            Some("0.08000 0.04000 0.08000 0.04000 0.02000 0.04000")
+            Some("0.06000 0.06000 0.06000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(14.0).as_deref(),
-            Some("0.20000 0.04000 0.08000 0.04000")
+            Some("0.18000 0.06000 0.06000 0.06000") // canonical 9/3/3
         );
         assert_eq!(
             arr(15.0).as_deref(),
-            Some("0.20000 0.04000 0.08000 0.04000 0.08000 0.04000")
+            Some("0.18000 0.06000 0.06000 0.06000 0.06000 0.06000")
         );
-        assert_eq!(arr(16.0).as_deref(), Some("0.32000 0.16000"));
-        assert_eq!(arr(17.0).as_deref(), Some("0.02000 0.16000"));
+        assert_eq!(arr(16.0).as_deref(), Some("0.30000 0.18000"));
+        assert_eq!(arr(17.0).as_deref(), Some("0.0000020000 0.18000"));
         assert_eq!(
             arr(18.0).as_deref(),
-            Some("0.32000 0.16000 0.02000 0.16000")
+            Some("0.30000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(19.0).as_deref(),
-            Some("0.32000 0.16000 0.02000 0.16000 0.02000 0.16000")
+            Some("0.30000 0.18000 0.0000020000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(20.0).as_deref(),
-            Some("0.32000 0.16000 0.32000 0.16000 0.02000 0.16000")
+            Some("0.30000 0.18000 0.30000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(21.0).as_deref(),
-            Some("0.80000 0.16000 0.32000 0.16000")
+            Some("0.78000 0.18000 0.30000 0.18000") // canonical 39/9/15/9
         );
         assert_eq!(
             arr(22.0).as_deref(),
-            Some("0.80000 0.16000 0.32000 0.16000 0.32000 0.16000")
+            Some("0.78000 0.18000 0.30000 0.18000 0.30000 0.18000")
         );
-        assert_eq!(arr(23.0).as_deref(), Some("0.04000 0.02000"));
+        assert_eq!(arr(23.0).as_deref(), Some("0.02000 0.04000"));
         // Solid (1) and hidden (0, handled at the call site) render
         // without a dasharray; so do out-of-gallery values.
         assert!(line_dasharray(1.0, w).is_none());
@@ -5686,6 +5863,255 @@ mod tests {
         assert!(
             both4.contains(&format!("M {:.5} -{:.5}", bt, bt)),
             "the begin trim is the smaller one: {both4}"
+        );
+    }
+
+    /// A geometry row for the wave-3 shape fixtures.
+    fn w3_row(ix: i64, t: &str, cells: &[(&str, &str)]) -> Row {
+        Row {
+            ix,
+            t: Some(t.to_string()),
+            cells: cells
+                .iter()
+                .map(|(n, v)| (n.to_string(), Cell::value(*v)))
+                .collect(),
+            ..Row::default()
+        }
+    }
+
+    /// #227: a geometry whose walk closes draws no line ends — Visio
+    /// renders a closed rectangle with EndArrow=5 as a clean corner
+    /// (MisterDiagram #105 field batch); an open control line beside
+    /// it keeps its head, and the closed section keeps its stroke.
+    #[test]
+    fn closed_geometry_draws_no_arrowheads() {
+        let doc = Document::default();
+        let render = |rows: Vec<Row>, cells: &[(&str, &str)]| {
+            let mut s = Shape::default();
+            for (n, v) in cells {
+                s.sheet.set_cell(n, Cell::value(*v));
+            }
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: 0,
+                rows,
+                ..Section::default()
+            }));
+            let chain = [&s];
+            let mut out = String::new();
+            render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
+            out
+        };
+        // A closed rectangle walk (returns to its start) with both
+        // arrow cells set.
+        let closed = render(
+            vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "1"), ("Y", "0")]),
+                w3_row(3, "LineTo", &[("X", "1"), ("Y", "1")]),
+                w3_row(4, "LineTo", &[("X", "0"), ("Y", "1")]),
+                w3_row(5, "LineTo", &[("X", "0"), ("Y", "0")]),
+            ],
+            &[("EndArrow", "5"), ("BeginArrow", "5")],
+        );
+        assert!(
+            !closed.contains("dc-ah"),
+            "a closed walk draws no line ends: {closed}"
+        );
+        assert!(
+            closed.contains("<path") && closed.contains("L 0.00000 -0.00000"),
+            "the closed contour still strokes: {closed}"
+        );
+        // The open control keeps its head.
+        let open = render(
+            vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "1"), ("Y", "1")]),
+            ],
+            &[("EndArrow", "5")],
+        );
+        assert!(open.contains("dc-ah"), "the open line keeps its head: {open}");
+        // A MULTI-subpath walk takes no heads either — Visio gives
+        // them none (the trim_path evidence note; CodeRabbit flagged
+        // the last-subpath-closed case, #278).
+        let multi = render(
+            vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "1"), ("Y", "0")]),
+                w3_row(3, "MoveTo", &[("X", "2"), ("Y", "0")]),
+                w3_row(4, "LineTo", &[("X", "3"), ("Y", "1")]),
+            ],
+            &[("EndArrow", "5"), ("BeginArrow", "5")],
+        );
+        assert!(
+            !multi.contains("dc-ah"),
+            "a multi-subpath walk draws no line ends: {multi}"
+        );
+    }
+
+    /// #233: an authored D=0 (zero-width) EllipticalArcTo draws the
+    /// endpoint CHORD even when its A/B control is off the chord —
+    /// the old fallback's quadratic-through-m doubled back
+    /// (MisterDiagram M5.50; 887 corpus masters carry these rows). A
+    /// positive-width control on the same points still solves as an
+    /// arc.
+    #[test]
+    fn zero_width_elliptical_arc_to_draws_the_chord() {
+        let doc = Document::default();
+        let render = |d: &str| {
+            let mut s = Shape::default();
+            s.sheet.set_cell("Width", Cell::value("2"));
+            s.sheet.set_cell("Height", Cell::value("2"));
+            s.sheet.children.push(SheetChild::Section(Section {
+                name: "Geometry".into(),
+                ix: 0,
+                rows: vec![
+                    w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                    w3_row(
+                        2,
+                        "EllipticalArcTo",
+                        &[("X", "1"), ("Y", "0"), ("A", "0.5"), ("B", "1"), ("C", "0"), ("D", d)],
+                    ),
+                ],
+                ..Section::default()
+            }));
+            let chain = [&s];
+            let mut out = String::new();
+            render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
+            out
+        };
+        let flat = render("0");
+        assert!(
+            flat.contains("L 1.00000 -0.00000"),
+            "D=0 draws the endpoint chord: {flat}"
+        );
+        assert!(!flat.contains("Q "), "no doubled-back quadratic: {flat}");
+        assert!(!flat.contains(" A "), "no solved arc for a zero-width row: {flat}");
+        let arc = render("0.5");
+        assert!(arc.contains(" A "), "a positive width still solves an arc: {arc}");
+    }
+
+    /// #235: an explicit-zero LineWeight keeps zero — SVG paints
+    /// nothing at stroke-width 0, and the old `.max(0.001)` fallback
+    /// pen drew stray hairlines Visio never shows.
+    #[test]
+    fn explicit_zero_line_weight_paints_nothing() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        s.sheet.set_cell("LineWeight", Cell::value("0"));
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "1"), ("Y", "1")]),
+            ],
+            ..Section::default()
+        }));
+        let chain = [&s];
+        let mut out = String::new();
+        render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
+        assert!(
+            out.contains(r#"stroke-width="0.00000""#),
+            "an explicit zero stays zero: {out}"
+        );
+        assert!(
+            !out.contains(r#"stroke-width="0.001"#),
+            "no fallback pen: {out}"
+        );
+    }
+
+    /// #228: every fill-eligible Geometry section of one shape joins
+    /// ONE alternate-fill path (`fill-rule="evenodd"`) under the
+    /// per-section strokes — nesting and overlap toggle coverage
+    /// regardless of winding direction (MisterDiagram M5.109: the
+    /// two rects here wind in OPPOSITE directions, which nonzero
+    /// fill would paint solid). NoFill opts a section out of the
+    /// fill only; NoLine leaves the fill in and drops the stroke.
+    #[test]
+    fn sections_fill_one_even_odd_path() {
+        let doc = Document::default();
+        let mut s = Shape::default();
+        // Outer rect, clockwise.
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 0,
+            rows: vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "2"), ("Y", "0")]),
+                w3_row(3, "LineTo", &[("X", "2"), ("Y", "2")]),
+                w3_row(4, "LineTo", &[("X", "0"), ("Y", "2")]),
+                w3_row(5, "LineTo", &[("X", "0"), ("Y", "0")]),
+            ],
+            ..Section::default()
+        }));
+        // Inner rect, COUNTER-clockwise — same coverage under
+        // even-odd, solid under nonzero.
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 1,
+            rows: vec![
+                w3_row(1, "MoveTo", &[("X", "0.5"), ("Y", "0.5")]),
+                w3_row(2, "LineTo", &[("X", "0.5"), ("Y", "1.5")]),
+                w3_row(3, "LineTo", &[("X", "1.5"), ("Y", "1.5")]),
+                w3_row(4, "LineTo", &[("X", "1.5"), ("Y", "0.5")]),
+                w3_row(5, "LineTo", &[("X", "0.5"), ("Y", "0.5")]),
+            ],
+            ..Section::default()
+        }));
+        // A NoFill section: stroke only, excluded from the union.
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 2,
+            cells: vec![("NoFill".to_string(), Cell::value("1"))],
+            rows: vec![
+                w3_row(1, "MoveTo", &[("X", "3"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "3"), ("Y", "1")]),
+            ],
+            ..Section::default()
+        }));
+        // A NoLine section: fill only — joins the union, no stroke.
+        s.sheet.children.push(SheetChild::Section(Section {
+            name: "Geometry".into(),
+            ix: 3,
+            cells: vec![("NoLine".to_string(), Cell::value("1"))],
+            rows: vec![
+                w3_row(1, "MoveTo", &[("X", "4"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "4"), ("Y", "1")]),
+            ],
+            ..Section::default()
+        }));
+        let chain = [&s];
+        let mut out = String::new();
+        render_shape(&doc, &s, 11.0, &chain, "", None, None, None, &mut out);
+        // ONE even-odd fill element, first among the paths (under the
+        // ink), carrying exactly the three fill-eligible subpaths.
+        assert_eq!(
+            out.matches("fill-rule=\"evenodd\"").count(),
+            1,
+            "one alternate fill per shape: {out}"
+        );
+        let fill_elem = out
+            .split("fill-rule=\"evenodd\"")
+            .nth(1)
+            .expect("fill element present");
+        let fill_elem = &fill_elem[..fill_elem.find("/>").unwrap_or(fill_elem.len())];
+        assert_eq!(
+            fill_elem.matches("M ").count(),
+            3,
+            "the two rects (either winding) and the NoLine section join; NoFill stays out: {fill_elem}"
+        );
+        // The strokes stay per-section: outer, inner, NoFill open
+        // line — three stroke paths after the fill element.
+        let after_fill = out.split("fill-rule=\"evenodd\"").nth(1).unwrap_or("");
+        assert_eq!(
+            after_fill.matches("<path").count(),
+            3,
+            "three per-section strokes follow the fill: {after_fill}"
+        );
+        assert!(
+            after_fill.contains(r#"fill="none""#),
+            "stroke paths carry no fill: {after_fill}"
         );
     }
 

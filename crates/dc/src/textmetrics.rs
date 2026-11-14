@@ -33,15 +33,17 @@
 //! documents measure with the user's installed fonts, exactly what
 //! rasterizes.
 //!
-//! Shaped measurement (#146): usvg 0.49 rasterizes text through
-//! harfrust (BIDI visual runs at base LTR, default features — pair
-//! kerning on, ligatures and contextual forms applied, script and
+//! Shaped measurement (#146): usvg 0.50 rasterizes text through
+//! harfrust 0.15 (BIDI visual runs at base LTR, default features —
+//! pair kerning on, ligatures and contextual forms applied, script and
 //! language guessed). `width_in` runs the SAME pipeline over the SAME
 //! face, so the wrap decision and the raster shape identically by
 //! construction. Glyphs the resolved face lacks keep the
 //! per-character Carlito/conservative fallback advance (usvg swaps a
 //! fallback font in there — the one documented divergence, coverage
-//! gaps only).
+//! gaps only). The shaper pin moves in lockstep with the in-tree usvg
+//! (#270): harfrust 0.15 is usvg 0.50's shaper, and it bumps only
+//! when usvg's own dependency does.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -344,8 +346,8 @@ impl ResolvedFace {
     }
 
     /// Width of `text` at `size_in` inches (Char.Size units): the
-    /// SHAPED advance sum (#146) — the same harfrust shaping usvg
-    /// 0.49 rasterizes with (pair kerning on, ligatures and
+    /// SHAPED advance sum (#146) — the same harfrust 0.15 shaping
+    /// usvg 0.50 rasterizes with (pair kerning on, ligatures and
     /// contextual forms applied, BIDI visual runs at base LTR,
     /// script/language guessed), missing glyphs falling back per
     /// character. The isolated-advance sum survives as the fallback
@@ -377,7 +379,7 @@ impl ResolvedFace {
         let width =
             m.db.with_face_data(self.id, |data, index| {
                 shaped_face(db_key, self.id, data, index)
-                    .map(|shaped| shape_width_em(&shaped, text, &fallback))
+                    .and_then(|shaped| shape_width_em(&shaped, text, &fallback))
             })
             .flatten()
             .unwrap_or_else(|| text.chars().map(fallback).sum());
@@ -428,23 +430,22 @@ impl ResolvedFace {
     }
 }
 
-/// A face prepared for harfrust shaping: the face bytes and
-/// `FontRef` are leaked once per (database, face) — the process-wide
-/// database owns its data for the process lifetime, so the leak is
-/// bounded by the set of faces actually measured, and it is what
-/// makes the `&'static FontRef` (and the `ShaperData` built from it)
-/// shareable as a plain `Arc` cache entry.
+/// A face prepared for harfrust 0.15 shaping: an OWNED
+/// `harfrust::Font` — the read-fonts model font carries its bytes in
+/// an Arc-backed blob and clones cheaply, so the leak-the-`FontRef`
+/// pattern the ≤0.13 API forced is gone (#270) — plus its
+/// units-per-em for the em-unit advance math. One per (database,
+/// face), shared as a plain `Arc` cache entry.
 struct ShapedFace {
     upem: f64,
-    font: &'static harfrust::FontRef<'static>,
-    shaper_data: harfrust::ShaperData,
+    font: harfrust::Font,
 }
 
 /// The per-(database, face) shaped-face cache (see [`ShapedFace`]).
 /// Faces that fail to load are remembered in a negative cache so a
-/// broken font costs one parse attempt, not one per measurement, and
-/// no bytes are leaked for it (CodeRabbit: validation runs on the
-/// BORROWED data first; only a face that parses gets a leaked copy).
+/// broken font costs one parse attempt, not one per measurement —
+/// the `Font` owns its byte copy (nothing leaks; a rejected face's
+/// one `to_vec` is the whole cost).
 fn shaped_face(
     db_key: usize,
     id: fontdb::ID,
@@ -470,49 +471,49 @@ fn shaped_face(
     {
         return None;
     }
-    // Validate on the borrowed data before committing to a leak.
-    if harfrust::FontRef::from_index(data, index).is_err() {
+    // The owned Font parses and validates the copy; a face that
+    // cannot load lands in the negative cache above.
+    let Some(font) = harfrust::Font::new(data.to_vec(), index) else {
         REJECTED
             .get_or_init(Default::default)
             .lock()
             .unwrap()
             .insert(key);
         return None;
-    }
-    let bytes: &'static [u8] = Box::leak(data.to_vec().into_boxed_slice());
-    let font: &'static harfrust::FontRef<'static> =
-        Box::leak(Box::new(harfrust::FontRef::from_index(bytes, index).ok()?));
-    let shaper_data = harfrust::ShaperData::new(font);
+    };
     let upem = ttf_parser::Face::parse(data, index)
         .ok()
         .map(|f| f.units_per_em() as f64)
         .unwrap_or(1000.0);
-    let shaped = std::sync::Arc::new(ShapedFace {
-        upem,
-        font,
-        shaper_data,
-    });
+    let shaped = std::sync::Arc::new(ShapedFace { upem, font });
     cache.lock().unwrap().insert(key, shaped.clone());
     Some(shaped)
 }
 
-/// The usvg-0.49 shaping pipeline, measurement-side (#146): BIDI
-/// visual runs, each shaped by harfrust with DEFAULT features — pair
-/// kerning on, ligatures/contextual forms applied, script and
-/// language guessed — advances summed in em units. The base level is
-/// `None` (#257 text-direction): each PARAGRAPH takes the first-strong
-/// base (explicit U+202A/U+202B overrides honored), the reconstruction
-/// the analysis note pins for Visio-authored text. usvg's own pipeline
+/// The usvg-0.50 shaping pipeline, measurement-side (#146): BIDI
+/// visual runs, each shaped by harfrust 0.15 with DEFAULT features —
+/// pair kerning on, ligatures/contextual forms applied, script and
+/// language guessed — advances summed in em units (the identity
+/// `Scale` default keeps them in font units, exactly what usvg reads
+/// off the same shaper). The base level is `None` (#257
+/// text-direction): each PARAGRAPH takes the first-strong base
+/// (explicit U+202A/U+202B overrides honored), the reconstruction the
+/// analysis note pins for Visio-authored text. usvg's own pipeline
 /// still hardcodes base LTR — the SVG exporter compensates with
 /// isolates (see `svg::emit_text`) — but the advance SUM is
 /// base-invariant either way, so a width measured here is the width
-/// the rasterizer draws.
-fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> f64 {
-    use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
-    let shaper = face.shaper_data.shaper(face.font).build();
+/// the rasterizer draws. Returns `None` when a run fails to shape —
+/// the caller falls back to the isolated-advance sum (the 0.15 API
+/// shapes in place and can fail; the old API could not).
+fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64) -> Option<f64> {
+    use harfrust::{shape, Buffer, Direction, ShapeOptions, ShaperFont};
+    // Built per call, like usvg's own shaping path: harfrust's
+    // interop slot caches the font's layout data behind the `Font`,
+    // so repeated construction reuses it.
+    let shaper = ShaperFont::new(&face.font);
     let bidi = unicode_bidi::BidiInfo::new(text, None);
     let Some(paragraph) = bidi.paragraphs.first() else {
-        return 0.0;
+        return Some(0.0);
     };
     let (levels, runs) = bidi.visual_runs(paragraph, paragraph.range.clone());
     let mut total = 0.0;
@@ -526,14 +527,21 @@ fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64)
         } else {
             Direction::RightToLeft
         };
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = Buffer::new();
         buffer.push_str(sub);
         buffer.set_direction(direction);
         buffer.guess_segment_properties();
-        let out = shaper.shape(buffer, ShapeOptions::new());
-        let infos = out.glyph_infos();
-        let positions = out.glyph_positions();
-        for i in 0..out.len() {
+        shape(&shaper, &mut buffer, ShapeOptions::new()).ok()?;
+        // harfrust reports limit overruns (not API misuse) through the
+        // buffer's allocation flag: Ok(()) with a failed buffer means
+        // INCOMPLETE output (CodeRabbit, #278) — fall back to the
+        // isolated sum instead of summing and caching a partial width.
+        if !buffer.allocation_successful() {
+            return None;
+        }
+        let infos = buffer.glyph_infos();
+        let positions = buffer.glyph_positions();
+        for i in 0..buffer.len() {
             let info = &infos[i];
             if info.glyph_id == 0 {
                 // Missing glyph: charge the cluster's characters the
@@ -559,7 +567,7 @@ fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64)
             }
         }
     }
-    total
+    Some(total)
 }
 
 /// The actual face a shape's text rasterizes in, as bytes — for

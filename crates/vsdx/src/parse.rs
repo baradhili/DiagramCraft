@@ -23,14 +23,46 @@ use crate::opc::{unescape, Package};
 /// The source [`Package`] is retained on the document so the write path can
 /// re-emit unmodeled parts byte-for-byte.
 pub fn parse(path: &Path) -> Result<Document> {
+    // #279: Visio itself creates ZERO-LENGTH stencil placeholders — My
+    // Shapes' `Favorites.vssx` ships 0 bytes until the user favorites
+    // a master (two independent witnesses in the sample tree, one
+    // dated to the 2016 install) — and opens them as EMPTY stencils.
+    // An empty file on disk is treated as CREATING A NEW DOCUMENT
+    // (owner ruling): the placeholder parses as the canonical minimal
+    // document — [`Document::default()` serialized through the
+    // fresh-write path and parsed back — so every downstream surface
+    // (round-trip verify, model equality, later saves) sees exactly
+    // what a brand-new document looks like, and the zip EOCD error it
+    // used to raise (which read like archive damage) is gone.
+    if std::fs::metadata(path).is_ok_and(|m| m.len() == 0) {
+        return parse_bytes(&fresh_empty_package()?);
+    }
     let pkg = Package::open(path).context("opening OPC package")?;
     parse_package(pkg)
 }
 
 /// Parse a package held in memory (embedded templates).
 pub fn parse_bytes(bytes: &[u8]) -> Result<Document> {
+    // #279 (see [`parse`]): a 0-length buffer is the empty
+    // placeholder too. Callers that must NOT accept it (the built-in
+    // extraction's self-heal falls back to embedded bytes for partial
+    // files) check the length before calling.
+    if bytes.is_empty() {
+        return parse_bytes(&fresh_empty_package()?);
+    }
     let pkg = Package::from_reader(std::io::Cursor::new(bytes)).context("opening OPC package")?;
     parse_package(pkg)
+}
+
+/// The canonical empty document's package (#279): exactly what the
+/// writer produces for `Document::default()` — deterministic (fixed
+/// zip timestamps), so a 0-byte placeholder re-parses to a model that
+/// equals its own round-trip.
+fn fresh_empty_package() -> Result<Vec<u8>> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    crate::write::save_with(&Document::default(), &mut buf)
+        .context("serializing the canonical empty document")?;
+    Ok(buf.into_inner())
 }
 
 fn parse_package(pkg: Package) -> Result<Document> {

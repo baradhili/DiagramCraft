@@ -4080,9 +4080,9 @@ fn format_pane_edits_cells_for_whole_selection() {
     );
 
     // #72: the Line section's Begin/End Arrow pickers write through,
-    // the canvas renders the head, and one Ctrl+Z restores.
-    // (The placed Rectangle is 2-D, but Arrow cells ride any line
-    // geometry; assert the write + the marker in the page SVG.)
+    // and one Ctrl+Z restores. (The placed Rectangle is 2-D and its
+    // geometry walk CLOSES, so #227 gates the head off the canvas —
+    // assert the write, and the absence of a head group.)
     let end_cur = h
         .state()
         .debug_cell_for_test(sid, "EndArrow")
@@ -4110,12 +4110,24 @@ fn format_pane_edits_cells_for_whole_selection() {
         Some("1".into()),
         "the picker wrote the cell through the whole-selection macro"
     );
+    // #227: the placed shape is a CLOSED rectangle — Visio draws no
+    // line ends on a closed geometry whatever the arrow cells say
+    // (the cell write is asserted above; heads render on open
+    // geometry only, pinned by the arrow-gallery unit tests). The
+    // SVG render must SUCCEED before the negative assertion, and
+    // BOTH placed rectangles must paint — each solid-filled shape
+    // contributes one even-odd fill path, so a count of 2 pins the
+    // EDITED shape's own presence (a bare `<path` check could pass
+    // on the other rectangle alone; CodeRabbit, #278).
+    let closed_svg = h.state().debug_page_svg().expect("the page renders");
+    assert_eq!(
+        closed_svg.matches("fill-rule=\"evenodd\"").count(),
+        2,
+        "both placed rectangles paint (the edited one included): {closed_svg}"
+    );
     assert!(
-        h.state()
-            .debug_page_svg()
-            .unwrap_or_default()
-            .contains("dc-ah"),
-        "the canvas renders the arrowhead head group"
+        !closed_svg.contains("dc-ah"),
+        "a closed rectangle draws no arrowhead (#227): {closed_svg}"
     );
     h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
     h.run();

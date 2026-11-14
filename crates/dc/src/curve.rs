@@ -118,6 +118,61 @@ impl SplineData {
                 self.knots[i] = self.knots[i - 1];
             }
         }
+        // #233 rider (MisterDiagram knot-precision evidence): Visio
+        // serializes NURBS knots at 14 significant digits, and knots
+        // sharing a 14-digit representation are the SAME knot —
+        // coalesce them to the larger value (their reconciliation
+        // rule) so the flattener never divides by a phantom knot
+        // difference. Review refinements (#278, three rounds):
+        // 1. the quantum scales with magnitude (1.5·10^(⌊log10⌋−13):
+        // ~1e-14 in a 0..1 domain, ~1.5e-7 at ~1e6 — the ×1.5 covers
+        //    float representation slack), floored at 16 machine
+        //    epsilons for sub-unit magnitudes;
+        // 2. it is CAPPED at half the parameter span, so no
+        //    reconciliation can bridge the domain — a huge-offset
+        //    unit-span domain used to collapse onto itself and
+        //    flatten the curve to its chord;
+        // 3. a whole RUN of near-equal knots reconciles to the run's
+        //    maximum — the old forward pass left [a,b,b,b] from
+        //    [a,a,b,b], keeping a phantom span inside the run.
+        let span = (self.knots[self.knots.len() - 1] - self.knots[0]).abs();
+        let mut i = 0;
+        while i < self.knots.len() {
+            let mut j = i;
+            while j + 1 < self.knots.len() {
+                // The run's TOTAL spread from its first member — not
+                // each adjacent gap — must stay within the tolerance:
+                // chained near-equal steps used to bridge past the cap
+                // through middle knots and collapse the domain
+                // (Greptile P1, #278: [big, big+0.5, big+1] chained
+                // two half-span gaps and flattened the curve).
+                let (a, b) = (self.knots[i], self.knots[j + 1]);
+                let mag = a.abs().max(b.abs());
+                // ×1.5: two doubles sharing a 14-digit string can sit
+                // a hair over one quantum apart (the f64 grid at the
+                // value's magnitude adds representation slack).
+                let quantum = if mag > 0.0 {
+                    1.5 * 10f64.powf(mag.log10().floor() - 13.0)
+                } else {
+                    0.0
+                };
+                let tol = quantum.max(16.0 * f64::EPSILON).min(span / 2.0);
+                if (b - a).abs() <= tol {
+                    j += 1;
+                } else {
+                    break;
+                }
+            }
+            if j > i {
+                // Non-decreasing after the clamp pass, so the run's
+                // maximum is its last member.
+                let hi = self.knots[j];
+                for k in i..=j {
+                    self.knots[k] = hi;
+                }
+            }
+            i = j + 1;
+        }
         let d = self.degree.clamp(1, (n - 1).max(1));
         let first = self.knots[0];
         let last = *self.knots.last().unwrap();
@@ -321,6 +376,119 @@ impl SplineAcc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #278 review: the near-equal knot coalescing reconciles whole
+    /// RUNS to the run's maximum (the old forward pass left
+    /// [a,b,b,b] from [a,a,b,b], keeping a phantom span), and its
+    /// tolerance is bounded by the parameter SPAN — a huge-offset
+    /// unit-span domain stays distinct instead of collapsing onto
+    /// itself and flattening the curve to its chord.
+    #[test]
+    fn knot_reconciliation_is_run_based_and_span_bounded() {
+        // A FOUR-member interior run [a,a,b,b] (b-a within the
+        // span-bounded tolerance): the whole run reconciles to its
+        // maximum. A two-member run would also reconcile under the
+        // old pairwise loop, so this shape is what pins the fix
+        // (Greptile, #278: [a,a,b,b] used to come back [a,b,b,b]).
+        // Degree 1 with 6 points retains all four interior knots.
+        let a = 0.5_f64;
+        let b = 0.5 + 1e-16;
+        let run = SplineData {
+            degree: 1,
+            points: vec![
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (2.0, 0.0),
+                (3.0, 0.0),
+                (4.0, 0.0),
+                (5.0, 0.0),
+            ],
+            weights: vec![],
+            knots: vec![0.0, a, a, b, b, 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        // Assembled: [0,0, interior×4, 1,1] — the interior sits at
+        // indices 2..=5.
+        for k in &run.knots[2..=5] {
+            assert_eq!(
+                *k, run.knots[5],
+                "the whole near-equal run reconciles to one knot"
+            );
+        }
+        assert!(
+            run.knots[2].to_bits() == b.to_bits(),
+            "reconciled to the run's maximum, not its first member"
+        );
+        // An OFFSET domain (~1e6): the 14-digit serialization
+        // quantum there is 1e-7, so an interior pair one quantum
+        // apart is the same knot and reconciles (CodeRabbit round 4,
+        // #278) — while the domain endpoints a full unit apart stay
+        // distinct.
+        let off = SplineData {
+            degree: 1,
+            points: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            weights: vec![],
+            knots: vec![1000000.0, 1000000.4999999, 1000000.5, 1000001.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        // Normalized to [0..1]: the interior pair merged onto 0.5.
+        assert!(
+            (off.knots[2] - 0.5).abs() < 1e-12 && (off.knots[3] - 0.5).abs() < 1e-12,
+            "a one-quantum offset-domain pair reconciles: {:?}",
+            off.knots
+        );
+        assert!(
+            off.knots[0] == 0.0 && off.knots[5] == 1.0,
+            "the domain endpoints survive: {:?}",
+            off.knots
+        );
+        // A large-offset domain with a MIDDLE knot half a span in:
+        // the pairwise-chained run used to bridge both half-span
+        // gaps through it and collapse everything (Greptile P1,
+        // #278); the spread-bounded run stops at the cap.
+        let base = 1125899906842624.0;
+        let mid = SplineData {
+            degree: 1,
+            points: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            weights: vec![],
+            knots: vec![base, base + 0.5, base + 1.0, base + 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        assert!(
+            mid.knots.first() == Some(&0.0) && mid.knots.last() == Some(&1.0),
+            "the domain survives the middle knot: {:?}",
+            mid.knots
+        );
+        assert!(
+            mid.flatten(16).len() > 2,
+            "the curve flattens past its endpoints, not to the chord"
+        );
+        // A unit span parked at ~2^50: the old magnitude-based
+        // tolerance (~4) fused the endpoints; the span-bounded one
+        // must not, so the quadratic keeps its apex.
+        let big = 1125899906842624.0;
+        let wide = SplineData {
+            degree: 2,
+            points: vec![(0.0, 0.0), (1.0, 2.0), (2.0, 0.0)],
+            weights: vec![],
+            knots: vec![big, big + 1.0],
+        }
+        .sanitized()
+        .expect("sanitizes");
+        let pts = wide.flatten(16);
+        assert!(pts.len() > 2, "the curve survives, not just the chord");
+        let apex = pts.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+        // The Bézier quadratic's true apex is 1.0 (half the control
+        // height); the old domain collapse flattened it to the y=0
+        // chord.
+        assert!(
+            (apex - 1.0).abs() < 1e-9,
+            "the quadratic keeps its apex: {apex}"
+        );
+    }
 
     /// A clamped cubic (4 control points, knots 0,0,0,0,1,1,1,1) with
     /// all weights 1 IS a cubic Bézier: the midpoint lands on the

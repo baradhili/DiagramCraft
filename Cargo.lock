@@ -942,7 +942,7 @@ dependencies = [
  "dc-core",
  "flate2",
  "fontdb",
- "harfrust 0.12.0",
+ "harfrust 0.15.0",
  "image",
  "pdf-writer",
  "resvg 0.50.0",

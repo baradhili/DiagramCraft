@@ -5616,6 +5616,15 @@ impl App {
                 .resolve_cell(sh, &chain, "LineWeight")
                 .and_then(|c| c.numeric())
                 .unwrap_or(0.01);
+            // #235 corollary (CodeRabbit, #278): an explicit-zero
+            // LineWeight paints nothing — the export path
+            // (`page_jumps`) drops such connectors from the crossing
+            // set, and the canvas overlay must agree or a visible
+            // connector hops over an invisible shaft on screen while
+            // the export shows no hop.
+            if weight == 0.0 {
+                continue;
+            }
             let color = ed
                 .doc
                 .resolve_cell(sh, &chain, "LineColor")

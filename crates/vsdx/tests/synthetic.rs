@@ -738,3 +738,52 @@ fn effective_section_walks_the_master_chain() {
         "a section on neither level stays None"
     );
 }
+
+/// #279: Visio itself ships ZERO-LENGTH stencil placeholders — My
+/// Shapes' `Favorites.vssx` is 0 bytes until the user favorites a
+/// master — and opens them as EMPTY stencils. A 0-byte input is
+/// emptiness, not archive corruption (the zip EOCD error it used to
+/// raise read like damage); the empty Document round-trips through
+/// the fresh-write path into a complete minimal package that
+/// re-parses empty.
+#[test]
+fn zero_length_placeholder_parses_as_an_empty_stencil() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("Favorites.vssx");
+    std::fs::write(&path, b"").unwrap();
+
+    // An empty file on disk is CREATING A NEW DOCUMENT (#279 owner
+    // ruling): the placeholder opens as the canonical minimal
+    // document — the fresh-write serialization of Document::default()
+    // parsed back — with a real retained package.
+    let doc = vsdx::parse::parse(&path).unwrap();
+    assert!(doc.masters.is_empty(), "no masters in an empty stencil");
+    assert!(doc.pages.is_empty(), "no pages in an empty stencil");
+    assert!(
+        doc.package.is_some(),
+        "the placeholder carries the canonical minimal package"
+    );
+
+    // In-memory opens agree (the embedded-template path).
+    let bytes = vsdx::parse::parse_bytes(b"").unwrap();
+    assert!(
+        bytes.masters.is_empty() && bytes.pages.is_empty(),
+        "parse_bytes treats 0-length input the same"
+    );
+
+    // Round-trip: the placeholder's model equals its own round-trip
+    // under the STRICT same_model (no special cases) — the canonical
+    // document is a fixed point of write→parse.
+    let out = tmp.path().join("out.vssx");
+    vsdx::write::save(&doc, &out).unwrap();
+    assert!(out.metadata().unwrap().len() > 0, "the written file is a real zip");
+    let reopened = vsdx::parse::parse(&out).unwrap();
+    assert!(
+        reopened.masters.is_empty() && reopened.pages.is_empty(),
+        "the minimal package re-parses empty"
+    );
+    assert!(
+        doc.same_model(&reopened),
+        "the canonical empty document is a write→parse fixed point"
+    );
+}

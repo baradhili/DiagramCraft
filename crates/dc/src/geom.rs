@@ -358,12 +358,31 @@ pub fn arc_row(s: &Shape, master_root: Option<&Shape>, frame: &HitFrame) -> Opti
             (None, None) => (0.0, 0.0),
         };
         if t == "EllipticalArcTo" || t == "RelEllipticalArcTo" {
-            // A/B ride `cell` alone — the hit walk applies no rel or
-            // post-scale to the on-curve control.
-            return match (cell(row, *master, "A"), cell(row, *master, "B"), cur) {
-                (Some(a), Some(b), Some(start)) => Some(ArcRow { start, end, on_curve: (a, b) }),
-                _ => None,
-            };
+            // #233: an authored D=0 arc renders its endpoint CHORD, so
+            // the on-curve control is dead geometry — a `LineMid` seat
+            // on the quadratic would float off the visible line, and
+            // dragging it would change nothing the pen shows (Greptile
+            // P1 / CodeRabbit, #278). Skip the row: the walk keeps
+            // looking for a live arc, and a shape with none takes the
+            // chord-midpoint seat like any line. D reads unscaled —
+            // it is a ratio, and only its zero-ness matters here.
+            let zero_width = row_cell_value(
+                row.cell("D"),
+                master.and_then(|m| m.cell("D")),
+                1.0,
+                &frame.env,
+            )
+            .is_some_and(|d| d.abs() < 1e-9);
+            if !zero_width {
+                // A/B ride `cell` alone — the hit walk applies no rel
+                // or post-scale to the on-curve control.
+                return match (cell(row, *master, "A"), cell(row, *master, "B"), cur) {
+                    (Some(a), Some(b), Some(start)) => {
+                        Some(ArcRow { start, end, on_curve: (a, b) })
+                    }
+                    _ => None,
+                };
+            }
         }
         cur = Some(end);
     }
@@ -558,15 +577,23 @@ pub fn geometry_hit_segments(
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
                 // (A,B) is an ON-curve point → quadratic control.
+                // #233: an authored D=0 is a ZERO-WIDTH arc — the
+                // renderer draws the endpoint chord, so the hit walk
+                // follows the ink (a quadratic through an off-chord
+                // control would test the doubled-back curve that is
+                // never drawn; CodeRabbit, #278).
+                let zero_width = cell(row, *master, "D").is_some_and(|d| d.abs() < 1e-9);
                 let a = cell(row, *master, "A");
                 let b = cell(row, *master, "B");
-                if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
-                    let ctrl = (
-                        2.0 * a - (c0.0 + end.0) / 2.0,
-                        2.0 * b - (c0.1 + end.1) / 2.0,
-                    );
-                    for u in [0.25, 0.5, 0.75] {
-                        pts.push(to_page(quad(c0, ctrl, end, u)));
+                if !zero_width {
+                    if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
+                        let ctrl = (
+                            2.0 * a - (c0.0 + end.0) / 2.0,
+                            2.0 * b - (c0.1 + end.1) / 2.0,
+                        );
+                        for u in [0.25, 0.5, 0.75] {
+                            pts.push(to_page(quad(c0, ctrl, end, u)));
+                        }
                     }
                 }
                 pts.push(to_page(end));
@@ -907,6 +934,14 @@ pub fn page_jumps(doc: &vsdx::Document, page: &vsdx::Page, hidden: &[i64]) -> Ve
             .resolve_cell(s, &chain, "LineWeight")
             .and_then(|c| c.numeric())
             .unwrap_or(0.01);
+        // #235 corollary (CodeRabbit, #278): an explicit-zero
+        // LineWeight paints nothing since the fallback pen went, so
+        // an invisible shaft must not make visible connectors hop
+        // over it (and it has no hop of its own to draw). Drop it
+        // from the crossing set entirely.
+        if weight == 0.0 {
+            continue;
+        }
         // Resolve like the renderer (#218 review): a legacy palette
         // index (`LineColor V='0'`) is common, and the hex-only read
         // drew every such crossing's under line and hop arc in gray.
@@ -1051,6 +1086,146 @@ mod tests {
 
     /// #187: two crossing connectors produce one hop; a rotated
     /// jumper crosses too (slice 2 — the Angle gate is gone).
+    #[test]
+    fn zero_width_arcs_and_zero_weight_connectors_leave_interaction() {
+        // #278 review (Greptile P1 + CodeRabbit): an authored D=0 arc
+        // renders the chord, so its on-curve control is dead — no
+        // curve handle seat floats off the ink — and a zero-weight
+        // connector paints nothing, so nothing hops over it.
+        let arc_shape = |d: &str| {
+            let mut s = Shape {
+                id: 1,
+                type_: Some("Shape".into()),
+                ..Shape::default()
+            };
+            for (n, v) in [
+                ("Width", "2"),
+                ("Height", "2"),
+                ("LocPinX", "1"),
+                ("LocPinY", "1"),
+                ("ObjType", "2"),
+            ] {
+                s.sheet.set_cell(n, Cell::value(v));
+            }
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                Row {
+                    t: Some("EllipticalArcTo".into()),
+                    ix: 2,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("1")),
+                        ("Y".to_string(), Cell::value("0")),
+                        ("A".to_string(), Cell::value("0.5")),
+                        ("B".to_string(), Cell::value("1")),
+                        ("C".to_string(), Cell::value("0")),
+                        ("D".to_string(), Cell::value(d)),
+                    ],
+                    ..Row::default()
+                },
+            ];
+            s.sheet.children.push(SheetChild::Section(sec));
+            s
+        };
+        let doc = vsdx::Document::default();
+        let flat = arc_shape("0");
+        let chain = [&flat];
+        let frame = hit_frame(&doc, &chain, &flat, (1.0, 1.0));
+        assert!(
+            arc_row(&flat, None, &frame).is_none(),
+            "a D=0 arc has no curve seat — the control is dead ink"
+        );
+        let live = arc_shape("0.5");
+        let chain2 = [&live];
+        let frame2 = hit_frame(&doc, &chain2, &live, (1.0, 1.0));
+        let arc = arc_row(&live, None, &frame2).expect("a live arc yields its seat");
+        assert_eq!(arc.on_curve, (0.5, 1.0));
+
+        // A zero-weight connector is excluded from the crossing set:
+        // the horizontal axis line no longer hops over it.
+        let connector = |id: i64, pin: (f64, f64), w: f64, h: f64, angle: f64, weight: Option<f64>| {
+            let mut c = Shape {
+                id,
+                type_: Some("Shape".into()),
+                ..Shape::default()
+            };
+            for (n, v) in [
+                ("PinX", pin.0),
+                ("PinY", pin.1),
+                ("Width", w),
+                ("Height", h),
+                ("LocPinX", w / 2.0),
+                ("LocPinY", h / 2.0),
+                ("Angle", angle),
+                ("ObjType", 2.0),
+            ] {
+                c.sheet.set_cell(n, Cell::value(format!("{v}")));
+            }
+            if let Some(wt) = weight {
+                c.sheet.set_cell("LineWeight", Cell::value(format!("{wt}")));
+            }
+            let row = |ix: i64, x: f64, y: f64| Row {
+                t: Some("LineTo".into()),
+                ix,
+                cells: vec![
+                    ("X".to_string(), Cell::value(format!("{x}"))),
+                    ("Y".to_string(), Cell::value(format!("{y}"))),
+                ],
+                ..Row::default()
+            };
+            let mut sec = Section {
+                name: "Geometry".into(),
+                ix: 0,
+                ..Section::default()
+            };
+            sec.rows = vec![
+                Row {
+                    t: Some("MoveTo".into()),
+                    ix: 1,
+                    cells: vec![
+                        ("X".to_string(), Cell::value("0")),
+                        ("Y".to_string(), Cell::value("0")),
+                    ],
+                    ..Row::default()
+                },
+                row(2, w, h),
+            ];
+            c.sheet.children.push(SheetChild::Section(sec));
+            c
+        };
+        let mut page = vsdx::Page {
+            id: 0,
+            name: "T".into(),
+            ..vsdx::Page::default()
+        };
+        page.shapes.push(connector(1, (3.0, 1.0), 4.0, 0.0, 0.0, Some(0.0)));
+        page.shapes.push(connector(
+            2,
+            (3.0, 1.0),
+            3.0,
+            0.0,
+            -std::f64::consts::FRAC_PI_4,
+            None,
+        ));
+        let jumps = page_jumps(&doc, &page, &[]);
+        assert!(
+            jumps.is_empty(),
+            "an invisible shaft forces no hop: {jumps:?}"
+        );
+    }
+
     #[test]
     fn page_jumps_crosses_axis_and_rotated() {
         let connector = |id: i64, pin: (f64, f64), w: f64, h: f64, angle: f64| {

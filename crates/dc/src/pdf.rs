@@ -117,6 +117,13 @@ struct PdfContext<'db> {
     /// fallback scan probes every database face per uncovered char,
     /// and file-backed system fonts re-read megabytes each time.
     face_cache: HashMap<FaceKey, FaceBytes>,
+    /// Owned shaper fonts, one per face (#278 review): the 0.15 API's
+    /// `Font` owns its byte copy where the old `FontRef` zero-copy
+    /// borrowed the cached bytes, so it is built once per face — a
+    /// cached `None` remembers a face that cannot load. Clones share
+    /// the instance (read-fonts model fonts), so handing one out
+    /// re-copies nothing.
+    shaper_fonts: HashMap<FaceKey, Option<harfrust::Font>>,
     image_counter: u32,
     shade_counter: u32,
     /// The page content's base transform (px → points, y-flip): a
@@ -140,6 +147,7 @@ impl<'db> PdfContext<'db> {
             shading_order: Vec::new(),
             fallbacks: HashMap::new(),
             face_cache: HashMap::new(),
+            shaper_fonts: HashMap::new(),
             image_counter: 0,
             shade_counter: 0,
             base: tiny_skia_path::Transform::identity(),
@@ -178,6 +186,20 @@ impl<'db> PdfContext<'db> {
         let hit: FaceBytes = Some((data, info.index));
         self.face_cache.insert(key, hit.clone());
         hit
+    }
+
+    /// The shaper font for a face, built once and cached (see
+    /// [`Self::shaper_fonts`]) — shaping a text span re-borrows it
+    /// instead of re-copying the face bytes (Greptile, #278).
+    fn shaper_font(&mut self, key: FaceKey) -> Option<harfrust::Font> {
+        if let Some(hit) = self.shaper_fonts.get(&key) {
+            return hit.clone();
+        }
+        let built = self
+            .face_data(key)
+            .and_then(|(data, index)| harfrust::Font::new(data.to_vec(), index));
+        self.shaper_fonts.insert(key, built.clone());
+        built
     }
 
     /// Query the db for the face a chunk's span asks for. The SVG's
@@ -294,16 +316,14 @@ fn glyph_width_1000(face: &ttf_parser::Face, gid: u16) -> f32 {
         .unwrap_or(0.0)
 }
 
-/// Shape `text` with harfrust on the face at `data[index]` — the same
-/// pipeline the measurement side uses (`textmetrics`): BIDI visual
-/// runs at base LTR, default shaping features.
-fn shape_text(data: &[u8], index: u32, text: &str) -> Vec<ShapedGlyph> {
-    use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
-    let Ok(font_ref) = harfrust::FontRef::from_index(data, index) else {
-        return Vec::new();
-    };
-    let shaper_data = harfrust::ShaperData::new(&font_ref);
-    let shaper = shaper_data.shaper(&font_ref).build();
+/// Shape `text` with harfrust on `font` — the same pipeline the
+/// measurement side uses (`textmetrics`): BIDI visual runs at base
+/// LTR, default shaping features, advances in font units (the
+/// identity `Scale` default). The font comes from
+/// [`PdfContext::shaper_font`] (per-face cache — no per-span copy).
+fn shape_text(font: &harfrust::Font, text: &str) -> Vec<ShapedGlyph> {
+    use harfrust::{shape, Buffer, Direction, ShapeOptions, ShaperFont};
+    let shaper = ShaperFont::new(font);
     let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
     let Some(paragraph) = bidi.paragraphs.first() else {
         return Vec::new();
@@ -320,14 +340,19 @@ fn shape_text(data: &[u8], index: u32, text: &str) -> Vec<ShapedGlyph> {
         } else {
             Direction::RightToLeft
         };
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = Buffer::new();
         buffer.push_str(sub);
         buffer.set_direction(direction);
         buffer.guess_segment_properties();
-        let out = shaper.shape(buffer, ShapeOptions::new());
-        let infos = out.glyph_infos();
-        let positions = out.glyph_positions();
-        for i in 0..out.len() {
+        // In place since 0.14 (#270); a run that fails to shape is
+        // skipped — the old API had no failure path, so this only
+        // ever drops glyphs the font cannot produce at all.
+        if shape(&shaper, &mut buffer, ShapeOptions::new()).is_err() {
+            continue;
+        }
+        let infos = buffer.glyph_infos();
+        let positions = buffer.glyph_positions();
+        for i in 0..buffer.len() {
             glyphs.push(ShapedGlyph {
                 id: u16::try_from(infos[i].glyph_id).unwrap_or(0),
                 // Text-absolute: harfrust clusters are offsets into
@@ -365,10 +390,10 @@ fn split_fallback_runs(
             if run.face == primary {
                 return run;
             }
-            let Some((data, index)) = ctx.face_data(run.face) else {
+            let Some(font) = ctx.shaper_font(run.face) else {
                 return run;
             };
-            let glyphs = shape_text(&data, index, &run.text);
+            let glyphs = shape_text(&font, &run.text);
             if glyphs.is_empty() {
                 return run;
             }
@@ -945,10 +970,10 @@ fn emit_text(ctx: &mut PdfContext, content: &mut Content, text: &usvg::Text) {
             let Some(primary) = ctx.query_face(span.font()) else {
                 continue;
             };
-            let Some((data, index)) = ctx.face_data(primary) else {
+            let Some(font) = ctx.shaper_font(primary) else {
                 continue;
             };
-            let shaped = shape_text(&data, index, sub);
+            let shaped = shape_text(&font, sub);
             runs.extend(split_fallback_runs(ctx, primary, sub, shaped));
         }
         if runs.is_empty() {
