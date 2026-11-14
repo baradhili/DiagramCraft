@@ -31,8 +31,9 @@ jobs:
       - name: Install build tools
         run: |
           apt-get update
+          # file — appimagetool's 2026-11 continuous build requires it (#274)
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            ca-certificates curl git build-essential binutils \
+            ca-certificates curl git file build-essential binutils \
             libxkbcommon-x11-0 libxkbcommon0 libx11-6 libx11-xcb1 libxcb1 libxcb-xkb1 \
             libxcursor1 libxrandr2 libxi6 libxrender1 libxfixes3 libxext6 \
             libxau6 libxdmcp6 libbsd0 libmd0 libwayland-client0 \
