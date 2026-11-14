@@ -12,12 +12,15 @@ anyhow.workspace = true
 clap.workspace = true
 fontdb = "0.24"
 ttf-parser = "0.25"
-# Shaped measurement (#146): the SAME crates usvg 0.49 rasterizes
-# with (matching lock entries), so the wrap decision and the raster
-# shape identically by construction.
-harfrust = "0.12"
+# Shaped measurement (#146): the SAME shaper version the in-tree
+# usvg rasterizes with (matching lock entries), so the wrap decision
+# and the raster shape identically by construction. Lockstep rule
+# (#270): harfrust 0.15 is usvg 0.50's shaper; it moves ONLY when the
+# in-tree usvg's own dependency does — never via a standalone bump
+# (Renovate's harfrust-only PRs are superseded until then).
+harfrust = "0.15"
 unicode-bidi = "0.3"
-# The shared SVG raster stack (#35): the same resvg 0.49 the GUI's
+# The shared SVG raster stack (#35): the same resvg 0.50 the GUI's
 # svgimg canvas half uses (matching lock entries), so PNG exports are
 # the canvas picture.
 resvg = "0.50.0"

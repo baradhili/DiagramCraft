@@ -296,14 +296,14 @@ fn glyph_width_1000(face: &ttf_parser::Face, gid: u16) -> f32 {
 
 /// Shape `text` with harfrust on the face at `data[index]` — the same
 /// pipeline the measurement side uses (`textmetrics`): BIDI visual
-/// runs at base LTR, default shaping features.
+/// runs at base LTR, default shaping features, advances in font units
+/// (the identity `Scale` default).
 fn shape_text(data: &[u8], index: u32, text: &str) -> Vec<ShapedGlyph> {
-    use harfrust::{Direction, ShapeOptions, UnicodeBuffer};
-    let Ok(font_ref) = harfrust::FontRef::from_index(data, index) else {
+    use harfrust::{shape, Buffer, Direction, ShapeOptions, ShaperFont};
+    let Some(font) = harfrust::Font::new(data.to_vec(), index) else {
         return Vec::new();
     };
-    let shaper_data = harfrust::ShaperData::new(&font_ref);
-    let shaper = shaper_data.shaper(&font_ref).build();
+    let shaper = ShaperFont::new(&font);
     let bidi = unicode_bidi::BidiInfo::new(text, Some(unicode_bidi::Level::ltr()));
     let Some(paragraph) = bidi.paragraphs.first() else {
         return Vec::new();
@@ -320,14 +320,19 @@ fn shape_text(data: &[u8], index: u32, text: &str) -> Vec<ShapedGlyph> {
         } else {
             Direction::RightToLeft
         };
-        let mut buffer = UnicodeBuffer::new();
+        let mut buffer = Buffer::new();
         buffer.push_str(sub);
         buffer.set_direction(direction);
         buffer.guess_segment_properties();
-        let out = shaper.shape(buffer, ShapeOptions::new());
-        let infos = out.glyph_infos();
-        let positions = out.glyph_positions();
-        for i in 0..out.len() {
+        // In place since 0.14 (#270); a run that fails to shape is
+        // skipped — the old API had no failure path, so this only
+        // ever drops glyphs the font cannot produce at all.
+        if shape(&shaper, &mut buffer, ShapeOptions::new()).is_err() {
+            continue;
+        }
+        let infos = buffer.glyph_infos();
+        let positions = buffer.glyph_positions();
+        for i in 0..buffer.len() {
             glyphs.push(ShapedGlyph {
                 id: u16::try_from(infos[i].glyph_id).unwrap_or(0),
                 // Text-absolute: harfrust clusters are offsets into

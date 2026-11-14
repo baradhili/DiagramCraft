@@ -2636,7 +2636,7 @@ fn emit_text(
     // xml:space="preserve" (#144): SVG's default whitespace handling
     // strips leading/trailing spaces of text-node content, so the
     // spaces the splitter now preserves would be dropped again at
-    // raster time. usvg (resvg 0.49) honors the attribute — inherited
+    // raster time. usvg (resvg 0.50) honors the attribute — inherited
     // by every tspan — and skips its stripping only for preserve, so
     // the authored spacing reaches the pixels. Greeked blocks (#124)
     // carry plain rects in `body`, never glyph nodes: they emit as a
