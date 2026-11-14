@@ -118,6 +118,18 @@ impl SplineData {
                 self.knots[i] = self.knots[i - 1];
             }
         }
+        // #233 rider (MisterDiagram knot-precision evidence): Visio
+        // serializes NURBS knots at 14 significant digits, so adjacent
+        // "repeated" knots can arrive differing in their last bits —
+        // coalesce neighbors within 16 machine epsilons to the larger
+        // value (their reconciliation rule) so the flattener never
+        // divides by a phantom knot difference.
+        for i in 1..self.knots.len() {
+            let (a, b) = (self.knots[i - 1], self.knots[i]);
+            if (b - a).abs() <= 16.0 * f64::EPSILON * a.abs().max(b.abs()).max(1.0) {
+                self.knots[i - 1] = b; // b >= a after the clamp pass
+            }
+        }
         let d = self.degree.clamp(1, (n - 1).max(1));
         let first = self.knots[0];
         let last = *self.knots.last().unwrap();
