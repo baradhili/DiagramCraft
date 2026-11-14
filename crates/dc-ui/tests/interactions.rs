@@ -3982,6 +3982,47 @@ fn format_pane_edits_cells_for_whole_selection() {
     );
 }
 
+// #150: the Home ▸ Font Text color button opens the shared palette
+// on #73's ColorTarget::Text — a pick writes the Character row-0
+// Color cell through the whole-selection macro (first-edit
+// materialization), and one undo removes the materialized row.
+// (The WYSIWYG render of that cell is pinned by the #73 pane leg
+// above — same apply_color path.)
+#[test]
+fn ribbon_text_color_button_writes_character_color() {
+    use egui_kittest::kittest::Queryable;
+    let mut h = harness_with_blank();
+    h.run();
+    let cells = h.state().debug_master_cells();
+    let canvas = h.state().debug_canvas_rect();
+    click_at(&mut h, cells[0].1.center(), egui::PointerButton::Primary);
+    click_at(&mut h, canvas.center(), egui::PointerButton::Primary);
+    h.run();
+    let (_, sid) = h.state().debug_sel().expect("placed shape selected");
+
+    // The icon-only ribbon button carries its name in the a11y label
+    // (#252 compact tier); the palette window it opens shares the
+    // "Text Color" title, so the button query runs while it is closed.
+    h.get_by_label("Text Color").click();
+    h.run();
+    // The swatch click is also the palette-open assert (the label
+    // exists only inside the popup).
+    h.get_by_label("#FFC000").click();
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        Some("#FFC000".into()),
+        "the ribbon button's palette wrote the Character row-0 Color cell"
+    );
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    assert_eq!(
+        h.state().debug_cell_for_test(sid, "Char.Color"),
+        None,
+        "one undo removed the materialized Color cell"
+    );
+}
+
 /// GitHub #29 rework: the badge indicates a comment; the popup edits,
 /// replies, and deletes — one undo per action.
 #[test]

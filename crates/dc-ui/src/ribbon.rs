@@ -206,6 +206,10 @@ pub enum Action {
     Macros,
     FillMenu,
     LineMenu,
+    /// #150: Home ▸ Font — the Text color button opens the shared
+    /// palette on #73's `ColorTarget::Text` (the Character row-0
+    /// Color cell, written across the whole selection).
+    TextColorMenu,
     FontGrow,
     FontShrink,
     RotateLeft,

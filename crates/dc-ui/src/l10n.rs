@@ -5490,7 +5490,7 @@ pub static MESSAGE_CONTRACTS: &[MessageContract] = &[
         elements: &[],
     },
     MessageContract {
-        message: "text-color-planned",
+        message: "text-color-tip",
         attribute: None,
         vars: &[],
         bool_vars: &[],
@@ -6303,9 +6303,9 @@ impl L10n {
 
     fn byte_range(&self) -> std::ops::Range<usize> {
         match self {
-            Self::De => 0..44555,
-            Self::En => 44555..87782,
-            Self::Fa => 87782..144471,
+            Self::De => 0..44551,
+            Self::En => 44551..87779,
+            Self::Fa => 87779..144442,
         }
     }
     /// Load a L10nLanguage from the embedded data.
@@ -9413,8 +9413,8 @@ impl L10nLanguage {
     pub fn msg_text_color(&self) -> String {
         self.0.msg("text-color", None).unwrap()
     }
-    pub fn msg_text_color_planned(&self) -> String {
-        self.0.msg("text-color-planned", None).unwrap()
+    pub fn msg_text_color_tip(&self) -> String {
+        self.0.msg("text-color-tip", None).unwrap()
     }
     pub fn msg_text_field(&self) -> String {
         self.0.msg("text-field", None).unwrap()

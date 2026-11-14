@@ -8130,11 +8130,13 @@ impl App {
                 }
             }
             Action::Macros => self.status = crate::i18n::strs().msg_macros_arrive_with_m7_vba_vsdm_m(),
-            Action::FillMenu | Action::LineMenu => {
-                self.color_pick = Some(if a == Action::FillMenu {
-                    ColorTarget::Fill
-                } else {
-                    ColorTarget::Line
+            Action::FillMenu | Action::LineMenu | Action::TextColorMenu => {
+                self.color_pick = Some(match a {
+                    Action::FillMenu => ColorTarget::Fill,
+                    Action::LineMenu => ColorTarget::Line,
+                    // #150: the ribbon Text color button rides #73's
+                    // whole-selection Character row-0 write.
+                    _ => ColorTarget::Text,
                 });
             }
             Action::FontGrow => self.nudge_char_size(1.0),
@@ -14557,7 +14559,8 @@ impl App {
         self.version += 1;
     }
 
-    /// The Visio theme palette shown by the ribbon Fill/Line buttons.
+    /// The Visio theme palette shown by the ribbon Fill/Line/Text
+    /// color buttons and the Format pane's color rows.
     fn color_palette_window(&mut self, ctx: &egui::Context) {
         let Some(target) = self.color_pick else {
             return;
