@@ -13,9 +13,11 @@ path = "src/main.rs"
 [package.metadata.deb]
 name = "tarahi"
 # Rename transition (CodeRabbit PR #277): the package was
-# `diagramcraft` — Replaces + Breaks lets dpkg upgrade over it
-# instead of coexisting two copies (the old package's files differ,
-# so no Conflicts is needed).
+# `diagramcraft`, and it already shipped packaging/tarahi.desktop
+# (the desktop entry was renamed ahead of the package) — so the two
+# packages SHARE usr/share/applications/tarahi.desktop. Replaces
+# licenses the file takeover on upgrade; Breaks moves the old
+# package out. Conflicts is unnecessary (nothing else collides).
 replaces = ["diagramcraft"]
 breaks = ["diagramcraft"]
 maintainer = "Tarahi contributors"
