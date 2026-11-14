@@ -558,15 +558,23 @@ pub fn geometry_hit_segments(
             }
             "EllipticalArcTo" | "RelEllipticalArcTo" => {
                 // (A,B) is an ON-curve point → quadratic control.
+                // #233: an authored D=0 is a ZERO-WIDTH arc — the
+                // renderer draws the endpoint chord, so the hit walk
+                // follows the ink (a quadratic through an off-chord
+                // control would test the doubled-back curve that is
+                // never drawn; CodeRabbit, #278).
+                let zero_width = cell(row, *master, "D").is_some_and(|d| d.abs() < 1e-9);
                 let a = cell(row, *master, "A");
                 let b = cell(row, *master, "B");
-                if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
-                    let ctrl = (
-                        2.0 * a - (c0.0 + end.0) / 2.0,
-                        2.0 * b - (c0.1 + end.1) / 2.0,
-                    );
-                    for u in [0.25, 0.5, 0.75] {
-                        pts.push(to_page(quad(c0, ctrl, end, u)));
+                if !zero_width {
+                    if let (Some(a), Some(b), Some(c0)) = (a, b, cur) {
+                        let ctrl = (
+                            2.0 * a - (c0.0 + end.0) / 2.0,
+                            2.0 * b - (c0.1 + end.1) / 2.0,
+                        );
+                        for u in [0.25, 0.5, 0.75] {
+                            pts.push(to_page(quad(c0, ctrl, end, u)));
+                        }
                     }
                 }
                 pts.push(to_page(end));

@@ -532,6 +532,13 @@ fn shape_width_em(face: &ShapedFace, text: &str, fallback: &dyn Fn(char) -> f64)
         buffer.set_direction(direction);
         buffer.guess_segment_properties();
         shape(&shaper, &mut buffer, ShapeOptions::new()).ok()?;
+        // harfrust reports limit overruns (not API misuse) through the
+        // buffer's allocation flag: Ok(()) with a failed buffer means
+        // INCOMPLETE output (CodeRabbit, #278) — fall back to the
+        // isolated sum instead of summing and caching a partial width.
+        if !buffer.allocation_successful() {
+            return None;
+        }
         let infos = buffer.glyph_infos();
         let positions = buffer.glyph_positions();
         for i in 0..buffer.len() {

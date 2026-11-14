@@ -4437,13 +4437,17 @@ fn path_frames(d: &str) -> Option<(HeadFrame, HeadFrame)> {
     // corner in Visio, not an arrowhead (MisterDiagram #105 witness;
     // the cells stay in the file, only rendering is gated). Closure =
     // the single-subpath walk returning to its start (the same test
-    // `trim_path` uses to refuse trimming a loop).
-    if cmds.iter().filter(|(c, _)| *c == 'M').count() == 1 {
-        let start = first.2;
-        let last_end = last.3;
-        if ((last_end.0 - start.0).powi(2) + (last_end.1 - start.1).powi(2)).sqrt() < 1e-9 {
-            return None;
-        }
+    // `trim_path` uses to refuse trimming a loop). Multi-subpath
+    // sections take no heads either — the same evidence note
+    // `trim_path` carries (Visio gives them no heads; CodeRabbit
+    // flagged the last-subpath-closed case, #278).
+    if cmds.iter().filter(|(c, _)| *c == 'M').count() != 1 {
+        return None;
+    }
+    let start = first.2;
+    let last_end = last.3;
+    if ((last_end.0 - start.0).powi(2) + (last_end.1 - start.1).powi(2)).sqrt() < 1e-9 {
+        return None;
     }
     let begin = seg_start_tangent(first.0, &first.1, first.2)
         .or_else(|| {
@@ -4823,7 +4827,21 @@ fn line_dasharray(pattern: f64, weight: f64) -> Option<String> {
         .collect();
     Some(
         geom.iter()
-            .map(|m| format!("{:.5}", (m * weight).max(1e-4)))
+            .map(|m| {
+                let v = m * weight;
+                // The dot lead (0.0001w) sits far below the 5-decimal
+                // rounding floor — print sub-floor values at 10
+                // decimals so the lead and its gap compensation
+                // survive (CodeRabbit, #278: the old `.max(1e-4)`
+                // clamp inflated the lead 50× at a 0.02 weight and
+                // stretched the period). Every value is positive by
+                // construction, so no zero-length dash entries occur.
+                if v < 1e-4 {
+                    format!("{v:.10}")
+                } else {
+                    format!("{v:.5}")
+                }
+            })
             .collect::<Vec<_>>()
             .join(" "),
     )
@@ -5491,15 +5509,15 @@ mod tests {
         let w = 0.02; // the fixture's weight
         let arr = |p: f64| line_dasharray(p, w);
         assert_eq!(arr(2.0).as_deref(), Some("0.14000 0.10000")); // canonical 7/5
-        assert_eq!(arr(3.0).as_deref(), Some("0.00010 0.10000"));
-        assert_eq!(arr(4.0).as_deref(), Some("0.14000 0.10000 0.00010 0.10000"));
+        assert_eq!(arr(3.0).as_deref(), Some("0.0000020000 0.10000"));
+        assert_eq!(arr(4.0).as_deref(), Some("0.14000 0.10000 0.0000020000 0.10000"));
         assert_eq!(
             arr(5.0).as_deref(),
-            Some("0.14000 0.10000 0.00010 0.10000 0.00010 0.10000")
+            Some("0.14000 0.10000 0.0000020000 0.10000 0.0000020000 0.10000")
         );
         assert_eq!(
             arr(6.0).as_deref(),
-            Some("0.14000 0.10000 0.14000 0.10000 0.00010 0.10000")
+            Some("0.14000 0.10000 0.14000 0.10000 0.0000020000 0.10000")
         );
         assert_eq!(arr(7.0).as_deref(), Some("0.38000 0.10000 0.14000 0.10000"));
         assert_eq!(
@@ -5507,18 +5525,18 @@ mod tests {
             Some("0.38000 0.10000 0.14000 0.10000 0.14000 0.10000")
         );
         assert_eq!(arr(9.0).as_deref(), Some("0.06000 0.06000"));
-        assert_eq!(arr(10.0).as_deref(), Some("0.00010 0.06000"));
+        assert_eq!(arr(10.0).as_deref(), Some("0.0000020000 0.06000"));
         assert_eq!(
             arr(11.0).as_deref(),
-            Some("0.06000 0.06000 0.00010 0.06000")
+            Some("0.06000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(12.0).as_deref(),
-            Some("0.06000 0.06000 0.00010 0.06000 0.00010 0.06000")
+            Some("0.06000 0.06000 0.0000020000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(13.0).as_deref(),
-            Some("0.06000 0.06000 0.06000 0.06000 0.00010 0.06000")
+            Some("0.06000 0.06000 0.06000 0.06000 0.0000020000 0.06000")
         );
         assert_eq!(
             arr(14.0).as_deref(),
@@ -5529,18 +5547,18 @@ mod tests {
             Some("0.18000 0.06000 0.06000 0.06000 0.06000 0.06000")
         );
         assert_eq!(arr(16.0).as_deref(), Some("0.30000 0.18000"));
-        assert_eq!(arr(17.0).as_deref(), Some("0.00010 0.18000"));
+        assert_eq!(arr(17.0).as_deref(), Some("0.0000020000 0.18000"));
         assert_eq!(
             arr(18.0).as_deref(),
-            Some("0.30000 0.18000 0.00010 0.18000")
+            Some("0.30000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(19.0).as_deref(),
-            Some("0.30000 0.18000 0.00010 0.18000 0.00010 0.18000")
+            Some("0.30000 0.18000 0.0000020000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(20.0).as_deref(),
-            Some("0.30000 0.18000 0.30000 0.18000 0.00010 0.18000")
+            Some("0.30000 0.18000 0.30000 0.18000 0.0000020000 0.18000")
         );
         assert_eq!(
             arr(21.0).as_deref(),
@@ -5913,6 +5931,22 @@ mod tests {
             &[("EndArrow", "5")],
         );
         assert!(open.contains("dc-ah"), "the open line keeps its head: {open}");
+        // A MULTI-subpath walk takes no heads either — Visio gives
+        // them none (the trim_path evidence note; CodeRabbit flagged
+        // the last-subpath-closed case, #278).
+        let multi = render(
+            vec![
+                w3_row(1, "MoveTo", &[("X", "0"), ("Y", "0")]),
+                w3_row(2, "LineTo", &[("X", "1"), ("Y", "0")]),
+                w3_row(3, "MoveTo", &[("X", "2"), ("Y", "0")]),
+                w3_row(4, "LineTo", &[("X", "3"), ("Y", "1")]),
+            ],
+            &[("EndArrow", "5"), ("BeginArrow", "5")],
+        );
+        assert!(
+            !multi.contains("dc-ah"),
+            "a multi-subpath walk draws no line ends: {multi}"
+        );
     }
 
     /// #233: an authored D=0 (zero-width) EllipticalArcTo draws the
