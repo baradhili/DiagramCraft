@@ -365,18 +365,40 @@ mod tests {
     /// itself and flattening the curve to its chord.
     #[test]
     fn knot_reconciliation_is_run_based_and_span_bounded() {
-        // The interior run [0.5, 0.5+1e-16] reconciles to one value.
+        // A FOUR-member interior run [a,a,b,b] (b-a within the
+        // span-bounded tolerance): the whole run reconciles to its
+        // maximum. A two-member run would also reconcile under the
+        // old pairwise loop, so this shape is what pins the fix
+        // (Greptile, #278: [a,a,b,b] used to come back [a,b,b,b]).
+        // Degree 1 with 6 points retains all four interior knots.
+        let a = 0.5_f64;
+        let b = 0.5 + 1e-16;
         let run = SplineData {
             degree: 1,
-            points: vec![(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)],
+            points: vec![
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (2.0, 0.0),
+                (3.0, 0.0),
+                (4.0, 0.0),
+                (5.0, 0.0),
+            ],
             weights: vec![],
-            knots: vec![0.0, 0.5, 0.5 + 1e-16, 1.0],
+            knots: vec![0.0, a, a, b, b, 1.0],
         }
         .sanitized()
         .expect("sanitizes");
-        assert_eq!(
-            run.knots[2], run.knots[3],
-            "the near-equal interior run reconciles to one knot"
+        // Assembled: [0,0, interior×4, 1,1] — the interior sits at
+        // indices 2..=5.
+        for k in &run.knots[2..=5] {
+            assert_eq!(
+                *k, run.knots[5],
+                "the whole near-equal run reconciles to one knot"
+            );
+        }
+        assert!(
+            run.knots[2].to_bits() == b.to_bits(),
+            "reconciled to the run's maximum, not its first member"
         );
         // A unit span parked at ~2^50: the old magnitude-based
         // tolerance (~4) fused the endpoints; the span-bounded one
