@@ -246,8 +246,16 @@ fn bar_button(ui: &mut Ui, chrome: &Chrome, it: &Item, act: &mut Option<Act>) {
     }
     let glyph = if dropdown { 15.0 } else { 16.0 };
     let ir = if dropdown {
+        // The glyph leads and the chevron trails; #257 mirrors BOTH
+        // with the chrome (Greptile PR #277: mirroring only the
+        // chevron stacked it on the glyph in RTL).
+        let gx = if crate::i18n::rtl() {
+            r.right() - 2.0 - glyph
+        } else {
+            r.left() + 2.0
+        };
         Rect::from_min_size(
-            r.left_top() + egui::vec2(2.0, (BTN - glyph) / 2.0),
+            egui::pos2(gx, r.top() + (BTN - glyph) / 2.0),
             Vec2::splat(glyph),
         )
     } else {

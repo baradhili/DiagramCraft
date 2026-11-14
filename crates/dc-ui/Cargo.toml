@@ -12,6 +12,12 @@ path = "src/main.rs"
 
 [package.metadata.deb]
 name = "tarahi"
+# Rename transition (CodeRabbit PR #277): the package was
+# `diagramcraft` — Replaces + Breaks lets dpkg upgrade over it
+# instead of coexisting two copies (the old package's files differ,
+# so no Conflicts is needed).
+replaces = ["diagramcraft"]
+breaks = ["diagramcraft"]
 maintainer = "Tarahi contributors"
 depends = "$auto"
 section = "graphics"

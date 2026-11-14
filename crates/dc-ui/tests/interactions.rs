@@ -405,13 +405,61 @@ fn ctx_bar_flip_flyout_flips_both_orientations() {
 /// FOCUSED on their section (Fill / Line / Text), not generically.
 /// The seam reports the LAST targeted section (the one-shot scroll
 /// focus is consumed by the pane's first render, which can land in
-/// the same frame as the click).
+/// the same frame as the click) — so the Fill icon is additionally
+/// pinned END-TO-END (Greptile PR #277): the pane actually opens
+/// with the section expanded, and the one-shot focus forces a
+/// collapsed target back open. (The scroll half of the focus is
+/// inert in the tall harness pane by design — scroll_to_me on a
+/// non-overflowing area is a no-op.)
 #[test]
 fn ctx_bar_format_icons_focus_their_pane_section() {
     let mut h = harness_with_blank();
     h.run();
     h.run();
     let (_page, a) = place_master(&mut h, 2);
+    // End-to-end on the Fill icon: the click opens the pane with the
+    // Fill section expanded (its Foreground row renders).
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Format Shape Fill…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label("Format Shape").next().is_some(),
+        "the pane opened (its heading renders)"
+    );
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_some(),
+        "the Fill section renders expanded"
+    );
+    // Collapse the pane's Fill header (the right-side "Fill" — the
+    // ribbon carries its own) and confirm the body disappears.
+    let fill_hdr = h
+        .get_all_by_label("Fill")
+        .into_iter()
+        .find(|n| n.rect().left() > 1000.0)
+        .expect("the pane's Fill header");
+    fill_hdr.click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_none(),
+        "collapsed: the section body is gone"
+    );
+    // The icon again: the one-shot focus forces the section open.
+    // (Re-read the shape's center — the opened pane narrowed the
+    // canvas and shifted every screen position.)
+    let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+    click_at(&mut h, to, egui::PointerButton::Secondary);
+    h.run();
+    h.run();
+    h.get_by_label("Format Shape Fill…").click();
+    h.run();
+    assert!(
+        h.query_all_by_label_contains("Foreground").next().is_some(),
+        "the focused section is forced back open"
+    );
+    // The per-icon targets, via the seam.
     for (bar_label, section) in [
         ("Format Shape Fill…", "fill"),
         ("Format Shape Line…", "line"),

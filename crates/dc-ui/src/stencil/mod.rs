@@ -306,12 +306,22 @@ impl Stencil {
                                     my_shapes_files(ui, set, &mut self.request, &mine.root);
                                     for folder in &mine.folders {
                                         ui.menu_button(folder.name.as_str(), |ui| {
-                                            my_shapes_files(
-                                                ui,
-                                                set,
-                                                &mut self.request,
-                                                &folder.files,
-                                            );
+                                            // The folder popup scrolls on its own
+                                            // (CodeRabbit PR #277): the parent area
+                                            // scrolls the folder BUTTONS, not the
+                                            // contents of this separate popup — a
+                                            // deep folder would run past the screen
+                                            // with its tail unreachable.
+                                            egui::ScrollArea::vertical()
+                                                .max_height(420.0)
+                                                .show(ui, |ui| {
+                                                    my_shapes_files(
+                                                        ui,
+                                                        set,
+                                                        &mut self.request,
+                                                        &folder.files,
+                                                    );
+                                                });
                                         });
                                     }
                                 });
