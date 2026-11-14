@@ -1,6 +1,6 @@
 ; Tarahi Windows installer (NSIS). Build:
 ;   makensis -DVERSION=<ver> packaging/installer.nsi
-; from the repo root; expects target\release\diagramcraft.exe.
+; from the repo root; expects target\release\tarahi.exe.
 
 !define APPNAME "Tarahi"
 ; Local builds: makensis -DVERSION=x packaging/installer.nsi from the
@@ -26,7 +26,7 @@ UninstPage instfiles
 Section "${APPNAME} (required)"
   SectionIn RO
   SetOutPath "$INSTDIR"
-  File "${BINDIR}\diagramcraft.exe"
+  File "${BINDIR}\tarahi.exe"
   CreateDirectory "$INSTDIR\licenses"
   SetOutPath "$INSTDIR\licenses"
   File /oname=LICENSE-MIT "${LICENSEDIR}\LICENSE-MIT"
@@ -45,12 +45,12 @@ SectionEnd
 
 Section "Start Menu shortcut"
   CreateDirectory "$SMPROGRAMS\${APPNAME}"
-  CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\diagramcraft.exe"
+  CreateShortcut "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk" "$INSTDIR\tarahi.exe"
   CreateShortcut "$SMPROGRAMS\${APPNAME}\Uninstall ${APPNAME}.lnk" "$INSTDIR\uninstall.exe"
 SectionEnd
 
 Section "Desktop shortcut"
-  CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\diagramcraft.exe"
+  CreateShortcut "$DESKTOP\${APPNAME}.lnk" "$INSTDIR\tarahi.exe"
 SectionEnd
 
 Section "Uninstall"
@@ -58,7 +58,7 @@ Section "Uninstall"
   Delete "$INSTDIR\licenses\LICENSE-APACHE"
   Delete "$INSTDIR\licenses\LICENSE-Carlito"
   RMDir "$INSTDIR\licenses"
-  Delete "$INSTDIR\diagramcraft.exe"
+  Delete "$INSTDIR\tarahi.exe"
   Delete "$INSTDIR\uninstall.exe"
   Delete "$DESKTOP\${APPNAME}.lnk"
   Delete "$SMPROGRAMS\${APPNAME}\${APPNAME}.lnk"

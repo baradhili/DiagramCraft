@@ -61,7 +61,7 @@ jobs:
           # older-baseline linker (e.g. cargo-zigbuild) instead.
           GLIBC_FLOOR: "2.35"
         run: |
-          BIN=target/release/diagramcraft
+          BIN=target/release/tarahi
           MAXV="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -uV | tail -1)"
           MAXN="${MAXV#GLIBC_}"
           echo "highest GLIBC symbol version required: ${MAXV:-none}"
@@ -124,9 +124,9 @@ jobs:
           # diagramcraft_*.AppImage for it (#261).
           OUTPUT="Tarahi_${{ steps.ver.outputs.version }}_x86_64.AppImage" /tmp/linuxdeploy \
             --appdir AppDir \
-            -e target/release/diagramcraft \
+            -e target/release/tarahi \
             -d packaging/tarahi.desktop \
-            -i packaging/diagramcraft.png \
+            -i packaging/tarahi.png \
             --output appimage
       - name: Collect artifacts
         run: |
@@ -170,7 +170,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          7z a -tzip "dist/Tarahi_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/diagramcraft.exe
+          7z a -tzip "dist/Tarahi_${{ steps.ver.outputs.version }}_windows_x64.zip" ./target/release/tarahi.exe
       - name: Collect artifacts
         shell: bash
         run: |
@@ -205,16 +205,16 @@ jobs:
           cargo build --release -p dc-ui --locked --target aarch64-apple-darwin
           mkdir -p "Tarahi.app/Contents/MacOS" "Tarahi.app/Contents/Resources"
           lipo -create \
-            target/x86_64-apple-darwin/release/diagramcraft \
-            target/aarch64-apple-darwin/release/diagramcraft \
+            target/x86_64-apple-darwin/release/tarahi \
+            target/aarch64-apple-darwin/release/tarahi \
             -output "Tarahi.app/Contents/MacOS/Tarahi"
       - name: Bundle icon
         run: |
           mkdir AppIcon.iconset
           for size in 16 32 128 256; do
-            sips -z $size $size packaging/diagramcraft.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
+            sips -z $size $size packaging/tarahi.png --out AppIcon.iconset/icon_${size}x${size}.png >/dev/null
             big=$((size * 2))
-            sips -z $big $big packaging/diagramcraft.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
+            sips -z $big $big packaging/tarahi.png --out AppIcon.iconset/icon_${size}x${size}@2x.png >/dev/null
           done
           iconutil -c icns AppIcon.iconset -o "Tarahi.app/Contents/Resources/AppIcon.icns"
       - name: Bundle app + dmg
