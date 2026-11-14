@@ -337,6 +337,102 @@ fn ctx_menu_icon_bar_dispatches_and_mirrors_enablement() {
     );
 }
 
+/// #149 item 1: the mini-toolbar's Flip slot is a DROPDOWN — one
+/// glyph cannot pick Vertical vs Horizontal, so the click opens a
+/// two-entry flyout whose items dispatch the text rows' flips.
+#[test]
+fn ctx_bar_flip_flyout_flips_both_orientations() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (page, a) = place_master(&mut h, 2);
+    // Flip cells start ABSENT on the blank rectangle (default 0).
+    let cell = |h: &Harness<'_, App>, n: &str| {
+        h.state()
+            .debug_cell(page, a, n)
+            .and_then(|(v, _)| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    let flip = |h: &mut Harness<'_, App>, which: &str| {
+        let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+        click_at(h, to, egui::PointerButton::Secondary);
+        h.run();
+        h.run();
+        let menu = h.state().debug_ctx_menu_rect().expect("menu open");
+        let btn = h
+            .get_all_by_label("Flip")
+            .into_iter()
+            .find(|n| n.rect().width() < 40.0 && menu.expand(2.0).contains_rect(n.rect()))
+            .expect("the Flip dropdown button");
+        btn.click();
+        h.run();
+        // The flyout renders at the panel (the menu's top); the menu's
+        // own Flip text rows sit far below — the topmost match is the
+        // flyout entry.
+        let entry = h
+            .get_all_by_label_contains(which)
+            .min_by(|a, b| {
+                a.rect()
+                    .top()
+                    .partial_cmp(&b.rect().top())
+                    .expect("finite rects")
+            })
+            .unwrap_or_else(|| panic!("the {which} flyout entry"));
+        entry.click();
+        h.run();
+    };
+    flip(&mut h, "Flip Vertical");
+    let fy = cell(&h, "FlipY");
+    assert!(
+        (fy - 1.0).abs() < 1e-6,
+        "Flip Vertical wrote FlipY=1, got {fy}"
+    );
+    // The menu consumed, so a second open + flip lands Horizontal.
+    flip(&mut h, "Flip Horizontal");
+    let fx = cell(&h, "FlipX");
+    assert!(
+        (fx - 1.0).abs() < 1e-6,
+        "Flip Horizontal wrote FlipX=1, got {fx}"
+    );
+    // One undo removes the last flip.
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Z);
+    h.run();
+    let fx = cell(&h, "FlipX");
+    assert!(fx.abs() < 1e-6, "undo restored FlipX=0, got {fx}");
+}
+
+/// #149 item 2: the three Format icons open the Format Shape pane
+/// FOCUSED on their section (Fill / Line / Text), not generically.
+/// The seam reports the LAST targeted section (the one-shot scroll
+/// focus is consumed by the pane's first render, which can land in
+/// the same frame as the click).
+#[test]
+fn ctx_bar_format_icons_focus_their_pane_section() {
+    let mut h = harness_with_blank();
+    h.run();
+    h.run();
+    let (_page, a) = place_master(&mut h, 2);
+    for (bar_label, section) in [
+        ("Format Shape Fill…", "fill"),
+        ("Format Shape Line…", "line"),
+        ("Format Shape Text…", "text"),
+    ] {
+        let to = h.state().debug_shape_screen_rect(a).unwrap().center();
+        click_at(&mut h, to, egui::PointerButton::Secondary);
+        h.run();
+        h.run();
+        // Exact match picks the bar icon (the text rows carry
+        // leading-space layout text).
+        h.get_by_label(bar_label).click();
+        h.run();
+        assert_eq!(
+            h.state().debug_format_pane_focus(),
+            Some(section),
+            "{bar_label} targets the {section} section"
+        );
+    }
+}
+
 #[test]
 fn right_click_menu_delete_removes_shape() {
     let mut h = harness_with_blank();

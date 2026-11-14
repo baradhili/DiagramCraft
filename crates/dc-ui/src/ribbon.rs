@@ -345,6 +345,8 @@ pub enum Icon {
     Lock,
     /// #246 i18n: the Language command.
     Translate,
+    /// #149: the context-menu mini-toolbar's Flip flyout.
+    FlipVertical,
 }
 
 impl Icon {
@@ -354,6 +356,7 @@ impl Icon {
             Icon::Save => "save",
             Icon::Undo => "undo",
             Icon::Translate => "translate",
+            Icon::FlipVertical => "flip-vertical",
             Icon::Redo => "redo",
             Icon::Open => "open",
             Icon::New => "new",
@@ -888,6 +891,36 @@ impl Icon {
                 ] {
                     p.line_segment([a, b], stroke(gray));
                 }
+            }
+            Icon::FlipVertical => {
+                // The fallback flip glyph: a dashed mirror axis with a
+                // filled triangle above and a hollow one below (the
+                // MDI flip-vertical shape).
+                let g = Rect::from_center_size(c, Vec2::new(14.0, 10.0));
+                for (dx, w) in [(-7.0, 2.5), (-2.5, 2.5), (2.0, 2.5), (6.5, 0.5)] {
+                    p.line_segment(
+                        [Pos2::new(c.x + dx, c.y), Pos2::new(c.x + dx + w, c.y)],
+                        stroke(gray),
+                    );
+                }
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        Pos2::new(c.x - 3.0, c.y - 2.0),
+                        Pos2::new(c.x + 3.0, c.y - 2.0),
+                        Pos2::new(c.x, g.top()),
+                    ],
+                    gray,
+                    Stroke::NONE,
+                ));
+                p.add(egui::Shape::convex_polygon(
+                    vec![
+                        Pos2::new(c.x - 3.0, c.y + 2.0),
+                        Pos2::new(c.x + 3.0, c.y + 2.0),
+                        Pos2::new(c.x, g.bottom()),
+                    ],
+                    Color32::TRANSPARENT,
+                    stroke(gray),
+                ));
             }
             Icon::Container => {
                 p.rect_stroke(

@@ -349,6 +349,7 @@ first-page = First page
 fit-the-page-width-planned = Fit the page width — planned
 fit-the-whole-page-in-the-window = Fit the whole page in the window
 fit-to-contents = Fit to Contents
+flip = Flip
 flip-horizontal = Flip Horizontal
 flip-vertical = Flip Vertical
 floor-plan = Floor Plan
@@ -910,6 +911,7 @@ strikethrough = Strikethrough
 strikethrough-planned = Strikethrough — planned
 style = Style
 style-gallery-planned = Style gallery — planned
+styles = Styles
 sub-address-page = Sub-address page
 suggested-flowchart-network-floo = Suggested: flowchart · network · floor plan
 # $n (Number) - argument

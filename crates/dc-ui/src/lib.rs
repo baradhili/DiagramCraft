@@ -17,6 +17,7 @@ pub mod hyperlink;
 pub mod icontex;
 pub mod i18n;
 pub mod keytips;
+pub mod mini_toolbar;
 /// Generated fluent-typed accessors (`build.rs` from the project-level
 /// `locales/` catalogs); re-exported through [`i18n`]. #246.
 #[allow(clippy::all)]

@@ -74,6 +74,16 @@ struct PageUiState {
     view: View,
 }
 
+/// #149 item 2: which Format-pane section a mini-toolbar Format icon
+/// targets — the pane forces the section open and scrolls to it once,
+/// then consumes the focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormatSection {
+    Fill,
+    Line,
+    Text,
+}
+
 pub struct App {
     ed: Option<Editor>,
     path: PathBuf,
@@ -110,6 +120,13 @@ pub struct App {
     shape_data_open: Option<i64>,
     /// The Format Shape pane is open (#31).
     format_pane_open: bool,
+    /// #149 item 2: the pane section a mini-toolbar Format icon
+    /// targets — forced open and scrolled to once, then consumed.
+    format_pane_focus: Option<FormatSection>,
+    /// The last section a Format icon targeted (diagnostic; unlike
+    /// [`Self::format_pane_focus`] it persists after the pane
+    /// consumed the one-shot scroll).
+    format_pane_last_focus: Option<FormatSection>,
     /// Text buffers for the Format pane's numeric/text fields (#31).
     fmt_bufs: std::collections::HashMap<String, String>,
     /// Text buffers for the Shape Data string fields (#30) — commits
@@ -657,6 +674,8 @@ impl App {
             prop_bufs: std::collections::HashMap::new(),
             prop_add: None,
             format_pane_open: false,
+            format_pane_focus: None,
+            format_pane_last_focus: None,
             fmt_bufs: std::collections::HashMap::new(),
             tab: Tab::Home,
             zoom_selection_pending: false,
@@ -9006,10 +9025,20 @@ impl App {
         let mut color_pick: Option<ColorTarget> = None;
         let mut set_cell: Option<(String, String)> = None;
         let mut set_row: Option<(String, String, String)> = None;
+        // #149 item 2: a targeted open (a mini-toolbar Format icon)
+        // forces its section open and scrolls to it once, then the
+        // focus is consumed.
+        let focus = self.format_pane_focus;
+        let mut scrolled = false;
 
-        egui::CollapsingHeader::new(crate::i18n::strs().msg_fill())
-            .default_open(true)
+        egui::ScrollArea::vertical()
             .show(ui, |ui| {
+        let mut fill_hdr =
+            egui::CollapsingHeader::new(crate::i18n::strs().msg_fill()).default_open(true);
+        if focus == Some(FormatSection::Fill) {
+            fill_hdr = fill_hdr.open(Some(true));
+        }
+        let fill_rsp = fill_hdr.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::strs().msg_foreground());
                     if ui
@@ -9054,10 +9083,17 @@ impl App {
                     set_cell = Some(("FillPattern".into(), v));
                 }
             });
+        if focus == Some(FormatSection::Fill) {
+            fill_rsp.header_response.scroll_to_me(Some(egui::Align::Min));
+            scrolled = true;
+        }
         ui.add_space(2.0);
-        egui::CollapsingHeader::new(crate::i18n::strs().msg_line())
-            .default_open(true)
-            .show(ui, |ui| {
+        let mut line_hdr =
+            egui::CollapsingHeader::new(crate::i18n::strs().msg_line()).default_open(true);
+        if focus == Some(FormatSection::Line) {
+            line_hdr = line_hdr.open(Some(true));
+        }
+        let line_rsp = line_hdr.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::strs().msg_color());
                     if ui
@@ -9187,10 +9223,17 @@ impl App {
                     }
                 });
             });
+        if focus == Some(FormatSection::Line) {
+            line_rsp.header_response.scroll_to_me(Some(egui::Align::Min));
+            scrolled = true;
+        }
         ui.add_space(2.0);
-        egui::CollapsingHeader::new(crate::i18n::strs().msg_text())
-            .default_open(true)
-            .show(ui, |ui| {
+        let mut text_hdr =
+            egui::CollapsingHeader::new(crate::i18n::strs().msg_text()).default_open(true);
+        if focus == Some(FormatSection::Text) {
+            text_hdr = text_hdr.open(Some(true));
+        }
+        let text_rsp = text_hdr.show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(crate::i18n::strs().msg_font());
                     let cur = self.eff_row_str("Character", "Font").unwrap_or_default();
@@ -9285,6 +9328,14 @@ impl App {
                     set_row = Some(("Paragraph".into(), "HorzAlign".into(), v));
                 }
             });
+        if focus == Some(FormatSection::Text) {
+            text_rsp.header_response.scroll_to_me(Some(egui::Align::Min));
+            scrolled = true;
+        }
+            });
+        if scrolled {
+            self.format_pane_focus = None;
+        }
 
         self.fmt_bufs = bufs;
         if let Some(target) = color_pick {
@@ -12632,6 +12683,11 @@ impl App {
             AddComment,
             ShapeData,
             FormatShape,
+            /// #149 item 2: the mini-toolbar's three Format icons open
+            /// the pane focused on their section.
+            FormatFill,
+            FormatLine,
+            FormatText,
             Cut,
             Copy,
             Paste,
@@ -12714,104 +12770,38 @@ impl App {
             // separators ride the token too (egui's dark default is too
             // faint on the dark menu fill)
             ui.visuals_mut().widgets.noninteractive.bg_stroke.color = tokens.separator;
-            // The icon action bar (#77): Visio 2016's menu header — a
-            // row of command accelerators over a hairline, ahead of
-            // the text rows. Icons dispatch the SAME Act variants and
-            // mirror the rows' enablement; tooltips and accessible
-            // names carry the row labels (#56). Flip stays out of v1:
-            // one glyph cannot choose between Flip Vertical and Flip
-            // Horizontal (and the vendored MDI set carries no flip
-            // icon) — wiring a guess would be worse than omitting.
+            // The mini-toolbar (#77 landed a flat icon bar; #149
+            // restyles it to the real Visio 2010/2016 menu): a
+            // two-row ribbon-chrome panel above the text rows, with
+            // the Flip flyout (#149 item 1) and the section-targeted
+            // Format icons (#149 item 2). The seven #77 commands stay
+            // the working set until #149 item 3's oracle pass
+            // confirms the real slot map.
             {
                 let can_group = self.sel_set.len() >= 2;
-                // #257 item 3: the bar mirrors with the chrome — under
-                // RTL the entries are EMITTED reversed (ui::horizontal's
-                // wrap-aware measure stays; a with_layout flip here
-                // balloons the popup's sizing pass).
-                let bar: [(crate::ribbon::Icon, String, bool, Act); 7] = [
-                    (
-                        crate::ribbon::Icon::TextBox,
-                        crate::i18n::strs().msg_edit_text(),
-                        true,
-                        Act::EditText,
-                    ),
-                        // #218 review: the three Format-Shape entries
-                        // carry DISTINCT accessible names (an ambiguous
-                        // "Format Shape…" triplicated confuses screen
-                        // readers and label-based tests); all three
-                        // still dispatch Act::FormatShape.
-                        (
-                            crate::ribbon::Icon::Bucket,
-                            crate::i18n::strs().msg_format_shape_fill(),
-                            true,
-                            Act::FormatShape,
-                        ),
-                        (
-                            crate::ribbon::Icon::Pen,
-                            crate::i18n::strs().msg_format_shape_line(),
-                            true,
-                            Act::FormatShape,
-                        ),
-                        (
-                            crate::ribbon::Icon::FontA,
-                            crate::i18n::strs().msg_format_shape_text(),
-                            true,
-                            Act::FormatShape,
-                        ),
-                        (
-                            crate::ribbon::Icon::BringFront,
-                            crate::i18n::strs().msg_bring_to_front(),
-                            true,
-                            Act::Front,
-                        ),
-                        (
-                            crate::ribbon::Icon::Rotate,
-                            crate::i18n::strs().msg_rotate_right_90(),
-                            true,
-                            // The text row's sign: page coordinates are
-                            // y-up, so clockwise (right) is NEGATIVE
-                            // radians (#77 branch review — the bar had
-                            // it backwards).
-                            Act::Rot(-std::f64::consts::FRAC_PI_2),
-                        ),
-                        (crate::ribbon::Icon::Group, crate::i18n::strs().msg_group(), can_group, Act::Group),
-                ];
-                let bar: Vec<_> = if crate::i18n::rtl() {
-                    bar.into_iter().rev().collect()
-                } else {
-                    bar.into_iter().collect()
-                };
-                ui.horizontal(|ui| {
-                    ui.add_space(5.0);
-                    for (icon, label, enabled, a) in bar {
-                        // A real (possibly disabled) button — egui-level
-                        // disablement keeps a Menu-kind popup open on
-                        // click, exactly like the disabled text rows.
-                        let resp = ui.add_enabled(
-                            enabled,
-                            egui::Button::new("").min_size(Vec2::splat(22.0)),
-                        );
-                        resp.widget_info(|| {
-                            egui::WidgetInfo::labeled(egui::Role::Button, enabled, label.clone())
-                        });
-                        let resp = if enabled {
-                            resp.on_hover_text(label)
-                        } else {
-                            resp.on_disabled_hover_text(label)
-                        };
-                        let r = resp.rect;
-                        let p = ui.painter();
-                        if enabled && resp.hovered() {
-                            p.rect_filled(r, 3.0, tokens.hover_fill);
+                if let Some(bar) = crate::mini_toolbar::show(ui, can_group) {
+                    act = Some(match bar {
+                        crate::mini_toolbar::Act::EditText => Act::EditText,
+                        crate::mini_toolbar::Act::FormatFill => Act::FormatFill,
+                        crate::mini_toolbar::Act::FormatLine => Act::FormatLine,
+                        crate::mini_toolbar::Act::FormatText => Act::FormatText,
+                        crate::mini_toolbar::Act::Front => Act::Front,
+                        // The text row's sign: page coordinates are
+                        // y-up, so clockwise (right) is NEGATIVE
+                        // radians (#77 branch review — the bar had
+                        // it backwards).
+                        crate::mini_toolbar::Act::RotateRight => {
+                            Act::Rot(-std::f64::consts::FRAC_PI_2)
                         }
-                        let ir = Rect::from_center_size(r.center(), Vec2::splat(16.0));
-                        icon.paint_tinted(ui, ir, tokens.icon_tint(icon.office_color(), enabled));
-                        if enabled && resp.clicked() {
-                            act = Some(a);
-                        }
-                    }
-                });
-                ui.separator();
+                        crate::mini_toolbar::Act::FlipVertical => Act::FlipV,
+                        crate::mini_toolbar::Act::FlipHorizontal => Act::FlipH,
+                        crate::mini_toolbar::Act::Group => Act::Group,
+                        // The Styles tile's stand-in until a styles
+                        // feature: the pane, generically.
+                        crate::mini_toolbar::Act::Styles => Act::FormatShape,
+                    });
+                }
+                ui.add_space(2.0);
             }
             // Visio order: master actions, Show ShapeSheet, clipboard,
             // object commands, then the grayed future milestones.
@@ -13104,6 +13094,21 @@ impl App {
             Act::FormatShape => {
                 self.format_pane_open = true;
                 self.fmt_bufs.clear();
+                self.format_pane_focus = None;
+            }
+            // #149 item 2: the mini-toolbar's three Format icons open
+            // the pane FOCUSED on their section — the reference maps
+            // the Fill/Line/Text slots to those pane areas.
+            Act::FormatFill | Act::FormatLine | Act::FormatText => {
+                self.format_pane_open = true;
+                self.fmt_bufs.clear();
+                let section = match a {
+                    Act::FormatFill => FormatSection::Fill,
+                    Act::FormatLine => FormatSection::Line,
+                    _ => FormatSection::Text,
+                };
+                self.format_pane_focus = Some(section);
+                self.format_pane_last_focus = Some(section);
             }
             Act::Ungroup => {
                 let first_member = self.ed().and_then(|ed| {
@@ -14560,6 +14565,17 @@ impl App {
     #[doc(hidden)]
     pub fn debug_status(&self) -> &str {
         &self.status
+    }
+    /// #149 item 2 tests: the Format pane section a mini-toolbar
+    /// Format icon targeted. This is the LAST target (the one-shot
+    /// scroll focus is consumed by the pane's first render).
+    #[doc(hidden)]
+    pub fn debug_format_pane_focus(&self) -> Option<&'static str> {
+        self.format_pane_last_focus.map(|f| match f {
+            FormatSection::Fill => "fill",
+            FormatSection::Line => "line",
+            FormatSection::Text => "text",
+        })
     }
     /// One resolved cell of a shape, as (value, formula) — asserting
     /// guarded cells stay untouched (GitHub #59 tests).
