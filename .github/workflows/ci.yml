@@ -21,6 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+        # rustfmt is a dc-ui build dependency (#246/#271); the runner
+        # images happen to preinstall it — don't rely on that.
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - name: Install software Vulkan driver (Linux)
         if: runner.os == 'Linux'
